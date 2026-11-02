@@ -275,3 +275,23 @@ func TestHolderRefresh(t *testing.T) {
 		t.Fatal("no active revision must fall back to base")
 	}
 }
+
+func TestPermissions(t *testing.T) {
+	c := layeredConfig()
+	h, _ := NewHolder(c)
+	doc := goodDoc()
+	doc.Roles["wide"] = uiapi.Role{Rules: []uiapi.Rule{{Zones: []string{"example.com"}, Actions: []string{ActionDNSRead, ActionRecordAdopt}}}}
+	snap := h.CompileUnchecked(&doc, "r1")
+
+	got := snap.Permissions([]string{"web-writer", "policy-admin", "unknown", "wide"})
+	b, _ := json.Marshal(got)
+	want := `[{"role":"policy-admin","zones":["*"],"actions":["policy.read","policy.propose","policy.approve"],"hosts":[],"types":[]},` +
+		`{"role":"web-writer","zones":["example.com"],"actions":["dns.read","dns.record.write"],"hosts":["*.staging"],"types":["CNAME"]},` +
+		`{"role":"wide","zones":["example.com"],"actions":["dns.read"],"hosts":[],"types":[]}]`
+	if string(b) != want {
+		t.Fatalf("permissions:\n got %s\nwant %s", b, want)
+	}
+	if p := snap.Permissions(nil); p == nil || len(p) != 0 {
+		t.Fatalf("no role: %#v", p)
+	}
+}

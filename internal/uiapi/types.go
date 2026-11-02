@@ -4,6 +4,7 @@
 // an empty inventory cache.
 //
 //	GET /api/v1/me                         -> Me
+//	GET /api/v1/connect                    -> Connect
 //	GET /api/v1/zones                      -> []ZoneSummary
 //	GET /api/v1/zones/{zone}/rrsets        -> ZoneInventory
 //	GET /api/v1/audit?zone=&host=&type=&subject=&category=&decision=&since=&until=&limit=&cursor=
@@ -14,12 +15,46 @@ import "time"
 
 // Me describes the logged-in user.
 type Me struct {
-	Subject  string   `json:"subject"`  // issuer:id
-	Name     string   `json:"name"`     // display name
-	Category string   `json:"category"` // human | pipeline | key
-	Roles    []string `json:"roles"`
-	Teams    []string `json:"teams"`
-	Groups   []string `json:"groups"`
+	Subject     string       `json:"subject"`  // issuer:id
+	Name        string       `json:"name"`     // display name
+	Category    string       `json:"category"` // human | pipeline | key
+	Roles       []string     `json:"roles"`
+	Teams       []string     `json:"teams"`
+	Groups      []string     `json:"groups"`
+	Permissions []Permission `json:"permissions"`
+}
+
+// Permission is one effective rule of a role of the subject (base and
+// managed layers merged, managed rules clipped to the bounds).
+type Permission struct {
+	Role    string   `json:"role"`
+	Zones   []string `json:"zones"`
+	Actions []string `json:"actions"`
+	Hosts   []string `json:"hosts"` // empty: the whole zone
+	Types   []string `json:"types"` // empty: any type
+}
+
+// Connect is what a client needs to reach the gate (Connect page).
+type Connect struct {
+	BaseURL  string         `json:"base_url"`
+	MCP      ConnectMCP     `json:"mcp"`
+	Issuer   *ConnectIssuer `json:"issuer,omitempty"` // UI login issuer, absent without UI
+	ClientID string         `json:"client_id,omitempty"`
+	CLIScope string         `json:"cli_scope,omitempty"` // scope a CLI requests for a gate token
+}
+
+// ConnectMCP describes the MCP endpoint.
+type ConnectMCP struct {
+	Enabled     bool   `json:"enabled"`
+	URL         string `json:"url"`
+	AllowWrites bool   `json:"allow_writes"`
+}
+
+// ConnectIssuer describes the OIDC issuer humans sign in with.
+type ConnectIssuer struct {
+	URL      string `json:"url"`
+	Kind     string `json:"kind"`                // entra | oidc
+	TenantID string `json:"tenant_id,omitempty"` // Entra only
 }
 
 // ZoneSummary is one managed zone.

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,6 +109,33 @@ func TestUISessionKey(t *testing.T) {
 	}
 	if len(c.UI.SessionKey) != 32 || c.UI.Scopes[0] != "openid" {
 		t.Fatalf("ui not configured: %+v", c.UI)
+	}
+}
+
+func TestUICLIScope(t *testing.T) {
+	const tenant = "11111111-2222-3333-4444-555555555555"
+	const client = "99999999-8888-7777-6666-555555555555"
+	e := env(map[string]string{"EURODNS_API_KEY": "k", "EURODNS_GATE_SESSION_KEY": strings.Repeat("ab", 32)})
+	ui := "ui: {enabled: true, issuer: ci, client_id: " + client + ", redirect_url: https://gate.example.com/auth/callback%s}\n"
+	entra := strings.NewReplacer("https://token.example.net", "https://login.microsoftonline.com/"+tenant+"/v2.0", "audiences: [eurodns-gate]", "audiences: ["+client+"]").Replace(base)
+
+	c, err := Parse([]byte(entra+fmt.Sprintf(ui, "")), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.UI.CLIScope != "api://"+client+"/.default" {
+		t.Fatalf("Entra default cli_scope: %q", c.UI.CLIScope)
+	}
+	if c, err = Parse([]byte(entra+fmt.Sprintf(ui, ", cli_scope: api://eurodns-gate/.default")), e); err != nil || c.UI.CLIScope != "api://eurodns-gate/.default" {
+		t.Fatalf("explicit cli_scope: %v %q", err, c.UI.CLIScope)
+	}
+	if c, err = Parse([]byte(base+fmt.Sprintf(ui, "")), e); err != nil || c.UI.CLIScope != "" {
+		t.Fatalf("non-Entra issuer has no default: %v %q", err, c.UI.CLIScope)
+	}
+	for _, bad := range []string{`"api://x/.default openid"`, `"api://x/.default'"`, `"$(id)"`, `"-x"`} {
+		if _, err := Parse([]byte(entra+fmt.Sprintf(ui, ", cli_scope: "+bad)), e); err == nil || !strings.Contains(err.Error(), "ui.cli_scope") {
+			t.Errorf("cli_scope %s: expected an error, got %v", bad, err)
+		}
 	}
 }
 

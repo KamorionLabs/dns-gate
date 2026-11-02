@@ -83,6 +83,10 @@ type UI struct {
 	RedirectURL string   `yaml:"redirect_url"`
 	Scopes      []string `yaml:"scopes"`
 	SessionTTL  Duration `yaml:"session_ttl"`
+	// CLIScope is the OAuth scope a command-line tool requests to call the
+	// gate (shown on the Connect page). Default for an Entra v2 issuer:
+	// api://<client_id>/.default.
+	CLIScope string `yaml:"cli_scope"`
 
 	ClientSecret string `yaml:"-"` // EURODNS_GATE_UI_CLIENT_SECRET(_FILE), optional (public client)
 	SessionKey   []byte `yaml:"-"` // EURODNS_GATE_SESSION_KEY(_FILE), 32 bytes, hex or base64
@@ -397,6 +401,13 @@ func (c *Config) defaults() {
 	}
 	if len(c.UI.Scopes) == 0 {
 		c.UI.Scopes = []string{"openid", "profile", "email"}
+	}
+	if c.UI.CLIScope == "" && c.UI.ClientID != "" {
+		for _, is := range c.Issuers {
+			if _, entra := EntraV2Tenant(is.Issuer); entra && is.Name == c.UI.Issuer {
+				c.UI.CLIScope = "api://" + c.UI.ClientID + "/.default"
+			}
+		}
 	}
 	for i := range c.Zones {
 		c.Zones[i] = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(c.Zones[i])), ".")
@@ -752,6 +763,9 @@ func (c *Config) Validate() error {
 			add("ui.session_ttl: must be between 1m and 24h")
 		}
 	}
+	if c.UI.CLIScope != "" && (len(c.UI.CLIScope) > 512 || !cliScopeRe.MatchString(c.UI.CLIScope)) {
+		add("ui.cli_scope: one scope of letters, digits and . _ ~ : / %% - expected, got %q", c.UI.CLIScope)
+	}
 
 	return errors.Join(errs...)
 }
@@ -772,6 +786,8 @@ func decodeKey(s string) ([]byte, error) {
 var (
 	guidRe        = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 	placeholderRe = regexp.MustCompile(`\{\{\s*([A-Za-z0-9_.:-]+)\s*\}\}`)
+	// cliScopeRe keeps the scope safe to paste unquoted in shell snippets.
+	cliScopeRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._~:/%-]*$`)
 )
 
 // Placeholders returns the claim names of a subject template.
@@ -839,6 +855,28 @@ func validateEntra(is Issuer) error {
 		}
 	}
 	return nil
+}
+
+// EntraV2Tenant returns the tenant of an Entra ID v2 issuer
+// (https://login.microsoftonline.com/<tenant-id>/v2.0).
+func EntraV2Tenant(issuer string) (string, bool) {
+	u, err := url.Parse(issuer)
+	if err != nil || strings.ToLower(u.Hostname()) != "login.microsoftonline.com" || u.Scheme != "https" {
+		return "", false
+	}
+	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(parts) != 2 || parts[1] != "v2.0" || !guidRe.MatchString(strings.ToLower(parts[0])) {
+		return "", false
+	}
+	return strings.ToLower(parts[0]), true
+}
+
+// EntraTenant returns the tenant of an Entra ID issuer, v1 or v2.
+func EntraTenant(issuer string) (string, bool) {
+	if tid, ok := EntraV2Tenant(issuer); ok {
+		return tid, true
+	}
+	return entraV1Tenant(issuer)
 }
 
 func entraV1Tenant(issuer string) (string, bool) {

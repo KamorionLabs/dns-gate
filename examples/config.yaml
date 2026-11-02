@@ -240,3 +240,7 @@ ui:
   redirect_url: https://dns-gate.example.com/auth/callback
   scopes: [openid, profile, email]
   session_ttl: 8h
+  # Scope command-line tools request for a gate token, shown on the Connect
+  # page. Default with an Entra v2 issuer: api://<client_id>/.default; set it
+  # when the Application ID URI is not built from the client id.
+  cli_scope: api://eurodns-gate/.default
