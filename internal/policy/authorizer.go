@@ -1,0 +1,42 @@
+// Package policy evaluates RBAC rules (roles, bindings, protected records).
+package policy
+
+import (
+	"time"
+
+	"github.com/KamorionLabs/eurodns-gate/internal/identity"
+	"github.com/KamorionLabs/eurodns-go/rrset"
+)
+
+// Actions.
+const (
+	ActionDNSRead     = "dns.read"
+	ActionRecordWrite = "dns.record.write"
+	ActionRecordAdopt = "dns.record.adopt"
+	ActionZoneAdmin   = "dns.zone.admin" // DNSSEC sign/unsign, zone profiles
+	ActionDomainRead  = "domain.read"
+	ActionUIRead      = "ui.read" // read-only UI and /api/v1
+)
+
+// Authorizer is implemented by the policy engine and consumed by the HTTP
+// layer and the zone write engine.
+type Authorizer interface {
+	// Allow checks an action on a zone (no record scope).
+	Allow(s *identity.Subject, action, zone string) bool
+	// AllowRRset checks an action on one RRset (zone, host, type), including
+	// the protected-records list (protected wins over any role).
+	AllowRRset(s *identity.Subject, action, zone string, key rrset.Key) bool
+	// OwnerTeam returns the team that will own an RRset created by s in this
+	// zone (first of s.Teams allowed for the zone), false if none.
+	OwnerTeam(s *identity.Subject, zone string) (string, bool)
+	// MaxChangesPerRequest returns the blast-radius limit for s (0 = unlimited).
+	MaxChangesPerRequest(s *identity.Subject) int
+	// RebaseOnSave: on a full-zone PUT, ignore out-of-scope differences
+	// instead of refusing them (stale zones from ACME clients such as lego).
+	RebaseOnSave(s *identity.Subject) bool
+	// EphemeralTTL: RRsets created by s expire and are garbage-collected after
+	// this duration (0 = permanent). Used for ACME challenge records.
+	EphemeralTTL(s *identity.Subject) time.Duration
+	// IsProtected reports whether an RRset is in the protected list.
+	IsProtected(zone string, key rrset.Key) bool
+}

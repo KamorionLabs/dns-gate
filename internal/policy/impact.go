@@ -1,0 +1,275 @@
+package policy
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/KamorionLabs/eurodns-gate/internal/glob"
+	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
+)
+
+// OwnedCounter returns the number of RRsets a team owns in a zone.
+type OwnedCounter func(team, zone string) int
+
+type grantKey struct {
+	who, role, zone, action string
+}
+
+// grants lists what every binding and virtual key grants, per managed zone.
+func (s *Snapshot) grants() map[grantKey]bool {
+	out := map[grantKey]bool{}
+	addRole := func(who, roleName string) {
+		cr := s.roles[roleName]
+		if cr == nil {
+			return
+		}
+		for _, r := range cr.role.Rules {
+			for _, a := range r.Actions {
+				if IsMeta(a) {
+					out[grantKey{who, roleName, "*", a}] = true
+					continue
+				}
+				if cr.layer == LayerManaged && !s.withinBounds(r, a) {
+					continue
+				}
+				for z := range s.zones {
+					if glob.Any(r.Zones, z) {
+						out[grantKey{who, roleName, z, a}] = true
+					}
+				}
+			}
+		}
+	}
+	for _, b := range s.bindings {
+		addRole(bindingWho(b.binding), b.binding.Role)
+	}
+	for _, k := range s.keys {
+		for _, r := range k.key.Roles {
+			addRole("virtual key "+k.key.ID, r)
+		}
+	}
+	return out
+}
+
+func bindingWho(b uiapi.Binding) string {
+	var parts []string
+	for _, g := range b.Groups {
+		parts = append(parts, "group "+g)
+	}
+	for _, m := range b.Subjects {
+		parts = append(parts, MatcherString(m))
+	}
+	who := strings.Join(parts, ", ")
+	if b.Team != "" {
+		who = "team " + b.Team + " (" + who + ")"
+	}
+	return who
+}
+
+// MatcherString renders a matcher as "issuer{claim=a|b,...}".
+func MatcherString(m uiapi.SubjectMatcher) string {
+	names := sortedKeys(m.Claims)
+	parts := make([]string, 0, len(names))
+	for _, n := range names {
+		parts = append(parts, n+"="+strings.Join(m.Claims[n], "|"))
+	}
+	return m.Issuer + "{" + strings.Join(parts, ",") + "}"
+}
+
+// teamWrites returns team -> zones where the team can write records.
+func (s *Snapshot) teamWrites() map[string]map[string]bool {
+	out := map[string]map[string]bool{}
+	add := func(team, role string) {
+		cr := s.roles[role]
+		if team == "" || cr == nil {
+			return
+		}
+		for _, r := range cr.role.Rules {
+			if !contains(r.Actions, ActionRecordWrite) || (cr.layer == LayerManaged && !s.withinBounds(r, ActionRecordWrite)) {
+				continue
+			}
+			for z := range s.zones {
+				if glob.Any(r.Zones, z) {
+					if out[team] == nil {
+						out[team] = map[string]bool{}
+					}
+					out[team][z] = true
+				}
+			}
+		}
+	}
+	for _, b := range s.bindings {
+		add(b.binding.Team, b.binding.Role)
+	}
+	for _, k := range s.keys {
+		for _, t := range k.key.Teams {
+			for _, r := range k.key.Roles {
+				add(t, r)
+			}
+		}
+	}
+	return out
+}
+
+// Impact compares two snapshots: permissions gained and lost per binding,
+// group or virtual key, and warnings when a team that owns RRsets loses
+// write access to their zone.
+func Impact(old, new *Snapshot, owned OwnedCounter) []uiapi.ImpactItem {
+	og, ng := old.grants(), new.grants()
+	type agg struct {
+		kind, who, role string
+		zones, actions  map[string]bool
+	}
+	groups := map[string]*agg{}
+	collect := func(set, other map[grantKey]bool, kind string) {
+		for k := range set {
+			if other[k] {
+				continue
+			}
+			id := kind + "\x00" + k.who + "\x00" + k.role
+			a := groups[id]
+			if a == nil {
+				a = &agg{kind: kind, who: k.who, role: k.role, zones: map[string]bool{}, actions: map[string]bool{}}
+				groups[id] = a
+			}
+			a.zones[k.zone] = true
+			a.actions[k.action] = true
+		}
+	}
+	collect(ng, og, "gain")
+	collect(og, ng, "loss")
+
+	var items []uiapi.ImpactItem
+	for _, a := range groups {
+		zones, actions := keys(a.zones), keys(a.actions)
+		verb := "gains"
+		if a.kind == "loss" {
+			verb = "loses"
+		}
+		items = append(items, uiapi.ImpactItem{
+			Kind: a.kind, Who: a.who, Role: a.role, Zones: zones, Actions: actions,
+			Message: fmt.Sprintf("%s %s %s on %s (role %s)", a.who, verb, strings.Join(actions, ", "), strings.Join(zones, ", "), a.role),
+		})
+	}
+
+	// Group membership changes.
+	for _, name := range unionKeys(old.groups, new.groups) {
+		og, ng := old.groups[name], new.groups[name]
+		switch {
+		case og == nil:
+			items = append(items, uiapi.ImpactItem{Kind: "gain", Who: "group " + name, Message: fmt.Sprintf("group %s is created with %d member matcher(s)", name, len(ng.members))})
+		case ng == nil:
+			items = append(items, uiapi.ImpactItem{Kind: "loss", Who: "group " + name, Message: fmt.Sprintf("group %s is removed", name)})
+		case membersText(og.members) != membersText(ng.members):
+			items = append(items, uiapi.ImpactItem{Kind: "warning", Who: "group " + name, Message: fmt.Sprintf("members of group %s change: %s -> %s", name, membersText(og.members), membersText(ng.members))})
+		}
+	}
+
+	// Teams losing write where they own RRsets.
+	ow, nw := old.teamWrites(), new.teamWrites()
+	for _, team := range keysOf(ow) {
+		for _, zone := range keys(ow[team]) {
+			if nw[team][zone] {
+				continue
+			}
+			n := 0
+			if owned != nil {
+				n = owned(team, zone)
+			}
+			if n == 0 {
+				continue
+			}
+			items = append(items, uiapi.ImpactItem{
+				Kind: "warning", Who: "team " + team, Zones: []string{zone}, Actions: []string{ActionRecordWrite},
+				Message: fmt.Sprintf("team %s loses write on %s where it owns %d RRset(s): they become unmanageable through the gate", team, zone, n),
+			})
+		}
+	}
+
+	order := map[string]int{"warning": 0, "loss": 1, "gain": 2}
+	sort.Slice(items, func(i, j int) bool {
+		if order[items[i].Kind] != order[items[j].Kind] {
+			return order[items[i].Kind] < order[items[j].Kind]
+		}
+		return items[i].Message < items[j].Message
+	})
+	if items == nil {
+		items = []uiapi.ImpactItem{}
+	}
+	return items
+}
+
+func membersText(ms []uiapi.SubjectMatcher) string {
+	parts := make([]string, 0, len(ms))
+	for _, m := range ms {
+		parts = append(parts, MatcherString(m))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, "; ")
+}
+
+func keys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func keysOf[T any](m map[string]T) []string { return sortedKeys(m) }
+
+func unionKeys(a, b map[string]*compiledGroup) []string {
+	set := map[string]bool{}
+	for k := range a {
+		set[k] = true
+	}
+	for k := range b {
+		set[k] = true
+	}
+	return keys(set)
+}
+
+// WhoCan lists the bindings and virtual keys allowed to perform an action
+// on an RRset (or a zone when key is nil).
+func (s *Snapshot) WhoCan(action, zone, host, typ string) uiapi.WhoCanResponse {
+	zone = normZone(zone)
+	resp := uiapi.WhoCanResponse{Entries: []uiapi.WhoCanEntry{}}
+	var key *struct{ host, typ string }
+	if host != "" || typ != "" {
+		key = &struct{ host, typ string }{host, typ}
+	}
+	decide := func(role string) bool {
+		if key == nil {
+			return s.Decide([]string{role}, action, zone, nil).Allowed
+		}
+		k := normKey(rrsetKey(key.host, key.typ))
+		return s.Decide([]string{role}, action, zone, &k).Allowed
+	}
+	if key != nil && !IsMeta(action) {
+		_, resp.Protected = s.protectedBy(zone, normKey(rrsetKey(key.host, key.typ)))
+	}
+	for _, b := range s.bindings {
+		if !decide(b.binding.Role) {
+			continue
+		}
+		resp.Entries = append(resp.Entries, uiapi.WhoCanEntry{
+			Role: b.binding.Role, Team: b.binding.Team, Layer: b.layer,
+			Groups: b.binding.Groups, Subjects: b.binding.Subjects,
+		})
+	}
+	for _, k := range s.keys {
+		for _, r := range k.key.Roles {
+			if decide(r) {
+				team := ""
+				if len(k.key.Teams) > 0 {
+					team = k.key.Teams[0]
+				}
+				resp.Entries = append(resp.Entries, uiapi.WhoCanEntry{Role: r, Team: team, Layer: k.layer, Keys: []string{k.key.ID}})
+				break
+			}
+		}
+	}
+	return resp
+}

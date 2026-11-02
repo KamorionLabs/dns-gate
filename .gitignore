@@ -1,0 +1,11 @@
+/eurodns-gate
+/dist/
+*.test
+*.out
+coverage.*
+web/node_modules/
+web/dist/*
+!web/dist/index.html
+.env
+*.local.yaml
+api/openapi.json

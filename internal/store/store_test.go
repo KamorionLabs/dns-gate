@@ -1,0 +1,470 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"os"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
+
+	"github.com/KamorionLabs/eurodns-gate/internal/audit"
+	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
+)
+
+type fakeClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *fakeClock) Now() time.Time      { c.mu.Lock(); defer c.mu.Unlock(); return c.t }
+func (c *fakeClock) Add(d time.Duration) { c.mu.Lock(); c.t = c.t.Add(d); c.mu.Unlock() }
+
+func conformance(t *testing.T, s Store, clock *fakeClock) {
+	ctx := context.Background()
+	zone := "example.com"
+
+	t.Run("crud", func(t *testing.T) {
+		if _, err := s.Get(ctx, zone, "www", "A"); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("get missing: %v", err)
+		}
+		exp := clock.Now().Add(time.Hour)
+		o := Ownership{Zone: zone, Host: "www", Type: "A", Owner: "team-a", CreatedBy: "iss:sub",
+			CreatedByName: "ci", CreatedByCategory: "pipeline", UpdatedBy: "iss:sub",
+			CreatedAt: clock.Now(), UpdatedAt: clock.Now(), ContentHash: "h1", State: StateActive, ExpiresAt: &exp}
+		if err := s.Put(ctx, o); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Put(ctx, o); !errors.Is(err, ErrConflict) {
+			t.Fatalf("double create: %v", err)
+		}
+		got, err := s.Get(ctx, zone, "www", "A")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Version != 1 || got.Owner != "team-a" || got.CreatedByName != "ci" || got.UpdatedBy != "iss:sub" || got.ExpiresAt == nil || !got.ExpiresAt.Equal(exp) {
+			t.Fatalf("unexpected %+v", got)
+		}
+		got.ContentHash = "h2"
+		if err := s.Put(ctx, *got); err != nil {
+			t.Fatal(err)
+		}
+		stale := *got
+		if err := s.Put(ctx, stale); !errors.Is(err, ErrConflict) {
+			t.Fatalf("stale update: %v", err)
+		}
+		if err := s.Put(ctx, Ownership{Zone: zone, Host: "api", Type: "CNAME", Owner: "team-b", State: StatePending}); err != nil {
+			t.Fatal(err)
+		}
+		list, err := s.List(ctx, zone)
+		if err != nil || len(list) != 2 || list[0].Host != "api" {
+			t.Fatalf("list %v %+v", err, list)
+		}
+		if other, _ := s.List(ctx, "other.com"); len(other) != 0 {
+			t.Fatalf("list leaks zones: %+v", other)
+		}
+		if err := s.Delete(ctx, zone, "www", "A", 1); !errors.Is(err, ErrConflict) {
+			t.Fatalf("delete stale: %v", err)
+		}
+		if err := s.Delete(ctx, zone, "www", "A", 2); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Delete(ctx, zone, "www", "A", 2); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("delete missing: %v", err)
+		}
+	})
+
+	t.Run("zone version", func(t *testing.T) {
+		v, err := s.ZoneVersion(ctx, "v.example.com")
+		if err != nil || v != 0 {
+			t.Fatalf("initial %d %v", v, err)
+		}
+		if v, err = s.BumpZoneVersion(ctx, "v.example.com", 0); err != nil || v != 1 {
+			t.Fatalf("bump %d %v", v, err)
+		}
+		if _, err = s.BumpZoneVersion(ctx, "v.example.com", 0); !errors.Is(err, ErrConflict) {
+			t.Fatalf("stale bump %v", err)
+		}
+		if v, _ = s.ZoneVersion(ctx, "v.example.com"); v != 1 {
+			t.Fatalf("version %d", v)
+		}
+	})
+
+	t.Run("audit", func(t *testing.T) {
+		base := time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)
+		for i := 0; i < 7; i++ {
+			e := audit.Event{
+				Time: base.Add(time.Duration(i) * time.Second), RequestID: "r" + string(rune('a'+i)),
+				Subject: "ci:pipeline-1", SubjectName: "pipeline one", SubjectCategory: "pipeline",
+				Action: "dns.record.write", Zone: "audit.example.com", Decision: "allow",
+				Changes: []uiapi.Change{{Op: "create", Host: "www", Type: "A", NewValues: []string{"192.0.2.1"}}},
+			}
+			if i%2 == 1 {
+				e.Decision = "deny"
+				e.Subject, e.SubjectName, e.SubjectCategory = "idp:alice", "alice@example.com", "human"
+				e.Changes = []uiapi.Change{{Op: "update", Host: "api", Type: "CNAME"}}
+			}
+			if i == 6 {
+				e.Zone = "other.example.com"
+			}
+			if err := s.AppendAudit(ctx, e); err != nil {
+				t.Fatal(err)
+			}
+		}
+		page, cur, err := s.ListAudit(ctx, AuditQuery{Zone: "audit.example.com", Limit: 4})
+		if err != nil || len(page) != 4 || cur == "" || page[0].RequestID != "rf" || page[3].RequestID != "rc" {
+			t.Fatalf("page1 %v %q %+v", err, cur, page)
+		}
+		page, cur, err = s.ListAudit(ctx, AuditQuery{Zone: "audit.example.com", Limit: 4, Cursor: cur})
+		if err != nil || len(page) != 2 || cur != "" || page[1].RequestID != "ra" {
+			t.Fatalf("page2 %v %q %+v", err, cur, page)
+		}
+		all, _, _ := s.ListAudit(ctx, AuditQuery{})
+		if len(all) < 7 || all[0].RequestID != "rg" {
+			t.Fatalf("all %+v", all)
+		}
+		for _, tc := range []struct {
+			q    AuditQuery
+			want int
+		}{
+			{AuditQuery{Zone: "audit.example.com", Decision: "deny"}, 3},
+			{AuditQuery{Zone: "audit.example.com", Category: "pipeline"}, 3},
+			{AuditQuery{Zone: "audit.example.com", Subject: "alice@example.com"}, 3},
+			{AuditQuery{Zone: "audit.example.com", Subject: "ALICE"}, 3},
+			{AuditQuery{Zone: "audit.example.com", Subject: "pipeline-"}, 3},
+			{AuditQuery{Zone: "audit.example.com", Subject: "ci:"}, 3},
+			{AuditQuery{Zone: "audit.example.com", Subject: "%"}, 0},
+			{AuditQuery{Zone: "audit.example.com", Subject: "pipeline_one"}, 0},
+			{AuditQuery{Zone: "audit.example.com", Host: "www", Type: "a"}, 3},
+			{AuditQuery{Zone: "audit.example.com", Since: base.Add(2 * time.Second), Until: base.Add(4 * time.Second)}, 3},
+		} {
+			got, _, err := s.ListAudit(ctx, tc.q)
+			if err != nil || len(got) != tc.want {
+				t.Errorf("%+v: got %d want %d (%v)", tc.q, len(got), tc.want, err)
+			}
+		}
+		if _, _, err := s.ListAudit(ctx, AuditQuery{Cursor: "%%%"}); err == nil {
+			t.Fatal("bad cursor accepted")
+		}
+	})
+
+	t.Run("policy", func(t *testing.T) { policyConformance(t, s) })
+
+	t.Run("lock", func(t *testing.T) {
+		z := "lock.example.com"
+		if err := s.Lock(ctx, z, "a", time.Minute); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Lock(ctx, z, "a", time.Minute); err != nil {
+			t.Fatalf("reentrant: %v", err)
+		}
+		if err := s.Lock(ctx, z, "b", time.Minute); !errors.Is(err, ErrLockHeld) {
+			t.Fatalf("held: %v", err)
+		}
+		if err := s.Unlock(ctx, z, "b"); err != nil {
+			t.Fatalf("foreign unlock must be a no-op: %v", err)
+		}
+		if err := s.Lock(ctx, z, "b", time.Minute); !errors.Is(err, ErrLockHeld) {
+			t.Fatalf("foreign unlock released the lock: %v", err)
+		}
+		clock.Add(2 * time.Minute)
+		if err := s.Lock(ctx, z, "b", time.Minute); err != nil {
+			t.Fatalf("expired lease: %v", err)
+		}
+		if err := s.Unlock(ctx, z, "b"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.Lock(ctx, z, "a", time.Minute); err != nil {
+			t.Fatalf("after unlock: %v", err)
+		}
+	})
+}
+
+func TestMemory(t *testing.T) {
+	clock := &fakeClock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	conformance(t, NewMemoryWithClock(clock.Now), clock)
+}
+
+// TestDynamoDB runs against DynamoDB Local, e.g.
+// docker run -p 8000:8000 amazon/dynamodb-local; DYNAMODB_ENDPOINT=http://localhost:8000
+func TestDynamoDB(t *testing.T) {
+	endpoint := os.Getenv("DYNAMODB_ENDPOINT")
+	if endpoint == "" {
+		t.Skip("DYNAMODB_ENDPOINT not set")
+	}
+	t.Setenv("AWS_ACCESS_KEY_ID", "test")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
+	ctx := context.Background()
+	table := "eurodns-gate-test-" + time.Now().Format("150405.000000")
+	st, err := NewDynamoDB(ctx, DynamoDBConfig{Table: table, Region: "us-east-1", Endpoint: endpoint})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := st.(*dynamo)
+	api := d.api.(*dynamodb.Client)
+	_, err = api.CreateTable(ctx, &dynamodb.CreateTableInput{
+		TableName:   aws.String(table),
+		BillingMode: types.BillingModePayPerRequest,
+		AttributeDefinitions: []types.AttributeDefinition{
+			{AttributeName: aws.String("pk"), AttributeType: types.ScalarAttributeTypeS},
+			{AttributeName: aws.String("sk"), AttributeType: types.ScalarAttributeTypeS},
+		},
+		KeySchema: []types.KeySchemaElement{
+			{AttributeName: aws.String("pk"), KeyType: types.KeyTypeHash},
+			{AttributeName: aws.String("sk"), KeyType: types.KeyTypeRange},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = api.DeleteTable(context.Background(), &dynamodb.DeleteTableInput{TableName: aws.String(table)})
+	})
+	clock := &fakeClock{t: time.Now()}
+	d.now = clock.Now
+	conformance(t, d, clock)
+}
+
+func TestSQLite(t *testing.T) {
+	ctx := context.Background()
+	path := t.TempDir() + "/gate.db"
+	st, err := NewSQLite(ctx, SQLiteConfig{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := st.(*sqlStore)
+	clock := &fakeClock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	s.now = clock.Now
+	conformance(t, s, clock)
+	testSQLMigrationsAndPurge(t, s, clock)
+	_ = s.Close()
+
+	// Reopening keeps data and does not re-apply migrations.
+	again, err := NewSQLite(ctx, SQLiteConfig{Path: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer again.(*sqlStore).Close()
+	if v, _ := again.ZoneVersion(ctx, "v.example.com"); v != 1 {
+		t.Fatalf("data lost on reopen: %d", v)
+	}
+}
+
+// TestPostgres runs against PostgreSQL, e.g.
+// POSTGRES_DSN=postgres://postgres:test@localhost:5432/postgres?sslmode=disable
+func TestPostgres(t *testing.T) {
+	dsn := os.Getenv("POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("POSTGRES_DSN not set")
+	}
+	ctx := context.Background()
+	st, err := NewPostgres(ctx, PostgresConfig{DSN: dsn, MaxConns: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := st.(*sqlStore)
+	defer s.Close()
+	for _, table := range []string{"policy_active", "policy_revision", "ownership", "zone_meta", "zone_lock", "audit"} {
+		if _, err := s.db.ExecContext(ctx, "DELETE FROM "+table); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clock := &fakeClock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	s.now = clock.Now
+	conformance(t, s, clock)
+	testSQLMigrationsAndPurge(t, s, clock)
+
+	// A second store on the same database (another replica) sees the lease.
+	other, err := NewPostgres(ctx, PostgresConfig{DSN: dsn, MaxConns: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer other.(*sqlStore).Close()
+	other.(*sqlStore).now = clock.Now
+	if err := s.Lock(ctx, "ha.example.com", "pod-a", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if err := other.Lock(ctx, "ha.example.com", "pod-b", time.Minute); !errors.Is(err, ErrLockHeld) {
+		t.Fatalf("lease not shared: %v", err)
+	}
+}
+
+func testSQLMigrationsAndPurge(t *testing.T, s *sqlStore, clock *fakeClock) {
+	ctx := context.Background()
+	var n int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&n); err != nil || n != 2 {
+		t.Fatalf("schema_migrations %d %v", n, err)
+	}
+	if err := s.migrate(ctx); err != nil {
+		t.Fatalf("idempotent migrate: %v", err)
+	}
+	old := audit.Event{Time: clock.Now().Add(-500 * 24 * time.Hour), RequestID: "old", Zone: "purge.example.com", Decision: "allow"}
+	recent := audit.Event{Time: clock.Now(), RequestID: "recent", Zone: "purge.example.com", Decision: "allow"}
+	for _, e := range []audit.Event{old, recent} {
+		if err := s.AppendAudit(ctx, e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.PurgeAudit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err := s.ListAudit(ctx, AuditQuery{Zone: "purge.example.com"})
+	if err != nil || len(got) != 1 || got[0].RequestID != "recent" {
+		t.Fatalf("purge %v %+v", err, got)
+	}
+}
+
+func policyConformance(t *testing.T, s Store) {
+	ctx := context.Background()
+	base := time.Date(2026, 4, 1, 9, 0, 0, 0, time.UTC)
+	rev := func(id string, i int, status string) PolicyRevision {
+		return PolicyRevision{ID: id, Document: []byte(`{"roles":{"r` + id + `":{}}}`), Author: "idp:alice",
+			AuthorName: "alice@example.com", AuthorCat: "human", CreatedAt: base.Add(time.Duration(i) * time.Minute),
+			Comment: "c" + id, Status: status}
+	}
+	if _, err := s.ActiveRevision(ctx); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("no active: %v", err)
+	}
+	for i, id := range []string{"p1", "p2", "p3", "p4", "p5"} {
+		if err := s.CreateRevision(ctx, rev(id, i, revisionProposed)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.CreateRevision(ctx, rev("p1", 9, revisionProposed)); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate: %v", err)
+	}
+	if err := s.CreateRevision(ctx, rev("bad", 9, revisionActive)); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("create active: %v", err)
+	}
+	if _, err := s.GetRevision(ctx, "nope"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing: %v", err)
+	}
+
+	r1, err := s.GetRevision(ctx, "p1")
+	if err != nil || r1.Version != 1 || string(r1.Document) != `{"roles":{"rp1":{}}}` || r1.AuthorName != "alice@example.com" || !r1.CreatedAt.Equal(base) {
+		t.Fatalf("get %v %+v", err, r1)
+	}
+	upd := *r1
+	upd.Status = revisionApproved
+	upd.Document = []byte(`{"tampered":true}`)
+	upd.Comment = "tampered"
+	upd.Approvals = []PolicyApproval{{By: "idp:bob", ByName: "bob", ByCategory: "human", At: base.Add(time.Hour), Decision: "approve", Comment: "ok"}}
+	if err := s.UpdateRevision(ctx, upd); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpdateRevision(ctx, upd); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale update: %v", err)
+	}
+	r1, _ = s.GetRevision(ctx, "p1")
+	if r1.Status != revisionApproved || r1.Version != 2 || string(r1.Document) != `{"roles":{"rp1":{}}}` || r1.Comment != "cp1" ||
+		len(r1.Approvals) != 1 || r1.Approvals[0].ByName != "bob" || !r1.Approvals[0].At.Equal(base.Add(time.Hour)) {
+		t.Fatalf("after update %+v", r1)
+	}
+	toActive := *r1
+	toActive.Status = revisionActive
+	if err := s.UpdateRevision(ctx, toActive); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("update to active: %v", err)
+	}
+	if err := s.UpdateRevision(ctx, PolicyRevision{ID: "nope", Version: 1}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("update missing: %v", err)
+	}
+
+	at := base.Add(2 * time.Hour)
+	if err := s.Activate(ctx, "p1", "", "idp:bob", at); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Activate(ctx, "p2", "", "idp:bob", at); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale expected: %v", err)
+	}
+	act, err := s.ActiveRevision(ctx)
+	if err != nil || act.ID != "p1" || act.Status != revisionActive || act.ActivatedBy != "idp:bob" || act.ActivatedAt == nil || !act.ActivatedAt.Equal(at) {
+		t.Fatalf("active %v %+v", err, act)
+	}
+	if err := s.Activate(ctx, "p2", "p1", "idp:bob", at.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if r, _ := s.GetRevision(ctx, "p1"); r.Status != revisionSuperseded {
+		t.Fatalf("previous %s", r.Status)
+	}
+	if act, _ := s.ActiveRevision(ctx); act.ID != "p2" {
+		t.Fatalf("active %s", act.ID)
+	}
+	sup, _ := s.GetRevision(ctx, "p1")
+	sup.Status = revisionApproved
+	if err := s.UpdateRevision(ctx, *sup); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("revive superseded: %v", err)
+	}
+
+	r3, _ := s.GetRevision(ctx, "p3")
+	r3.Status = "rejected"
+	if err := s.UpdateRevision(ctx, *r3); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Activate(ctx, "p3", "p2", "idp:bob", at); !errors.Is(err, ErrInvalidTransition) {
+		t.Fatalf("activate rejected: %v", err)
+	}
+	if err := s.Activate(ctx, "nope", "p2", "idp:bob", at); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("activate missing: %v", err)
+	}
+
+	page, cur, err := s.ListRevisions(ctx, "", 2, "")
+	if err != nil || len(page) != 2 || page[0].ID != "p5" || page[1].ID != "p4" || cur == "" {
+		t.Fatalf("page1 %v %+v", err, page)
+	}
+	page, cur, err = s.ListRevisions(ctx, "", 2, cur)
+	if err != nil || len(page) != 2 || page[0].ID != "p3" || page[1].ID != "p2" || cur == "" {
+		t.Fatalf("page2 %v %+v", err, page)
+	}
+	page, cur, err = s.ListRevisions(ctx, "", 2, cur)
+	if err != nil || len(page) != 1 || page[0].ID != "p1" || cur != "" {
+		t.Fatalf("page3 %v %q %+v", err, cur, page)
+	}
+	if got, _, _ := s.ListRevisions(ctx, revisionProposed, 0, ""); len(got) != 2 || got[0].ID != "p5" {
+		t.Fatalf("proposed %+v", got)
+	}
+	if _, _, err := s.ListRevisions(ctx, "", 2, "%%"); err == nil {
+		t.Fatal("bad cursor accepted")
+	}
+
+	// Concurrent activations from the same expected state: one winner.
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	wins := 0
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			id := []string{"p4", "p5"}[i%2]
+			err := s.Activate(ctx, id, "p2", "idp:bob", at)
+			mu.Lock()
+			defer mu.Unlock()
+			switch {
+			case err == nil:
+				wins++
+			case errors.Is(err, ErrConflict), errors.Is(err, ErrInvalidTransition):
+			default:
+				t.Errorf("activate: %v", err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if wins != 1 {
+		t.Fatalf("%d concurrent activations won", wins)
+	}
+	act, _ = s.ActiveRevision(ctx)
+	other := map[string]string{"p4": "p5", "p5": "p4"}[act.ID]
+	if r, _ := s.GetRevision(ctx, other); r.Status != revisionProposed {
+		t.Fatalf("loser %s is %s", other, r.Status)
+	}
+	if r, _ := s.GetRevision(ctx, "p2"); r.Status != revisionSuperseded {
+		t.Fatalf("p2 is %s", r.Status)
+	}
+	actives, _, _ := s.ListRevisions(ctx, revisionActive, 0, "")
+	if len(actives) != 1 {
+		t.Fatalf("%d active revisions", len(actives))
+	}
+}

@@ -1,0 +1,285 @@
+package server
+
+import (
+	"errors"
+	"io/fs"
+	"net/http"
+	"path"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/KamorionLabs/eurodns-gate/internal/audit"
+	"github.com/KamorionLabs/eurodns-gate/internal/authn"
+	"github.com/KamorionLabs/eurodns-gate/internal/config"
+	"github.com/KamorionLabs/eurodns-gate/internal/identity"
+	"github.com/KamorionLabs/eurodns-gate/internal/policy"
+	"github.com/KamorionLabs/eurodns-gate/internal/store"
+	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
+)
+
+// uiSubject authenticates a UI API request: session cookie first, then
+// bearer token or virtual key.
+// The session is returned when the request was authenticated by cookie
+// (mutations then require the CSRF token).
+func (s *Server) uiSubject(r *http.Request) (*identity.Subject, *session, *authn.Error) {
+	if s.ui != nil {
+		subj, sess, err := s.ui.sessionSubject(r)
+		if err != nil {
+			var ae *authn.Error
+			if errors.As(err, &ae) {
+				return nil, nil, ae
+			}
+			return nil, nil, &authn.Error{Status: http.StatusForbidden, Reason: "forbidden", Message: "not allowed"}
+		}
+		if subj != nil {
+			return subj, sess, nil
+		}
+	}
+	if r.Header.Get("Authorization") == "" && r.Header.Get("X-Api-Key") == "" {
+		return nil, nil, &authn.Error{Status: http.StatusUnauthorized, Reason: "unauthenticated", Message: "login required"}
+	}
+	subj, err := s.cfg.Authn.Authenticate(r)
+	if err != nil {
+		var ae *authn.Error
+		if errors.As(err, &ae) {
+			return nil, nil, ae
+		}
+		return nil, nil, &authn.Error{Status: http.StatusUnauthorized, Reason: "unauthenticated", Message: "authentication failed"}
+	}
+	return subj, nil, nil
+}
+
+func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/v1")
+	isPolicy := rest == "/policy" || strings.HasPrefix(rest, "/policy/")
+	isAdopt := strings.HasPrefix(rest, "/zones/") && (strings.HasSuffix(rest, "/adopt") || strings.HasSuffix(rest, "/adopt/preview"))
+	if r.Method != http.MethodGet && !((isPolicy || isAdopt) && r.Method == http.MethodPost) {
+		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+		return
+	}
+	subj, sess, ae := s.uiSubject(r)
+	if ae != nil {
+		writeError(w, ae.Status, ae.Reason, ae.Message)
+		return
+	}
+	if r.Method == http.MethodPost && sess != nil && !s.ui.checkCSRF(r) {
+		writeError(w, http.StatusForbidden, "csrf", "missing or invalid CSRF token or origin")
+		return
+	}
+	authn.StripCredentials(r.Header)
+	ctx := identity.With(r.Context(), subj)
+	r = r.WithContext(ctx)
+	if isPolicy {
+		s.handlePolicyAPI(w, r, subj, sess, strings.TrimPrefix(rest, "/policy"))
+		return
+	}
+	if zp := strings.Split(strings.TrimPrefix(rest, "/zones/"), "/"); strings.HasPrefix(rest, "/zones/") && len(zp) >= 2 && zp[1] != "rrsets" {
+		s.handleZoneOps(w, r, subj, sess, zp[0], strings.Join(zp[1:], "/"))
+		return
+	}
+
+	readable := s.readableZones(subj)
+	if len(readable) == 0 && rest != "/me" {
+		writeError(w, http.StatusForbidden, "forbidden", "ui.read not granted")
+		return
+	}
+
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	switch {
+	case rest == "/me":
+		writeJSON(w, http.StatusOK, uiapi.Me{
+			Subject:  subj.String(),
+			Name:     subj.Name,
+			Category: subj.Category,
+			Roles:    nonNil(subj.Roles),
+			Teams:    nonNil(subj.Teams),
+			Groups:   nonNil(subj.Groups),
+		})
+	case rest == "/zones":
+		zs, err := s.cfg.Engine.Zones(ctx, subj)
+		if err != nil {
+			s.log.Error("ui zones", "err", err)
+			writeError(w, http.StatusBadGateway, "upstream", "inventory unavailable")
+			return
+		}
+		out := make([]uiapi.ZoneSummary, 0, len(zs))
+		for _, z := range zs {
+			if readable[z.Zone] {
+				out = append(out, z)
+			}
+		}
+		writeJSON(w, http.StatusOK, out)
+	case len(parts) == 3 && parts[0] == "zones" && parts[2] == "rrsets":
+		zone := strings.ToLower(parts[1])
+		if !config.ValidFQDN(zone) {
+			writeError(w, http.StatusBadRequest, "bad_request", "invalid zone")
+			return
+		}
+		if !readable[zone] {
+			writeError(w, http.StatusForbidden, "forbidden", "ui.read not granted on "+zone)
+			return
+		}
+		inv, err := s.cfg.Engine.Inventory(ctx, subj, zone)
+		if err != nil {
+			s.log.Error("ui inventory", "zone", zone, "err", err)
+			writeError(w, http.StatusBadGateway, "upstream", "inventory unavailable")
+			return
+		}
+		if inv.RRsets == nil {
+			inv.RRsets = []uiapi.RRset{}
+		}
+		writeJSON(w, http.StatusOK, inv)
+	case rest == "/audit":
+		s.handleAudit(w, r, readable)
+	default:
+		writeError(w, http.StatusNotFound, "not_found", "unknown API endpoint")
+	}
+}
+
+// readableZones returns the managed zones the subject may see in the UI.
+func (s *Server) readableZones(subj *identity.Subject) map[string]bool {
+	out := map[string]bool{}
+	for _, z := range s.cfg.Config.Zones {
+		if s.cfg.Authz.Allow(subj, policy.ActionUIRead, z) {
+			out[z] = true
+		}
+	}
+	return out
+}
+
+var auditParams = map[string]bool{
+	"zone": true, "host": true, "type": true, "subject": true, "category": true,
+	"decision": true, "since": true, "until": true, "limit": true, "cursor": true,
+}
+
+// handleAudit lists audit events. Events of zones the subject cannot read
+// are filtered out; events without a zone (authentication failures) are
+// only shown to subjects that can read every managed zone.
+func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request, readable map[string]bool) {
+	if s.cfg.AuditReader == nil {
+		writeError(w, http.StatusNotFound, "not_found", "audit storage not configured")
+		return
+	}
+	q := r.URL.Query()
+	for k, v := range q {
+		if !auditParams[k] || len(v) != 1 {
+			writeError(w, http.StatusBadRequest, "bad_request", "unknown or repeated query parameter "+k)
+			return
+		}
+	}
+	aq := store.AuditQuery{
+		Zone:     strings.ToLower(q.Get("zone")),
+		Host:     q.Get("host"),
+		Type:     strings.ToUpper(q.Get("type")),
+		Subject:  q.Get("subject"),
+		Category: q.Get("category"),
+		Decision: q.Get("decision"),
+		Cursor:   q.Get("cursor"),
+		Limit:    50,
+	}
+	if aq.Zone != "" && !readable[aq.Zone] {
+		writeError(w, http.StatusForbidden, "forbidden", "ui.read not granted on "+aq.Zone)
+		return
+	}
+	switch aq.Category {
+	case "", identity.CategoryHuman, identity.CategoryPipeline, identity.CategoryKey:
+	default:
+		writeError(w, http.StatusBadRequest, "bad_request", "category must be human, pipeline or key")
+		return
+	}
+	switch aq.Decision {
+	case "", "allow", "deny", "error":
+	default:
+		writeError(w, http.StatusBadRequest, "bad_request", "decision must be allow, deny or error")
+		return
+	}
+	var err error
+	if v := q.Get("since"); v != "" {
+		if aq.Since, err = time.Parse(time.RFC3339, v); err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "since must be RFC 3339")
+			return
+		}
+	}
+	if v := q.Get("until"); v != "" {
+		if aq.Until, err = time.Parse(time.RFC3339, v); err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "until must be RFC 3339")
+			return
+		}
+	}
+	if v := q.Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 || n > 500 {
+			writeError(w, http.StatusBadRequest, "bad_request", "limit must be between 1 and 500")
+			return
+		}
+		aq.Limit = n
+	}
+	events, next, err := s.cfg.AuditReader.ListAudit(r.Context(), aq)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid audit query")
+		return
+	}
+	all := len(readable) == len(s.cfg.Config.Zones)
+	page := uiapi.AuditPage{Entries: []uiapi.AuditEntry{}, NextCursor: next}
+	for _, e := range events {
+		if (e.Zone == "" && !all) || (e.Zone != "" && !readable[e.Zone]) {
+			continue
+		}
+		page.Entries = append(page.Entries, toAuditEntry(e))
+	}
+	writeJSON(w, http.StatusOK, page)
+}
+
+func toAuditEntry(e audit.Event) uiapi.AuditEntry {
+	return uiapi.AuditEntry{
+		Time:       e.Time,
+		RequestID:  e.RequestID,
+		Actor:      uiapi.Actor{Subject: e.Subject, Name: e.SubjectName, Category: e.SubjectCategory},
+		Teams:      e.Teams,
+		Action:     e.Action,
+		Zone:       e.Zone,
+		Decision:   e.Decision,
+		Reason:     e.Reason,
+		Changes:    e.Changes,
+		SnapshotID: e.SnapshotID,
+	}
+}
+
+func nonNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
+}
+
+// spaHandler serves the built UI under /ui/, falling back to index.html for
+// client-side routes.
+func spaHandler(files fs.FS) http.Handler {
+	fileServer := http.StripPrefix("/ui/", http.FileServer(http.FS(files)))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "GET only")
+			return
+		}
+		name := strings.TrimPrefix(path.Clean(r.URL.Path), "/ui")
+		name = strings.TrimPrefix(name, "/")
+		if name != "" && name != "index.html" {
+			if st, err := fs.Stat(files, name); err == nil && !st.IsDir() {
+				if strings.HasPrefix(name, "assets/") {
+					w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+				}
+				fileServer.ServeHTTP(w, r)
+				return
+			}
+		}
+		index, err := fs.ReadFile(files, "index.html")
+		if err != nil {
+			writeError(w, http.StatusNotFound, "not_found", "UI not built")
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		_, _ = w.Write(index)
+	})
+}

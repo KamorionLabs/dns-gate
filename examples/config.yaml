@@ -1,0 +1,242 @@
+# eurodns-gate example configuration (see docs/CONFIG.md).
+# Secrets are never written here: EURODNS_API_KEY(_FILE),
+# EURODNS_GATE_SESSION_KEY(_FILE), EURODNS_GATE_UI_CLIENT_SECRET(_FILE),
+# EURODNS_GATE_POSTGRES_DSN(_FILE).
+
+listen:
+  address: ":8080"
+
+upstream:
+  base_url: https://rest-api.eurodns.com
+  app_id: acme-gate            # or EURODNS_APP_ID(_FILE)
+  rate: {every: 1.1s, burst: 5} # EuroDNS allows 10 requests / 10 s per IP
+
+# Only these zones are reachable through the gate.
+zones:
+  - example.com
+  - example.org
+
+check_on_write: true
+reconcile_interval: 15m
+
+limits:
+  max_body_bytes: 1048576
+  max_changes_per_request: 20
+
+store:
+  type: sqlite                 # memory | sqlite | postgres | dynamodb
+  audit_retention: 9600h       # 400 days
+  sqlite:
+    path: /var/lib/eurodns-gate/gate.db
+
+issuers:
+  # AWS IAM outbound identity federation (sts:GetWebIdentityToken).
+  # The issuer URL is account specific: aws iam get-outbound-web-identity-federation-info
+  - name: aws
+    issuer: https://00000000-0000-0000-0000-000000000000.tokens.sts.global.api.aws
+    audiences: [eurodns-gate]
+    category: pipeline
+    bound_claims:
+      sub: ["arn:aws:iam::111111111111:role/*"]
+
+  # GitHub Actions OIDC.
+  - name: github
+    issuer: https://token.actions.githubusercontent.com
+    audiences: [eurodns-gate]
+    category: pipeline
+    name_claim: workflow
+    bound_claims:
+      repository_owner: [acme]
+
+  # Kubernetes service account tokens (projected, custom audience).
+  - name: k8s
+    issuer: https://oidc.eks.eu-west-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B71EXAMPLE
+    audiences: [eurodns-gate]
+    category: pipeline
+
+  # Entra ID: Managed Identity, AKS Workload Identity and Azure DevOps
+  # (service connection with workload identity federation) access tokens.
+  # Gate app registration: Application ID URI api://eurodns-gate,
+  # accessTokenAcceptedVersion: 2, app roles, assignment required.
+  - name: entra
+    issuer: https://login.microsoftonline.com/11111111-2222-3333-4444-555555555555/v2.0
+    audiences: ["api://eurodns-gate", "99999999-8888-7777-6666-555555555555"]
+    subject_template: "{{tid}}/{{oid}}"
+    bound_claims: {tid: "11111111-2222-3333-4444-555555555555"}
+    category_claim: idtyp
+    category_map: {app: pipeline, user: human}
+    name_claim: name
+
+  # Corporate IdP, used by humans through the UI.
+  - name: sso
+    issuer: https://login.example.com
+    audiences: [eurodns-gate]
+    category: human
+    name_claim: email
+
+virtual_keys:
+  # For ACME clients that only speak X-APP-ID / X-API-KEY (Caddy, lego).
+  # key_sha256 = sha256 of the key given to the client (printf %s "$KEY" | sha256sum).
+  - id: caddy-edge
+    app_id: vk-caddy-edge
+    key_sha256: 0000000000000000000000000000000000000000000000000000000000000000
+    roles: [acme-solver]
+    teams: [edge]
+    expires_at: 2027-06-30T00:00:00Z
+    allowed_cidrs: [10.0.0.0/8]
+
+roles:
+  reader:
+    rules:
+      - zones: ["*"]
+        actions: [dns.read, ui.read]
+
+  web-cname-writer:
+    rules:
+      - zones: [example.com]
+        actions: [dns.read, dns.record.write, ui.read]
+        records:
+          hosts: ["*.staging", "_*.staging", "app"]
+          types: [CNAME, TXT]
+
+  acm-validation:
+    rules:
+      - zones: ["*"]
+        actions: [dns.read, dns.record.write]
+        records:
+          hosts: ["_*", "_*.**"]
+          types: [CNAME]
+
+  acme-solver:
+    rebase_on_save: true       # lego and Caddy PUT whole, possibly stale, zones
+    ephemeral_ttl: 24h         # challenge records are garbage-collected
+    max_changes_per_request: 4
+    rules:
+      - zones: ["*"]
+        actions: [dns.read, dns.record.write]
+        records:
+          hosts: ["_acme-challenge", "_acme-challenge.**"]
+          types: [TXT]
+
+  policy-admin:
+    rules:
+      - zones: ["*"]
+        actions: [policy.read, policy.propose, policy.approve, ui.read]
+
+  dns-admin:
+    max_changes_per_request: 100
+    rules:
+      - zones: ["*"]
+        actions: [dns.read, dns.record.write, dns.record.adopt, ui.read]
+
+bindings:
+  - role: web-cname-writer
+    team: web
+    subjects:
+      - issuer: aws
+        claims: {sub: "arn:aws:iam::111111111111:role/ci-web"}
+      - issuer: github
+        claims: {sub: "repo:acme/web:environment:production"}
+
+  - role: acm-validation
+    team: platform
+    subjects:
+      - issuer: aws
+        claims: {sub: "arn:aws:iam::111111111111:role/ci-platform"}
+
+  - role: acme-solver
+    team: platform
+    subjects:
+      - issuer: k8s
+        claims: {sub: "system:serviceaccount:cert-manager:cert-manager"}
+
+  # Azure Managed Identity, by object id.
+  - role: web-cname-writer
+    team: web
+    subjects:
+      - issuer: entra
+        claims: {oid: "aaaaaaaa-0000-0000-0000-000000000001", idtyp: app}
+
+  # AKS Workload Identity (user-assigned identity with a federated credential).
+  - role: acme-solver
+    team: platform
+    subjects:
+      - issuer: entra
+        claims: {oid: "aaaaaaaa-0000-0000-0000-000000000002"}
+
+  # Azure DevOps pipeline: AzureCLI@2 with a workload identity federation
+  # service connection, then
+  #   az account get-access-token --scope api://eurodns-gate/.default
+  # Bound on the DNS.Write app role assigned to the service principal.
+  # Never trust the raw vstoken.dev.azure.com token (fixed audience
+  # api://AzureADTokenExchange, replayable against Azure).
+  - role: acm-validation
+    team: platform
+    subjects:
+      - issuer: entra
+        claims: {roles: ["DNS.Write"], idtyp: app}
+
+  - role: reader
+    groups: [gate-readers]
+
+  - role: dns-admin
+    team: dns
+    groups: [gate-operators]
+
+  - role: policy-admin
+    groups: [gate-policy-admins]
+
+# Groups. With Entra ID, declare app roles on the gate app registration
+# (Gate.Reader, Gate.Operator, Gate.PolicyAdmin) and assign them to Entra
+# groups: tokens then carry the "roles" claim, without groups overage.
+groups:
+  gate-readers:
+    description: Entra app role Gate.Reader
+    members:
+      - issuer: entra
+        claims: {roles: [Gate.Reader]}
+  gate-operators:
+    description: Entra app role Gate.Operator
+    members:
+      - issuer: entra
+        claims: {roles: [Gate.Operator]}
+  gate-policy-admins:
+    description: Entra app role Gate.PolicyAdmin
+    members:
+      - issuer: entra
+        claims: {roles: [Gate.PolicyAdmin]}
+
+# Managed layer, editable from the UI by policy admins, within these bounds.
+policy:
+  editable: true
+  require_approval: true
+  edit_max_age: 15m
+  require_amr: []              # e.g. [mfa] if the IdP emits amr
+  bounds:
+    zones: [example.com, "*.example.com", example.org]
+    actions: [dns.read, dns.record.write, ui.read]
+
+# Never writable nor adoptable, whatever the role.
+protected:
+  - zones: ["*"]
+    hosts: ["@"]
+    types: [NS, SOA, MX, CAA]
+  - zones: ["*"]              # SPF and DMARC
+    hosts: ["_dmarc", "@"]
+    types: [TXT]
+
+# MCP endpoint for AI assistants (read-only unless allow_writes).
+mcp:
+  enabled: true
+  allow_writes: false
+  plan_ttl: 10m
+  requests_per_minute: 120
+  public_url: https://dns-gate.example.com
+
+ui:
+  enabled: true
+  issuer: entra
+  client_id: eurodns-gate-ui
+  redirect_url: https://dns-gate.example.com/auth/callback
+  scopes: [openid, profile, email]
+  session_ttl: 8h

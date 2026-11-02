@@ -1,0 +1,708 @@
+package server
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/KamorionLabs/eurodns-gate/internal/audit"
+	"github.com/KamorionLabs/eurodns-gate/internal/authn"
+	"github.com/KamorionLabs/eurodns-gate/internal/glob"
+	"github.com/KamorionLabs/eurodns-gate/internal/identity"
+	"github.com/KamorionLabs/eurodns-gate/internal/policy"
+	"github.com/KamorionLabs/eurodns-gate/internal/requestid"
+	"github.com/KamorionLabs/eurodns-gate/internal/store"
+	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
+	"github.com/KamorionLabs/eurodns-gate/internal/version"
+	"github.com/KamorionLabs/eurodns-gate/internal/zonewrite"
+	eurodns "github.com/KamorionLabs/eurodns-go"
+)
+
+const (
+	mcpPath          = "/mcp"
+	resourceMetaPath = "/.well-known/oauth-protected-resource"
+	// subjectRefHeader carries, inside the gate only, a reference to the
+	// subject authenticated by the HTTP middleware; the MCP SDK hands the
+	// request headers to tool handlers. Client values are always replaced.
+	subjectRefHeader = "X-Gate-Internal-Subject-Ref"
+)
+
+const recordRules = "Hosts are relative to the zone, \"@\" is the apex. Targets of CNAME, MX, NS, SRV and PTR records must be fully qualified with a trailing dot (\"target.example.net.\"), otherwise EuroDNS appends the zone. TXT values are raw text, without surrounding quotes. TTL must be one of 600, 900, 1800, 3600, 7200, 14400, 21600, 43200, 86400, 172800, 432000, 604800."
+
+type mcpServer struct {
+	s       *Server
+	handler http.Handler
+	refs    sync.Map // ref -> *identity.Subject
+	plans   *planStore
+	limiter *subjectLimiter
+}
+
+func (s *Server) newMCP() *mcpServer {
+	m := &mcpServer{
+		s:       s,
+		plans:   newPlanStore(s.cfg.Config.MCP.PlanTTL.D(), s.now),
+		limiter: newSubjectLimiter(s.cfg.Config.MCP.RequestsPerMinute, s.now),
+	}
+	srv := mcp.NewServer(&mcp.Implementation{Name: "eurodns-gate", Version: version.Version}, &mcp.ServerOptions{
+		Instructions: "eurodns-gate manages EuroDNS zones under RBAC and record ownership. Read tools are always available; changes are made with plan_rrset_change then apply_rrset_change, and only on RRsets owned by your team. " + recordRules,
+	})
+	m.addReadTools(srv)
+	if s.cfg.Config.MCP.AllowWrites && s.cfg.Ops != nil {
+		m.addWriteTools(srv)
+	}
+	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
+	m.handler = h
+	return m
+}
+
+// baseURL is the public base URL of the gate.
+func (m *mcpServer) baseURL(r *http.Request) string {
+	c := m.s.cfg.Config
+	if c.MCP.PublicURL != "" {
+		return strings.TrimSuffix(c.MCP.PublicURL, "/")
+	}
+	if m.s.ui != nil {
+		return m.s.ui.origin
+	}
+	scheme := "https"
+	if r.TLS == nil && (strings.HasPrefix(r.Host, "127.0.0.1") || strings.HasPrefix(r.Host, "localhost")) {
+		scheme = "http"
+	}
+	return scheme + "://" + r.Host
+}
+
+// serveResourceMetadata serves the RFC 9728 protected resource metadata.
+func (m *mcpServer) serveResourceMetadata(w http.ResponseWriter, r *http.Request) {
+	base := m.baseURL(r)
+	doc := map[string]any{
+		"resource":                 base + mcpPath,
+		"authorization_servers":    []string{},
+		"bearer_methods_supported": []string{"header"},
+		"scopes_supported":         []string{},
+		"resource_name":            "eurodns-gate",
+	}
+	if m.s.ui != nil {
+		doc["authorization_servers"] = []string{m.s.ui.issuer.Issuer}
+	}
+	writeJSON(w, http.StatusOK, doc)
+}
+
+func (m *mcpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	r.Header.Del(subjectRefHeader)
+	r.Header.Del("Cookie")
+	subj, err := m.s.cfg.Authn.Authenticate(r)
+	if err != nil {
+		var ae *authn.Error
+		if !errors.As(err, &ae) {
+			ae = &authn.Error{Status: http.StatusUnauthorized, Reason: "unauthenticated", Message: "authentication failed"}
+		}
+		if ae.Status == http.StatusUnauthorized {
+			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Bearer resource_metadata="%s%s"`, m.baseURL(r), resourceMetaPath))
+		}
+		m.s.audit(r, nil, "mcp", "", "deny", ae.Reason)
+		writeError(w, ae.Status, ae.Reason, ae.Message)
+		return
+	}
+	if !m.limiter.allow(subj.String()) {
+		w.Header().Set("Retry-After", "10")
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many MCP requests")
+		return
+	}
+	authn.StripCredentials(r.Header)
+	ref := randomToken()
+	m.refs.Store(ref, subj)
+	defer m.refs.Delete(ref)
+	r.Header.Set(subjectRefHeader, ref)
+	m.handler.ServeHTTP(w, r.WithContext(identity.With(r.Context(), subj)))
+}
+
+// call resolves the subject of a tool call.
+func (m *mcpServer) subject(ctx context.Context, req *mcp.CallToolRequest) (*identity.Subject, error) {
+	if s := identity.From(ctx); s != nil {
+		return s, nil
+	}
+	if req != nil && req.Extra != nil && req.Extra.Header != nil {
+		if v, ok := m.refs.Load(req.Extra.Header.Get(subjectRefHeader)); ok {
+			return v.(*identity.Subject), nil
+		}
+	}
+	return nil, errors.New("unauthenticated")
+}
+
+func clientName(req *mcp.CallToolRequest) string {
+	if req != nil && req.Session != nil {
+		if p := req.Session.InitializeParams(); p != nil && p.ClientInfo != nil && p.ClientInfo.Name != "" {
+			return p.ClientInfo.Name
+		}
+	}
+	if req != nil && req.Extra != nil && req.Extra.Header != nil {
+		return req.Extra.Header.Get("User-Agent")
+	}
+	return ""
+}
+
+func (m *mcpServer) audit(ctx context.Context, req *mcp.CallToolRequest, subj *identity.Subject, tool, zone, decision, reason string, extra map[string]any) {
+	e := audit.Event{
+		Time: m.s.now().UTC(), RequestID: requestid.From(ctx), Action: "mcp." + tool, Zone: zone,
+		Decision: decision, Reason: reason, Extra: map[string]any{"via": "mcp", "mcp_client": clientName(req)},
+	}
+	if e.RequestID == "" {
+		e.RequestID = requestid.New()
+	}
+	if subj != nil {
+		e.Subject, e.SubjectName, e.SubjectCategory, e.Teams = subj.String(), subj.Name, subj.Category, subj.Teams
+	}
+	for k, v := range extra {
+		e.Extra[k] = v
+	}
+	m.s.cfg.Audit.Log(ctx, e)
+}
+
+func ptr[T any](v T) *T { return &v }
+
+func readOnly(title string) *mcp.ToolAnnotations {
+	return &mcp.ToolAnnotations{Title: title, ReadOnlyHint: true, IdempotentHint: true, OpenWorldHint: ptr(false)}
+}
+
+// canRead reports whether the subject may read a zone (ui.read or dns.read).
+func (m *mcpServer) canRead(subj *identity.Subject, zone string) bool {
+	return m.s.cfg.Authz.Allow(subj, policy.ActionUIRead, zone) || m.s.cfg.Authz.Allow(subj, policy.ActionDNSRead, zone)
+}
+
+func (m *mcpServer) readable(subj *identity.Subject) map[string]bool {
+	out := map[string]bool{}
+	for _, z := range m.s.cfg.Config.Zones {
+		if m.canRead(subj, z) {
+			out[z] = true
+		}
+	}
+	return out
+}
+
+func normZoneArg(z string) string {
+	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(z)), ".")
+}
+
+// Tool inputs and outputs.
+
+type zoneArg struct {
+	Zone string `json:"zone" jsonschema:"managed zone name, e.g. example.com"`
+}
+
+type listZonesOut struct {
+	Zones []uiapi.ZoneSummary `json:"zones"`
+}
+
+type listRRsetsIn struct {
+	Zone   string `json:"zone" jsonschema:"managed zone name, e.g. example.com"`
+	Status string `json:"status,omitempty" jsonschema:"filter: managed, tainted, pending, foreign or missing"`
+	Host   string `json:"host,omitempty" jsonschema:"host glob relative to the zone, * matches any characters, @ is the apex"`
+	Type   string `json:"type,omitempty" jsonschema:"record type, e.g. CNAME"`
+	Owner  string `json:"owner,omitempty" jsonschema:"owner team"`
+}
+
+type listRRsetsOut struct {
+	Zone         string        `json:"zone"`
+	LastSyncedAt *time.Time    `json:"last_synced_at,omitempty"`
+	RRsets       []uiapi.RRset `json:"rrsets"`
+}
+
+type getRRsetIn struct {
+	Zone string `json:"zone" jsonschema:"managed zone name"`
+	Host string `json:"host" jsonschema:"host relative to the zone, @ for the apex"`
+	Type string `json:"type" jsonschema:"record type"`
+}
+
+type getRRsetOut struct {
+	RRset   *uiapi.RRset       `json:"rrset,omitempty"`
+	History []uiapi.AuditEntry `json:"history"`
+}
+
+type searchAuditIn struct {
+	Zone     string `json:"zone,omitempty"`
+	Host     string `json:"host,omitempty"`
+	Type     string `json:"type,omitempty"`
+	Subject  string `json:"subject,omitempty" jsonschema:"partial, case-insensitive match on the subject or its name"`
+	Category string `json:"category,omitempty" jsonschema:"human, pipeline, key or system"`
+	Decision string `json:"decision,omitempty" jsonschema:"allow, deny or error"`
+	Since    string `json:"since,omitempty" jsonschema:"RFC 3339 time"`
+	Until    string `json:"until,omitempty" jsonschema:"RFC 3339 time"`
+	Limit    int    `json:"limit,omitempty" jsonschema:"1 to 200, default 50"`
+	Cursor   string `json:"cursor,omitempty"`
+}
+
+type explainIn struct {
+	Issuer string              `json:"issuer" jsonschema:"issuer name from the gate configuration"`
+	Claims map[string][]string `json:"claims" jsonschema:"concrete claim values of the subject to simulate"`
+	Action string              `json:"action" jsonschema:"e.g. dns.record.write"`
+	Zone   string              `json:"zone"`
+	Host   string              `json:"host,omitempty"`
+	Type   string              `json:"type,omitempty"`
+}
+
+type whoCanIn struct {
+	Zone   string `json:"zone"`
+	Host   string `json:"host,omitempty"`
+	Type   string `json:"type,omitempty"`
+	Action string `json:"action,omitempty" jsonschema:"default dns.record.write"`
+}
+
+type planIn struct {
+	Zone    string              `json:"zone" jsonschema:"managed zone name"`
+	Changes []uiapi.RRsetChange `json:"changes" jsonschema:"desired state per RRset; delete=true removes it"`
+}
+
+type applyIn struct {
+	PlanID string `json:"plan_id" jsonschema:"plan_id returned by plan_rrset_change"`
+}
+
+type adoptPreviewIn struct {
+	Zone      string               `json:"zone"`
+	Selection uiapi.AdoptSelection `json:"selection"`
+}
+
+type adoptApplyIn struct {
+	Zone         string           `json:"zone"`
+	RRsets       []uiapi.RRsetRef `json:"rrsets"`
+	Owner        string           `json:"owner,omitempty"`
+	Comment      string           `json:"comment"`
+	PreviewToken string           `json:"preview_token"`
+}
+
+func (m *mcpServer) addReadTools(srv *mcp.Server) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "list_zones",
+		Description: "List the DNS zones managed by the gate that you can read, with counts of managed, foreign, tainted and pending RRsets.",
+		Annotations: readOnly("List zones"),
+	}, func(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, listZonesOut, error) {
+		subj, err := m.subject(ctx, req)
+		if err != nil {
+			return nil, listZonesOut{}, err
+		}
+		zs, err := m.s.cfg.Engine.Zones(ctx, subj)
+		if err != nil {
+			return nil, listZonesOut{}, errors.New("inventory unavailable")
+		}
+		readable := m.readable(subj)
+		out := listZonesOut{Zones: []uiapi.ZoneSummary{}}
+		for _, z := range zs {
+			if readable[z.Zone] {
+				out.Zones = append(out.Zones, z)
+			}
+		}
+		m.audit(ctx, req, subj, "list_zones", "", "allow", "", nil)
+		return nil, out, nil
+	})
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "list_rrsets",
+		Description: "List the RRsets of a zone with their ownership status (managed: owned by a team through the gate; foreign: created outside the gate, read-only; tainted: changed outside the gate, writes blocked; pending; missing). Optional filters on status, host glob, type and owner team.",
+		Annotations: readOnly("List RRsets"),
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in listRRsetsIn) (*mcp.CallToolResult, listRRsetsOut, error) {
+		subj, err := m.subject(ctx, req)
+		if err != nil {
+			return nil, listRRsetsOut{}, err
+		}
+		zone := normZoneArg(in.Zone)
+		if !m.canRead(subj, zone) {
+			return nil, listRRsetsOut{}, fmt.Errorf("read access to %q not granted", zone)
+		}
+		inv, err := m.s.cfg.Engine.Inventory(ctx, subj, zone)
+		if err != nil {
+			return nil, listRRsetsOut{}, errors.New("inventory unavailable")
+		}
+		out := listRRsetsOut{Zone: inv.Zone, LastSyncedAt: inv.LastSyncedAt, RRsets: []uiapi.RRset{}}
+		for _, rs := range inv.RRsets {
+			if (in.Status == "" || rs.Status == in.Status) && (in.Host == "" || glob.Match(strings.ToLower(in.Host), rs.Host)) &&
+				(in.Type == "" || strings.EqualFold(in.Type, rs.Type)) && (in.Owner == "" || rs.Owner == in.Owner) {
+				out.RRsets = append(out.RRsets, rs)
+			}
+		}
+		m.audit(ctx, req, subj, "list_rrsets", zone, "allow", "", nil)
+		return nil, out, nil
+	})
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "get_rrset",
+		Description: "Get one RRset (values, TTL, owner, status) and its recent audit history.",
+		Annotations: readOnly("Get RRset"),
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in getRRsetIn) (*mcp.CallToolResult, getRRsetOut, error) {
+		subj, err := m.subject(ctx, req)
+		if err != nil {
+			return nil, getRRsetOut{}, err
+		}
+		zone := normZoneArg(in.Zone)
+		if !m.canRead(subj, zone) {
+			return nil, getRRsetOut{}, fmt.Errorf("read access to %q not granted", zone)
+		}
+		inv, err := m.s.cfg.Engine.Inventory(ctx, subj, zone)
+		if err != nil {
+			return nil, getRRsetOut{}, errors.New("inventory unavailable")
+		}
+		out := getRRsetOut{History: []uiapi.AuditEntry{}}
+		host := strings.ToLower(in.Host)
+		if host == "" {
+			host = "@"
+		}
+		for i := range inv.RRsets {
+			if inv.RRsets[i].Host == host && strings.EqualFold(inv.RRsets[i].Type, in.Type) {
+				out.RRset = &inv.RRsets[i]
+			}
+		}
+		if m.s.cfg.AuditReader != nil {
+			events, _, err := m.s.cfg.AuditReader.ListAudit(ctx, store.AuditQuery{Zone: zone, Host: host, Type: strings.ToUpper(in.Type), Limit: 20})
+			if err == nil {
+				for _, e := range events {
+					out.History = append(out.History, toAuditEntry(e))
+				}
+			}
+		}
+		m.audit(ctx, req, subj, "get_rrset", zone, "allow", "", nil)
+		return nil, out, nil
+	})
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "search_audit",
+		Description: "Search the gate audit log, newest first. Only events of zones you can read are returned. Use next_cursor to page.",
+		Annotations: readOnly("Search audit log"),
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in searchAuditIn) (*mcp.CallToolResult, uiapi.AuditPage, error) {
+		subj, err := m.subject(ctx, req)
+		if err != nil {
+			return nil, uiapi.AuditPage{}, err
+		}
+		if m.s.cfg.AuditReader == nil {
+			return nil, uiapi.AuditPage{}, errors.New("audit storage not configured")
+		}
+		readable := m.readable(subj)
+		q := store.AuditQuery{Zone: normZoneArg(in.Zone), Host: in.Host, Type: strings.ToUpper(in.Type), Subject: in.Subject,
+			Category: in.Category, Decision: in.Decision, Cursor: in.Cursor, Limit: 50}
+		if q.Zone != "" && !readable[q.Zone] {
+			return nil, uiapi.AuditPage{}, fmt.Errorf("read access to %q not granted", q.Zone)
+		}
+		if in.Limit > 0 {
+			q.Limit = min(in.Limit, 200)
+		}
+		for _, t := range []struct {
+			v   string
+			dst *time.Time
+		}{{in.Since, &q.Since}, {in.Until, &q.Until}} {
+			if t.v != "" {
+				ts, err := time.Parse(time.RFC3339, t.v)
+				if err != nil {
+					return nil, uiapi.AuditPage{}, errors.New("since and until must be RFC 3339 times")
+				}
+				*t.dst = ts
+			}
+		}
+		events, next, err := m.s.cfg.AuditReader.ListAudit(ctx, q)
+		if err != nil {
+			return nil, uiapi.AuditPage{}, errors.New("invalid audit query")
+		}
+		all := len(readable) == len(m.s.cfg.Config.Zones)
+		page := uiapi.AuditPage{Entries: []uiapi.AuditEntry{}, NextCursor: next}
+		for _, e := range events {
+			if (e.Zone == "" && all) || readable[e.Zone] {
+				page.Entries = append(page.Entries, toAuditEntry(e))
+			}
+		}
+		return nil, page, nil
+	})
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "explain",
+		Description: "Simulate an authorization decision of the active policy for a subject with given claims: groups, bindings, the rule that grants or the reason of the denial. Requires policy.read.",
+		Annotations: readOnly("Explain a decision"),
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in explainIn) (*mcp.CallToolResult, uiapi.ExplainResponse, error) {
+		subj, err := m.subject(ctx, req)
+		if err != nil {
+			return nil, uiapi.ExplainResponse{}, err
+		}
+		if !m.s.pol.AllowMeta(subj, uiapi.ActionPolicyRead) {
+			return nil, uiapi.ExplainResponse{}, errors.New("policy.read not granted")
+		}
+		claims := map[string]any{}
+		for k, v := range in.Claims {
+			if len(v) == 1 {
+				claims[k] = v[0]
+			} else {
+				arr := make([]any, len(v))
+				for i, x := range v {
+					arr[i] = x
+				}
+				claims[k] = arr
+			}
+		}
+		return nil, m.s.cfg.Policy.Current().Explain(in.Issuer, claims, in.Action, normZoneArg(in.Zone), in.Host, in.Type), nil
+	})
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "who_can",
+		Description: "List the bindings and virtual keys allowed to perform an action (default dns.record.write) on an RRset of a zone. Requires policy.read.",
+		Annotations: readOnly("Who can"),
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in whoCanIn) (*mcp.CallToolResult, uiapi.WhoCanResponse, error) {
+		subj, err := m.subject(ctx, req)
+		if err != nil {
+			return nil, uiapi.WhoCanResponse{}, err
+		}
+		if !m.s.pol.AllowMeta(subj, uiapi.ActionPolicyRead) {
+			return nil, uiapi.WhoCanResponse{}, errors.New("policy.read not granted")
+		}
+		action := in.Action
+		if action == "" {
+			action = policy.ActionRecordWrite
+		}
+		return nil, m.s.cfg.Policy.Current().WhoCan(action, normZoneArg(in.Zone), in.Host, in.Type), nil
+	})
+}
+
+func (m *mcpServer) addWriteTools(srv *mcp.Server) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "plan_rrset_change",
+		Description: "Dry run of RRset changes in a zone: checks RBAC, ownership and EuroDNS validation without writing, and returns the changes and a plan_id valid for a few minutes. Each change is the full desired state of one RRset (host, type, ttl, values) or delete=true. " +
+			recordRules + " Only RRsets owned by your team, or new ones in your scope, can change. Show the plan to the user before applying it.",
+		Annotations: readOnly("Plan RRset changes"),
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in planIn) (*mcp.CallToolResult, uiapi.PlanResult, error) {
+		subj, err := m.subject(ctx, req)
+		if err != nil {
+			return nil, uiapi.PlanResult{}, err
+		}
+		zone := normZoneArg(in.Zone)
+		if len(in.Changes) == 0 || len(in.Changes) > 100 {
+			return nil, uiapi.PlanResult{}, errors.New("between 1 and 100 changes are required")
+		}
+		if !m.s.cfg.Authz.Allow(subj, policy.ActionRecordWrite, zone) {
+			m.audit(ctx, req, subj, "plan_rrset_change", zone, "deny", "forbidden", nil)
+			return nil, uiapi.PlanResult{}, fmt.Errorf("dns.record.write not granted on %q", zone)
+		}
+		plan, err := m.s.cfg.Ops.PlanRRsets(ctx, subj, zone, in.Changes)
+		if err != nil {
+			return nil, uiapi.PlanResult{}, toolError(err)
+		}
+		if plan.Allowed {
+			plan.PlanID = m.plans.put(subj.String(), zone, in.Changes, plan.ZoneVersion)
+		}
+		m.audit(ctx, req, subj, "plan_rrset_change", zone, "allow", plan.Reason, map[string]any{"plan_id": plan.PlanID, "allowed": plan.Allowed})
+		return nil, *plan, nil
+	})
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "apply_rrset_change",
+		Description: "Apply a plan returned by plan_rrset_change, exactly as planned. Fails if the plan expired, belongs to another caller, or if the zone changed since the plan (plan again). Only apply after the user confirmed the plan.",
+		Annotations: &mcp.ToolAnnotations{Title: "Apply RRset plan", DestructiveHint: ptr(true), IdempotentHint: false, OpenWorldHint: ptr(true)},
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in applyIn) (*mcp.CallToolResult, uiapi.PlanResult, error) {
+		subj, err := m.subject(ctx, req)
+		if err != nil {
+			return nil, uiapi.PlanResult{}, err
+		}
+		p, err := m.plans.take(in.PlanID, subj.String())
+		if err != nil {
+			m.audit(ctx, req, subj, "apply_rrset_change", "", "deny", err.Error(), map[string]any{"plan_id": in.PlanID})
+			return nil, uiapi.PlanResult{}, err
+		}
+		res, err := m.s.cfg.Ops.ApplyRRsets(ctx, subj, p.zone, p.changes, p.version)
+		if err != nil {
+			m.audit(ctx, req, subj, "apply_rrset_change", p.zone, "error", reasonOf(err), map[string]any{"plan_id": in.PlanID})
+			return nil, uiapi.PlanResult{}, toolError(err)
+		}
+		m.audit(ctx, req, subj, "apply_rrset_change", p.zone, "allow", "", map[string]any{"plan_id": in.PlanID})
+		res.PlanID = in.PlanID
+		return nil, *res, nil
+	})
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "adopt_preview",
+		Description: "Preview the adoption of foreign RRsets (created outside the gate) by a team: which ones are adoptable and why not (protected, server-managed, owned by another team, relative target). Returns a preview_token for adopt_apply. Requires dns.record.adopt.",
+		Annotations: readOnly("Preview adoption"),
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in adoptPreviewIn) (*mcp.CallToolResult, uiapi.AdoptPreview, error) {
+		subj, err := m.subject(ctx, req)
+		if err != nil {
+			return nil, uiapi.AdoptPreview{}, err
+		}
+		zone := normZoneArg(in.Zone)
+		if !m.s.cfg.Authz.Allow(subj, policy.ActionRecordAdopt, zone) {
+			return nil, uiapi.AdoptPreview{}, fmt.Errorf("dns.record.adopt not granted on %q", zone)
+		}
+		p, err := m.s.cfg.Ops.PreviewAdopt(ctx, subj, zone, in.Selection)
+		if err != nil {
+			return nil, uiapi.AdoptPreview{}, toolError(err)
+		}
+		return nil, *p, nil
+	})
+
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "adopt_apply",
+		Description: "Adopt RRsets listed by adopt_preview, all or nothing, with the preview_token. A comment explaining why is required. Fails if any RRset changed since the preview.",
+		Annotations: &mcp.ToolAnnotations{Title: "Adopt RRsets", DestructiveHint: ptr(false), IdempotentHint: true, OpenWorldHint: ptr(false)},
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in adoptApplyIn) (*mcp.CallToolResult, uiapi.AdoptResult, error) {
+		subj, err := m.subject(ctx, req)
+		if err != nil {
+			return nil, uiapi.AdoptResult{}, err
+		}
+		zone := normZoneArg(in.Zone)
+		if !m.s.cfg.Authz.Allow(subj, policy.ActionRecordAdopt, zone) {
+			return nil, uiapi.AdoptResult{}, fmt.Errorf("dns.record.adopt not granted on %q", zone)
+		}
+		if e := m.s.stepUp(subj, nil); e != nil {
+			return nil, uiapi.AdoptResult{}, errors.New(e.msg)
+		}
+		if strings.TrimSpace(in.Comment) == "" || len(in.RRsets) == 0 || in.PreviewToken == "" {
+			return nil, uiapi.AdoptResult{}, errors.New("rrsets, comment and preview_token are required")
+		}
+		res, err := m.s.cfg.Ops.AdoptMany(ctx, subj, zone, uiapi.AdoptApply{RRsets: in.RRsets, Owner: in.Owner, Comment: in.Comment, PreviewToken: in.PreviewToken})
+		if err != nil {
+			m.audit(ctx, req, subj, "adopt_apply", zone, "error", reasonOf(err), nil)
+			return nil, uiapi.AdoptResult{}, toolError(err)
+		}
+		m.audit(ctx, req, subj, "adopt_apply", zone, "allow", "", map[string]any{"adopted": len(res.Adopted)})
+		return nil, *res, nil
+	})
+}
+
+func reasonOf(err error) string {
+	if ze, ok := zonewrite.AsError(err); ok {
+		return string(ze.Reason)
+	}
+	return "error"
+}
+
+// toolError turns engine errors into messages useful to the model,
+// without upstream details.
+func toolError(err error) error {
+	if ze, ok := zonewrite.AsError(err); ok {
+		return fmt.Errorf("%s: %s", ze.Reason, ze.Message)
+	}
+	var ae *eurodns.APIError
+	if errors.As(err, &ae) {
+		return errors.New("upstream: EuroDNS returned an error")
+	}
+	return errors.New("internal error")
+}
+
+// planStore keeps plans in memory, bound to subject, zone, changes and zone
+// version; single use. Plans do not survive a restart and are local to the
+// replica.
+type planStore struct {
+	mu    sync.Mutex
+	ttl   time.Duration
+	now   func() time.Time
+	plans map[string]storedPlan
+}
+
+type storedPlan struct {
+	subject, zone string
+	changes       []uiapi.RRsetChange
+	version       int64
+	expires       time.Time
+}
+
+var (
+	errPlanUnknown = errors.New("unknown or already used plan_id: plan again")
+	errPlanExpired = errors.New("plan expired: plan again")
+	errPlanOwner   = errors.New("plan belongs to another caller")
+)
+
+func newPlanStore(ttl time.Duration, now func() time.Time) *planStore {
+	return &planStore{ttl: ttl, now: now, plans: map[string]storedPlan{}}
+}
+
+func (p *planStore) put(subject, zone string, changes []uiapi.RRsetChange, version int64) string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	id := "plan-" + hex.EncodeToString(b[:])
+	cp, _ := json.Marshal(changes)
+	var frozen []uiapi.RRsetChange
+	_ = json.Unmarshal(cp, &frozen)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := p.now()
+	for k, v := range p.plans {
+		if now.After(v.expires) {
+			delete(p.plans, k)
+		}
+	}
+	p.plans[id] = storedPlan{subject: subject, zone: zone, changes: frozen, version: version, expires: now.Add(p.ttl)}
+	return id
+}
+
+func (p *planStore) take(id, subject string) (storedPlan, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	sp, ok := p.plans[id]
+	switch {
+	case !ok:
+		return storedPlan{}, errPlanUnknown
+	case sp.subject != subject:
+		return storedPlan{}, errPlanOwner
+	case p.now().After(sp.expires):
+		delete(p.plans, id)
+		return storedPlan{}, errPlanExpired
+	}
+	delete(p.plans, id)
+	return sp, nil
+}
+
+// subjectLimiter is a token bucket per subject.
+type subjectLimiter struct {
+	mu      sync.Mutex
+	rate    float64 // tokens per second
+	burst   float64
+	now     func() time.Time
+	buckets map[string]*bucket
+}
+
+type bucket struct {
+	tokens float64
+	last   time.Time
+}
+
+func newSubjectLimiter(perMinute int, now func() time.Time) *subjectLimiter {
+	burst := float64(perMinute) / 4
+	if burst < 5 {
+		burst = 5
+	}
+	return &subjectLimiter{rate: float64(perMinute) / 60, burst: burst, now: now, buckets: map[string]*bucket{}}
+}
+
+func (l *subjectLimiter) allow(subject string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	now := l.now()
+	b := l.buckets[subject]
+	if b == nil {
+		if len(l.buckets) > 10000 {
+			l.gc(now)
+		}
+		b = &bucket{tokens: l.burst, last: now}
+		l.buckets[subject] = b
+	}
+	b.tokens = min(l.burst, b.tokens+now.Sub(b.last).Seconds()*l.rate)
+	b.last = now
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
+}
+
+func (l *subjectLimiter) gc(now time.Time) {
+	keys := make([]string, 0, len(l.buckets))
+	for k, b := range l.buckets {
+		if now.Sub(b.last) > 10*time.Minute {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		delete(l.buckets, k)
+	}
+}

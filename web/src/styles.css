@@ -1,0 +1,295 @@
+/* Ledger: an archival registry for DNS custody. One ink accent, paper surfaces,
+   seal colors only where they carry meaning. Borders-only depth. */
+
+:root {
+  --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  --font-record: ui-monospace, 'SF Mono', 'Cascadia Code', 'JetBrains Mono', Menlo, Consolas, monospace;
+
+  /* 13px base, ratio 1.2 */
+  --t-caption: 11px;
+  --t-body: 13px;
+  --t-lead: 15px;
+  --t-h3: 18px;
+  --t-h2: 22px;
+  --t-h1: 28px;
+
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 20px;
+  --s6: 24px;
+  --s8: 32px;
+  --s10: 40px;
+
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 10px;
+
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+
+  /* paper & ink */
+  --paper: #f6f5f1;
+  --sheet: #fdfcf9;
+  --sheet-raised: #ffffff;
+  --well: #efede7;
+  --ink: #1b2230;
+  --ink-2: #444d5e;
+  --ink-3: #6b7383;
+  --ink-4: #9aa0ab;
+  --rule: rgba(27, 34, 48, 0.1);
+  --rule-soft: rgba(27, 34, 48, 0.06);
+  --rule-strong: rgba(27, 34, 48, 0.18);
+
+  /* the one accent: registry ink */
+  --seal-ink: #24406b;
+  --seal-ink-wash: rgba(36, 64, 107, 0.08);
+  --focus: rgba(36, 64, 107, 0.45);
+
+  /* meaning */
+  --wax: #b4372f;
+  --wax-wash: rgba(180, 55, 47, 0.09);
+  --brass: #9a6a12;
+  --brass-wash: rgba(154, 106, 18, 0.1);
+  --stamp: #2c7451;
+  --stamp-wash: rgba(44, 116, 81, 0.09);
+  --pencil: #8a8f99;
+  --pencil-wash: rgba(138, 143, 153, 0.12);
+
+  --scrim: rgba(18, 22, 30, 0.32);
+  --lift: 0 0 0 1px rgba(27, 34, 48, 0.06), 0 8px 24px -8px rgba(27, 34, 48, 0.18);
+
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+  --paper: #111419;
+  --sheet: #161a21;
+  --sheet-raised: #1b2029;
+  --well: #0d1014;
+  --ink: #e6e8ec;
+  --ink-2: #b3b9c4;
+  --ink-3: #868d9a;
+  --ink-4: #5d6470;
+  --rule: rgba(255, 255, 255, 0.08);
+  --rule-soft: rgba(255, 255, 255, 0.05);
+  --rule-strong: rgba(255, 255, 255, 0.14);
+  --seal-ink: #8fb0e6;
+  --seal-ink-wash: rgba(143, 176, 230, 0.1);
+  --focus: rgba(143, 176, 230, 0.5);
+  --wax: #e0786e;
+  --wax-wash: rgba(224, 120, 110, 0.12);
+  --brass: #d6a54c;
+  --brass-wash: rgba(214, 165, 76, 0.12);
+  --stamp: #6cc095;
+  --stamp-wash: rgba(108, 192, 149, 0.11);
+  --pencil: #7c828d;
+  --pencil-wash: rgba(124, 130, 141, 0.14);
+  --scrim: rgba(0, 0, 0, 0.5);
+  --lift: 0 0 0 1px rgba(255, 255, 255, 0.08);
+  color-scheme: dark;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: var(--t-body);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  font-weight: 600;
+  text-wrap: balance;
+}
+
+p {
+  margin: 0;
+  text-wrap: pretty;
+}
+
+a {
+  color: inherit;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+}
+
+::placeholder {
+  color: var(--ink-4);
+  opacity: 1;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
+.mono {
+  font-family: var(--font-record);
+  font-size: 12.5px;
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+.eyebrow {
+  font-size: var(--t-caption);
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+/* controls */
+.field {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  height: 32px;
+  padding: 0 var(--s3);
+  background: var(--well);
+  border: 1px solid var(--rule);
+  border-radius: var(--r-md);
+  transition: border-color 120ms var(--ease-out);
+}
+.field:focus-within {
+  border-color: var(--rule-strong);
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+.field input,
+.field select {
+  border: 0;
+  background: transparent;
+  outline: none;
+  min-width: 0;
+  height: 100%;
+}
+.field select {
+  appearance: none;
+  padding-right: 14px;
+  cursor: pointer;
+}
+.field .chev {
+  margin-left: -18px;
+  pointer-events: none;
+  color: var(--ink-3);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s2);
+  height: 32px;
+  padding: 0 var(--s3);
+  border-radius: var(--r-md);
+  border: 1px solid var(--rule);
+  background: var(--sheet-raised);
+  cursor: pointer;
+  font-weight: 500;
+  transition:
+    background-color 120ms var(--ease-out),
+    border-color 120ms var(--ease-out),
+    transform 100ms var(--ease-out);
+}
+.btn:hover {
+  border-color: var(--rule-strong);
+}
+.btn:active {
+  transform: scale(0.97);
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+  transform: none;
+}
+.btn.quiet {
+  background: transparent;
+  border-color: transparent;
+  color: var(--ink-2);
+}
+.btn.quiet:hover {
+  background: var(--rule-soft);
+  color: var(--ink);
+}
+.btn.icon {
+  width: 32px;
+  padding: 0;
+}
+
+.empty {
+  padding: var(--s10) var(--s6);
+  text-align: center;
+  color: var(--ink-3);
+}
+.empty strong {
+  display: block;
+  color: var(--ink-2);
+  font-weight: 600;
+  margin-bottom: var(--s1);
+}
+
+.skeleton {
+  background: linear-gradient(90deg, var(--rule-soft), var(--rule), var(--rule-soft));
+  background-size: 200% 100%;
+  animation: shimmer 1.4s linear infinite;
+  border-radius: var(--r-sm);
+}
+@keyframes shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

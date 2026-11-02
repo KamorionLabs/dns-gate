@@ -1,0 +1,930 @@
+// Demo data for `VITE_FIXTURES=1`: lets the UI be judged without a running gate.
+import type {
+  AdoptApply,
+  AdoptCandidate,
+  AdoptPreview,
+  AdoptResult,
+  AdoptSelection,
+  Actor,
+  AuditEntry,
+  AuditPage,
+  AuditQuery,
+  Binding,
+  EffectivePolicy,
+  ExplainRequest,
+  ExplainResponse,
+  GeneratedKey,
+  ImpactItem,
+  Me,
+  PolicyDocument,
+  ProposeRequest,
+  RevisionDetail,
+  RevisionSummary,
+  Role,
+  RRset,
+  TerraformQuery,
+  ValidationError,
+  WhoCanResponse,
+  ZoneInventory,
+  ZoneSummary,
+} from './types';
+import { ApiError } from './api';
+import { toYAML } from './yaml';
+import { claimMatch, hostMatch, zoneMatch } from './glob';
+
+const now = Date.now();
+const ago = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
+const ahead = (minutes: number) => new Date(now + minutes * 60_000).toISOString();
+const H = 60;
+const D = 24 * H;
+
+const ciApp: Actor = { subject: 'aws:arn:aws:iam::111111111111:role/ci-app', name: 'role/ci-app', category: 'pipeline' };
+const ciCorp: Actor = { subject: 'aws:arn:aws:iam::111111111111:role/ci-corporate', name: 'role/ci-corporate', category: 'pipeline' };
+const ghWeb: Actor = { subject: 'github:repo:acme/web:ref:refs/heads/main', name: 'acme/web @ main', category: 'pipeline' };
+const alice: Actor = { subject: 'entra:alice@example.com', name: 'alice@example.com', category: 'human' };
+const bob: Actor = { subject: 'entra:bob@example.com', name: 'bob@example.com', category: 'human' };
+const acmeKey: Actor = { subject: 'key:acme-solver', name: 'acme-solver', category: 'key' };
+const reconciler: Actor = { subject: 'gate:reconciler', name: 'reconciler', category: 'system' };
+const carol: Actor = { subject: 'entra:carol@example.com', name: 'carol@example.com', category: 'human' };
+const dave: Actor = { subject: 'entra:dave@example.com', name: 'dave@example.com', category: 'human' };
+
+// ?as=reader in the page URL switches to a read-only user.
+const asReader = new URLSearchParams(window.location.search).get('as') === 'reader';
+
+const me: Me = asReader
+  ? {
+      subject: 'entra:carol@example.com',
+      name: 'carol@example.com',
+      category: 'human',
+      roles: ['viewer'],
+      teams: ['ops'],
+      groups: ['dns-viewers'],
+    }
+  : {
+      subject: 'entra:alice@example.com',
+      name: 'alice@example.com',
+      category: 'human',
+      roles: ['viewer', 'policy-admin', 'app-cname-writer'],
+      teams: ['web', 'platform'],
+      groups: ['policy-admins', 'web-humans'],
+    };
+
+const foreign = (host: string, type: string, ttl: number, values: string[], prot = false): RRset => ({
+  host, type, ttl, values, status: 'foreign', protected: prot, adopted: false,
+});
+
+const inventories: ZoneInventory[] = [
+  {
+    zone: 'example.com',
+    last_synced_at: ago(3),
+    rrsets: [
+      foreign('@', 'SOA', 86400, ['ns1.eurodns.com. hostmaster.eurodns.com. 2026110201 10800 3600 604800 600']),
+      foreign('@', 'NS', 86400, ['ns1.eurodns.com.', 'ns2.eurodns.com.', 'ns3.eurodns.com.', 'ns4.eurodns.com.'], true),
+      foreign('@', 'A', 3600, ['203.0.113.10'], true),
+      foreign('@', 'MX', 3600, ['10 mx1.example.com.', '20 mx2.example.com.'], true),
+      foreign('@', 'TXT', 3600, ['"v=spf1 include:_spf.example.net -all"', '"google-site-verification=3fQ9…"'], true),
+      foreign('_dmarc', 'TXT', 3600, ['"v=DMARC1; p=reject; rua=mailto:dmarc@example.com"'], true),
+      {
+        host: 'www', type: 'CNAME', ttl: 600, values: ['d111111abcdef8.cloudfront.net.'], status: 'managed', protected: false,
+        owner: 'web', created_by: ciApp, created_at: ago(9 * D), updated_by: ghWeb, updated_at: ago(2 * H), adopted: false,
+        last_request_id: 'req_01JBX7Q4M2',
+      },
+      {
+        host: '_3f1c9a7b2d.www', type: 'CNAME', ttl: 600, values: ['_8e2d41c0b9.mhbtsbpdnt.acm-validations.aws.'], status: 'managed',
+        protected: false, owner: 'web', created_by: ciApp, created_at: ago(9 * D), adopted: false, last_request_id: 'req_01JAVK2N7T',
+      },
+      {
+        host: 'staging', type: 'CNAME', ttl: 600, values: ['staging.edge.example.net.'], status: 'managed', protected: false,
+        owner: 'web', created_by: alice, created_at: ago(21 * D), updated_by: ciApp, updated_at: ago(26 * H), adopted: false,
+        last_request_id: 'req_01JBQ0Z8C1',
+      },
+      {
+        host: 'api.staging', type: 'CNAME', ttl: 900, values: ['alb-api-stg.eu-central-1.elb.example.net.'], status: 'managed',
+        protected: false, owner: 'platform', created_by: ciApp, created_at: ago(14 * D), adopted: false, last_request_id: 'req_01JB2W9QHD',
+      },
+      {
+        host: 'shop', type: 'CNAME', ttl: 600, values: ['shop-old.hosting.example.org.'], status: 'tainted', protected: false,
+        owner: 'web', created_by: ciApp, created_at: ago(30 * D), updated_by: ciApp, updated_at: ago(6 * D), adopted: false,
+        last_request_id: 'req_01JAMR4E0P',
+      },
+      {
+        host: 'status', type: 'CNAME', ttl: 600, values: ['status.statuspage.example.net.'], status: 'pending', protected: false,
+        owner: 'platform', created_by: ciCorp, created_at: ago(1), adopted: false, last_request_id: 'req_01JBXA0003',
+      },
+      {
+        host: 'docs', type: 'CNAME', ttl: 3600, values: ['docs.pages.example.net.'], status: 'missing', protected: false,
+        owner: 'web', created_by: ghWeb, created_at: ago(40 * D), adopted: false, last_request_id: 'req_01J9ZP3K5S',
+      },
+      {
+        host: 'assets', type: 'CNAME', ttl: 3600, values: ['assets.cdn.example.net.'], status: 'managed', protected: false,
+        owner: 'web', created_by: bob, created_at: ago(5 * D), adopted: true, last_request_id: 'req_01JBF1D6XW',
+      },
+      {
+        host: '_acme-challenge.intranet', type: 'TXT', ttl: 600, values: ['"Zm9vYmFyLWNoYWxsZW5nZS10b2tlbi0xMjM0"'],
+        status: 'managed', protected: false, owner: 'security', created_by: acmeKey, created_at: ago(40), adopted: false,
+        expires_at: ahead(23 * H + 20), last_request_id: 'req_01JBX9AC3M',
+      },
+      foreign('legacy', 'A', 3600, ['198.51.100.7']),
+      foreign('mail', 'CNAME', 3600, ['mail.hosted.example.org.']),
+      foreign('autodiscover', 'CNAME', 3600, ['autodiscover.outlook.com.']),
+      foreign('intranet', 'CNAME', 3600, ['gateway']),
+      foreign('vpn', 'A', 3600, ['198.51.100.21', '198.51.100.22']),
+      foreign('crm', 'CNAME', 1800, ['acme.crm.example.net.']),
+      foreign('crm', 'TXT', 3600, ['"crm-domain-verification=6c1f0b"']),
+    ],
+  },
+  {
+    zone: 'acme.example',
+    last_synced_at: ago(4),
+    rrsets: [
+      foreign('@', 'NS', 86400, ['ns1.eurodns.com.', 'ns2.eurodns.com.'], true),
+      {
+        host: '@', type: 'APEX', ttl: 600, values: ['d222222fedcba9.cloudfront.net.'], status: 'managed', protected: false,
+        owner: 'corporate', created_by: ciCorp, created_at: ago(12 * D), updated_by: ciCorp, updated_at: ago(3 * D), adopted: true,
+        last_request_id: 'req_01JBA7S2LK',
+      },
+      {
+        host: 'www', type: 'CNAME', ttl: 600, values: ['d222222fedcba9.cloudfront.net.'], status: 'managed', protected: false,
+        owner: 'corporate', created_by: ciCorp, created_at: ago(12 * D), adopted: false, last_request_id: 'req_01JAZZ1P4E',
+      },
+      {
+        host: 'careers', type: 'CNAME', ttl: 1800, values: ['acme.careers.example.org.'], status: 'managed', protected: false,
+        owner: 'corporate', created_by: bob, created_at: ago(2 * D), adopted: false, last_request_id: 'req_01JBRM5V8N',
+      },
+      {
+        host: '_acme-challenge', type: 'TXT', ttl: 600, values: ['"aW50ZXJuYWwtdG9rZW4tYWJjZGVm"', '"c2Vjb25kLXRva2VuLWZvci13aWxkY2FyZA"'],
+        status: 'managed', protected: false, owner: 'security', created_by: acmeKey, created_at: ago(12), adopted: false,
+        expires_at: ahead(23 * H + 48), last_request_id: 'req_01JBXA0001',
+      },
+      foreign('@', 'MX', 3600, ['10 mx.acme.example.'], true),
+      foreign('@', 'CAA', 3600, ['0 issue "amazon.com"', '0 issue "letsencrypt.org"'], true),
+    ],
+  },
+  {
+    zone: 'brand.example',
+    last_synced_at: ago(6),
+    rrsets: [
+      foreign('@', 'NS', 86400, ['ns1.eurodns.com.', 'ns2.eurodns.com.'], true),
+      foreign('@', 'A', 3600, ['192.0.2.44']),
+      foreign('www', 'CNAME', 3600, ['brand.example.']),
+      foreign('@', 'MX', 3600, ['10 mx.brand.example.'], true),
+      foreign('@', 'TXT', 3600, ['"v=spf1 -all"'], true),
+    ],
+  },
+];
+
+function summarize(inv: ZoneInventory, lastWrite?: string): ZoneSummary {
+  const count = (s: string) => inv.rrsets.filter((r) => r.status === s).length;
+  return {
+    zone: inv.zone,
+    rrsets: inv.rrsets.length,
+    managed: count('managed'),
+    tainted: count('tainted') + count('missing'),
+    pending: count('pending'),
+    foreign: count('foreign'),
+    last_synced_at: inv.last_synced_at,
+    last_write_at: lastWrite,
+  };
+}
+
+const audit: AuditEntry[] = [
+  {
+    time: ago(1), request_id: 'req_01JBXA0003', actor: ciCorp, teams: ['corporate', 'platform'], action: 'addDnsRecords',
+    zone: 'example.com', decision: 'allow',
+    changes: [{ op: 'create', host: 'status', type: 'CNAME', new_ttl: 600, new_values: ['status.statuspage.example.net.'] }],
+  },
+  {
+    time: ago(7), request_id: 'req_01JBXA0002', actor: acmeKey, teams: ['security'], action: 'saveDnsZone', zone: 'example.com',
+    decision: 'deny', reason: 'foreign_rrset',
+    changes: [{ op: 'create', host: 'mail', type: 'TXT', new_ttl: 600, new_values: ['"dGVzdA"'] }],
+  },
+  {
+    time: ago(12), request_id: 'req_01JBXA0001', actor: acmeKey, teams: ['security'], action: 'saveDnsZone', zone: 'acme.example',
+    decision: 'allow', snapshot_id: 884213,
+    changes: [{
+      op: 'create', host: '_acme-challenge', type: 'TXT', new_ttl: 600,
+      new_values: ['"aW50ZXJuYWwtdG9rZW4tYWJjZGVm"', '"c2Vjb25kLXRva2VuLWZvci13aWxkY2FyZA"'],
+    }],
+  },
+  {
+    time: ago(40), request_id: 'req_01JBX9AC3M', actor: acmeKey, teams: ['security'], action: 'saveDnsZone', zone: 'example.com',
+    decision: 'allow', snapshot_id: 884190,
+    changes: [{ op: 'create', host: '_acme-challenge.intranet', type: 'TXT', new_ttl: 600, new_values: ['"Zm9vYmFyLWNoYWxsZW5nZS10b2tlbi0xMjM0"'] }],
+  },
+  {
+    time: ago(2 * H), request_id: 'req_01JBX7Q4M2', actor: ghWeb, teams: ['web'], action: 'saveDnsZone', zone: 'example.com',
+    decision: 'allow', snapshot_id: 884102,
+    changes: [{
+      op: 'update', host: 'www', type: 'CNAME', old_ttl: 3600, old_values: ['www-legacy.hosting.example.org.'],
+      new_ttl: 600, new_values: ['d111111abcdef8.cloudfront.net.'],
+    }],
+  },
+  {
+    time: ago(2 * H + 4), request_id: 'req_01JBX7P0ZZ', actor: ciCorp, teams: ['corporate'], action: 'saveDnsZone', zone: 'example.com',
+    decision: 'deny', reason: 'not_owner',
+    changes: [{
+      op: 'update', host: 'www', type: 'CNAME', old_ttl: 3600, old_values: ['www-legacy.hosting.example.org.'],
+      new_ttl: 600, new_values: ['d222222fedcba9.cloudfront.net.'],
+    }],
+  },
+  {
+    time: ago(5 * H), request_id: 'req_01JBWZ8R1D', actor: ciApp, teams: ['web', 'platform'], action: 'saveDnsZone',
+    zone: 'example.com', decision: 'error', reason: 'upstream',
+  },
+  {
+    time: ago(5 * H + 2), request_id: 'req_01JBWZ7T9Q', actor: ciApp, teams: ['web', 'platform'], action: 'saveDnsZone',
+    zone: 'example.com', decision: 'deny', reason: 'precondition',
+  },
+  {
+    time: ago(26 * H), request_id: 'req_01JBQ0Z8C1', actor: ciApp, teams: ['web', 'platform'], action: 'saveDnsZone',
+    zone: 'example.com', decision: 'allow', snapshot_id: 883551,
+    changes: [{
+      op: 'update', host: 'staging', type: 'CNAME', old_ttl: 600, old_values: ['staging-v1.edge.example.net.'],
+      new_ttl: 600, new_values: ['staging.edge.example.net.'],
+    }],
+  },
+  {
+    time: ago(30 * H), request_id: 'req_01JBP4H6A2', actor: alice, teams: ['web', 'platform'], action: 'saveDnsZone',
+    zone: 'example.com', decision: 'deny', reason: 'forbidden',
+    changes: [{ op: 'update', host: '@', type: 'MX', old_ttl: 3600, old_values: ['10 mx1.example.com.', '20 mx2.example.com.'], new_ttl: 3600, new_values: ['10 mx.newmail.example.net.'] }],
+  },
+  {
+    time: ago(30 * H + 9), request_id: 'req_01JBP4F1KQ', actor: ghWeb, teams: ['web'], action: 'saveDnsZone',
+    zone: 'example.com', decision: 'deny', reason: 'too_many_changes',
+  },
+  {
+    time: ago(2 * D), request_id: 'req_01JBRM5V8N', actor: bob, teams: ['corporate'], action: 'addDnsRecords', zone: 'acme.example',
+    decision: 'allow', snapshot_id: 882990,
+    changes: [{ op: 'create', host: 'careers', type: 'CNAME', new_ttl: 1800, new_values: ['acme.careers.example.org.'] }],
+  },
+  {
+    time: ago(2 * D + 3 * H), request_id: 'rec_01JBR0EXP1', actor: reconciler, action: 'reconcile', zone: 'example.com',
+    decision: 'allow',
+    changes: [{ op: 'expire', host: '_acme-challenge.intranet', type: 'TXT', old_ttl: 600, old_values: ['"b2xkLXRva2Vu"'] }],
+  },
+  {
+    time: ago(3 * D), request_id: 'req_01JBA7S2LK', actor: ciCorp, teams: ['corporate'], action: 'saveDnsZone', zone: 'acme.example',
+    decision: 'allow', snapshot_id: 882100,
+    changes: [{ op: 'update', host: '@', type: 'APEX', old_ttl: 3600, old_values: ['acme-old.hosting.example.org.'], new_ttl: 600, new_values: ['d222222fedcba9.cloudfront.net.'] }],
+  },
+  {
+    time: ago(5 * D), request_id: 'req_01JBF1D6XW', actor: bob, teams: ['web'], action: 'adopt', zone: 'example.com',
+    decision: 'allow',
+    changes: [{ op: 'adopt', host: 'assets', type: 'CNAME', new_ttl: 3600, new_values: ['assets.cdn.example.net.'] }],
+  },
+  {
+    time: ago(6 * D - 30), request_id: 'rec_01JBD2TNT0', actor: reconciler, action: 'reconcile', zone: 'example.com',
+    decision: 'allow',
+    changes: [{
+      op: 'taint', host: 'shop', type: 'CNAME', old_ttl: 600, old_values: ['shop.edge.example.net.'],
+      new_ttl: 600, new_values: ['shop-old.hosting.example.org.'],
+    }],
+  },
+  {
+    time: ago(6 * D), request_id: 'req_01JAMR4E0P', actor: ciApp, teams: ['web'], action: 'saveDnsZone', zone: 'example.com',
+    decision: 'allow', snapshot_id: 880771,
+    changes: [{ op: 'update', host: 'shop', type: 'CNAME', old_ttl: 3600, old_values: ['shop-v1.edge.example.net.'], new_ttl: 600, new_values: ['shop.edge.example.net.'] }],
+  },
+  {
+    time: ago(9 * D), request_id: 'req_01JAVK2N7T', actor: ciApp, teams: ['web'], action: 'addDnsRecords', zone: 'example.com',
+    decision: 'allow', snapshot_id: 879400,
+    changes: [
+      { op: 'create', host: 'www', type: 'CNAME', new_ttl: 3600, new_values: ['www-legacy.hosting.example.org.'] },
+      { op: 'create', host: '_3f1c9a7b2d.www', type: 'CNAME', new_ttl: 600, new_values: ['_8e2d41c0b9.mhbtsbpdnt.acm-validations.aws.'] },
+    ],
+  },
+  {
+    time: ago(12 * D), request_id: 'req_01JAZZ1P4E', actor: ciCorp, teams: ['corporate'], action: 'addDnsRecords', zone: 'acme.example',
+    decision: 'allow', snapshot_id: 878002,
+    changes: [{ op: 'create', host: 'www', type: 'CNAME', new_ttl: 600, new_values: ['d222222fedcba9.cloudfront.net.'] }],
+  },
+  {
+    time: ago(14 * D), request_id: 'req_01JB2W9QHD', actor: ciApp, teams: ['platform'], action: 'addDnsRecords', zone: 'example.com',
+    decision: 'allow', snapshot_id: 877310,
+    changes: [{ op: 'create', host: 'api.staging', type: 'CNAME', new_ttl: 900, new_values: ['alb-api-stg.eu-central-1.elb.example.net.'] }],
+  },
+  {
+    time: ago(21 * D), request_id: 'req_01JAQ7B2ZR', actor: alice, teams: ['web'], action: 'addDnsRecords', zone: 'example.com',
+    decision: 'allow', snapshot_id: 875533,
+    changes: [{ op: 'create', host: 'staging', type: 'CNAME', new_ttl: 600, new_values: ['staging-v1.edge.example.net.'] }],
+  },
+  {
+    time: ago(21 * D + 10), request_id: 'req_01JAQ79XXA', actor: alice, teams: ['web'], action: 'deleteDnsRecord', zone: 'example.com',
+    decision: 'deny', reason: 'foreign_rrset',
+    changes: [{ op: 'delete', host: 'legacy', type: 'A', old_ttl: 3600, old_values: ['198.51.100.7'] }],
+  },
+  {
+    time: ago(40 * D), request_id: 'req_01J9ZP3K5S', actor: ghWeb, teams: ['web'], action: 'addDnsRecords', zone: 'example.com',
+    decision: 'allow', snapshot_id: 870020,
+    changes: [{ op: 'create', host: 'docs', type: 'CNAME', new_ttl: 3600, new_values: ['docs.pages.example.net.'] }],
+  },
+];
+
+const delay = <T>(v: T, ms = 180) => new Promise<T>((r) => setTimeout(() => r(structuredClone(v)), ms));
+
+function matches(e: AuditEntry, q: AuditQuery): boolean {
+  if (q.zone && e.zone !== q.zone) return false;
+  if (q.decision && e.decision !== q.decision) return false;
+  if (q.category && e.actor.category !== q.category) return false;
+  if (q.subject) {
+    const needle = q.subject.toLowerCase();
+    if (!e.actor.subject.toLowerCase().includes(needle) && !e.actor.name.toLowerCase().includes(needle)) return false;
+  }
+  if (q.host || q.type) {
+    const hit = (e.changes ?? []).some((c) => (!q.host || c.host === q.host) && (!q.type || c.type === q.type));
+    if (!hit) return false;
+  }
+  if (q.since && e.time < q.since) return false;
+  if (q.until && e.time > q.until) return false;
+  return true;
+}
+
+
+// ---------------------------------------------------------------- policy
+
+const ENTRA = 'entra';
+const base: EffectivePolicy['base'] = {
+  config_hash: 'sha256:9f2c4e1ab07d5c3e88a1f0b6d2e4c7a9b1d3f5e7a9c1b3d5e7f9a1c3e5b7d9f1',
+  loaded_at: ago(3 * D + 2 * H),
+  zones: ['example.com', 'acme.example', 'brand.example'],
+  issuers: [
+    {
+      name: 'aws',
+      issuer: 'https://3f8a1c2e-0b7d-4e9a-a1c3-5d7f9b1e3a5c.tokens.sts.global.api.aws',
+      audiences: ['eurodns-gate'],
+      bound_claims: { 'https://sts.amazonaws.com/org_id': ['o-a1b2c3d4e5'] },
+      subject_claim: 'sub',
+      category: 'pipeline',
+    },
+    {
+      name: 'github',
+      issuer: 'https://token.actions.githubusercontent.com',
+      audiences: ['eurodns-gate'],
+      bound_claims: { repository_owner: ['acme'] },
+      subject_claim: 'sub',
+      category: 'pipeline',
+    },
+    {
+      name: ENTRA,
+      issuer: 'https://login.microsoftonline.com/7c1e2d3f-4a5b-6c7d-8e9f-0a1b2c3d4e5f/v2.0',
+      audiences: ['api://eurodns-gate'],
+      subject_claim: 'preferred_username',
+      category: 'human',
+    },
+    {
+      name: 'k8s',
+      issuer: 'https://oidc.eks.eu-central-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B71EXAMPLE',
+      audiences: ['eurodns-gate'],
+      category: 'pipeline',
+    },
+  ],
+  protected: [
+    { zones: ['*'], hosts: ['@'], types: ['NS', 'SOA', 'MX', 'CAA'] },
+    { zones: ['*'], hosts: ['_dmarc', '@'], types: ['TXT'] },
+  ],
+  bounds: {
+    zones: ['example.com', 'acme.example', 'brand.example'],
+    actions: ['dns.read', 'ui.read', 'dns.record.write', 'dns.record.adopt'],
+  },
+  document: {
+    groups: {
+      'policy-admins': {
+        description: 'Entra app role PolicyAdmin',
+        members: [{ issuer: ENTRA, claims: { roles: ['PolicyAdmin'] } }],
+      },
+      'dns-viewers': {
+        description: 'Anyone in the DNS readers group',
+        members: [{ issuer: ENTRA, claims: { groups: ['5b8e2c1a-dns-readers'] } }],
+      },
+    },
+    roles: {
+      viewer: { description: 'Read zones, records and the journal', rules: [{ zones: ['*'], actions: ['dns.read', 'ui.read', 'policy.read'] }] },
+      'policy-admin': {
+        description: 'Propose and approve managed policy revisions',
+        rules: [{ zones: ['*'], actions: ['policy.read', 'policy.propose', 'policy.approve'] }],
+      },
+      'acme-solver': {
+        description: 'DNS-01 challenges only',
+        rules: [{ zones: ['*'], actions: ['dns.read', 'dns.record.write'], records: { hosts: ['_acme-challenge', '_acme-challenge.**'], types: ['TXT'] } }],
+        rebase_on_save: true,
+        ephemeral_ttl: '24h',
+      },
+    },
+    bindings: [
+      { role: 'viewer', team: 'ops', groups: ['dns-viewers', 'policy-admins'] },
+      { role: 'policy-admin', team: 'security', groups: ['policy-admins'] },
+    ],
+    virtual_keys: [
+      {
+        id: 'acme-solver',
+        app_id: 'vk_acme_7Q2M',
+        key_sha256: 'a3f1c2e4b6d8f0a2c4e6b8d0f2a4c6e8b0d2f4a6c8e0b2d4f6a8c0e2b4d6f8a0',
+        description: 'Caddy and lego hosts for internal certificates',
+        roles: ['acme-solver'],
+        teams: ['security'],
+        expires_at: ahead(83 * D),
+        allowed_cidrs: ['10.20.0.0/16'],
+      },
+    ],
+  },
+};
+
+const activeDoc: PolicyDocument = {
+  groups: {
+    'web-pipelines': {
+      description: 'CI that deploys the web front',
+      members: [
+        { issuer: 'aws', claims: { sub: ['arn:aws:iam::111111111111:role/ci-app'] } },
+        { issuer: 'github', claims: { repository: ['acme/web'], ref: ['refs/heads/main'] } },
+      ],
+    },
+    'web-humans': { members: [{ issuer: ENTRA, claims: { groups: ['2d4f6a8c-web-team'] } }] },
+    'corporate-pipelines': { members: [{ issuer: 'aws', claims: { sub: ['arn:aws:iam::111111111111:role/ci-corporate'] } }] },
+    platform: { members: [{ issuer: 'aws', claims: { sub: ['arn:aws:iam::222222222222:role/platform-*'] } }] },
+  },
+  roles: {
+    'app-cname-writer': {
+      description: 'Application CNAMEs and validation records',
+      rules: [{ zones: ['example.com'], actions: ['dns.read', 'dns.record.write'], records: { hosts: ['*', '*.staging', '_*.*'], types: ['CNAME', 'TXT'] } }],
+      max_changes_per_request: 20,
+    },
+    'corporate-writer': {
+      rules: [{ zones: ['acme.example'], actions: ['dns.read', 'dns.record.write'], records: { types: ['A', 'AAAA', 'CNAME', 'APEX', 'TXT'] } }],
+    },
+    adopter: { description: 'Take existing records under gate custody', rules: [{ zones: ['example.com', 'acme.example'], actions: ['dns.record.adopt'] }] },
+  },
+  bindings: [
+    { role: 'app-cname-writer', team: 'web', groups: ['web-pipelines', 'web-humans'] },
+    { role: 'app-cname-writer', team: 'platform', groups: ['platform'] },
+    { role: 'corporate-writer', team: 'corporate', groups: ['corporate-pipelines'], subjects: [{ issuer: ENTRA, claims: { preferred_username: ['bob@example.com'] } }] },
+    { role: 'adopter', team: 'web', subjects: [{ issuer: ENTRA, claims: { preferred_username: ['bob@example.com'] } }] },
+  ],
+  virtual_keys: [],
+};
+
+const clone = <T>(v: T): T => structuredClone(v);
+
+const proposedDoc = clone(activeDoc);
+proposedDoc.bindings.push({ role: 'app-cname-writer', team: 'corporate', groups: ['corporate-pipelines'] });
+(proposedDoc.roles['app-cname-writer'] as Role).rules[0]!.records!.hosts = ['*', '*.staging', '_*.*', 'www'];
+proposedDoc.groups['platform'] = { members: [{ issuer: 'aws', claims: { sub: ['arn:aws:iam::222222222222:role/platform-dns'] } }] };
+
+const rejectedDoc = clone(activeDoc);
+rejectedDoc.bindings = rejectedDoc.bindings.filter((b) => b.team !== 'platform');
+
+interface Rev {
+  s: RevisionSummary;
+  doc: PolicyDocument;
+  impact: ImpactItem[];
+}
+
+const revs: Rev[] = [
+  {
+    s: {
+      id: 'rev_0009', parent_id: 'rev_0007', status: 'proposed', author: bob, created_at: ago(50),
+      comment: 'Let corporate CI point www at the new CloudFront distribution; narrow platform to its DNS role.',
+    },
+    doc: proposedDoc,
+    impact: [
+      { kind: 'gain', who: 'corporate', role: 'app-cname-writer', zones: ['example.com'], actions: ['dns.record.write'], message: 'team corporate gains write on CNAME/TXT in example.com (via corporate-pipelines)' },
+      { kind: 'loss', who: 'platform', role: 'app-cname-writer', zones: ['example.com'], actions: ['dns.record.write'], message: 'group platform no longer matches arn:aws:iam::222222222222:role/platform-ci (used 14 times in the last 30 days)' },
+      { kind: 'warning', who: 'corporate', role: 'app-cname-writer', zones: ['example.com'], message: 'team corporate may create RRsets next to 9 owned by team web; ownership still applies' },
+    ],
+  },
+  {
+    s: {
+      id: 'rev_0008', parent_id: 'rev_0006', status: 'rejected', author: dave, created_at: ago(4 * D),
+      comment: 'Remove the platform binding, unused since the migration.',
+      approvals: [{ by: alice, at: ago(4 * D - 3 * H), decision: 'reject', comment: 'Still used by platform-dns for api.staging.' }],
+    },
+    doc: rejectedDoc,
+    impact: [
+      { kind: 'loss', who: 'platform', role: 'app-cname-writer', zones: ['example.com'], actions: ['dns.read', 'dns.record.write'], message: 'team platform loses write on 2 owned RRsets (api.staging, status)' },
+    ],
+  },
+  {
+    s: {
+      id: 'rev_0007', parent_id: 'rev_0006', status: 'active', author: alice, created_at: ago(6 * D),
+      comment: 'Add the adopter role for bob (assets migration).',
+      approvals: [{ by: bob, at: ago(6 * D - 2 * H), decision: 'approve', comment: 'OK, scoped to two zones.' }],
+      activated_at: ago(6 * D - 2 * H + 5), activated_by: bob,
+    },
+    doc: activeDoc,
+    impact: [{ kind: 'gain', who: 'bob@example.com', role: 'adopter', zones: ['example.com', 'acme.example'], actions: ['dns.record.adopt'], message: 'bob@example.com gains adopt on example.com and acme.example' }],
+  },
+  {
+    s: {
+      id: 'rev_0006', parent_id: 'rev_0005', status: 'superseded', author: alice, created_at: ago(15 * D),
+      comment: 'Corporate team onto acme.example.',
+      approvals: [{ by: dave, at: ago(15 * D - 1 * H), decision: 'approve' }],
+      activated_at: ago(15 * D - 50), activated_by: alice,
+    },
+    doc: (() => { const d = clone(activeDoc); delete d.roles['adopter']; d.bindings = d.bindings.filter((b) => b.role !== 'adopter'); return d; })(),
+    impact: [],
+  },
+  {
+    s: {
+      id: 'rev_0005', status: 'superseded', author: alice, created_at: ago(32 * D), comment: 'Initial managed policy.',
+      approvals: [{ by: dave, at: ago(32 * D - 2 * H), decision: 'approve' }], activated_at: ago(32 * D - 2 * H), activated_by: alice,
+    },
+    doc: { groups: { 'web-pipelines': activeDoc.groups['web-pipelines']! }, roles: { 'app-cname-writer': activeDoc.roles['app-cname-writer']! }, bindings: [activeDoc.bindings[0]!], virtual_keys: [] },
+    impact: [],
+  },
+];
+
+const settings: EffectivePolicy['settings'] = { editable: true, require_approval: true, edit_max_age: '15m', require_amr: ['mfa'] };
+const activeRev = () => revs.find((r) => r.s.status === 'active');
+
+function lineDiff(a: string, b: string): string {
+  const x = a.split('\n');
+  const y = b.split('\n');
+  const n = x.length;
+  const m = y.length;
+  const L: number[][] = Array.from({ length: n + 1 }, () => new Array<number>(m + 1).fill(0));
+  for (let i = n - 1; i >= 0; i--)
+    for (let j = m - 1; j >= 0; j--) L[i]![j] = x[i] === y[j] ? L[i + 1]![j + 1]! + 1 : Math.max(L[i + 1]![j]!, L[i]![j + 1]!);
+  const out: string[] = ['--- active', '+++ proposed'];
+  let i = 0;
+  let j = 0;
+  while (i < n || j < m) {
+    if (i < n && j < m && x[i] === y[j]) out.push(' ' + x[i++]), j++;
+    else if (j < m && (i >= n || L[i]![j + 1]! > L[i + 1]![j]!)) out.push('+' + y[j++]);
+    else out.push('-' + x[i++]);
+  }
+  // keep 3 lines of context around changes
+  const keep = new Set<number>();
+  out.forEach((l, k) => {
+    if (k > 1 && (l[0] === '+' || l[0] === '-')) for (let c = k - 3; c <= k + 3; c++) keep.add(c);
+  });
+  const res: string[] = [out[0]!, out[1]!];
+  let gap = false;
+  for (let k = 2; k < out.length; k++) {
+    if (keep.has(k)) {
+      if (gap) res.push('@@');
+      res.push(out[k]!);
+      gap = false;
+    } else gap = true;
+  }
+  return res.join('\n');
+}
+
+function detail(r: Rev): RevisionDetail {
+  const parent = revs.find((p) => p.s.id === r.s.parent_id) ?? activeRev();
+  const active = activeRev();
+  return clone({
+    ...r.s,
+    document: r.doc,
+    diff_yaml: parent && parent !== r ? lineDiff(toYAML(parent.doc), toYAML(r.doc)) : lineDiff('', toYAML(r.doc)),
+    impact: r.impact,
+    stale: r.s.status !== 'active' && r.s.status !== 'superseded' && !!active && r.s.parent_id !== active.s.id,
+  });
+}
+
+function validate(doc: PolicyDocument): ValidationError[] {
+  const errs: ValidationError[] = [];
+  const baseRoles = Object.keys(base.document.roles);
+  const allRoles = new Set([...baseRoles, ...Object.keys(doc.roles)]);
+  const allGroups = new Set([...Object.keys(base.document.groups), ...Object.keys(doc.groups)]);
+  for (const [name, g] of Object.entries(doc.groups)) {
+    if (base.document.groups[name]) errs.push({ path: `groups.${name}`, message: `"${name}" is defined in the base layer` });
+    if (!g.members.length) errs.push({ path: `groups.${name}.members`, message: 'a group needs at least one member' });
+    g.members.forEach((m, i) => {
+      if (!base.issuers.some((x) => x.name === m.issuer)) errs.push({ path: `groups.${name}.members[${i}].issuer`, message: `unknown issuer "${m.issuer}"` });
+    });
+  }
+  for (const [name, r] of Object.entries(doc.roles)) {
+    if (baseRoles.includes(name)) errs.push({ path: `roles.${name}`, message: `"${name}" is defined in the base layer` });
+    r.rules.forEach((rule, i) => {
+      rule.actions.forEach((a, k) => {
+        if (a.startsWith('policy.')) errs.push({ path: `roles.${name}.rules[${i}].actions[${k}]`, message: 'policy.* actions can only be granted in the base layer' });
+        else if (!base.bounds.actions.includes(a)) errs.push({ path: `roles.${name}.rules[${i}].actions[${k}]`, message: `"${a}" is outside the policy bounds` });
+      });
+      rule.zones.forEach((z, k) => {
+        if (!base.bounds.zones.some((b) => zoneMatch(b, z))) errs.push({ path: `roles.${name}.rules[${i}].zones[${k}]`, message: `zone "${z}" is outside the policy bounds` });
+      });
+      if (!rule.zones.length) errs.push({ path: `roles.${name}.rules[${i}].zones`, message: 'at least one zone' });
+      if (!rule.actions.length) errs.push({ path: `roles.${name}.rules[${i}].actions`, message: 'at least one action' });
+    });
+    if (r.ephemeral_ttl && !/^\d+(ns|us|ms|s|m|h)$/.test(r.ephemeral_ttl)) errs.push({ path: `roles.${name}.ephemeral_ttl`, message: 'Go duration expected, e.g. 24h' });
+  }
+  doc.bindings.forEach((b, i) => {
+    if (!allRoles.has(b.role)) errs.push({ path: `bindings[${i}].role`, message: `unknown role "${b.role}"` });
+    else if (b.role in base.document.roles && base.document.roles[b.role]!.rules.some((r) => r.actions.some((a) => a.startsWith('policy.')))) errs.push({ path: `bindings[${i}].role`, message: 'roles granting policy.* are bound in the base layer only' });
+    if (!b.team) errs.push({ path: `bindings[${i}].team`, message: 'team is required' });
+    (b.groups ?? []).forEach((g, k) => {
+      if (!allGroups.has(g)) errs.push({ path: `bindings[${i}].groups[${k}]`, message: `unknown group "${g}"` });
+    });
+    if (!b.groups?.length && !b.subjects?.length) errs.push({ path: `bindings[${i}]`, message: 'bind at least one group or subject' });
+  });
+  doc.virtual_keys.forEach((k, i) => {
+    if (!k.id) errs.push({ path: `virtual_keys[${i}].id`, message: 'id is required' });
+    if (!k.key_sha256) errs.push({ path: `virtual_keys[${i}].key_sha256`, message: 'generate a key first' });
+    k.roles.forEach((r, j) => {
+      if (!allRoles.has(r)) errs.push({ path: `virtual_keys[${i}].roles[${j}]`, message: `unknown role "${r}"` });
+    });
+  });
+  return errs;
+}
+
+let nextRev = 10;
+
+function find(id: string): Rev {
+  const r = revs.find((x) => x.s.id === id);
+  if (!r) throw new ApiError(404, 'not_found', `revision ${id} not found`);
+  return r;
+}
+
+function groupsOf(issuer: string, claims: Record<string, string[]>, doc: PolicyDocument): string[] {
+  const all = { ...base.document.groups, ...doc.groups };
+  const matches = (m: { issuer: string; claims?: Record<string, string[]> }) =>
+    m.issuer === issuer &&
+    Object.entries(m.claims ?? {}).every(([k, globs]) => (claims[k] ?? []).some((v) => globs.some((g) => claimMatch(g, v))));
+  return Object.entries(all).filter(([, g]) => g.members.some(matches)).map(([n]) => n);
+}
+
+function ruleCovers(role: Role, action: string, zone: string, host?: string, type?: string): number {
+  return role.rules.findIndex(
+    (r) =>
+      r.actions.includes(action) &&
+      r.zones.some((z) => zoneMatch(z, zone)) &&
+      (!host || !r.records?.hosts?.length || r.records.hosts.some((h) => hostMatch(h, host))) &&
+      (!type || !r.records?.types?.length || r.records.types.includes(type)),
+  );
+}
+
+function protectedHit(zone: string, host?: string, type?: string) {
+  if (!host || !type) return undefined;
+  return base.protected.find((p) => p.zones.some((z) => zoneMatch(z, zone)) && p.hosts.some((h) => hostMatch(h, host)) && p.types.includes(type));
+}
+
+function explain(req: ExplainRequest): ExplainResponse {
+  const doc = req.revision_id ? find(req.revision_id).doc : (activeRev()?.doc ?? { groups: {}, roles: {}, bindings: [], virtual_keys: [] });
+  const claims = req.subject.claims ?? {};
+  const groups = groupsOf(req.subject.issuer, claims, doc);
+  const matchesSubject = (b: Binding) =>
+    (b.groups ?? []).some((g) => groups.includes(g)) ||
+    (b.subjects ?? []).some((m) => m.issuer === req.subject.issuer && Object.entries(m.claims ?? {}).every(([k, gl]) => (claims[k] ?? []).some((v) => gl.some((g) => claimMatch(g, v)))));
+  const layers: [string, Binding[], Record<string, Role>][] = [
+    ['base', base.document.bindings, base.document.roles],
+    ['managed', doc.bindings, { ...base.document.roles, ...doc.roles }],
+  ];
+  const bindings: string[] = [];
+  let matched: string | undefined;
+  let layer: string | undefined;
+  for (const [ln, bs, roles] of layers) {
+    for (const b of bs.filter(matchesSubject)) {
+      bindings.push(`${b.role}@${b.team}`);
+      const role = roles[b.role];
+      if (!matched && role) {
+        const i = ruleCovers(role, req.action, req.zone, req.host, req.type);
+        if (i >= 0) {
+          matched = `roles.${b.role}.rules[${i}]`;
+          layer = ln;
+        }
+      }
+    }
+  }
+  const prot = req.action === 'dns.record.write' ? protectedHit(req.zone, req.host, req.type) : undefined;
+  if (prot) {
+    return { allowed: false, groups, bindings, denied: `protected: zones=${prot.zones.join(',')} hosts=${prot.hosts.join(',')} types=${prot.types.join(',')}`, layer: 'base' };
+  }
+  if (!matched) return { allowed: false, groups, bindings, denied: bindings.length ? 'no rule of the bound roles covers this action and record' : 'no binding matches this subject' };
+  return { allowed: true, groups, bindings, matched, layer };
+}
+
+function whoCan(q: { zone: string; host: string; type: string; action?: string }): WhoCanResponse {
+  const action = q.action ?? 'dns.record.write';
+  const doc = activeRev()?.doc ?? { groups: {}, roles: {}, bindings: [], virtual_keys: [] };
+  const roles = { ...base.document.roles, ...doc.roles };
+  const prot = action === 'dns.record.write' && !!protectedHit(q.zone, q.host, q.type);
+  const entries: WhoCanResponse['entries'] = [];
+  if (!prot) {
+    for (const [layer, bs] of [['base', base.document.bindings], ['managed', doc.bindings]] as const) {
+      for (const b of bs) {
+        const role = roles[b.role];
+        if (role && ruleCovers(role, action, q.zone, q.host, q.type) >= 0) {
+          const keys = [...base.document.virtual_keys, ...doc.virtual_keys].filter((k) => k.roles.includes(b.role) && k.teams.includes(b.team)).map((k) => k.id);
+          entries.push({ role: b.role, team: b.team, layer, groups: b.groups, subjects: b.subjects, virtual_keys: keys.length ? keys : undefined });
+        }
+      }
+    }
+  }
+  return { protected: prot, entries };
+}
+
+async function sha256(s: string): Promise<string> {
+  const d = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s));
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function randomToken(n: number): string {
+  const a = new Uint8Array(n);
+  crypto.getRandomValues(a);
+  return [...a].map((b) => 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'[b % 56]).join('');
+}
+
+function needRight(right: 'propose' | 'approve') {
+  if (asReader) throw new ApiError(403, 'forbidden', `policy.${right} is required`);
+}
+
+// ---------------------------------------------------------------- adoption
+
+const zoneVersion: Record<string, number> = {};
+// ?conflict=1 makes the first adoption fail as if the zone changed meanwhile.
+let conflictPending = new URLSearchParams(window.location.search).get('conflict') === '1';
+
+const isProtected = (zone: string, r: RRset) =>
+  r.protected || base.protected.some((p) => p.zones.some((z) => zoneMatch(z, zone)) && p.hosts.some((h) => hostMatch(h, r.host)) && p.types.includes(r.type));
+
+function candidate(zone: string, r: RRset, owner: string): AdoptCandidate {
+  const c: AdoptCandidate = { host: r.host, type: r.type, ttl: r.ttl, values: [...r.values], status: r.status, adoptable: false };
+  if (r.status !== 'foreign') c.reason = r.owner === owner ? 'already_owned' : 'owned_by_other_team';
+  else if (r.type === 'SOA') c.reason = 'server_managed';
+  else if (isProtected(zone, r)) c.reason = 'protected';
+  else if (r.type === 'CNAME' && r.values.some((v) => !v.endsWith('.'))) c.reason = 'relative_target';
+  else c.adoptable = true;
+  return c;
+}
+
+function select(zone: string, sel: AdoptSelection): RRset[] {
+  const inv = inventories.find((i) => i.zone === zone);
+  if (!inv) throw new ApiError(404, 'not_found', `zone ${zone} is not managed`);
+  const explicit = new Set((sel.rrsets ?? []).map((r) => `${r.host}/${r.type}`));
+  const byFilter = (r: RRset) =>
+    (sel.hosts?.length || sel.types?.length) &&
+    (!sel.hosts?.length || sel.hosts.some((h) => hostMatch(h, r.host))) &&
+    (!sel.types?.length || sel.types.includes(r.type));
+  return inv.rrsets.filter((r) => explicit.has(`${r.host}/${r.type}`) || byFilter(r));
+}
+
+function adoptPreview(zone: string, sel: AdoptSelection): AdoptPreview {
+  if (asReader) throw new ApiError(403, 'forbidden', 'dns.record.adopt is required');
+  const owner = sel.owner || me.teams[0] || '';
+  const v = zoneVersion[zone] ?? 1;
+  return { zone, owner, candidates: select(zone, sel).map((r) => candidate(zone, r, owner)), preview_token: `pt_${zone}_${v}` };
+}
+
+function adoptApply(zone: string, req: AdoptApply): AdoptResult {
+  if (asReader) throw new ApiError(403, 'forbidden', 'dns.record.adopt is required');
+  if (!req.comment.trim()) throw new ApiError(400, 'invalid', 'a comment is required');
+  const v = zoneVersion[zone] ?? 1;
+  if (conflictPending || req.preview_token !== `pt_${zone}_${v}`) {
+    conflictPending = false;
+    zoneVersion[zone] = v + 1;
+    throw new ApiError(409, 'adopt_conflict', 'the zone changed since the preview');
+  }
+  const owner = req.owner || me.teams[0] || '';
+  const rrs = select(zone, { rrsets: req.rrsets });
+  if (rrs.some((r) => !candidate(zone, r, owner).adoptable)) throw new ApiError(409, 'adopt_conflict', 'a selected record set is no longer adoptable');
+  const actor: Actor = { subject: me.subject, name: me.name, category: me.category };
+  const requestId = 'req_' + randomToken(10).toUpperCase();
+  const now = new Date().toISOString();
+  for (const r of rrs) Object.assign(r, { status: 'managed', owner, adopted: true, created_by: actor, created_at: now, last_request_id: requestId });
+  audit.unshift({
+    time: now, request_id: requestId, actor, teams: [owner], action: 'adopt', zone, decision: 'allow',
+    changes: rrs.map((r) => ({ op: 'adopt' as const, host: r.host, type: r.type, new_ttl: r.ttl, new_values: [...r.values] })),
+  });
+  zoneVersion[zone] = v + 1;
+  return { zone, owner, adopted: rrs.map((r) => ({ host: r.host, type: r.type })), request_id: requestId };
+}
+
+const tfName = (r: RRset) =>
+  ((r.host === '@' ? 'apex' : r.host).replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'apex') + '_' + r.type.toLowerCase();
+
+function terraform(zone: string, q: TerraformQuery): string {
+  const inv = inventories.find((i) => i.zone === zone);
+  if (!inv) throw new ApiError(404, 'not_found', `zone ${zone} is not managed`);
+  const rrs = inv.rrsets.filter(
+    (r) =>
+      r.status === 'managed' &&
+      (!q.team || r.owner === q.team) &&
+      (!q.hosts?.length || q.hosts.some((h) => hostMatch(h, r.host))) &&
+      (!q.types?.length || q.types.includes(r.type)),
+  );
+  const lines = [
+    `# eurodns-gate export of ${zone}${q.team ? ` for team ${q.team}` : ''}, ${new Date().toISOString().slice(0, 10)}`,
+    '# Provider: registry.terraform.io/kamorionlabs/eurodns (gate mode).',
+    '',
+  ];
+  for (const r of rrs) {
+    const n = tfName(r);
+    lines.push(
+      'import {',
+      `  to = eurodns_record_set.${n}`,
+      `  id = "${zone}/${r.host}/${r.type}"`,
+      '}',
+      '',
+      `resource "eurodns_record_set" "${n}" {`,
+      `  zone   = "${zone}"`,
+      `  host   = "${r.host}"`,
+      `  type   = "${r.type}"`,
+      `  ttl    = ${r.ttl}`,
+      `  values = [${r.values.map((v) => JSON.stringify(v)).join(', ')}]`,
+      '}',
+      '',
+    );
+  }
+  if (!rrs.length) lines.push('# No record set held by the gate matches this export.');
+  return lines.join('\n');
+}
+
+export const fixtureBackend = {
+  me: () => delay(me),
+  zones: () =>
+    delay(
+      inventories.map((inv) => {
+        const last = audit.find((e) => e.zone === inv.zone && e.decision === 'allow' && e.actor.subject !== reconciler.subject);
+        return summarize(inv, last?.time);
+      }),
+    ),
+  inventory: (zone: string) => {
+    const inv = inventories.find((i) => i.zone === zone);
+    if (!inv) return Promise.reject(new Error(`Zone ${zone} is not managed by this gate`));
+    return delay(inv);
+  },
+  audit: (q: AuditQuery): Promise<AuditPage> => {
+    const all = audit.filter((e) => matches(e, q));
+    const start = q.cursor ? Number(q.cursor) : 0;
+    const limit = q.limit ?? 25;
+    const entries = all.slice(start, start + limit);
+    const next = start + limit < all.length ? String(start + limit) : undefined;
+    return delay({ entries, next_cursor: next });
+  },
+  policy: (): Promise<EffectivePolicy> => {
+    const a = activeRev();
+    return delay({
+      settings,
+      base,
+      active: a ? a.s : undefined,
+      managed: a ? a.doc : undefined,
+      me: { can_propose: !asReader, can_approve: !asReader },
+    });
+  },
+  revisions: (q: { status?: string; limit?: number; cursor?: string }) => {
+    const list = revs.filter((r) => !q.status || r.s.status === q.status).map((r) => r.s);
+    return delay({ revisions: list });
+  },
+  revision: async (id: string) => delay(detail(find(id))),
+  propose: async (req: ProposeRequest) => {
+    needRight('propose');
+    const errors = validate(req.document);
+    if (!req.comment.trim()) errors.push({ path: 'comment', message: 'a comment is required' });
+    if (errors.length) throw new ApiError(400, 'invalid_policy', `${errors.length} validation error(s)`, errors);
+    const r: Rev = {
+      s: { id: `rev_${String(nextRev++).padStart(4, '0')}`, parent_id: req.parent_id || undefined, status: 'proposed', author: { subject: me.subject, name: me.name, category: me.category }, created_at: new Date().toISOString(), comment: req.comment },
+      doc: clone(req.document),
+      impact: [{ kind: 'warning', who: 'simulation', message: 'Impact is computed by the gate; the demo backend does not evaluate it.' }],
+    };
+    revs.unshift(r);
+    return delay(detail(r), 400);
+  },
+  approve: async (id: string, comment: string) => {
+    needRight('approve');
+    const r = find(id);
+    if (r.s.author.subject === me.subject) throw new ApiError(403, 'self_approval', 'the author cannot approve their own revision');
+    r.s.approvals = [...(r.s.approvals ?? []), { by: { subject: me.subject, name: me.name, category: me.category }, at: new Date().toISOString(), decision: 'approve', comment: comment || undefined }];
+    r.s.status = 'approved';
+    return delay(detail(r));
+  },
+  reject: async (id: string, comment: string) => {
+    needRight('approve');
+    const r = find(id);
+    if (r.s.author.subject === me.subject) throw new ApiError(403, 'self_approval', 'the author cannot reject their own revision');
+    r.s.approvals = [...(r.s.approvals ?? []), { by: { subject: me.subject, name: me.name, category: me.category }, at: new Date().toISOString(), decision: 'reject', comment: comment || undefined }];
+    r.s.status = 'rejected';
+    return delay(detail(r));
+  },
+  activate: async (id: string) => {
+    needRight('approve');
+    const r = find(id);
+    if (r.s.status !== 'approved') throw new ApiError(409, 'not_approved', 'only an approved revision can be activated');
+    const a = activeRev();
+    if (a) a.s.status = 'superseded';
+    r.s.status = 'active';
+    r.s.activated_at = new Date().toISOString();
+    r.s.activated_by = { subject: me.subject, name: me.name, category: me.category };
+    return delay(detail(r));
+  },
+  rollback: async (id: string) => {
+    needRight('propose');
+    const src = find(id);
+    const a = activeRev();
+    const r: Rev = {
+      s: { id: `rev_${String(nextRev++).padStart(4, '0')}`, parent_id: a?.s.id, status: 'proposed', author: { subject: me.subject, name: me.name, category: me.category }, created_at: new Date().toISOString(), comment: `Roll back to ${src.s.id}` },
+      doc: clone(src.doc),
+      impact: [],
+    };
+    revs.unshift(r);
+    return delay(detail(r));
+  },
+  explain: async (req: ExplainRequest) => delay(explain(req), 250),
+  whoCan: async (q: { zone: string; host: string; type: string; action?: string }) => delay(whoCan(q)),
+  adoptPreview: async (zone: string, sel: AdoptSelection) => delay(adoptPreview(zone, sel), 450),
+  adopt: async (zone: string, req: AdoptApply) => delay(adoptApply(zone, req), 500),
+  terraform: async (zone: string, q: TerraformQuery) => delay(terraform(zone, q), 200),
+  generateKey: async (): Promise<GeneratedKey> => {
+    needRight('propose');
+    const key = 'egk_' + randomToken(40);
+    return delay({ app_id: 'vk_' + randomToken(6), key, key_sha256: await sha256(key) });
+  },
+};
