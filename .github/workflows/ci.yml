@@ -57,7 +57,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
       - run: helm lint charts/eurodns-gate
-      - run: helm template charts/eurodns-gate --set networkPolicy.enabled=true > /dev/null
+      - run: helm template charts/eurodns-gate --set networkPolicy.enabled=true --set eurodns.existingSecret=eurodns-api-key > /dev/null
 
   e2e:
     runs-on: ubuntu-latest

@@ -3,6 +3,7 @@
 # The EuroDNS OpenAPI document is not redistributed: fetch it to regenerate
 # the route table.
 spec:
+	mkdir -p api
 	curl -fsSL https://docapi.eurodns.com/openapi.json -o api/openapi.json
 
 generate: spec
