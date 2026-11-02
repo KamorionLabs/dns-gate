@@ -94,7 +94,9 @@
                 </div>
               {/if}
               <a class="item" role="menuitem" href={connectHref()} onclick={() => (open = false)}><Icon name="arrow" size={14} /> Connect your tools</a>
-              <a class="item signout" role="menuitem" href="/auth/logout"><Icon name="logout" size={14} /> Sign out</a>
+              <form method="post" action="/auth/logout">
+                <button class="item signout" type="submit" role="menuitem"><Icon name="logout" size={14} /> Sign out</button>
+              </form>
             </div>
           {/if}
         </div>
@@ -329,7 +331,13 @@
     color: var(--seal-ink);
   }
   .signout {
+    width: calc(100% + var(--s2) * 2);
     margin-bottom: calc(var(--s2) * -1);
+    border: 0;
+    background: none;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
   }
   .signout:hover {
     color: var(--wax);
