@@ -1,10 +1,11 @@
-// Hash router: #/ (zones), #/zones/<zone>?..., #/journal?...
+// Hash router: #/ (zones), #/zones/<zone>?..., #/journal?..., #/connect
 // Hash routing keeps deep links working without server-side fallbacks.
 
 export type Route =
   | { name: 'zones' }
   | { name: 'zone'; zone: string }
   | { name: 'journal' }
+  | { name: 'connect' }
   | { name: 'policy'; tab: 'overview' | 'edit' | 'proposals' | 'simulate' }
   | { name: 'proposal'; id: string };
 
@@ -15,6 +16,7 @@ function parse(hash: string): { route: Route; params: URLSearchParams } {
   const parts = path.split('/').filter(Boolean).map(decodeURIComponent);
   if (parts[0] === 'zones' && parts[1]) return { route: { name: 'zone', zone: parts[1] }, params };
   if (parts[0] === 'journal') return { route: { name: 'journal' }, params };
+  if (parts[0] === 'connect') return { route: { name: 'connect' }, params };
   if (parts[0] === 'policy') {
     if (parts[1] === 'proposals' && parts[2]) return { route: { name: 'proposal', id: parts[2] }, params };
     const tab = parts[1] === 'edit' || parts[1] === 'proposals' || parts[1] === 'simulate' ? parts[1] : 'overview';
@@ -68,6 +70,7 @@ export function href(path: string, params?: Record<string, string | undefined>):
 export const zoneHref = (zone: string, params?: Record<string, string | undefined>) =>
   href('/zones/' + encodeURIComponent(zone), params);
 export const journalHref = (params?: Record<string, string | undefined>) => href('/journal', params);
+export const connectHref = (tab?: string) => href('/connect', { tab });
 export const policyHref = (tab?: 'edit' | 'proposals' | 'simulate', params?: Record<string, string | undefined>) =>
   href('/policy' + (tab ? '/' + tab : ''), params);
 export const proposalHref = (id: string) => href('/policy/proposals/' + encodeURIComponent(id));

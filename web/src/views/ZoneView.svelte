@@ -1,11 +1,12 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { api } from '../lib/api';
   import type { AdoptResult, Me, RRset, RRsetRef, Status, ZoneInventory } from '../lib/types';
   import { takeAdopt, type StoredAdopt } from '../lib/adoptDraft';
   import AdoptPanel from '../components/AdoptPanel.svelte';
   import TerraformPanel from '../components/TerraformPanel.svelte';
   import { router, href, journalHref } from '../lib/router.svelte';
-  import { statusLabel } from '../lib/labels';
+  import { statusHelp, statusLabel } from '../lib/labels';
   import { ttl as fmtTTL } from '../lib/format';
   import Seal from '../components/Seal.svelte';
   import Host from '../components/Host.svelte';
@@ -37,6 +38,8 @@
   $effect(() => {
     load();
     api.me().then((m) => (me = m)).catch(() => (me = null));
+    // #/zones/<zone>?export=terraform opens the export (link from the zones page).
+    if (untrack(() => router.params.get('export')) === 'terraform') tfOpen = true;
     const r = takeAdopt(zone);
     if (r) {
       restored = r;
@@ -160,6 +163,7 @@
           role="tab"
           type="button"
           aria-selected={statusF === t.key}
+          title={t.key ? statusHelp[t.key as Status] : undefined}
           class="tab {t.key}"
           onclick={() => router.setParams({ status: t.key || undefined })}
         >
@@ -302,7 +306,7 @@
 {/if}
 
 {#if tfOpen}
-  <TerraformPanel {zone} teams={me?.teams ?? []} {owners} onclose={() => (tfOpen = false)} />
+  <TerraformPanel {zone} teams={me?.teams ?? []} {owners} onclose={() => { tfOpen = false; router.setParams({ export: undefined }); }} />
 {/if}
 
 {#if selected && !selecting}

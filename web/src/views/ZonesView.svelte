@@ -1,7 +1,8 @@
 <script lang="ts">
   import { api } from '../lib/api';
   import type { ZoneSummary } from '../lib/types';
-  import { zoneHref, journalHref } from '../lib/router.svelte';
+  import { zoneHref, journalHref, connectHref } from '../lib/router.svelte';
+  import { statusHelp, statusLabel } from '../lib/labels';
   import CustodyStrip from '../components/CustodyStrip.svelte';
   import Seal from '../components/Seal.svelte';
   import RelTime from '../components/RelTime.svelte';
@@ -9,6 +10,33 @@
 
   let zones = $state<ZoneSummary[] | null>(null);
   let error = $state<string | null>(null);
+
+  const legend = ['managed', 'foreign', 'pending', 'tainted'] as const;
+  const GUIDE_KEY = 'eurodns-gate.guide-dismissed';
+  let guide = $state(readGuide());
+
+  function readGuide(): boolean {
+    try {
+      return localStorage.getItem(GUIDE_KEY) !== '1';
+    } catch {
+      return true;
+    }
+  }
+
+  function setGuide(show: boolean) {
+    guide = show;
+    try {
+      if (show) localStorage.removeItem(GUIDE_KEY);
+      else localStorage.setItem(GUIDE_KEY, '1');
+    } catch {
+      // storage unavailable (private mode): the choice lasts for this page
+    }
+  }
+
+  // Next steps point at a zone where they apply: foreign records to adopt,
+  // managed records to export.
+  const adoptZone = $derived(zones?.find((z) => z.foreign > 0) ?? zones?.[0]);
+  const exportZone = $derived(zones?.find((z) => z.managed > 0));
 
   $effect(() => {
     api
@@ -39,17 +67,38 @@
       <span class="of">record sets held by the gate, across {zones.length} {zones.length === 1 ? 'zone' : 'zones'}</span>
     </h1>
     <ul class="totals" aria-label="Totals">
-      <li class:alarm={totals.tainted > 0}>
+      <li class:alarm={totals.tainted > 0} title={statusHelp.tainted}>
         <Seal status="tainted" />
         <span class="num">{totals.tainted}</span> drifted outside the gate
       </li>
-      <li><Seal status="pending" /> <span class="num">{totals.pending}</span> pending</li>
-      <li><Seal status="foreign" /> <span class="num">{totals.foreign}</span> foreign, read-only</li>
+      <li title={statusHelp.pending}><Seal status="pending" /> <span class="num">{totals.pending}</span> pending</li>
+      <li title={statusHelp.foreign}><Seal status="foreign" /> <span class="num">{totals.foreign}</span> foreign, read-only</li>
+      {#if !guide}<li><button class="reopen" type="button" onclick={() => setGuide(true)}>How the gate works</button></li>{/if}
     </ul>
   {:else if !error}
     <div class="skeleton" style:height="34px" style:width="420px"></div>
   {/if}
 </section>
+
+{#if guide}
+  <aside class="guide" aria-labelledby="guide-title">
+    <div class="guide-head">
+      <h2 id="guide-title">How the gate works</h2>
+      <button class="btn quiet icon" type="button" aria-label="Dismiss" title="Dismiss" onclick={() => setGuide(false)}><Icon name="x" size={14} /></button>
+    </div>
+    <p class="lead">The gate holds the EuroDNS key and changes DNS records for teams, under their permissions. Each record set has a status:</p>
+    <dl class="legend">
+      {#each legend as st (st)}
+        <div><dt><Seal status={st} size={12} />{statusLabel[st]}</dt><dd>{statusHelp[st]}</dd></div>
+      {/each}
+    </dl>
+    <ul class="next" aria-label="Next steps">
+      {#if adoptZone}<li><a href={zoneHref(adoptZone.zone, { status: 'foreign' })}>Open a zone to adopt existing records <Icon name="arrow" size={13} /></a></li>{/if}
+      {#if exportZone}<li><a href={zoneHref(exportZone.zone, { export: 'terraform' })}>Export Terraform for adopted records <Icon name="arrow" size={13} /></a></li>{/if}
+      <li><a href={connectHref()}>Connect your tools <Icon name="arrow" size={13} /></a></li>
+    </ul>
+  </aside>
+{/if}
 
 {#if error}
   <div class="empty"><strong>Zones could not be loaded</strong>{error}</div>
@@ -71,10 +120,10 @@
           <div class="custody">
             <CustodyStrip {z} />
             <dl class="counts">
-              <div><dt><Seal status="managed" size={12} />Managed</dt><dd class="num" class:zero={z.managed === 0}>{z.managed}</dd></div>
-              <div class:hot={z.pending > 0}><dt><Seal status="pending" size={12} />Pending</dt><dd class="num" class:zero={z.pending === 0}>{z.pending}</dd></div>
-              <div class:hot={z.tainted > 0}><dt><Seal status="tainted" size={12} />Drifted</dt><dd class="num" class:zero={z.tainted === 0}>{z.tainted}</dd></div>
-              <div><dt><Seal status="foreign" size={12} />Foreign</dt><dd class="num" class:zero={z.foreign === 0}>{z.foreign}</dd></div>
+              <div><dt title={statusHelp.managed}><Seal status="managed" size={12} />Managed</dt><dd class="num" class:zero={z.managed === 0}>{z.managed}</dd></div>
+              <div class:hot={z.pending > 0}><dt title={statusHelp.pending}><Seal status="pending" size={12} />Pending</dt><dd class="num" class:zero={z.pending === 0}>{z.pending}</dd></div>
+              <div class:hot={z.tainted > 0}><dt title={statusHelp.tainted}><Seal status="tainted" size={12} />Drifted</dt><dd class="num" class:zero={z.tainted === 0}>{z.tainted}</dd></div>
+              <div><dt title={statusHelp.foreign}><Seal status="foreign" size={12} />Foreign</dt><dd class="num" class:zero={z.foreign === 0}>{z.foreign}</dd></div>
             </dl>
           </div>
 
@@ -146,6 +195,84 @@
   .totals .alarm,
   .totals .alarm .num {
     color: var(--wax);
+  }
+
+  .reopen {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--seal-ink);
+    cursor: pointer;
+  }
+  .reopen:hover {
+    text-decoration: underline;
+  }
+
+  .guide {
+    display: grid;
+    gap: var(--s3);
+    margin-bottom: var(--s6);
+    padding: var(--s4) var(--s5);
+    border: 1px solid var(--rule);
+    border-radius: var(--r-lg);
+    background: var(--sheet);
+    animation: rise 260ms var(--ease-out) both;
+  }
+  .guide-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--s3);
+    margin: -4px -8px -4px 0;
+  }
+  .guide h2 {
+    font-size: var(--t-lead);
+    letter-spacing: -0.01em;
+  }
+  .guide .lead {
+    color: var(--ink-2);
+  }
+  .legend {
+    margin: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: var(--s3) var(--s6);
+  }
+  .legend div {
+    display: grid;
+    align-content: start;
+    gap: 2px;
+  }
+  .legend dt {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-weight: 600;
+  }
+  .legend dd {
+    margin: 0;
+    color: var(--ink-3);
+    font-size: 12.5px;
+  }
+  .next {
+    list-style: none;
+    margin: 0;
+    padding: var(--s3) 0 0;
+    border-top: 1px solid var(--rule-soft);
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s2) var(--s6);
+  }
+  .next a {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    color: var(--seal-ink);
+    font-weight: 500;
+    text-decoration: none;
+  }
+  .next a:hover {
+    text-decoration: underline;
   }
 
   .register {
@@ -221,6 +348,8 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
+    pointer-events: auto;
+    cursor: help;
   }
   .counts dd {
     margin: 0;

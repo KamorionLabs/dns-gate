@@ -1,9 +1,10 @@
 <script lang="ts">
   import type { Me } from '../lib/types';
-  import { router, href } from '../lib/router.svelte';
+  import { router, href, connectHref } from '../lib/router.svelte';
   import { applyTheme, initialTheme, type Theme } from '../lib/theme';
   import { categoryLabel } from '../lib/labels';
   import { usingFixtures } from '../lib/api';
+  import { describePermissions } from '../lib/permissions';
   import Icon from './Icon.svelte';
   import Seal from './Seal.svelte';
 
@@ -17,8 +18,13 @@
   }
 
   const section = $derived(
-    router.route.name === 'journal' ? 'journal' : router.route.name === 'policy' || router.route.name === 'proposal' ? 'policy' : 'zones',
+    router.route.name === 'journal' || router.route.name === 'connect'
+      ? router.route.name
+      : router.route.name === 'policy' || router.route.name === 'proposal'
+        ? 'policy'
+        : 'zones',
   );
+  const can = $derived(describePermissions(me?.permissions ?? []));
   const initials = $derived(
     (me?.name ?? '?')
       .replace(/@.*/, '')
@@ -47,6 +53,7 @@
       <a href={href('/')} aria-current={section === 'zones' ? 'page' : undefined}>Zones</a>
       <a href={href('/journal')} aria-current={section === 'journal' ? 'page' : undefined}>Journal</a>
       <a href={href('/policy')} aria-current={section === 'policy' ? 'page' : undefined}>Policy</a>
+      <a href={connectHref()} aria-current={section === 'connect' ? 'page' : undefined}>Connect</a>
     </nav>
 
     <div class="tools">
@@ -78,7 +85,16 @@
                 <dt class="eyebrow">Roles</dt>
                 <dd>{#each me.roles as r (r)}<span class="tag role">{r}</span>{:else}<span class="sub">none</span>{/each}</dd>
               </dl>
-              <a class="signout" role="menuitem" href="/auth/logout"><Icon name="logout" size={14} /> Sign out</a>
+              {#if me.permissions}
+                <div class="can">
+                  <p class="eyebrow">What you can do</p>
+                  <ul>
+                    {#each can as c (c)}<li>{c}</li>{:else}<li class="sub">Nothing yet: ask a policy administrator for a role.</li>{/each}
+                  </ul>
+                </div>
+              {/if}
+              <a class="item" role="menuitem" href={connectHref()} onclick={() => (open = false)}><Icon name="arrow" size={14} /> Connect your tools</a>
+              <a class="item signout" role="menuitem" href="/auth/logout"><Icon name="logout" size={14} /> Sign out</a>
             </div>
           {/if}
         </div>
@@ -210,7 +226,7 @@
     position: absolute;
     right: 0;
     top: calc(100% + 6px);
-    width: 300px;
+    width: 320px;
     padding: var(--s4);
     background: var(--sheet-raised);
     border-radius: var(--r-lg);
@@ -261,18 +277,61 @@
     font-family: var(--font-record);
     font-size: 11.5px;
   }
-  .signout {
+  .can {
+    display: grid;
+    gap: var(--s1);
+    padding: var(--s3) 0;
+    margin-bottom: var(--s2);
+    border-top: 1px solid var(--rule-soft);
+    border-bottom: 1px solid var(--rule-soft);
+  }
+  .can ul {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    gap: 3px;
+    max-height: 220px;
+    overflow: auto;
+  }
+  .can li {
+    position: relative;
+    padding-left: 12px;
+    color: var(--ink-2);
+    font-size: 12.5px;
+    line-height: 1.45;
+  }
+  .can li::before {
+    content: '';
+    position: absolute;
+    left: 2px;
+    top: 0.6em;
+    width: 4px;
+    height: 4px;
+    border-radius: 50%;
+    background: var(--seal-ink);
+  }
+  .can li.sub::before {
+    display: none;
+  }
+  .item {
     display: flex;
     align-items: center;
     gap: var(--s2);
     padding: var(--s2);
-    margin: 0 calc(var(--s2) * -1) calc(var(--s2) * -1);
+    margin: 0 calc(var(--s2) * -1);
     border-radius: var(--r-md);
     text-decoration: none;
     color: var(--ink-2);
   }
-  .signout:hover {
+  .item:hover {
     background: var(--rule-soft);
+    color: var(--seal-ink);
+  }
+  .signout {
+    margin-bottom: calc(var(--s2) * -1);
+  }
+  .signout:hover {
     color: var(--wax);
   }
   @media (max-width: 720px) {
@@ -284,6 +343,29 @@
     .me-name,
     .demo {
       display: none;
+    }
+  }
+  @media (max-width: 480px) {
+    .inner {
+      gap: var(--s2);
+    }
+    .word,
+    .avatar :global(.icon) {
+      display: none;
+    }
+    nav {
+      min-width: 0;
+      overflow-x: auto;
+      scrollbar-width: none;
+    }
+    nav a {
+      padding: 0 var(--s2);
+      white-space: nowrap;
+    }
+    nav a[aria-current='page']::after {
+      left: var(--s2);
+      right: var(--s2);
+      bottom: 0;
     }
   }
 </style>
