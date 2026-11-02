@@ -15,7 +15,9 @@ request:
 - **the upstream rate limit** (10 requests per 10 seconds per IP, with progressive
   bans) for all clients combined;
 - a full **audit trail**, browsable in a **web UI** (zone inventory with ownership
-  status, filterable history with diffs);
+  status, filterable history with diffs, what the signed-in user may do, and a
+  Connect page with ready-to-paste setups for Claude Code, Claude Desktop,
+  Terraform and the API);
 - an **editable policy** from the UI for designated people: a managed layer of
   revisions on top of the git-managed base file, with approval by another approver,
   atomic activation, rollback, diff and impact analysis. Who may edit or approve is
