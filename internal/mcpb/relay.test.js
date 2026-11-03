@@ -12,6 +12,8 @@ const path = require('node:path');
 const test = require('node:test');
 
 const RELAY = path.join(__dirname, 'relay.js');
+// Loading relay.js as a library must not start the relay on the test's stdio.
+process.env.EURODNS_GATE_RELAY_NO_MAIN = '1';
 const b64url = (b) => Buffer.from(b).toString('base64url');
 
 // fakeServer plays both the OIDC provider and the gate's /mcp endpoint.
@@ -139,8 +141,8 @@ function fakeServer() {
 }
 
 // startRelay runs relay.js as Claude Desktop would, over stdio.
-function startRelay(f, tokenDir, extraEnv = {}) {
-  const child = spawn(process.execPath, [RELAY], {
+function startRelay(f, tokenDir, extraEnv = {}, args = [RELAY]) {
+  const child = spawn(process.execPath, args, {
     env: {
       PATH: process.env.PATH,
       EURODNS_GATE_MCP_URL: `${f.url}/mcp`,
@@ -237,21 +239,26 @@ test('relay', async (t) => {
       assert.equal(f.mcp.length, 0, 'no gate call before a request needs it');
       r.send({ jsonrpc: '2.0', method: 'notifications/initialized' });
       r.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
-      r.send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'list_zones', arguments: {} } });
+      assert.deepEqual((await r.response(2)).result, { tools: [] }, 'tools/list does not wait for the browser');
+      r.send({ jsonrpc: '2.0', id: 3, method: 'prompts/list' });
+      assert.deepEqual((await r.response(3)).result, { prompts: [] });
+      r.send({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'list_zones', arguments: {} } });
 
       const page = await browse(await r.signInURL());
       assert.equal(page.status, 200);
       assert.match(page.text, /Signed in/);
 
-      const list = await r.response(2);
+      await r.wait((m) => m.method === 'notifications/tools/list_changed', 'list_changed');
+      const call = await r.response(4);
+      assert.equal(call.result.content[0].text, 'zones', 'tools/call waited for the sign-in');
+      r.send({ jsonrpc: '2.0', id: 5, method: 'tools/list' });
+      const list = await r.response(5);
       assert.equal(list.result.tools[0].name, 'list_zones', 'multi-line SSE data');
       await r.wait((m) => m.method === 'notifications/progress', 'SSE notification');
-      await r.wait((m) => m.method === 'notifications/tools/list_changed', 'list_changed');
-      const call = await r.response(3);
-      assert.equal(call.result.content[0].text, 'zones');
       await r.wait((m) => m.method === 'notifications/message' && m.params.data === 'from GET', 'GET stream notification');
 
       assert.deepEqual(f.tokenRequests, ['authorization_code'], 'one sign-in for concurrent requests');
+      assert.equal(r.messages.filter((m) => m.method === 'notifications/tools/list_changed').length, 1);
       assert.equal(f.mcp[0].method, 'initialize');
       assert.equal(f.mcp[0].session, undefined);
       assert.equal(f.mcp[1].method, 'notifications/initialized');
@@ -284,6 +291,9 @@ test('relay', async (t) => {
       r.send({ jsonrpc: '2.0', method: 'notifications/initialized' });
       r.send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'list_zones', arguments: {} } });
       assert.equal((await r.response(2)).result.content[0].text, 'zones');
+      r.send({ jsonrpc: '2.0', id: 3, method: 'tools/list' });
+      assert.equal((await r.response(3)).result.tools[0].name, 'list_zones', 'tools/list forwarded with a token at hand');
+      assert.ok(!r.messages.some((m) => m.method === 'notifications/tools/list_changed'));
       assert.deepEqual(f.tokenRequests, ['refresh_token']);
       assert.equal(JSON.parse(fs.readFileSync(tokenFile, 'utf8')).refresh_token, 'rt-2', 'rotated refresh token kept');
       assert.ok(f.mcp.every((c) => c.auth === 'at-2'));
@@ -316,9 +326,11 @@ test('relay', async (t) => {
       r.send(init());
       assert.equal((await r.response(1)).result.serverInfo.name, 'eurodns-gate');
       r.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
+      assert.deepEqual((await r.response(2)).result, { tools: [] });
+      r.send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'list_zones', arguments: {} } });
       const page = await browse(await r.signInURL());
       assert.equal(page.status, 400);
-      const res = await r.response(2);
+      const res = await r.response(3);
       assert.equal(res.error.code, -32001);
       assert.match(res.error.message, /Sign-in to .* failed: access_denied/);
     } finally {
@@ -332,7 +344,7 @@ test('relay', async (t) => {
     try {
       r.send(init());
       await r.response(1);
-      r.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
+      r.send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: 'list_zones', arguments: {} } });
       const res = await r.response(2);
       assert.equal(res.error.code, -32001);
       assert.match(res.error.message, /not completed within 1 seconds/);
@@ -342,6 +354,21 @@ test('relay', async (t) => {
       await r.stop();
     }
   });
+});
+
+test('starts when loaded by a host module, as in a Claude Desktop utility process', async () => {
+  const f = await fakeServer();
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-relay-'));
+  const r = startRelay(f, dir, {}, ['-e', `require(${JSON.stringify(RELAY)})`]);
+  try {
+    r.send(init());
+    assert.equal((await r.response(1)).result.serverInfo.name, 'eurodns-gate');
+  } finally {
+    await r.stop();
+    f.server.closeAllConnections();
+    f.server.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('rejects plain http towards a remote host', async () => {
