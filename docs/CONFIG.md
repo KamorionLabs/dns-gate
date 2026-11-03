@@ -30,12 +30,38 @@ Generate a session key with `openssl rand -hex 32`.
 | `upstream.app_id` | | EuroDNS application id. |
 | `upstream.rate.every`, `upstream.rate.burst` | `1.1s`, `5` | Client-side limiter shared by every upstream call. EuroDNS allows 10 requests per 10 seconds per IP and bans progressively: keep the default unless EuroDNS raised your quota. |
 | `upstream.max_retries` | `3` | Retries on 429, 5xx and network errors (idempotent requests). |
-| `zones` | (required) | Managed zones. Requests for any other zone are refused before authorization. |
+| `zones` | (required without `zones_discovery`) | Managed zones of the base layer. Zones listed by the active [managed policy](#managed-policy-editing-from-the-ui) revision are added to them. Requests for any other zone are refused before authorization (zones found by [zone discovery](#zone-discovery) are readable only). |
+| `zones_discovery.*` | disabled | Lists the zones of the EuroDNS account, see [Zone discovery](#zone-discovery). |
 | `check_on_write` | `true` | Validate every zone with EuroDNS `check` before saving it. |
 | `reconcile_interval` | `15m` | Drift detection period per zone (minimum `1m`). |
 | `limits.max_body_bytes` | `1048576` | Request body limit. |
 | `limits.max_changes_per_request` | `20` | Default blast-radius limit (RRset changes per request). |
 | `lock.ttl`, `lock.wait` | `60s`, `30s` | Per-zone write lease and how long a request waits for it (then `503 zone_locked`). |
+
+## Zone discovery
+
+Without discovery the gate only knows `zones`. With it, the gate lists the domains of the EuroDNS account, shows those it does not manage as **unmanaged** (in the UI and in the MCP `list_zones` tool) and lets policy administrators bring them under management from the UI, through a [managed policy](#managed-policy-editing-from-the-ui) revision, without a configuration change.
+
+| Field | Default | Description |
+|---|---|---|
+| `zones_discovery.enabled` | `false` | List the account domains (`POST /domains/search`, `searchDomains`). |
+| `zones_discovery.include` | `["*"]` | Zone globs (`*` wildcards) a discovered zone must match. |
+| `zones_discovery.exclude` | `[]` | Zone globs removed from the list; they win over `include`. |
+| `zones_discovery.refresh` | `1h` | Listing period (minimum `5m`). A failed listing is retried after 5 minutes and the previous list is kept. |
+
+```yaml
+zones: [example.com]
+zones_discovery:
+  enabled: true
+  include: ["*"]
+  exclude: ["*.internal.example", "legacy-*.example"]
+  refresh: 1h
+```
+
+- **Upstream load**: a listing costs one request per 100 domains, through the shared rate-limited transport, once per `refresh` and per replica (the list is held in memory). When a policy proposal names a zone not seen yet, the gate lists the account once more, at most once a minute, so that a domain added just before is found.
+- **Unmanaged zones are read-only.** Their RRsets are readable with `dns.read` on the zone (UI and MCP; the UI also requires `ui.read`), evaluated by RBAC as usual: the zone globs of the role rules apply, so `zones: ["*"]` in a read role covers every discovered zone. They are never writable nor adoptable, the EuroDNS-compatible API (`/dns-zones/...`), the Terraform export and adoption refuse them, and reconcile does not run on them. Their content is read on demand, when someone opens the zone, and reused for `reconcile_interval`; listing zones never reads them.
+- **Bringing a zone under management**: add it to the `zones` list of the managed policy (the UI offers "Manage this zone" to policy administrators), then approve and activate as any revision. It must match `policy.bounds.zones` and be in the discovered list (after `include` and `exclude`). Once active, the zone behaves as a base zone: writes within the roles, adoption, reconcile. `include`/`exclude` therefore also bound what can be managed from the UI.
+- The listing uses the EuroDNS key of the gate: its EuroDNS user must be allowed to search domains. Domains whose DNS is not hosted at EuroDNS are listed too; reading them fails upstream.
 
 ## Store
 
@@ -150,7 +176,7 @@ A map of named roles. Deny by default: an action is allowed only if a rule of on
 
 | Field | Description |
 |---|---|
-| `rules[].zones` | Zone globs (`*` matches any sequence, `*` alone any managed zone). |
+| `rules[].zones` | Zone globs (`*` matches any sequence, `*` alone any managed zone, and for `dns.read` and `ui.read` any [discovered](#zone-discovery) zone). |
 | `rules[].actions` | `dns.read`, `dns.record.write`, `dns.record.adopt`, `dns.zone.admin`, `domain.read`, `ui.read`. |
 | `rules[].records.hosts` | Host patterns relative to the zone, `@` is the apex. `*` matches one label, `**` one or more labels (a bare `**` matches every host, apex included). |
 | `rules[].records.types` | Record types, `*` for any. Omit `records` to cover the whole zone. |
@@ -184,12 +210,45 @@ With Entra ID, prefer **app roles** (`roles` claim) assigned to Entra groups. If
 | Field | Description |
 |---|---|
 | `role` | Role granted. |
-| `team` | Owner team of the RRsets created through this binding. Required to write. |
+| `team` | Owner team of the RRsets created through this binding. Required to write (or `team_from`). |
+| `team_from.claim`, `team_from.regex`, `team_from.prefix` | Derive the owner team from a claim of each subject instead of a fixed `team`, see below. Exclusive with `team`. |
 | `groups` | Groups whose members get the role. |
 | `subjects[].issuer` | Issuer name. |
 | `subjects[].claims` | Claim globs, all must match (at least one claim, typically `sub`). |
 
 A binding needs `groups`, `subjects` or both (a subject matching either is bound). A subject collects every matching binding (roles and teams, base bindings first in file order, then managed ones; the first team owns new RRsets). A valid token with no binding gets `403 no_binding`.
+
+### Team derived from a claim
+
+Binding pipeline identities one by one is heavy when each pipeline should own its records. `team_from` gives each subject its own team, computed from one of its claims, so a single binding covers every pipeline whose identity matches a glob:
+
+```yaml
+issuers:
+  - name: github
+    issuer: https://token.actions.githubusercontent.com
+    audiences: [eurodns-gate]
+    bound_claims: {sub: ["repo:acme/*"]}         # globs: new repositories need no gate change
+
+bindings:
+  - role: pipeline-writer
+    team_from:
+      claim: sub
+      regex: "^repo:acme/([a-z0-9-]+):environment:production$"
+      prefix: gh-                                # team gh-<repository>
+    subjects:
+      - issuer: github
+        claims: {sub: ["repo:acme/*:environment:production"]}
+```
+
+- `regex` is an RE2 expression anchored with `^` and `$`, with **exactly one** capture group (use `(?:...)` for the others). It is matched against the claim, which must be a string.
+- The team is `prefix` followed by the **lowercased** capture. `prefix` is optional, up to 32 characters `[a-z0-9._-]`; use it to keep derived teams apart from hand-written ones.
+- When the claim is missing, does not match, or the result is not a valid team name (lowercase identifier, at most 64 characters), the binding **does not apply** to that subject: it fails closed rather than writing under the team of another binding.
+- Teams are collected in binding order as with a fixed `team` (base bindings first, in file order) and the first one owns new RRsets: give pipelines matched by a `team_from` binding no other team-bearing binding. The explain simulator shows the derived team (`role@team`), who-can and the impact analysis show the rule. The impact analysis cannot count RRsets owned by derived teams (they are only known per subject).
+- Same rules in the managed layer (UI editor: "Team from a claim").
+
+Other subjects that encode one pipeline per value: Kubernetes service accounts (`^system:serviceaccount:([a-z0-9-]+):dns-writer$`, team per namespace), AWS role ARNs (`^arn:aws:iam::111111111111:role/ci-([a-z0-9-]+)$`), any CI whose `sub` names the project. With Entra ID access tokens (Azure DevOps, managed identities), `sub` is a pairwise id and there is no readable per-pipeline claim: keep one binding per `oid` there, or derive the team from a claim your tokens do carry.
+
+**Trade-off.** Ownership isolates pipelines from each other: each one can only modify or delete the RRsets its own team created. But every identity matching the binding gets the role, so any of them can **create** any RRset that does not exist yet and that the role allows (hosts, types), and a new identity matching the glob is bound without a gate change. Keep the role narrow (hosts, types, zones), keep `protected` records for what must never change, and treat the right to create identities matching the glob (repositories, service connections, namespaces) as the right to write within that role. Two subjects whose captures differ only by case share a team.
 
 ## Protected records
 
@@ -200,13 +259,14 @@ A binding needs `groups`, `subjects` or both (a subject matching either is bound
 The policy has two layers, merged at evaluation:
 
 - **base**: this file (GitOps). Issuers, UI, store, protected records, `policy.bounds` and every `policy.*` grant live only here.
-- **managed**: a document of groups, roles, bindings and virtual keys stored as immutable **revisions** in the store and edited from the UI (or the API).
+- **managed**: a document of zones, groups, roles, bindings and virtual keys stored as immutable **revisions** in the store and edited from the UI (or the API).
 
 Rules of the managed layer:
 
 - a managed role or group cannot reuse a base name;
 - managed rules cannot grant `policy.*` actions and must stay within `policy.bounds` (zone globs, actions); a managed binding may reuse a base role only if that role also stays within the bounds;
 - protected records still win over everything;
+- managed `zones` are brought under management in addition to the base `zones`: each must match `policy.bounds.zones` and, when it is not managed yet, exist in the EuroDNS account ([zone discovery](#zone-discovery) must be enabled); a zone already managed by the active revision is not checked again, so a domain removed from the account does not block unrelated changes;
 - managed virtual keys must have `expires_at`, and only their SHA-256 is stored (`POST /api/v1/policy/virtual-keys/generate` returns a random key once);
 - `max_changes_per_request: -1` (unlimited) is reserved to the base.
 
@@ -221,7 +281,7 @@ Rules of the managed layer:
 
 Meta actions, granted only by base roles: `policy.read` (view the policy, revisions, diff, explain, who-can), `policy.propose` (create revisions, rollback, generate virtual keys), `policy.approve` (approve, reject, activate). Virtual keys cannot hold them.
 
-Workflow: **propose** (validated, based on the active revision `parent_id`; `409 stale_revision` if another revision was activated meanwhile) → **approve** / **reject** (an author cannot approve their own revision; an author may reject it to withdraw it) → **activate** (atomic: `409 conflict` when another activation won the race; the document is re-validated against the current base) → **rollback** (a new proposal copying an older revision). Each revision shows a unified YAML diff against its parent and an impact analysis (permissions gained and lost per binding, group and key, and a warning when a team that owns RRsets loses write on their zone). Every step is audited (`policy.propose`, `policy.approve`, `policy.reject`, `policy.activate`, with the revision id).
+Workflow: **propose** (validated, based on the active revision `parent_id`; `409 stale_revision` if another revision was activated meanwhile) → **approve** / **reject** (an author cannot approve their own revision; an author may reject it to withdraw it) → **activate** (atomic: `409 conflict` when another activation won the race; the document is re-validated against the current base) → **rollback** (a new proposal copying an older revision). Each revision shows a unified YAML diff against its parent and an impact analysis (permissions gained and lost per binding, group and key, zones that become managed or are released, a warning when a team that owns RRsets loses write on their zone, and a warning when a released zone still has RRsets owned by the gate: they stay in the store but become read-only until the zone is managed again). Every step is audited (`policy.propose`, `policy.approve`, `policy.reject`, `policy.activate`, with the revision id).
 
 Each replica checks the active revision every 10 seconds and recompiles; evaluation never calls the store. If the base file changes so that the active revision no longer validates, the replica keeps the previous policy and logs an error.
 
@@ -256,8 +316,8 @@ Tools:
 
 | Tool | Kind | Description |
 |---|---|---|
-| `list_zones` | read | Readable zones with their counts. |
-| `list_rrsets` | read | RRsets of a zone, filters on status, host glob, type, owner. |
+| `list_zones` | read | Readable zones with their counts; zones discovered in the account but not managed are flagged `unmanaged`. |
+| `list_rrsets` | read | RRsets of a zone (managed, or unmanaged with `dns.read`), filters on status, host glob, type, owner. |
 | `get_rrset` | read | One RRset and its recent audit history. |
 | `search_audit` | read | Audit search, same visibility as the UI. |
 | `explain`, `who_can` | read | Policy simulation (`policy.read`). |
@@ -344,6 +404,8 @@ Read-only web UI under `/ui/` and its JSON API under `/api/v1` (action `ui.read`
 
 Login is the authorization code flow with PKCE (S256), `state` and `nonce` checked. The ID token is verified with the issuer keys and `aud = client_id`; issuer `bound_claims` apply. The session cookie (`__Host-` prefixed when the redirect URL is HTTPS) is encrypted with AES-256-GCM, `HttpOnly`, `Secure`, `SameSite=Lax`. It keeps the identity claims of the ID token (protocol claims dropped) plus `auth_time` and `amr`; roles, groups and teams are recomputed on every request, so a policy change applies immediately. A login whose claims do not fit in a cookie fails with `session_too_large`: reduce the emitted claims (Entra: app roles rather than groups). `POST /auth/logout` clears it.
 
+With [zone discovery](#zone-discovery), the zones view also lists the unmanaged zones the user can read, with a "Manage this zone" action for holders of `policy.propose` (it creates a proposal adding the zone to the managed layer) and a hint for the others.
+
 Audit events of zones the user cannot read are filtered out; events without a zone (authentication failures) are shown only to users who can read every managed zone.
 
 ## Endpoints
@@ -353,7 +415,7 @@ Audit events of zones the user cannot read are filtered out; events without a zo
 | EuroDNS API paths | Opened operations: `getDnsZone`, `saveDnsZone`, `checkDnsZone`, `addDnsRecords`, `deleteDnsRecord` (zone engine), `listDnsZoneSnapshots`, `getSnapShot`, `getDnssecStatus`, `getDomain` (proxied). Every other operation returns `403 operation_denied`. Query strings, encoded separators and dot segments are refused. |
 | `GET /.well-known/eurodns-gate` | Version and features (`if-match`, `ownership`, `adopt`), unauthenticated. |
 | `POST /.well-known/eurodns-gate/zones/{zone}/adopt` | Adopt RRsets (used by the Terraform provider on import). Foreign RRsets need `dns.record.adopt`; RRsets already owned by one of the caller's teams are a no-op and only need `dns.record.write` on the zone. |
-| `/api/v1/me`, `/api/v1/connect`, `/api/v1/zones`, `/api/v1/zones/{zone}/rrsets`, `/api/v1/audit` | UI API (`ui.read`; `/me` for any bound subject, with its groups and effective permissions; `/connect` returns the public URL, the MCP state, the login issuer and `ui.cli_scope` for the Connect page). |
+| `/api/v1/me`, `/api/v1/connect`, `/api/v1/zones`, `/api/v1/zones/{zone}/rrsets`, `/api/v1/audit` | UI API (`ui.read`; `/zones` lists managed zones then unmanaged ones (`"unmanaged": true`), whose `rrsets` need `dns.read`; `/me` for any bound subject, with its groups and effective permissions; `/connect` returns the public URL, the MCP state, the login issuer and `ui.cli_scope` for the Connect page). |
 | `GET /api/v1/connect/claude-desktop.mcpb` | Claude Desktop extension of the gate (`ui.read`), when MCP and the UI login are enabled, see [Claude Desktop extension](#claude-desktop-extension). |
 | `/api/v1/policy`, `/api/v1/policy/revisions[/{id}[/approve\|reject\|activate\|rollback\|export]]`, `/api/v1/policy/explain`, `/api/v1/policy/who-can`, `/api/v1/policy/virtual-keys/generate` | Policy API, see `internal/uiapi/policy.go`. |
 | `/auth/login`, `/auth/callback`, `/auth/logout` | UI login. |

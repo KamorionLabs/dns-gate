@@ -113,6 +113,7 @@ Main packages of the gate:
 | `internal/zonewrite` | `Engine`: every DNS zone read/write on behalf of a subject, ownership enforcement, reconcile. |
 | `internal/store` | `Store`: ownership entries, zone versions, zone locks (memory, DynamoDB). |
 | `internal/audit` | Structured audit events (stdout and store). |
+| `internal/discovery` | Listing of the EuroDNS account zones (`zones_discovery`), filtered and cached in memory. |
 | `internal/uiapi` | JSON API for the web UI (inventory, audit, policy revisions, adoption, Terraform export). |
 | MCP server | `/mcp` endpoint for LLM agents (section 17). |
 
@@ -129,7 +130,7 @@ request
   ├─ route lookup (method + path template → operationId)
   │       unknown operation ─────────► 403 (deny by default)
   ├─ action = mapping[operationId]  (e.g. getDnsZone → dns.read)
-  ├─ zone check: {domain-name} must be a managed zone ──► else 403
+  ├─ zone check: {domain-name} must be a managed zone (base or managed layer) ──► else 403
   ├─ Authorizer.Allow(subject, action, zone) ──► else 403
   ├─ dispatch
   │     passthrough-read  → reverse proxy with injected EuroDNS credentials
@@ -317,6 +318,14 @@ Checks: signature, `iss`, `exp`/`nbf` (small leeway), `aud` must equal the gate'
 configured audience (prevents replay of tokens issued for another service), maximum
 token lifetime.
 
+A binding normally acts for a fixed team. With `team_from` it derives the team of
+each subject from a claim (anchored regex, one capture group, optional prefix), so
+one binding with a subject glob covers many pipelines while ownership keeps them
+apart: each pipeline only changes the RRsets its own team created. A subject whose
+claim yields no valid team is not bound by that binding (fail closed). Any matching
+identity can still create RRsets that do not exist yet within the role, which is the
+trade-off of binding by glob (THREAT-MODEL T29).
+
 ### 9.2 Entra ID
 
 Azure workloads authenticate with an **Entra ID access token issued for the gate's
@@ -374,6 +383,8 @@ Kept minimal and invisible to plain EuroDNS clients:
 - The gate must be the only caller from its egress IP.
 - Zone GETs are coalesced (singleflight) and cached briefly; the cache is
   invalidated on every write.
+- Zone discovery costs one request per 100 domains per `zones_discovery.refresh`
+  and per replica.
 - v0.1 runs a single replica: an IaC call tolerates a short unavailability, and the
   EuroDNS console remains the break-glass path. With the DynamoDB store, locks and
   zone versions already work across replicas; a shared rate limiter is the remaining
@@ -435,7 +446,9 @@ layer (section 15). It never performs DNS writes.
 ### 14.1 Views
 
 - **Zones**: managed zones with counters (RRsets, managed, tainted, pending,
-  foreign), last upstream sync, last gate write.
+  foreign), last upstream sync, last gate write; with zone discovery (15.7), the
+  zones of the EuroDNS account that are not managed, flagged unmanaged, with a
+  "Manage this zone" action for policy proposers.
 - **Inventory of a zone**: every RRset with its status, owner team, protected flag,
   created by / updated by (actor and category: `human`, `pipeline` or `key`),
   timestamps, adoption flag, expiry for ephemeral RRsets, last request id.
@@ -500,7 +513,7 @@ for what matters most.
 | Layer | Where | Content | Who changes it |
 |---|---|---|---|
 | **base** | YAML config file (git, deployed by CD) | issuers, UI and store settings, managed zones, protected records, **bounds**, every `policy.*` grant, plus base groups, roles, bindings and keys | pull request on the config repository |
-| **managed** | store, as immutable **revisions** | groups, roles, bindings, virtual keys (`PolicyDocument`) | proposed and approved in the UI |
+| **managed** | store, as immutable **revisions** | zones, groups, roles, bindings, virtual keys (`PolicyDocument`) | proposed and approved in the UI |
 
 At evaluation the active managed revision is merged with base. Constraints on the
 managed layer, checked at proposal and again at activation:
@@ -511,7 +524,9 @@ managed layer, checked at proposal and again at activation:
   extend who controls the editor;
 - every managed rule must stay within the **bounds** declared in base
   (`bounds.zones` globs, `bounds.actions` list);
-- protected records (base) win over any managed grant.
+- protected records (base) win over any managed grant;
+- zones it brings under management must match `bounds.zones` and exist in the
+  EuroDNS account (15.7).
 
 Validation errors come back as `400 {"reason":"invalid_policy","errors":[{"path","message"}]}`.
 
@@ -607,6 +622,32 @@ across tenants.
   cookie and a same-origin `Origin` header.
 - **Virtual keys** are generated server-side and shown once; only their hash goes
   into a proposal.
+
+### 15.7 Managed zones and zone discovery
+
+The managed zones are the union of the base `zones` and the `zones` of the active
+managed revision. Every component reads them from the current policy snapshot: the
+route table of the EuroDNS-compatible API, the write engine, reconcile (at each
+round), the UI and MCP. Activating a revision that adds a zone is therefore enough
+to manage it, on every replica within the reload interval.
+
+With `zones_discovery`, `internal/discovery` lists the account domains
+(`searchDomains`, paginated, through the shared rate-limited transport) at start
+and every `refresh`, filtered by `include`/`exclude` globs, and keeps the list in
+memory. Discovered zones that are not managed are **unmanaged**:
+
+| | Managed | Unmanaged |
+|---|---|---|
+| RBAC actions that can match | all | `dns.read`, `ui.read` only |
+| EuroDNS-compatible API, plans, writes, adoption, Terraform export | yes | refused |
+| Reconcile | every `reconcile_interval` | never |
+| Inventory | cache filled by reconcile and writes | read on demand, reused for `reconcile_interval`; never read by the zone list |
+
+A revision may add a zone only if it is discovered (one extra listing, at most once
+a minute, when a proposal names a zone not seen yet). Removing a zone from the
+managed layer is allowed; the impact analysis warns when the gate owns RRsets
+there. Their ownership entries stay in the store, so managing the zone again
+restores them.
 
 ## 16. Onboarding and adoption
 

@@ -35,6 +35,12 @@ Also included:
 - **onboarding of existing zones**: bulk adoption team by team (preview, all-or-nothing
   apply, mandatory comment) and Terraform export with `import` blocks, whose first
   plan must be empty — see [docs/ONBOARDING.md](docs/ONBOARDING.md);
+- **zone discovery**: the zones of the EuroDNS account outside the configured ones
+  are listed read-only and brought under management from the UI by a reviewed
+  policy revision, without a redeploy — see [docs/CONFIG.md](docs/CONFIG.md#zone-discovery);
+- **one binding for many pipelines**: the owner team derived from a claim
+  (`team_from`), so each pipeline matched by a glob owns its own records — see
+  [docs/CONFIG.md](docs/CONFIG.md#team-derived-from-a-claim);
 - an **MCP server** at `/mcp` for LLM agents, with the same authentication, RBAC and
   ownership: read tools by default, writes only if enabled and always through a plan
   then an apply bound to that plan. Claude Desktop users install it from the Connect

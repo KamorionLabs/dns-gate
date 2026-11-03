@@ -9,7 +9,10 @@ Example used below: zone `example.com`, team `web` taking over `www`, `shop` and
 
 ## 0. Prerequisites
 
-- `example.com` is listed in the gate's managed zones (base config).
+- `example.com` is listed in the gate's managed zones: in the base config, or, with
+  [zone discovery](CONFIG.md#zone-discovery), in the managed policy (open the
+  unmanaged zone in the UI, "Manage this zone", then approve and activate the
+  revision; `example.com` must match `policy.bounds.zones`).
 - The EuroDNS user of the gate has access to the zone.
 - An admin holds `dns.record.adopt` on the zone (base policy).
 - Team `web` has a role allowing `dns.record.write` on the hosts it will own, bound
