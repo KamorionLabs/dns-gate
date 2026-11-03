@@ -248,7 +248,7 @@ Both are mutations for CSRF (cookie sessions) and the apply requires the same re
 | `mcp.allow_writes` | `false` | Adds the write tools (plan/apply, adoption). Without it, the server is read-only. |
 | `mcp.plan_ttl` | `10m` | Lifetime of a plan returned by `plan_rrset_change` (1m to 1h). |
 | `mcp.requests_per_minute` | `120` | Rate limit per subject (`429` beyond). |
-| `mcp.public_url` | UI origin, else the request host | Base URL advertised in the protected resource metadata. |
+| `mcp.public_url` | UI origin, else the request host | Public base URL of the gate, advertised in the protected resource metadata and shown on the Connect page. |
 
 Authentication is the same as the API: an OIDC bearer token of a configured issuer, or a virtual key (`X-APP-ID` / `X-API-KEY`); cookies are ignored. Without credentials the answer is `401` with `WWW-Authenticate: Bearer resource_metadata="<base>/.well-known/oauth-protected-resource"`, and that document (RFC 9728) names the UI issuer as authorization server. Every tool runs with the RBAC and ownership rules of the caller and is audited (`mcp.<tool>`, with `via: mcp` and the client name).
 
@@ -267,14 +267,37 @@ Tools:
 
 There is no policy tool: policy changes stay with humans in the UI, with step-up. Plans live in the memory of the replica that created them: with several replicas, route `/mcp` to a single replica or accept that a plan must be applied where it was made.
 
-Claude Code example:
+### Connecting an assistant
+
+The **Connect** page of the UI (`/ui/#/connect`, data from `GET /api/v1/connect`) shows the commands below already filled in with the gate URL, the tenant and the token scope (`ui.cli_scope`), plus the Terraform provider block and a `curl` example. The gate only needs an access token of a configured issuer whose audience is the gate; with Entra ID, the Azure CLI gets one for the signed-in user.
+
+Claude Code, with a `headersHelper` that Claude Code runs again on each connection and on a `401` or `403`, so the token never goes stale (needs the Azure CLI signed in to the gate's tenant, `az login --tenant <tenant-id>`, and `jq`):
 
 ```sh
-claude mcp add --transport http eurodns-gate https://gate.example.com/mcp \
-  --header "Authorization: Bearer $TOKEN"
+claude mcp add-json eurodns-gate '{"type":"http","url":"https://gate.example.com/mcp","headersHelper":"az account get-access-token --scope api://<client-id>/.default --query accessToken -o tsv | jq -Rc \"{Authorization: (\\\"Bearer \\\" + .)}\""}' --scope user
 ```
 
-`$TOKEN` is an access token of a configured issuer whose audience is the gate (for Entra ID: `az account get-access-token --scope api://eurodns-gate/.default --query accessToken -o tsv`). MCP clients that implement the OAuth flow discover the issuer through the resource metadata, but Entra ID does not support OAuth dynamic client registration: register the MCP client as an application in Entra (or pass a token as above).
+The helper must print `{"Authorization":"Bearer <token>"}`. With another issuer, replace the `az` command by any command printing an access token.
+
+Claude Desktop and other clients that only start local servers go through the [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) bridge (Node.js) in `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "eurodns-gate": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote", "https://gate.example.com/mcp", "--header", "Authorization:${AUTH_HEADER}"],
+      "env": { "AUTH_HEADER": "Bearer <access token>" }
+    }
+  }
+}
+```
+
+The token is static there: an Entra access token lasts about an hour, after which it must be fetched again (`az account get-access-token --scope api://<client-id>/.default --query accessToken -o tsv`), pasted into `AUTH_HEADER` and the client restarted.
+
+With Entra ID, `az account get-access-token` for the gate scope requires the gate application to expose that scope and to trust the Azure CLI: add the Azure CLI client id (`04b07795-8ddb-461a-bbee-02f9e1bf7b46`) to the authorized client applications of the gate app registration, or grant tenant-wide admin consent; otherwise `az` answers `AADSTS65001` (consent required). The token the CLI receives must then be accepted by a configured issuer (audience and token version, see `accessTokenAcceptedVersion`).
+
+MCP clients that implement the OAuth flow discover the issuer through the resource metadata, but Entra ID does not support OAuth dynamic client registration: register the MCP client as an application in Entra, or pass a token as above.
 
 ## UI
 
@@ -288,6 +311,7 @@ Read-only web UI under `/ui/` and its JSON API under `/api/v1` (action `ui.read`
 | `ui.redirect_url` | (required) | `https://<gate>/auth/callback`, registered at the IdP. |
 | `ui.scopes` | `openid profile email` | Must include `openid`; add the scope that carries the claims used in bindings (for example `groups`). |
 | `ui.session_ttl` | `8h` | Session lifetime (1m to 24h). |
+| `ui.cli_scope` | `api://<client_id>/.default` with an Entra v2 issuer, else empty | OAuth scope a command-line tool requests to get a token for the gate, shown on the Connect page (`az account get-access-token --scope ...`, Terraform `azure_identity.scope`). One scope of letters, digits and `. _ ~ : / % -`, so it can be pasted into shell commands as is. Set it when the Application ID URI of the gate is not `api://<client_id>`. |
 
 Login is the authorization code flow with PKCE (S256), `state` and `nonce` checked. The ID token is verified with the issuer keys and `aud = client_id`; issuer `bound_claims` apply. The session cookie (`__Host-` prefixed when the redirect URL is HTTPS) is encrypted with AES-256-GCM, `HttpOnly`, `Secure`, `SameSite=Lax`. It keeps the identity claims of the ID token (protocol claims dropped) plus `auth_time` and `amr`; roles, groups and teams are recomputed on every request, so a policy change applies immediately. A login whose claims do not fit in a cookie fails with `session_too_large`: reduce the emitted claims (Entra: app roles rather than groups). `POST /auth/logout` clears it.
 
@@ -300,7 +324,7 @@ Audit events of zones the user cannot read are filtered out; events without a zo
 | EuroDNS API paths | Opened operations: `getDnsZone`, `saveDnsZone`, `checkDnsZone`, `addDnsRecords`, `deleteDnsRecord` (zone engine), `listDnsZoneSnapshots`, `getSnapShot`, `getDnssecStatus`, `getDomain` (proxied). Every other operation returns `403 operation_denied`. Query strings, encoded separators and dot segments are refused. |
 | `GET /.well-known/eurodns-gate` | Version and features (`if-match`, `ownership`, `adopt`), unauthenticated. |
 | `POST /.well-known/eurodns-gate/zones/{zone}/adopt` | Adopt RRsets (used by the Terraform provider on import). Foreign RRsets need `dns.record.adopt`; RRsets already owned by one of the caller's teams are a no-op and only need `dns.record.write` on the zone. |
-| `/api/v1/me`, `/api/v1/zones`, `/api/v1/zones/{zone}/rrsets`, `/api/v1/audit` | UI API (`ui.read`; `/me` for any bound subject, with its groups). |
+| `/api/v1/me`, `/api/v1/connect`, `/api/v1/zones`, `/api/v1/zones/{zone}/rrsets`, `/api/v1/audit` | UI API (`ui.read`; `/me` for any bound subject, with its groups and effective permissions; `/connect` returns the public URL, the MCP state, the login issuer and `ui.cli_scope` for the Connect page). |
 | `/api/v1/policy`, `/api/v1/policy/revisions[/{id}[/approve\|reject\|activate\|rollback\|export]]`, `/api/v1/policy/explain`, `/api/v1/policy/who-can`, `/api/v1/policy/virtual-keys/generate` | Policy API, see `internal/uiapi/policy.go`. |
 | `/auth/login`, `/auth/callback`, `/auth/logout` | UI login. |
 | `/healthz`, `/readyz` | Probes. |

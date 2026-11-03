@@ -12,6 +12,25 @@ export interface Me {
   roles: string[];
   teams: string[];
   groups?: string[];
+  permissions?: Permission[];
+}
+
+/** One effective rule of one of the subject's roles. */
+export interface Permission {
+  role: string;
+  zones: string[];
+  actions: string[];
+  hosts: string[]; // empty: the whole zone
+  types: string[]; // empty: any type
+}
+
+/** GET /api/v1/connect: what a client needs to reach the gate. */
+export interface Connect {
+  base_url: string;
+  mcp: { enabled: boolean; url: string; allow_writes: boolean };
+  issuer?: { url: string; kind: 'entra' | 'oidc'; tenant_id?: string };
+  client_id?: string;
+  cli_scope?: string;
 }
 
 export interface ZoneSummary {

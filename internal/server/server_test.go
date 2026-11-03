@@ -475,3 +475,88 @@ func TestStaticUI(t *testing.T) {
 		t.Fatalf("root redirect: %d", resp.StatusCode)
 	}
 }
+
+func TestUIAPIConnect(t *testing.T) {
+	e := newEnv(t)
+	tok := e.token("writer")
+	if r := e.do(t, "GET", "/api/v1/connect", "", "", nil); r.StatusCode != 401 {
+		t.Fatalf("connect without auth: %d", r.StatusCode)
+	}
+	if r := e.do(t, "GET", "/api/v1/connect", e.token("nobody"), "", nil); r.StatusCode != 403 {
+		t.Fatalf("connect without ui.read: %d", r.StatusCode)
+	}
+	r := e.do(t, "GET", "/api/v1/connect", tok, "", nil)
+	var c uiapi.Connect
+	_ = json.NewDecoder(r.Body).Decode(&c)
+	if r.StatusCode != 200 || c.BaseURL != e.srv.URL || c.MCP.Enabled || c.MCP.URL != e.srv.URL+"/mcp" || c.ClientID != e.idp.ClientID || c.CLIScope != "" {
+		t.Fatalf("connect: %d %+v", r.StatusCode, c)
+	}
+	if c.Issuer == nil || c.Issuer.Kind != "oidc" || c.Issuer.URL != e.idp.URL || c.Issuer.TenantID != "" {
+		t.Fatalf("connect issuer: %+v", c.Issuer)
+	}
+}
+
+func TestUIAPIConnectEntraAndMCP(t *testing.T) {
+	const tenant = "11111111-2222-3333-4444-555555555555"
+	e := newEnvWith(t, func(c *config.Config) {
+		c.Issuers = append(c.Issuers, config.Issuer{
+			Name: "entra", Issuer: "https://login.microsoftonline.com/" + tenant + "/v2.0", Audiences: []string{"api://gate"},
+			JWKSURL: "https://login.microsoftonline.com/" + tenant + "/discovery/v2.0/keys", Algorithms: config.DefaultAlgorithms, Category: "human",
+		})
+		c.UI.Issuer, c.UI.ClientID, c.UI.CLIScope = "entra", "99999999-8888-7777-6666-555555555555", "api://99999999-8888-7777-6666-555555555555/.default"
+		c.MCP = config.MCP{Enabled: true, PlanTTL: config.Duration(10 * time.Minute), RequestsPerMinute: 600, PublicURL: "https://gate.example.com/"}
+	})
+	r := e.do(t, "GET", "/api/v1/connect", e.token("writer"), "", nil)
+	var c uiapi.Connect
+	_ = json.NewDecoder(r.Body).Decode(&c)
+	if c.BaseURL != "https://gate.example.com" || !c.MCP.Enabled || c.MCP.AllowWrites || c.MCP.URL != "https://gate.example.com/mcp" {
+		t.Fatalf("connect mcp: %+v", c)
+	}
+	if c.Issuer == nil || c.Issuer.Kind != "entra" || c.Issuer.TenantID != tenant || c.CLIScope != "api://99999999-8888-7777-6666-555555555555/.default" {
+		t.Fatalf("connect entra: %+v %+v", c, c.Issuer)
+	}
+
+	e = newEnvWith(t, func(c *config.Config) {
+		c.MCP = config.MCP{Enabled: true, AllowWrites: true, PlanTTL: config.Duration(10 * time.Minute), RequestsPerMinute: 600}
+	})
+	r = e.do(t, "GET", "/api/v1/connect", e.token("writer"), "", nil)
+	c = uiapi.Connect{}
+	_ = json.NewDecoder(r.Body).Decode(&c)
+	if !c.MCP.AllowWrites || c.BaseURL != e.srv.URL {
+		t.Fatalf("connect writes: %+v", c)
+	}
+}
+
+func TestUIAPIMePermissions(t *testing.T) {
+	e := policyEnv(t, true)
+	r := e.do(t, "GET", "/api/v1/me", e.human("alice", time.Minute, "Gate.PolicyAdmin"), "", nil)
+	var me uiapi.Me
+	_ = json.NewDecoder(r.Body).Decode(&me)
+	got := map[string]uiapi.Permission{}
+	for _, p := range me.Permissions {
+		got[p.Role] = p
+	}
+	if p := got["padmin"]; len(me.Permissions) != 1 || strings.Join(p.Actions, ",") != "policy.read,policy.propose,policy.approve" || p.Hosts == nil || p.Types == nil {
+		t.Fatalf("policy admin permissions: %+v", me.Permissions)
+	}
+
+	// A managed role shows up once its revision is active.
+	tok := e.human("alice", time.Minute, "Gate.PolicyAdmin")
+	_, d := propose(t, e, tok, "", managedDoc("app-*"))
+	if code, rsn := post(t, e, e.human("bob", time.Minute, "Gate.PolicyAdmin"), "/api/v1/policy/revisions/"+d.ID+"/approve"); code != 200 {
+		t.Fatalf("approve: %d %s", code, rsn)
+	}
+	if code, rsn := post(t, e, tok, "/api/v1/policy/revisions/"+d.ID+"/activate"); code != 200 {
+		t.Fatalf("activate: %d %s", code, rsn)
+	}
+	r = e.do(t, "GET", "/api/v1/me", e.human("dave", time.Minute, "Gate.Operator"), "", nil)
+	me = uiapi.Me{}
+	_ = json.NewDecoder(r.Body).Decode(&me)
+	if len(me.Permissions) != 1 {
+		t.Fatalf("operator permissions: %+v", me.Permissions)
+	}
+	p := me.Permissions[0]
+	if p.Role != "web-writer" || p.Zones[0] != "example.com" || p.Actions[0] != policy.ActionRecordWrite || p.Hosts[0] != "app-*" || p.Types[0] != "CNAME" {
+		t.Fatalf("managed permission: %+v", p)
+	}
+}

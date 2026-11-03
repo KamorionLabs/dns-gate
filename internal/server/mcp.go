@@ -66,20 +66,7 @@ func (s *Server) newMCP() *mcpServer {
 }
 
 // baseURL is the public base URL of the gate.
-func (m *mcpServer) baseURL(r *http.Request) string {
-	c := m.s.cfg.Config
-	if c.MCP.PublicURL != "" {
-		return strings.TrimSuffix(c.MCP.PublicURL, "/")
-	}
-	if m.s.ui != nil {
-		return m.s.ui.origin
-	}
-	scheme := "https"
-	if r.TLS == nil && (strings.HasPrefix(r.Host, "127.0.0.1") || strings.HasPrefix(r.Host, "localhost")) {
-		scheme = "http"
-	}
-	return scheme + "://" + r.Host
-}
+func (m *mcpServer) baseURL(r *http.Request) string { return m.s.publicBaseURL(r) }
 
 // serveResourceMetadata serves the RFC 9728 protected resource metadata.
 func (m *mcpServer) serveResourceMetadata(w http.ResponseWriter, r *http.Request) {

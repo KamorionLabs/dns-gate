@@ -5,6 +5,7 @@ import type {
   AdoptSelection,
   AuditPage,
   AuditQuery,
+  Connect,
   EffectivePolicy,
   ExplainRequest,
   ExplainResponse,
@@ -33,6 +34,7 @@ export class ApiError extends Error {
 
 export interface Backend {
   me(): Promise<Me>;
+  connect(): Promise<Connect>;
   zones(): Promise<ZoneSummary[]>;
   inventory(zone: string): Promise<ZoneInventory>;
   audit(q: AuditQuery): Promise<AuditPage>;
@@ -122,6 +124,7 @@ const rev = (id: string) => '/api/v1/policy/revisions/' + encodeURIComponent(id)
 
 const http: Backend = {
   me: () => request('GET', '/api/v1/me'),
+  connect: () => request('GET', '/api/v1/connect'),
   zones: () => request('GET', '/api/v1/zones'),
   inventory: (zone) => request('GET', `/api/v1/zones/${encodeURIComponent(zone)}/rrsets`),
   audit: (q) => request('GET', '/api/v1/audit' + query(q)),

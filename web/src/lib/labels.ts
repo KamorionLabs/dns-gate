@@ -9,10 +9,10 @@ export const statusLabel: Record<Status, string> = {
 };
 
 export const statusHelp: Record<Status, string> = {
-  managed: 'Created or adopted by the gate; its owner team may change it.',
-  tainted: 'Changed outside the gate. Writes are blocked until an admin re-adopts it.',
-  pending: 'A gate write is in flight; confirmed by the next read of the zone.',
-  foreign: 'Not created by the gate. Read-only here; change it in the registrar console or adopt it.',
+  managed: 'Created or adopted by the gate: the only records it changes, and only for the team that owns them.',
+  tainted: 'Changed outside the gate. Writes on it are blocked until it is re-adopted.',
+  pending: 'Written by the gate, waiting for the next read of the zone to confirm it.',
+  foreign: 'Exists at EuroDNS, but the gate leaves it untouched until someone adopts it.',
   missing: 'Owned by the gate but gone from the zone (deleted outside the gate).',
 };
 

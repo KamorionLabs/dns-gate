@@ -6,6 +6,7 @@
   import ZonesView from './views/ZonesView.svelte';
   import ZoneView from './views/ZoneView.svelte';
   import JournalView from './views/JournalView.svelte';
+  import ConnectView from './views/ConnectView.svelte';
   import PolicyOverview from './views/PolicyOverview.svelte';
   import PolicyEdit from './views/PolicyEdit.svelte';
   import ProposalsView from './views/ProposalsView.svelte';
@@ -25,6 +26,8 @@
     {#key router.route.zone}<ZoneView zone={router.route.zone} />{/key}
   {:else if router.route.name === 'journal'}
     <JournalView />
+  {:else if router.route.name === 'connect'}
+    <ConnectView />
   {:else if router.route.name === 'proposal'}
     {#key router.route.id}<ProposalView id={router.route.id} />{/key}
   {:else if router.route.name === 'policy'}

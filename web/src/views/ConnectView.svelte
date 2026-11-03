@@ -1,0 +1,280 @@
+<script lang="ts">
+  import { api } from '../lib/api';
+  import type { Connect } from '../lib/types';
+  import { router } from '../lib/router.svelte';
+  import {
+    TOKEN_COMMAND_PLACEHOLDER,
+    claudeCodeCommand,
+    curlCommand,
+    desktopConfig,
+    loginCommand,
+    terraformProvider,
+    tokenCommand,
+  } from '../lib/connect';
+  import CopyText from '../components/CopyText.svelte';
+  import HclBlock from '../components/HclBlock.svelte';
+  import Icon from '../components/Icon.svelte';
+
+  let info = $state<Connect | null>(null);
+  let error = $state<string | null>(null);
+
+  $effect(() => {
+    api
+      .connect()
+      .then((c) => (info = c))
+      .catch((e: Error) => (error = e.message));
+  });
+
+  const tabs = [
+    { key: 'claude-code', label: 'Claude Code' },
+    { key: 'desktop', label: 'Claude Desktop and other MCP clients' },
+    { key: 'terraform', label: 'Terraform / OpenTofu' },
+    { key: 'api', label: 'API' },
+  ] as const;
+  const tab = $derived(tabs.find((t) => t.key === router.params.get('tab'))?.key ?? 'claude-code');
+  const entra = $derived(info?.issuer?.kind === 'entra');
+  const mcpState = $derived(!info?.mcp.enabled ? 'Disabled' : info.mcp.allow_writes ? 'Read and write' : 'Read-only');
+</script>
+
+<header class="head">
+  <p class="eyebrow">Connect</p>
+  <h1>Use the gate from your assistant, Terraform or scripts</h1>
+  <p class="meta">Every snippet below is filled in for this gate. You sign in as yourself: the gate applies your permissions, nothing more.</p>
+</header>
+
+{#if error}
+  <div class="empty"><strong>Connection details could not be loaded</strong>{error}</div>
+{:else if !info}
+  <div class="skeleton block"></div>
+{:else}
+  <dl class="facts">
+    <div><dt class="eyebrow">Gate URL</dt><dd><CopyText text={info.base_url} label="gate URL" /></dd></div>
+    <div>
+      <dt class="eyebrow">MCP endpoint</dt>
+      <dd>
+        {#if info.mcp.enabled}<CopyText text={info.mcp.url} label="MCP endpoint" />{/if}
+        <span class="state" class:off={!info.mcp.enabled} class:ro={info.mcp.enabled && !info.mcp.allow_writes}>{mcpState}</span>
+      </dd>
+    </div>
+    {#if info.issuer}
+      <div>
+        <dt class="eyebrow">Sign-in</dt>
+        <dd>
+          {#if entra && info.issuer.tenant_id}Entra ID tenant <CopyText text={info.issuer.tenant_id} label="tenant id" />
+          {:else}<CopyText text={info.issuer.url} label="issuer URL" />{/if}
+        </dd>
+      </div>
+    {/if}
+    {#if info.cli_scope}
+      <div><dt class="eyebrow">Token scope</dt><dd><CopyText text={info.cli_scope} label="token scope" /></dd></div>
+    {/if}
+  </dl>
+
+  <div class="tabs" role="tablist" aria-label="Tool">
+    {#each tabs as t (t.key)}
+      <button role="tab" type="button" aria-selected={tab === t.key} onclick={() => router.setParams({ tab: t.key === 'claude-code' ? undefined : t.key })}>
+        {t.label}{#if t.key === 'claude-code'}<span class="rec">Recommended</span>{/if}
+      </button>
+    {/each}
+  </div>
+
+  <section class="panel" role="tabpanel">
+    {#if tab === 'claude-code' || tab === 'desktop'}
+      {#if !info.mcp.enabled}
+        <p class="note off"><Icon name="lock" size={14} /><span>The MCP server is disabled on this gate. Administrators enable it with <span class="mono">mcp.enabled</span>.</span></p>
+      {:else if !info.mcp.allow_writes}
+        <p class="note"><Icon name="shield" size={14} /><span>Read-only: assistants can look up zones, records and the journal, not change them.</span></p>
+      {:else}
+        <p class="note"><Icon name="shield" size={14} /><span>Assistants can change records, always through a plan then an apply, and only records your teams own.</span></p>
+      {/if}
+    {/if}
+
+    {#if tab === 'claude-code' && info.mcp.enabled}
+      <p class="lead">One command. Claude Code runs the helper on every connection and again on a 401 or 403, so the token never goes stale.</p>
+      <ol class="steps">
+        {#if entra}
+          <li>Install the <a href="https://learn.microsoft.com/cli/azure/install-azure-cli" target="_blank" rel="noreferrer">Azure CLI</a> and <a href="https://jqlang.org/download/" target="_blank" rel="noreferrer">jq</a>.</li>
+          <li>Sign in to the gate's tenant: <CopyText text={loginCommand(info)} label="login command" /></li>
+        {:else}
+          <li>Install <a href="https://jqlang.org/download/" target="_blank" rel="noreferrer">jq</a> and a command that prints an access token of <span class="mono">{info.issuer?.url ?? 'the gate issuer'}</span> on stdout.</li>
+        {/if}
+        <li>
+          Add the server{#if !entra}, replacing <span class="mono">{TOKEN_COMMAND_PLACEHOLDER}</span>{/if}:
+          <HclBlock hcl={claudeCodeCommand(info)} filename="shell" download={false} wrap />
+        </li>
+        <li>In Claude Code, <span class="mono">/mcp</span> lists <span class="mono">eurodns-gate</span> as connected.</li>
+      </ol>
+      {#if entra}
+        <p class="hint">If <span class="mono">az</span> answers that consent is required (AADSTS65001), the gate application does not trust the Azure CLI yet: ask the gate administrators to pre-authorize it.</p>
+      {/if}
+    {:else if tab === 'desktop' && info.mcp.enabled}
+      <p class="lead">Claude Desktop and most other MCP clients only start local servers: <span class="mono">mcp-remote</span> (Node.js, run with npx) bridges them to the gate.</p>
+      <ol class="steps">
+        <li>Get a token: <CopyText text={tokenCommand(info)} label="token command" /></li>
+        <li>
+          Add the server to <span class="mono">claude_desktop_config.json</span> (Settings, Developer, Edit config) and paste the token after <span class="mono">Bearer </span>:
+          <HclBlock hcl={desktopConfig(info)} filename="claude_desktop_config.json" download={false} />
+        </li>
+        <li>Restart the client.</li>
+      </ol>
+      <p class="hint">The token lasts about an hour. To refresh it, run the token command again, replace <span class="mono">AUTH_HEADER</span> and restart the client; Claude Code refreshes it on its own. Clients that speak Streamable HTTP and accept custom headers can use the endpoint directly with an <span class="mono">Authorization: Bearer</span> header.</p>
+    {:else if tab === 'terraform'}
+      <p class="lead">The <span class="mono">kamorionlabs/eurodns</span> provider in gate mode: the gate holds the EuroDNS key, Terraform only proves who runs it.</p>
+      <HclBlock hcl={terraformProvider(info)} filename="provider.tf" />
+      <p class="hint">
+        {#if entra}Locally, <span class="mono">azure_identity</span> uses your <span class="mono">az login</span>. In an Azure DevOps pipeline, uncomment <span class="mono">azure_devops</span> with the id of the service connection: it takes precedence inside the job.{/if}
+        To move records the gate already holds into a stack, open a zone and use Export Terraform.
+      </p>
+    {:else if tab === 'api'}
+      <p class="lead">The API under <span class="mono">/api/v1</span> accepts the same bearer tokens. Who am I, with my roles and permissions:</p>
+      <HclBlock hcl={curlCommand(info)} filename="shell" download={false} />
+      <p class="hint">Also <span class="mono">/api/v1/zones</span>, <span class="mono">/api/v1/zones/&lbrace;zone&rbrace;/rrsets</span> and <span class="mono">/api/v1/audit</span>. EuroDNS clients use the gate URL as their base URL.</p>
+    {/if}
+  </section>
+{/if}
+
+<style>
+  .head {
+    display: grid;
+    gap: var(--s2);
+    margin-bottom: var(--s6);
+  }
+  h1 {
+    font-size: var(--t-h2);
+    letter-spacing: -0.015em;
+  }
+  .meta {
+    color: var(--ink-3);
+    max-width: 72ch;
+  }
+  .block {
+    height: 160px;
+  }
+  .facts {
+    margin: 0 0 var(--s6);
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s3) var(--s8);
+  }
+  .facts div {
+    flex: none;
+    max-width: 100%;
+    display: grid;
+    gap: 2px;
+  }
+  .facts dd {
+    margin: 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--s2);
+    color: var(--ink-2);
+  }
+  .state {
+    font-size: 12px;
+    padding: 1px 8px;
+    border-radius: 10px;
+    background: var(--stamp-wash);
+    color: var(--stamp);
+    font-weight: 500;
+  }
+  .state.ro {
+    background: var(--seal-ink-wash);
+    color: var(--seal-ink);
+  }
+  .state.off {
+    background: var(--pencil-wash);
+    color: var(--ink-3);
+  }
+  .tabs {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 2px;
+    padding: 3px;
+    margin-bottom: var(--s5);
+    border-radius: var(--r-lg);
+    background: var(--well);
+    border: 1px solid var(--rule-soft);
+  }
+  .tabs button {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 28px;
+    padding: 0 12px;
+    border: 0;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--ink-3);
+    cursor: pointer;
+    font-weight: 500;
+  }
+  .tabs button[aria-selected='true'] {
+    background: var(--sheet-raised);
+    color: var(--ink);
+    box-shadow: 0 0 0 1px var(--rule);
+  }
+  .rec {
+    font-size: var(--t-caption);
+    padding: 0 6px;
+    border-radius: 8px;
+    background: var(--seal-ink-wash);
+    color: var(--seal-ink);
+  }
+  .panel {
+    display: grid;
+    gap: var(--s4);
+    max-width: 880px;
+  }
+  .note {
+    display: flex;
+    align-items: center;
+    gap: var(--s2);
+    padding: var(--s2) var(--s3);
+    border-radius: var(--r-md);
+    background: var(--seal-ink-wash);
+    color: var(--seal-ink);
+    font-weight: 500;
+  }
+  .note.off {
+    background: var(--pencil-wash);
+    color: var(--ink-2);
+  }
+  .lead {
+    color: var(--ink-2);
+    font-size: var(--t-lead);
+  }
+  .steps {
+    margin: 0;
+    padding-left: var(--s5);
+    display: grid;
+    gap: var(--s3);
+    color: var(--ink-2);
+  }
+  .steps li {
+    padding-left: var(--s1);
+  }
+  .steps :global(.hcl) {
+    margin-top: var(--s2);
+  }
+  .panel :global(.hcl pre) {
+    max-height: none;
+  }
+  .facts :global(.copy),
+  .steps :global(.copy) {
+    text-align: left;
+  }
+  @media (max-width: 720px) {
+    .facts :global(.copy),
+    .steps :global(.copy) {
+      max-width: 100%;
+      word-break: break-all;
+    }
+  }
+  .hint {
+    color: var(--ink-3);
+  }
+  a {
+    color: var(--seal-ink);
+  }
+</style>

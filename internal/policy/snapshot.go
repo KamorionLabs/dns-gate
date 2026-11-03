@@ -334,6 +334,38 @@ func (s *Snapshot) Decide(roles []string, action, zone string, key *rrset.Key) D
 	return Decision{Denied: "no rule grants " + action}
 }
 
+// Permissions lists the effective rules of roles, sorted by role. Managed
+// rules lose the actions Decide ignores (policy.*, outside the bounds).
+func (s *Snapshot) Permissions(roles []string) []uiapi.Permission {
+	out := []uiapi.Permission{}
+	sorted := append([]string(nil), roles...)
+	sort.Strings(sorted)
+	for _, name := range sorted {
+		cr := s.roles[name]
+		if cr == nil {
+			continue
+		}
+		for _, r := range cr.role.Rules {
+			actions := []string{}
+			for _, a := range r.Actions {
+				if cr.layer != LayerManaged || s.withinBounds(r, a) {
+					actions = append(actions, a)
+				}
+			}
+			if len(actions) == 0 {
+				continue
+			}
+			p := uiapi.Permission{Role: name, Zones: append([]string{}, r.Zones...), Actions: actions, Hosts: []string{}, Types: []string{}}
+			if r.Records != nil {
+				p.Hosts = append(p.Hosts, r.Records.Hosts...)
+				p.Types = append(p.Types, r.Records.Types...)
+			}
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // withinBounds re-checks a managed rule against the base bounds (defense
 // in depth: documents are validated before activation).
 func (s *Snapshot) withinBounds(r uiapi.Rule, action string) bool {

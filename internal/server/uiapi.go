@@ -89,13 +89,16 @@ func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case rest == "/me":
 		writeJSON(w, http.StatusOK, uiapi.Me{
-			Subject:  subj.String(),
-			Name:     subj.Name,
-			Category: subj.Category,
-			Roles:    nonNil(subj.Roles),
-			Teams:    nonNil(subj.Teams),
-			Groups:   nonNil(subj.Groups),
+			Subject:     subj.String(),
+			Name:        subj.Name,
+			Category:    subj.Category,
+			Roles:       nonNil(subj.Roles),
+			Teams:       nonNil(subj.Teams),
+			Groups:      nonNil(subj.Groups),
+			Permissions: s.cfg.Policy.Current().Permissions(subj.Roles),
 		})
+	case rest == "/connect":
+		writeJSON(w, http.StatusOK, s.connectInfo(r))
 	case rest == "/zones":
 		zs, err := s.cfg.Engine.Zones(ctx, subj)
 		if err != nil {
@@ -135,6 +138,42 @@ func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "unknown API endpoint")
 	}
+}
+
+// publicBaseURL is the public base URL of the gate: mcp.public_url, else
+// the UI origin, else the request host.
+func (s *Server) publicBaseURL(r *http.Request) string {
+	c := s.cfg.Config
+	if c.MCP.PublicURL != "" {
+		return strings.TrimSuffix(c.MCP.PublicURL, "/")
+	}
+	if s.ui != nil {
+		return s.ui.origin
+	}
+	scheme := "https"
+	if r.TLS == nil && (strings.HasPrefix(r.Host, "127.0.0.1") || strings.HasPrefix(r.Host, "localhost")) {
+		scheme = "http"
+	}
+	return scheme + "://" + r.Host
+}
+
+// connectInfo describes how clients reach the gate (UI Connect page).
+func (s *Server) connectInfo(r *http.Request) uiapi.Connect {
+	c := s.cfg.Config
+	base := s.publicBaseURL(r)
+	out := uiapi.Connect{
+		BaseURL:  base,
+		MCP:      uiapi.ConnectMCP{Enabled: s.mcp != nil, URL: base + mcpPath, AllowWrites: s.mcp != nil && c.MCP.AllowWrites && s.cfg.Ops != nil},
+		CLIScope: c.UI.CLIScope,
+	}
+	if s.ui != nil {
+		out.ClientID = c.UI.ClientID
+		out.Issuer = &uiapi.ConnectIssuer{URL: s.ui.issuer.Issuer, Kind: "oidc"}
+		if tid, ok := config.EntraTenant(s.ui.issuer.Issuer); ok {
+			out.Issuer.Kind, out.Issuer.TenantID = "entra", tid
+		}
+	}
+	return out
 }
 
 // readableZones returns the managed zones the subject may see in the UI.

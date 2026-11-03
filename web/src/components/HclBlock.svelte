@@ -2,7 +2,12 @@
   import { downloadText } from '../lib/adoptDraft';
   import Icon from './Icon.svelte';
 
-  let { hcl, filename }: { hcl: string; filename: string } = $props();
+  let {
+    hcl,
+    filename,
+    download = true,
+    wrap = false,
+  }: { hcl: string; filename: string; download?: boolean; wrap?: boolean } = $props();
   let copied = $state(false);
 
   async function copy() {
@@ -20,9 +25,9 @@
   <div class="bar">
     <span class="mono name">{filename}</span>
     <button class="btn quiet" type="button" onclick={copy}><Icon name={copied ? 'check' : 'copy'} size={13} />{copied ? 'Copied' : 'Copy'}</button>
-    <button class="btn quiet" type="button" onclick={() => downloadText(filename, hcl)}><Icon name="download" size={13} />Download</button>
+    {#if download}<button class="btn quiet" type="button" onclick={() => downloadText(filename, hcl)}><Icon name="download" size={13} />Download</button>{/if}
   </div>
-  <pre class="mono">{hcl}</pre>
+  <pre class="mono" class:wrap>{hcl}</pre>
 </div>
 
 <style>
@@ -56,5 +61,9 @@
     font-size: 12px;
     line-height: 1.6;
     color: var(--ink-2);
+  }
+  pre.wrap {
+    white-space: pre-wrap;
+    word-break: break-all;
   }
 </style>

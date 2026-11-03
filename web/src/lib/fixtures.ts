@@ -10,6 +10,7 @@ import type {
   AuditPage,
   AuditQuery,
   Binding,
+  Connect,
   EffectivePolicy,
   ExplainRequest,
   ExplainResponse,
@@ -59,6 +60,7 @@ const me: Me = asReader
       roles: ['viewer'],
       teams: ['ops'],
       groups: ['dns-viewers'],
+      permissions: [{ role: 'viewer', zones: ['*'], actions: ['dns.read', 'ui.read', 'policy.read'], hosts: [], types: [] }],
     }
   : {
       subject: 'entra:alice@example.com',
@@ -67,7 +69,34 @@ const me: Me = asReader
       roles: ['viewer', 'policy-admin', 'app-cname-writer'],
       teams: ['web', 'platform'],
       groups: ['policy-admins', 'web-humans'],
+      permissions: [
+        {
+          role: 'app-cname-writer',
+          zones: ['example.com'],
+          actions: ['dns.read', 'dns.record.write'],
+          hosts: ['*', '*.staging', '_*.*'],
+          types: ['CNAME', 'TXT'],
+        },
+        { role: 'policy-admin', zones: ['*'], actions: ['policy.read', 'policy.propose', 'policy.approve'], hosts: [], types: [] },
+        { role: 'viewer', zones: ['*'], actions: ['dns.read', 'ui.read', 'policy.read'], hosts: [], types: [] },
+      ],
     };
+
+// ?mcp=readonly or ?mcp=off in the page URL changes the MCP state of the Connect page.
+const mcpMode = new URLSearchParams(window.location.search).get('mcp');
+const GATE = 'https://eurodns-gate.example.com';
+const UI_CLIENT_ID = '3f2a1b0c-9d8e-4f7a-b6c5-d4e3f2a1b0c9';
+const connect: Connect = {
+  base_url: GATE,
+  mcp: { enabled: mcpMode !== 'off', url: GATE + '/mcp', allow_writes: mcpMode !== 'readonly' && mcpMode !== 'off' },
+  issuer: {
+    url: 'https://login.microsoftonline.com/7c1e2d3f-4a5b-6c7d-8e9f-0a1b2c3d4e5f/v2.0',
+    kind: 'entra',
+    tenant_id: '7c1e2d3f-4a5b-6c7d-8e9f-0a1b2c3d4e5f',
+  },
+  client_id: UI_CLIENT_ID,
+  cli_scope: `api://${UI_CLIENT_ID}/.default`,
+};
 
 const foreign = (host: string, type: string, ttl: number, values: string[], prot = false): RRset => ({
   host, type, ttl, values, status: 'foreign', protected: prot, adopted: false,
@@ -830,6 +859,7 @@ function terraform(zone: string, q: TerraformQuery): string {
 
 export const fixtureBackend = {
   me: () => delay(me),
+  connect: () => delay(connect),
   zones: () =>
     delay(
       inventories.map((inv) => {
