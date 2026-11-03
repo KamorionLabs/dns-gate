@@ -454,13 +454,16 @@ layer (section 15). It never performs DNS writes.
   created by / updated by (actor and category: `human`, `pipeline` or `key`),
   timestamps, adoption flag, expiry for ephemeral RRsets, last request id.
 
-  | Status | Meaning |
-  |---|---|
-  | `managed` | owned by the gate, upstream content matches |
-  | `pending` | write in flight or interrupted, resolved by reconcile |
-  | `tainted` | owned, changed outside the gate; writes blocked |
-  | `missing` | owned, deleted outside the gate |
-  | `foreign` | exists upstream, not owned; read-only for the gate |
+  | Status | UI label | Meaning |
+  |---|---|---|
+  | `managed` | Managed | owned by the gate, upstream content matches |
+  | `pending` | Pending | write in flight or interrupted, resolved by reconcile |
+  | `tainted` | Drifted | owned, changed outside the gate; writes blocked |
+  | `missing` | Missing | owned, deleted outside the gate |
+  | `foreign` | Not managed | exists upstream, not owned; read-only for the gate |
+
+  The UI groups `tainted`, `missing` and `pending` as *Needs attention*, and calls
+  zones found by discovery but not managed *Not managed (read-only)*.
 
 - **Audit log**: filterable by zone, host, type, subject, actor category, decision,
   time range; each entry shows the RRset diff (old → new TTL and values), the
