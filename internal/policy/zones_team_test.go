@@ -293,3 +293,27 @@ func TestTeamFromValidation(t *testing.T) {
 		t.Fatal(paths(errs))
 	}
 }
+
+// The Azure DevOps example of CONFIG.md: team = service connection name.
+func TestTeamFromAzureDevOpsServiceConnection(t *testing.T) {
+	c := discoveryConfig()
+	c.Issuers = append(c.Issuers, config.Issuer{Name: "azure-devops", Issuer: "https://vstoken.dev.azure.com/org-id"})
+	tf := &config.TeamFrom{Claim: "sub", Regex: `^sc://[^/]+/[^/]+/(eurodns-gate-[a-z0-9-]+)$`}
+	if err := config.ValidateTeamFrom(tf.Claim, tf.Regex, tf.Prefix); err != nil {
+		t.Fatal(err)
+	}
+	c.Bindings = append(c.Bindings, config.Binding{Role: "admin", TeamFrom: tf,
+		Subjects: []config.Subject{{Issuer: "azure-devops", Claims: map[string]config.StringList{"sub": {"sc://org/project/eurodns-gate-*"}}}}})
+	snap := mustHolder(t, c).Current()
+	for sub, team := range map[string]string{
+		"sc://org/project/eurodns-gate-certificates-prd": "eurodns-gate-certificates-prd",
+		"sc://org/project/eurodns-gate-web":              "eurodns-gate-web",
+		"sc://org/project/eurodns-gate-":                 "",
+		"sc://org/project/other":                         "",
+	} {
+		r := snap.Resolve("azure-devops", map[string]any{"sub": sub})
+		if got := strings.Join(r.Teams, ","); got != team {
+			t.Errorf("%s: teams %q, want %q", sub, got, team)
+		}
+	}
+}

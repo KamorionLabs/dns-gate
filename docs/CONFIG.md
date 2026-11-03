@@ -159,7 +159,7 @@ Azure DevOps also issues its own OIDC token for a service connection (issuer `ht
 
 - one service connection per pipeline, used for nothing but the gate (a generic service connection without credentials is enough), authorized for that pipeline only;
 - no Entra federated credential, AWS role or other federation trusts its subject (check the trust policies match subjects exactly, not with wildcards);
-- the issuer is bound to those exact subjects.
+- the issuer is bound to those exact subjects, or, to bind every gate service connection with one rule ([team derived from a claim](#team-derived-from-a-claim)), to a subject prefix dedicated to the gate that no other federation trusts either.
 
 ```yaml
 issuers:
@@ -193,6 +193,28 @@ In the pipeline:
       serviceEndpoint: eurodns-gate-certificates-prd
   ```
 - the provider takes the connection id from `service_connection_id`, or from `EURODNS_GATE_ADO_SERVICE_CONNECTION_ID`, which a variable group named after the pipeline can carry so that nothing holds an id.
+
+One binding for every dedicated service connection, each one owning its records (team = service connection name), so that a new pipeline needs a service connection but no gate change:
+
+```yaml
+issuers:
+  - name: azure-devops
+    issuer: https://vstoken.dev.azure.com/<organization-id>
+    audiences: ["api://AzureADTokenExchange"]
+    bound_claims:
+      sub: ["sc://<organization>/<project>/eurodns-gate-*"]   # prefix dedicated to the gate
+    category: pipeline
+bindings:
+  - role: pipeline-writer
+    team_from:
+      claim: sub
+      regex: "^sc://[^/]+/[^/]+/(eurodns-gate-[a-z0-9-]+)$"   # team eurodns-gate-<name>
+    subjects:
+      - issuer: azure-devops
+        claims: {sub: ["sc://<organization>/<project>/eurodns-gate-*"]}
+```
+
+The glob turns the right to create service connections into the right to mint gate identities: see the trade-off under [Team derived from a claim](#team-derived-from-a-claim).
 
 When the pipeline already logs in to Azure, the Entra token above (audience = the gate application) needs no such precautions and is preferable.
 
@@ -261,7 +283,7 @@ A binding needs `groups`, `subjects` or both (a subject matching either is bound
 
 ### Team derived from a claim
 
-Binding pipeline identities one by one is heavy when each pipeline should own its records. `team_from` gives each subject its own team, computed from one of its claims, so a single binding covers every pipeline whose identity matches a glob:
+Binding pipeline identities one by one is heavy when each pipeline should own its records. `team_from` gives each subject its own team, computed from one of its claims, so a single binding covers every pipeline whose identity matches a glob. With [Azure DevOps OIDC](#azure-devops-oidc) tokens, the team is the service connection name (`sc://<organization>/<project>/<service connection>`, example in that section). With GitHub Actions, the repository:
 
 ```yaml
 issuers:
@@ -287,9 +309,16 @@ bindings:
 - Teams are collected in binding order as with a fixed `team` (base bindings first, in file order) and the first one owns new RRsets: give pipelines matched by a `team_from` binding no other team-bearing binding. The explain simulator shows the derived team (`role@team`), who-can and the impact analysis show the rule. The impact analysis cannot count RRsets owned by derived teams (they are only known per subject).
 - Same rules in the managed layer (UI editor: "Team from a claim").
 
-Other subjects that encode one pipeline per value: Kubernetes service accounts (`^system:serviceaccount:([a-z0-9-]+):dns-writer$`, team per namespace), AWS role ARNs (`^arn:aws:iam::111111111111:role/ci-([a-z0-9-]+)$`), any CI whose `sub` names the project. With Entra ID access tokens (Azure DevOps, managed identities), `sub` is a pairwise id and there is no readable per-pipeline claim: keep one binding per `oid` there, or derive the team from a claim your tokens do carry.
+Other subjects that encode one pipeline per value: Kubernetes service accounts (`^system:serviceaccount:([a-z0-9-]+):dns-writer$`, team per namespace), AWS role ARNs (`^arn:aws:iam::111111111111:role/ci-([a-z0-9-]+)$`), any CI whose `sub` names the project. Entra ID access tokens (managed identities, Azure DevOps after the exchange for an Entra token) are different: their `sub` is a pairwise id and they carry no readable per-pipeline claim, so keep one binding per `oid` there.
 
 **Trade-off.** Ownership isolates pipelines from each other: each one can only modify or delete the RRsets its own team created. But every identity matching the binding gets the role, so any of them can **create** any RRset that does not exist yet and that the role allows (hosts, types), and a new identity matching the glob is bound without a gate change. Keep the role narrow (hosts, types, zones), keep `protected` records for what must never change, and treat the right to create identities matching the glob (repositories, service connections, namespaces) as the right to write within that role. Two subjects whose captures differ only by case share a team.
+
+With Azure DevOps, the glob means that anyone allowed to **create a service connection** in the project with a name under the prefix, and to **authorize it for a pipeline they control**, mints a new trusted gate identity. That identity gets its own team, so it cannot change or delete the records of other teams, but it can create any not-yet-existing name its role allows. Mitigations:
+
+- keep the glob prefix (`eurodns-gate-*`) dedicated to the gate, and make sure no Entra federated credential, AWS role or other federation trusts subjects under it;
+- restrict who may create service connections in the project (*Endpoint Creators* and *Endpoint Administrators* of the project, and organization-level service connection permissions) to the people who would otherwise change the gate configuration;
+- require approvals and checks on the service connections (or on the environments the pipelines deploy to), so a new pipeline cannot use one unreviewed;
+- watch the audit log: every write carries the subject (`azure-devops:sc://...`) and the derived team, and a team that appears for the first time is a new service connection.
 
 ## Protected records
 
