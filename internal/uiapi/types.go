@@ -73,7 +73,7 @@ type ZoneSummary struct {
 	Pending      int        `json:"pending"`
 	Foreign      int        `json:"foreign"`
 	LastSyncedAt *time.Time `json:"last_synced_at,omitempty"` // last upstream read
-	LastWriteAt  *time.Time `json:"last_write_at,omitempty"`
+	LastWriteAt  *time.Time `json:"last_write_at,omitempty"`  // latest successful gate write, from the journal
 }
 
 // RRset statuses.

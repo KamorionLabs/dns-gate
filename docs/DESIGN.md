@@ -446,7 +446,8 @@ layer (section 15). It never performs DNS writes.
 ### 14.1 Views
 
 - **Zones**: managed zones with counters (RRsets, managed, tainted, pending,
-  foreign), last upstream sync, last gate write; with zone discovery (15.7), the
+  foreign), last upstream sync, last gate write (latest successful write found
+  in the journal, so it survives restarts and is the same on every replica); with zone discovery (15.7), the
   zones of the EuroDNS account that are not managed, flagged unmanaged, with a
   "Manage this zone" action for policy proposers.
 - **Inventory of a zone**: every RRset with its status, owner team, protected flag,
