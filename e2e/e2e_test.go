@@ -44,6 +44,8 @@ const (
 type env struct {
 	t        *testing.T
 	fake     *eurodnstest.Server
+	upstream *httptest.Server // fake plus the account domain listing
+	account  *accountDomains
 	idp      *oidctest.Provider
 	gate     *httptest.Server
 	app      *app.App
@@ -70,6 +72,7 @@ func TestEndToEnd(t *testing.T) {
 	t.Run("9_bulk_adopt_and_terraform_export", e.scenarioBulkAdopt)
 	t.Run("10_import_owned_rrset_with_write_only", e.scenarioImportOwned)
 	t.Run("11_mcp", e.scenarioMCP)
+	t.Run("12_zone_discovery_and_team_from", e.scenarioDiscoveryTeamFrom)
 }
 
 func setup(t *testing.T) *env {
@@ -92,6 +95,9 @@ func setup(t *testing.T) *env {
 		{Type: "CNAME", Host: "blog", TTL: 3600, RData: "blog.example.net."},
 		{Type: "CNAME", Host: "rel", TTL: 3600, RData: "internal"},
 	}})
+
+	e.account = &accountDomains{names: []string{zone}}
+	e.upstream = e.account.server(t, e.fake.URL)
 
 	e.idp = oidctest.New()
 	t.Cleanup(e.idp.Close)
@@ -130,6 +136,7 @@ upstream:
   app_id: %[2]s
   rate: {every: 5ms, burst: 50}
 zones: [%[3]s]
+zones_discovery: {enabled: true}
 check_on_write: true
 reconcile_interval: 1h
 limits: {max_changes_per_request: 20}
@@ -170,7 +177,15 @@ roles:
     rules:
       - zones: ["*"]
         actions: [policy.read, policy.propose, policy.approve, ui.read]
+  pipeline-writer:
+    rules:
+      - zones: [%[9]s]
+        actions: [dns.read, dns.record.write, ui.read]
+        records: {hosts: ["*.apps"], types: [CNAME]}
 bindings:
+  - role: pipeline-writer
+    team_from: {claim: sub, regex: "^pipeline:([a-z0-9-]+)$", prefix: p-}
+    subjects: [{issuer: ci, claims: {sub: ["pipeline:*"]}}]
   - role: web-writer
     team: web
     subjects: [{issuer: ci, claims: {sub: [ci-web]}}]
@@ -187,10 +202,10 @@ policy:
   editable: true
   require_approval: true
   bounds:
-    zones: [%[3]s]
+    zones: [%[3]s, %[9]s]
     actions: [dns.read, dns.record.write, ui.read]
 %[8]s
-`, e.fake.URL, upstreamApp, zone, filepath.Join(t.TempDir(), "gate.db"), e.idp.URL, acmeAppID, hex.EncodeToString(sum[:]), extra)
+`, e.upstream.URL, upstreamApp, zone, filepath.Join(t.TempDir(), "gate.db"), e.idp.URL, acmeAppID, hex.EncodeToString(sum[:]), extra, discoveredZone)
 	cfg, err := config.Parse([]byte(yaml), func(k string) string {
 		if k == "EURODNS_API_KEY" {
 			return upstreamKey
@@ -299,6 +314,10 @@ func (e *env) assertForeignIntact(t *testing.T) {
 }
 
 func recordTF(name, host, typ string, values ...string) string {
+	return recordTFIn(zone, name, host, typ, values...)
+}
+
+func recordTFIn(zoneName, name, host, typ string, values ...string) string {
 	q := make([]string, len(values))
 	for i, v := range values {
 		q[i] = fmt.Sprintf("%q", v)
@@ -311,7 +330,7 @@ resource "eurodns_record_set" %q {
   ttl    = 3600
   values = [%s]
 }
-`, name, zone, host, typ, strings.Join(q, ", "))
+`, name, zoneName, host, typ, strings.Join(q, ", "))
 }
 
 func (e *env) scenarioCreateUpdate(t *testing.T) {

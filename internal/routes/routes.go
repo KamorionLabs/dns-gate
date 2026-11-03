@@ -78,17 +78,23 @@ var (
 
 // Table resolves requests against the generated operations.
 type Table struct {
-	ops   []Operation
-	zones map[string]bool
+	ops     []Operation
+	managed func(zone string) bool
 }
 
-// New builds a table for the managed zones.
+// New builds a table for a fixed list of managed zones.
 func New(zones []string) *Table {
-	t := &Table{ops: operations, zones: map[string]bool{}}
+	set := map[string]bool{}
 	for _, z := range zones {
-		t.zones[strings.ToLower(z)] = true
+		set[strings.ToLower(z)] = true
 	}
-	return t
+	return NewDynamic(func(z string) bool { return set[z] })
+}
+
+// NewDynamic builds a table whose managed zones are decided per request
+// (they follow the active policy). managed receives a normalized zone.
+func NewDynamic(managed func(zone string) bool) *Table {
+	return &Table{ops: operations, managed: managed}
 }
 
 // Operations returns the generated table (read-only).
@@ -165,7 +171,7 @@ func (t *Table) Resolve(r *http.Request) (*Match, error) {
 	if m.Rule.Kind == Deny {
 		return m, ErrDenied
 	}
-	if m.Zone == "" || !t.zones[m.Zone] {
+	if m.Zone == "" || !t.managed(m.Zone) {
 		return m, ErrZoneUnknown
 	}
 	return m, nil

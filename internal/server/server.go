@@ -17,6 +17,7 @@ import (
 	"github.com/KamorionLabs/eurodns-gate/internal/audit"
 	"github.com/KamorionLabs/eurodns-gate/internal/authn"
 	"github.com/KamorionLabs/eurodns-gate/internal/config"
+	"github.com/KamorionLabs/eurodns-gate/internal/discovery"
 	"github.com/KamorionLabs/eurodns-gate/internal/identity"
 	"github.com/KamorionLabs/eurodns-gate/internal/policy"
 	"github.com/KamorionLabs/eurodns-gate/internal/requestid"
@@ -55,6 +56,9 @@ type Config struct {
 	Policy      *policy.Holder
 	PolicyStore store.PolicyStore
 	Ownership   OwnershipLister
+	// Discovery is the EuroDNS account zone listing (zones_discovery), nil
+	// when disabled: policy revisions may then not add zones.
+	Discovery ZoneDiscovery
 	// Ops and Terraform back adoption, RRset plans (MCP) and the HCL export.
 	Ops       Operations
 	Terraform TerraformRenderer
@@ -62,6 +66,16 @@ type Config struct {
 	HTTPClient *http.Client
 	Log        *slog.Logger
 	Now        func() time.Time
+}
+
+// ZoneDiscovery is the account zone listing (internal/discovery).
+type ZoneDiscovery interface {
+	policy.Discovery
+	Loaded() bool
+	Status() discovery.Status
+	// RefreshIfOlder lists the account again if the last listing is older
+	// than age (bounded below by discovery.MinOnDemand).
+	RefreshIfOlder(ctx context.Context, age time.Duration) error
 }
 
 // Server is the gate HTTP handler.
@@ -103,7 +117,8 @@ func New(c Config) (*Server, error) {
 		}
 		c.Policy = h
 	}
-	s := &Server{cfg: c, table: routes.New(c.Config.Zones), upstream: up, log: c.Log, now: c.Now, pol: policy.New(c.Policy)}
+	s := &Server{cfg: c, upstream: up, log: c.Log, now: c.Now, pol: policy.New(c.Policy)}
+	s.table = routes.NewDynamic(s.pol.Managed)
 	s.proxy = s.newProxy()
 	if c.Config.MCP.Enabled {
 		s.mcp = s.newMCP()

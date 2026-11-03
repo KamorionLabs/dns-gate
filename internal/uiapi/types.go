@@ -61,9 +61,12 @@ type ConnectIssuer struct {
 	TenantID string `json:"tenant_id,omitempty"` // Entra only
 }
 
-// ZoneSummary is one managed zone.
+// ZoneSummary is one zone: managed, or discovered in the EuroDNS account
+// and not managed (Unmanaged, read-only; counts stay zero until its content
+// has been read once).
 type ZoneSummary struct {
 	Zone         string     `json:"zone"`
+	Unmanaged    bool       `json:"unmanaged,omitempty"`
 	RRsets       int        `json:"rrsets"`  // total upstream RRsets
 	Managed      int        `json:"managed"` // owned by the gate (active)
 	Tainted      int        `json:"tainted"`
@@ -110,6 +113,7 @@ type Actor struct {
 // ZoneInventory is the RRsets of a zone.
 type ZoneInventory struct {
 	Zone         string     `json:"zone"`
+	Unmanaged    bool       `json:"unmanaged,omitempty"` // discovered, not managed: read-only, no adoption
 	LastSyncedAt *time.Time `json:"last_synced_at,omitempty"`
 	RRsets       []RRset    `json:"rrsets"`
 }

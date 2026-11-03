@@ -31,6 +31,7 @@ import (
 
 type fakeEngine struct {
 	zonewrite.Engine
+	extra     []uiapi.ZoneSummary // appended to Zones (unmanaged zones)
 	mu        sync.Mutex
 	lastMatch string
 	lastZone  *eurodns.Zone
@@ -64,7 +65,7 @@ func (f *fakeEngine) Adopt(ctx context.Context, s *identity.Subject, zone string
 }
 
 func (f *fakeEngine) Zones(ctx context.Context, s *identity.Subject) ([]uiapi.ZoneSummary, error) {
-	return []uiapi.ZoneSummary{{Zone: "example.com", RRsets: 3, Managed: 1}, {Zone: "example.org", RRsets: 1}}, nil
+	return append([]uiapi.ZoneSummary{{Zone: "example.com", RRsets: 3, Managed: 1}, {Zone: "example.org", RRsets: 1}}, f.extra...), nil
 }
 
 func (f *fakeEngine) Inventory(ctx context.Context, s *identity.Subject, zone string) (*uiapi.ZoneInventory, error) {
@@ -116,6 +117,12 @@ func newEnv(t *testing.T) *env { return newEnvWith(t, nil) }
 
 func newEnvWith(t *testing.T, tweak func(*config.Config)) *env {
 	t.Helper()
+	return newEnvDisc(t, tweak, nil)
+}
+
+// newEnvDisc builds the test server with an optional zone discovery.
+func newEnvDisc(t *testing.T, tweak func(*config.Config), disc ZoneDiscovery) *env {
+	t.Helper()
 	e := &env{idp: oidctest.New(), engine: &fakeEngine{}, audit: &memAudit{}, upReq: make(chan *http.Request, 4), ops: &fakeOps{}}
 	t.Cleanup(e.idp.Close)
 	e.upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -159,6 +166,9 @@ func newEnvWith(t *testing.T, tweak func(*config.Config)) *env {
 		t.Fatal(err)
 	}
 	e.holder, e.store = h, store.NewMemory()
+	if disc != nil {
+		h.SetDiscovery(disc)
+	}
 	an, err := authn.New(cfg, e.idp.Client(), h)
 	if err != nil {
 		t.Fatal(err)
@@ -166,7 +176,7 @@ func newEnvWith(t *testing.T, tweak func(*config.Config)) *env {
 	s, err := New(Config{
 		Config: cfg, Authn: an, Authz: policy.New(h), Engine: e.engine, Audit: e.audit, AuditReader: e.audit,
 		Policy: h, PolicyStore: e.store, Ownership: e.store, Now: func() time.Time { return e.clock() },
-		Ops: e.ops, Terraform: e.ops.terraform,
+		Ops: e.ops, Terraform: e.ops.terraform, Discovery: disc,
 		Upstream: keyTransport{}, HTTPClient: e.idp.Client(),
 		UIFiles: fstest.MapFS{"index.html": {Data: []byte("<html>ui</html>")}, "assets/app.js": {Data: []byte("js")}},
 	})

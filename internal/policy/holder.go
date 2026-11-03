@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,6 +29,7 @@ type ActiveSource interface {
 type Holder struct {
 	cfg  *config.Config
 	base uiapi.PolicyDocument
+	disc Discovery
 	cur  atomic.Pointer[Snapshot]
 	mu   sync.Mutex // serializes refreshes
 }
@@ -35,9 +37,22 @@ type Holder struct {
 // NewHolder compiles the base layer.
 func NewHolder(c *config.Config) (*Holder, error) {
 	h := &Holder{cfg: c, base: BaseDocument(c)}
-	h.cur.Store(compile(c, h.base, nil, ""))
+	h.cur.Store(compile(c, h.base, nil, "", nil))
 	return h, nil
 }
+
+// SetDiscovery attaches the account zone list (zones_discovery): discovered
+// zones that are not managed become readable. Call it before serving.
+func (h *Holder) SetDiscovery(d Discovery) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.disc = d
+	cur := h.Current()
+	h.cur.Store(compile(h.cfg, h.base, cur.Managed, cur.RevisionID, d))
+}
+
+// Discovery returns the account zone list, nil without zones_discovery.
+func (h *Holder) Discovery() Discovery { return h.disc }
 
 // Config returns the loaded configuration.
 func (h *Holder) Config() *config.Config { return h.cfg }
@@ -51,18 +66,18 @@ func (h *Holder) Base() uiapi.PolicyDocument { return h.base }
 // Compile validates and compiles a managed document against the base.
 func (h *Holder) Compile(doc *uiapi.PolicyDocument, revisionID string) (*Snapshot, []uiapi.ValidationError) {
 	if doc == nil {
-		return compile(h.cfg, h.base, nil, ""), nil
+		return compile(h.cfg, h.base, nil, "", h.disc), nil
 	}
 	if errs := ValidateManaged(h.cfg, h.base, *doc); len(errs) > 0 {
 		return nil, errs
 	}
-	return compile(h.cfg, h.base, doc, revisionID), nil
+	return compile(h.cfg, h.base, doc, revisionID, h.disc), nil
 }
 
 // CompileUnchecked compiles without validation (impact of old revisions,
 // explain on a proposal that no longer validates).
 func (h *Holder) CompileUnchecked(doc *uiapi.PolicyDocument, revisionID string) *Snapshot {
-	return compile(h.cfg, h.base, doc, revisionID)
+	return compile(h.cfg, h.base, doc, revisionID, h.disc)
 }
 
 // Refresh loads the active revision and swaps the snapshot when it changed.
@@ -72,7 +87,7 @@ func (h *Holder) Refresh(ctx context.Context, src ActiveSource) error {
 	rev, err := src.ActiveRevision(ctx)
 	if errors.Is(err, store.ErrNotFound) {
 		if h.Current().RevisionID != "" {
-			h.cur.Store(compile(h.cfg, h.base, nil, ""))
+			h.cur.Store(compile(h.cfg, h.base, nil, "", h.disc))
 		}
 		return nil
 	}
@@ -141,4 +156,13 @@ func Normalize(d *uiapi.PolicyDocument) {
 	if d.VirtualKeys == nil {
 		d.VirtualKeys = []uiapi.VirtualKey{}
 	}
+	if len(d.Zones) == 0 {
+		d.Zones = nil
+		return
+	}
+	zones := make([]string, len(d.Zones)) // copy: documents are shared by snapshots
+	for i, z := range d.Zones {
+		zones[i] = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(z)), ".")
+	}
+	d.Zones = zones
 }

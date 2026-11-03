@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/KamorionLabs/eurodns-gate/internal/audit"
+	"github.com/KamorionLabs/eurodns-gate/internal/discovery"
 	"github.com/KamorionLabs/eurodns-gate/internal/identity"
 	"github.com/KamorionLabs/eurodns-gate/internal/policy"
 	"github.com/KamorionLabs/eurodns-gate/internal/requestid"
@@ -206,6 +207,24 @@ func (s *Server) baseLayer() uiapi.BaseLayer {
 	for _, p := range c.Protected {
 		b.Protected = append(b.Protected, uiapi.Protected{Zones: p.Zones, Hosts: p.Hosts, Types: p.Types})
 	}
+	if c.ZonesDiscovery.Enabled {
+		zd := &uiapi.ZonesDiscovery{
+			Enabled: true, Include: nonNil(c.ZonesDiscovery.Include), Exclude: nonNil(c.ZonesDiscovery.Exclude),
+			Refresh: c.ZonesDiscovery.Refresh.D().String(),
+		}
+		if s.cfg.Discovery != nil {
+			st := s.cfg.Discovery.Status()
+			zd.Loaded, zd.Count = st.Loaded, st.Count
+			if !st.LastRefreshAt.IsZero() {
+				t := st.LastRefreshAt
+				zd.LastRefreshAt = &t
+			}
+			if st.Err != nil {
+				zd.Error = "the last listing of the EuroDNS account failed"
+			}
+		}
+		b.Discovery = zd
+	}
 	return b
 }
 
@@ -322,10 +341,14 @@ func (s *Server) ownedCounter(ctx context.Context) policy.OwnedCounter {
 				for _, o := range list {
 					if o.State != store.StatePending {
 						counts[o.Owner]++
+						counts["\x00all"]++
 					}
 				}
 			}
 			cache[zone] = counts
+		}
+		if team == "" {
+			return counts["\x00all"]
 		}
 		return counts[team]
 	}
@@ -396,6 +419,25 @@ func (s *Server) mutation(subj *identity.Subject, sess *session, action string) 
 	return s.stepUp(subj, sess)
 }
 
+// validateZonesExist checks that the zones a document adds exist in the
+// EuroDNS account. A zone not seen yet triggers one more listing when the
+// last one is older than discovery.MinOnDemand (a domain added just before).
+func (s *Server) validateZonesExist(ctx context.Context, doc uiapi.PolicyDocument) []uiapi.ValidationError {
+	cur := s.cfg.Policy.Current()
+	if s.cfg.Discovery == nil {
+		return policy.ValidateZonesDiscovered(doc, cur, nil, false)
+	}
+	d := s.cfg.Discovery
+	errs := policy.ValidateZonesDiscovered(doc, cur, d, d.Loaded())
+	if len(errs) > 0 {
+		if err := d.RefreshIfOlder(ctx, discovery.MinOnDemand); err != nil {
+			s.log.Warn("zone discovery refresh", "err", err)
+		}
+		errs = policy.ValidateZonesDiscovered(doc, cur, d, d.Loaded())
+	}
+	return errs
+}
+
 func newRevisionID(now time.Time) string {
 	var b [5]byte
 	_, _ = rand.Read(b[:])
@@ -404,7 +446,11 @@ func newRevisionID(now time.Time) string {
 
 func (s *Server) createRevision(ctx context.Context, subj *identity.Subject, parentID, comment string, doc uiapi.PolicyDocument) (*store.PolicyRevision, *policyError) {
 	policy.Normalize(&doc)
-	if errs := policy.ValidateManaged(s.cfg.Config, s.cfg.Policy.Base(), doc); len(errs) > 0 {
+	errs := policy.ValidateManaged(s.cfg.Config, s.cfg.Policy.Base(), doc)
+	if len(errs) == 0 {
+		errs = s.validateZonesExist(ctx, doc)
+	}
+	if len(errs) > 0 {
 		return nil, &policyError{status: http.StatusBadRequest, reason: "invalid_policy", msg: "the policy document is invalid", errs: errs}
 	}
 	raw, err := json.Marshal(doc)
@@ -593,7 +639,11 @@ func (s *Server) policyActivate(w http.ResponseWriter, r *http.Request, subj *id
 	if rev.ParentID != activeID {
 		return perr(http.StatusConflict, "stale_revision", "the policy changed since this revision was proposed")
 	}
-	if errs := policy.ValidateManaged(s.cfg.Config, s.cfg.Policy.Base(), doc); len(errs) > 0 {
+	errs := policy.ValidateManaged(s.cfg.Config, s.cfg.Policy.Base(), doc)
+	if len(errs) == 0 {
+		errs = s.validateZonesExist(r.Context(), doc)
+	}
+	if len(errs) > 0 {
 		return &policyError{status: http.StatusBadRequest, reason: "invalid_policy", msg: "the revision no longer validates against the base policy", errs: errs}
 	}
 	if err := s.cfg.PolicyStore.Activate(r.Context(), rev.ID, activeID, subj.String(), s.now().UTC()); err != nil {

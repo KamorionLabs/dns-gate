@@ -9,7 +9,8 @@ import (
 	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
 )
 
-// OwnedCounter returns the number of RRsets a team owns in a zone.
+// OwnedCounter returns the number of RRsets a team owns in a zone; an empty
+// team counts the RRsets of every team.
 type OwnedCounter func(team, zone string) int
 
 type grantKey struct {
@@ -61,7 +62,10 @@ func bindingWho(b uiapi.Binding) string {
 		parts = append(parts, MatcherString(m))
 	}
 	who := strings.Join(parts, ", ")
-	if b.Team != "" {
+	switch {
+	case b.TeamFrom != nil:
+		who = "team from " + TeamFromString(b.TeamFrom) + " (" + who + ")"
+	case b.Team != "":
 		who = "team " + b.Team + " (" + who + ")"
 	}
 	return who
@@ -100,6 +104,7 @@ func (s *Snapshot) teamWrites() map[string]map[string]bool {
 		}
 	}
 	for _, b := range s.bindings {
+		// Teams derived from claims are only known per subject.
 		add(b.binding.Team, b.binding.Role)
 	}
 	for _, k := range s.keys {
@@ -166,6 +171,26 @@ func Impact(old, new *Snapshot, owned OwnedCounter) []uiapi.ImpactItem {
 		}
 	}
 
+	// Zones brought under management or released.
+	for _, zone := range unionKeys(old.zones, new.zones) {
+		switch {
+		case !old.zones[zone]:
+			items = append(items, uiapi.ImpactItem{Kind: "gain", Who: "zone " + zone, Zones: []string{zone},
+				Message: fmt.Sprintf("zone %s becomes managed: writes and adoption are possible there within the roles", zone)})
+		case !new.zones[zone]:
+			items = append(items, uiapi.ImpactItem{Kind: "loss", Who: "zone " + zone, Zones: []string{zone},
+				Message: fmt.Sprintf("zone %s is no longer managed: it becomes read-only through the gate", zone)})
+			n := 0
+			if owned != nil {
+				n = owned("", zone)
+			}
+			if n > 0 {
+				items = append(items, uiapi.ImpactItem{Kind: "warning", Who: "zone " + zone, Zones: []string{zone}, Actions: []string{ActionRecordWrite},
+					Message: fmt.Sprintf("zone %s stops being managed while the gate owns %d RRset(s) there: no team can change them until the zone is managed again", zone, n)})
+			}
+		}
+	}
+
 	// Teams losing write where they own RRsets.
 	ow, nw := old.teamWrites(), new.teamWrites()
 	for _, team := range keysOf(ow) {
@@ -220,7 +245,7 @@ func keys(m map[string]bool) []string {
 
 func keysOf[T any](m map[string]T) []string { return sortedKeys(m) }
 
-func unionKeys(a, b map[string]*compiledGroup) []string {
+func unionKeys[T any](a, b map[string]T) []string {
 	set := map[string]bool{}
 	for k := range a {
 		set[k] = true
@@ -255,7 +280,7 @@ func (s *Snapshot) WhoCan(action, zone, host, typ string) uiapi.WhoCanResponse {
 			continue
 		}
 		resp.Entries = append(resp.Entries, uiapi.WhoCanEntry{
-			Role: b.binding.Role, Team: b.binding.Team, Layer: b.layer,
+			Role: b.binding.Role, Team: b.binding.Team, TeamFrom: b.binding.TeamFrom, Layer: b.layer,
 			Groups: b.binding.Groups, Subjects: b.binding.Subjects,
 		})
 	}

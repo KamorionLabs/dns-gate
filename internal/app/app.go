@@ -14,6 +14,7 @@ import (
 	"github.com/KamorionLabs/eurodns-gate/internal/audit"
 	"github.com/KamorionLabs/eurodns-gate/internal/authn"
 	"github.com/KamorionLabs/eurodns-gate/internal/config"
+	"github.com/KamorionLabs/eurodns-gate/internal/discovery"
 	"github.com/KamorionLabs/eurodns-gate/internal/policy"
 	"github.com/KamorionLabs/eurodns-gate/internal/server"
 	"github.com/KamorionLabs/eurodns-gate/internal/store"
@@ -35,13 +36,17 @@ type Options struct {
 
 // App is a wired gate.
 type App struct {
-	Config  *config.Config
-	Store   store.Store
-	Engine  zonewrite.Engine
-	Policy  *policy.Holder
-	handler http.Handler
-	opts    Options
-	log     *slog.Logger
+	Config *config.Config
+	Store  store.Store
+	Engine zonewrite.Engine
+	Policy *policy.Holder
+	// Discovery lists the zones of the EuroDNS account, nil unless
+	// zones_discovery is enabled.
+	Discovery *discovery.Discoverer
+	authz     *policy.Engine
+	handler   http.Handler
+	opts      Options
+	log       *slog.Logger
 }
 
 // New builds every component; background loops start with Run.
@@ -81,6 +86,17 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 	if err != nil {
 		return nil, err
 	}
+	var disc *discovery.Discoverer
+	if cfg.ZonesDiscovery.Enabled {
+		disc = discovery.New(discovery.Config{
+			Lister:  &discovery.EuroDNSLister{BaseURL: cfg.Upstream.BaseURL, Transport: transport},
+			Include: cfg.ZonesDiscovery.Include,
+			Exclude: cfg.ZonesDiscovery.Exclude,
+			Refresh: cfg.ZonesDiscovery.Refresh.D(),
+			Logger:  log,
+		})
+		holder.SetDiscovery(disc)
+	}
 	if err := holder.Refresh(ctx, st); err != nil {
 		log.Error("managed policy not loaded, serving the base policy", "err", err)
 	}
@@ -96,7 +112,8 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		Store:        st,
 		Authz:        authz,
 		Audit:        auditLog,
-		Zones:        cfg.Zones,
+		ZoneSet:      authz,
+		UnmanagedTTL: cfg.ReconcileInterval.D(),
 		Holder:       opts.Holder,
 		LockTTL:      cfg.Lock.TTL.D(),
 		LockWait:     cfg.Lock.Wait.D(),
@@ -112,7 +129,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 	if err != nil {
 		return nil, err
 	}
-	srv, err := server.New(server.Config{
+	scfg := server.Config{
 		Config:      cfg,
 		Authn:       an,
 		Authz:       authz,
@@ -127,20 +144,28 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		Terraform:   server.InventoryTerraform(eng),
 		UIFiles:     web.FS(),
 		Log:         log,
-	})
+	}
+	if disc != nil {
+		scfg.Discovery = disc
+	}
+	srv, err := server.New(scfg)
 	if err != nil {
 		return nil, err
 	}
-	return &App{Config: cfg, Store: st, Engine: eng, Policy: holder, handler: srv.Handler(), opts: opts, log: log}, nil
+	return &App{Config: cfg, Store: st, Engine: eng, Policy: holder, Discovery: disc, authz: authz, handler: srv.Handler(), opts: opts, log: log}, nil
 }
 
 // Handler is the HTTP handler of the gate.
 func (a *App) Handler() http.Handler { return a.handler }
 
-// Run starts the policy reload and reconcile loops; they stop with ctx.
+// Run starts the policy reload, zone discovery and reconcile loops; they
+// stop with ctx. Reconcile follows the managed zones of the current policy.
 func (a *App) Run(ctx context.Context) {
 	go a.Policy.Run(ctx, a.Store, a.opts.PolicyReloadInterval, a.log)
-	go zonewrite.RunReconciler(ctx, a.Engine, a.Config.Zones, a.Config.ReconcileInterval.D(), a.log)
+	if a.Discovery != nil {
+		go a.Discovery.Run(ctx)
+	}
+	go zonewrite.RunReconciler(ctx, a.Engine, a.authz.ManagedZones, a.Config.ReconcileInterval.D(), a.log)
 }
 
 func openStore(ctx context.Context, cfg *config.Config, log *slog.Logger) (store.Store, error) {

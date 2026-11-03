@@ -34,7 +34,12 @@ export interface ERole {
 export interface EBinding {
   uid: number;
   role: string;
+  /** fixed: team below; claim: team derived from a claim (team_from). */
+  team_mode: 'fixed' | 'claim';
   team: string;
+  tf_claim: string;
+  tf_regex: string;
+  tf_prefix: string;
   groups: string[];
   subjects: EMatcher[];
 }
@@ -50,6 +55,7 @@ export interface EKey {
   cidrs: string[];
 }
 export interface EModel {
+  zones: string[];
   groups: EGroup[];
   roles: ERole[];
   bindings: EBinding[];
@@ -73,6 +79,7 @@ const fromEMatcher = (m: EMatcher): SubjectMatcher => {
 export function fromDoc(d: PolicyDocument | undefined): EModel {
   const doc = d ?? { groups: {}, roles: {}, bindings: [], virtual_keys: [] };
   return {
+    zones: [...(doc.zones ?? [])],
     groups: Object.entries(doc.groups).map(([name, g]) => ({
       uid: nextUid(), name, description: g.description ?? '', members: g.members.map(toEMatcher),
     })),
@@ -86,7 +93,15 @@ export function fromDoc(d: PolicyDocument | undefined): EModel {
       max_changes: r.max_changes_per_request ? String(r.max_changes_per_request) : '',
     })),
     bindings: doc.bindings.map((b) => ({
-      uid: nextUid(), role: b.role, team: b.team, groups: [...(b.groups ?? [])], subjects: (b.subjects ?? []).map(toEMatcher),
+      uid: nextUid(),
+      role: b.role,
+      team_mode: b.team_from ? ('claim' as const) : ('fixed' as const),
+      team: b.team,
+      tf_claim: b.team_from?.claim ?? 'sub',
+      tf_regex: b.team_from?.regex ?? '',
+      tf_prefix: b.team_from?.prefix ?? '',
+      groups: [...(b.groups ?? [])],
+      subjects: (b.subjects ?? []).map(toEMatcher),
     })),
     keys: doc.virtual_keys.map((k) => ({
       uid: nextUid(),
@@ -104,6 +119,8 @@ export function fromDoc(d: PolicyDocument | undefined): EModel {
 
 export function toDoc(m: EModel): PolicyDocument {
   const doc: PolicyDocument = { groups: {}, roles: {}, bindings: [], virtual_keys: [] };
+  const zones = [...new Set(m.zones.map((z) => z.trim().toLowerCase().replace(/\.$/, '')).filter(Boolean))];
+  if (zones.length) doc.zones = zones;
   for (const g of m.groups) {
     doc.groups[g.name.trim()] = {
       ...(g.description.trim() ? { description: g.description.trim() } : {}),
@@ -127,7 +144,10 @@ export function toDoc(m: EModel): PolicyDocument {
   }
   doc.bindings = m.bindings.map((b) => ({
     role: b.role,
-    team: b.team.trim(),
+    team: b.team_mode === 'claim' ? '' : b.team.trim(),
+    ...(b.team_mode === 'claim'
+      ? { team_from: { claim: b.tf_claim.trim(), regex: b.tf_regex, ...(b.tf_prefix.trim() ? { prefix: b.tf_prefix.trim() } : {}) } }
+      : {}),
     ...(b.groups.length ? { groups: b.groups } : {}),
     ...(b.subjects.length ? { subjects: b.subjects.map(fromEMatcher) } : {}),
   }));

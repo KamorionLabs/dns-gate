@@ -72,3 +72,6 @@ Spike on a test domain before v0.1 is called usable:
    accounts.
 5. Apex host representation (`""` vs `@`) and case handling.
 6. Behaviour of `locked` records and of the `proxy` field on PUT.
+7. **Domain listing** (`zones_discovery`): `POST /domains/search` pagination (first
+   page number, assumed `1`; maximum `pagination-size`, 100 used; `pagination-count`),
+   and whether a DNS-scoped EuroDNS user may call it.

@@ -2,6 +2,7 @@ package policy
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -35,6 +36,17 @@ type compiledBinding struct {
 	index   int // index within its layer
 	layer   string
 	binding uiapi.Binding
+	teamRe  *regexp.Regexp // binding.TeamFrom.Regex, nil without team_from
+}
+
+// Discovery is the list of zones found in the EuroDNS account
+// (zones_discovery, see internal/discovery).
+type Discovery interface {
+	// Discovered reports whether zone is in the account, after the
+	// include and exclude filters.
+	Discovered(zone string) bool
+	// DiscoveredZones returns them, sorted.
+	DiscoveredZones() []string
 }
 
 type compiledKey struct {
@@ -49,7 +61,8 @@ type Snapshot struct {
 	Base       uiapi.PolicyDocument
 	Managed    *uiapi.PolicyDocument
 
-	zones      map[string]bool
+	zones      map[string]bool // managed: base zones and managed document zones
+	discovery  Discovery       // live account list, nil without zones_discovery
 	roles      map[string]*compiledRole
 	groups     map[string]*compiledGroup
 	groupNames []string
@@ -87,7 +100,11 @@ func BaseDocument(c *config.Config) uiapi.PolicyDocument {
 		d.Roles[name] = ur
 	}
 	for _, b := range c.Bindings {
-		d.Bindings = append(d.Bindings, uiapi.Binding{Role: b.Role, Team: b.Team, Groups: b.Groups, Subjects: matchers(b.Subjects)})
+		ub := uiapi.Binding{Role: b.Role, Team: b.Team, Groups: b.Groups, Subjects: matchers(b.Subjects)}
+		if b.TeamFrom != nil {
+			ub.TeamFrom = &uiapi.TeamFrom{Claim: b.TeamFrom.Claim, Regex: b.TeamFrom.Regex, Prefix: b.TeamFrom.Prefix}
+		}
+		d.Bindings = append(d.Bindings, ub)
 	}
 	for _, k := range c.VirtualKeys {
 		d.VirtualKeys = append(d.VirtualKeys, uiapi.VirtualKey{
@@ -111,12 +128,13 @@ func matchers(ss []config.Subject) []uiapi.SubjectMatcher {
 }
 
 // compile builds a snapshot. The managed document must be validated first.
-func compile(c *config.Config, base uiapi.PolicyDocument, managed *uiapi.PolicyDocument, revisionID string) *Snapshot {
+func compile(c *config.Config, base uiapi.PolicyDocument, managed *uiapi.PolicyDocument, revisionID string, disc Discovery) *Snapshot {
 	s := &Snapshot{
 		RevisionID: revisionID,
 		Base:       base,
 		Managed:    managed,
 		zones:      map[string]bool{},
+		discovery:  disc,
 		roles:      map[string]*compiledRole{},
 		groups:     map[string]*compiledGroup{},
 		protected:  c.Protected,
@@ -126,6 +144,13 @@ func compile(c *config.Config, base uiapi.PolicyDocument, managed *uiapi.PolicyD
 	}
 	for _, z := range c.Zones {
 		s.zones[z] = true
+	}
+	if managed != nil {
+		for _, z := range managed.Zones {
+			if z = normZone(z); z != "" {
+				s.zones[z] = true
+			}
+		}
 	}
 	for _, is := range c.Issuers {
 		s.issuers[is.Name] = is
@@ -142,7 +167,13 @@ func compile(c *config.Config, base uiapi.PolicyDocument, managed *uiapi.PolicyD
 			s.groups[name] = &compiledGroup{name: name, layer: layer, members: g.Members}
 		}
 		for i, b := range doc.Bindings {
-			s.bindings = append(s.bindings, compiledBinding{index: i, layer: layer, binding: b})
+			cb := compiledBinding{index: i, layer: layer, binding: b}
+			if b.TeamFrom != nil {
+				// Validated documents always compile; an invalid expression
+				// (unchecked compile of an old revision) binds nobody.
+				cb.teamRe, _ = regexp.Compile(b.TeamFrom.Regex)
+			}
+			s.bindings = append(s.bindings, cb)
 		}
 		for _, k := range doc.VirtualKeys {
 			s.keys = append(s.keys, compiledKey{layer: layer, key: k})
@@ -166,6 +197,30 @@ func (s *Snapshot) Zones() []string {
 		out = append(out, z)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// IsManaged reports whether the zone is managed (base or managed layer).
+func (s *Snapshot) IsManaged(zone string) bool { return s.zones[normZone(zone)] }
+
+// IsUnmanaged reports whether the zone exists in the account (discovery) but
+// is not managed: it is readable, never writable nor adoptable.
+func (s *Snapshot) IsUnmanaged(zone string) bool {
+	zone = normZone(zone)
+	return !s.zones[zone] && s.discovery != nil && s.discovery.Discovered(zone)
+}
+
+// UnmanagedZones returns the discovered zones that are not managed, sorted.
+func (s *Snapshot) UnmanagedZones() []string {
+	if s.discovery == nil {
+		return nil
+	}
+	var out []string
+	for _, z := range s.discovery.DiscoveredZones() {
+		if !s.zones[z] {
+			out = append(out, z)
+		}
+	}
 	return out
 }
 
@@ -195,18 +250,61 @@ func (s *Snapshot) Resolve(issuer string, claims map[string]any) Resolution {
 		if !s.bindingApplies(b.binding, issuer, claims, inGroup) {
 			continue
 		}
+		team := b.binding.Team
+		if b.binding.TeamFrom != nil {
+			var ok bool
+			if team, ok = deriveTeam(b, claims); !ok {
+				// Fail closed: without its own team the binding would act
+				// for the team of another binding of the subject.
+				continue
+			}
+		}
 		if !roles[b.binding.Role] {
 			roles[b.binding.Role] = true
 			r.Roles = append(r.Roles, b.binding.Role)
 		}
-		if b.binding.Team != "" && !teams[b.binding.Team] {
-			teams[b.binding.Team] = true
-			r.Teams = append(r.Teams, b.binding.Team)
+		if team != "" && !teams[team] {
+			teams[team] = true
+			r.Teams = append(r.Teams, team)
 		}
-		r.Bindings = append(r.Bindings, b.binding.Role+"@"+b.binding.Team)
+		r.Bindings = append(r.Bindings, b.binding.Role+"@"+team)
 	}
 	sort.Strings(r.Roles)
 	return r
+}
+
+// deriveTeam computes the team of a team_from binding: prefix plus the
+// lowercased capture of the regex on a string claim, and it must be a valid
+// team name.
+func deriveTeam(b compiledBinding, claims map[string]any) (string, bool) {
+	if b.teamRe == nil {
+		return "", false
+	}
+	v, ok := claims[b.binding.TeamFrom.Claim].(string)
+	if !ok {
+		return "", false
+	}
+	m := b.teamRe.FindStringSubmatch(v)
+	if len(m) != 2 || m[1] == "" {
+		return "", false
+	}
+	team := b.binding.TeamFrom.Prefix + strings.ToLower(m[1])
+	if !nameRe.MatchString(team) {
+		return "", false
+	}
+	return team, true
+}
+
+// TeamFromString renders a team derivation, e.g. "ci-" + sub ~ ^repo:acme/(.+)$.
+func TeamFromString(t *uiapi.TeamFrom) string {
+	if t == nil {
+		return ""
+	}
+	out := t.Claim + " ~ " + t.Regex
+	if t.Prefix != "" {
+		out = fmt.Sprintf("%q + %s", t.Prefix, out)
+	}
+	return out
 }
 
 func (s *Snapshot) bindingApplies(b uiapi.Binding, issuer string, claims map[string]any, inGroup map[string]bool) bool {
@@ -297,7 +395,12 @@ func (s *Snapshot) Decide(roles []string, action, zone string, key *rrset.Key) D
 	meta := IsMeta(action)
 	zone = normZone(zone)
 	if !meta && !s.zones[zone] {
-		return Decision{Denied: "zone not managed: " + zone}
+		if !s.IsUnmanaged(zone) {
+			return Decision{Denied: "zone not managed: " + zone}
+		}
+		if action != ActionDNSRead && action != ActionUIRead {
+			return Decision{Denied: "zone not managed: " + zone + " (discovered in the account, read-only until a policy revision manages it)"}
+		}
 	}
 	if key != nil && !meta {
 		k := normKey(*key)

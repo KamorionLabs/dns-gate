@@ -6,6 +6,7 @@
   import { policyState } from '../lib/policy.svelte';
   import { proposalHref } from '../lib/router.svelte';
   import { toYAML } from '../lib/yaml';
+  import { teamLabel } from '../lib/team';
   import PolicyFrame from '../components/policy/PolicyFrame.svelte';
   import MatcherEditor from '../components/policy/MatcherEditor.svelte';
   import LayerTag from '../components/policy/LayerTag.svelte';
@@ -82,10 +83,13 @@
   }
   function summary(p: EffectivePolicy, doc: PolicyDocument) {
     const a = p.managed ?? { groups: {}, roles: {}, bindings: [], virtual_keys: [] };
+    const zoneMap = (z: string[] | undefined) => Object.fromEntries((z ?? []).map((x) => [x, true]));
+    const bkey = (b: PolicyDocument['bindings'][number]) => `${b.role}@${teamLabel(b.team, b.team_from)}`;
     return [
+      ['Managed zones', diffCount(zoneMap(a.zones), zoneMap(doc.zones))],
       ['Groups', diffCount(a.groups, doc.groups)],
       ['Roles', diffCount(a.roles, doc.roles)],
-      ['Bindings', diffCount(listToMap(a.bindings, (b) => `${b.role}@${b.team}`), listToMap(doc.bindings, (b) => `${b.role}@${b.team}`))],
+      ['Bindings', diffCount(listToMap(a.bindings, bkey), listToMap(doc.bindings, bkey))],
       ['Virtual keys', diffCount(listToMap(a.virtual_keys, (k) => k.id), listToMap(doc.virtual_keys, (k) => k.id))],
     ] as const;
   }
@@ -175,6 +179,21 @@
           {:else}
             <p class="note"><LayerTag layer="base" /> items (issuers, protected records, bounds, policy.* grants and base groups, roles, bindings) are not editable here; base names cannot be reused.</p>
 
+            <!-- Managed zones -->
+            <section>
+              <div class="sh"><h2>Managed zones</h2></div>
+              <article class="card" class:bad={has('zones')}>
+                <span class="lbl">Zones brought under management by this layer <span class="dim">(added to the base zones; each must exist in the account and match the bounds)</span></span>
+                <ChipsInput bind:values={model.zones} label="Managed zones" placeholder="example.net" invalid={has('zones')} />
+                <FieldError {errors} path="zones" prefix />
+                <p class="dim small">
+                  Base zones: <span class="mono">{p.base.zones.join(', ') || 'none'}</span> · bounds: <span class="mono">{p.base.bounds.zones.join(', ')}</span>
+                  {#if p.base.zones_discovery && !p.base.zones_discovery.enabled} · zone discovery is disabled, so no zone can be added here.{/if}
+                </p>
+                <p class="dim small">Removing a zone where teams own record sets leaves them read-only through the gate: check the impact before approving.</p>
+              </article>
+            </section>
+
             <!-- Groups -->
             <section>
               <div class="sh"><h2>Groups</h2><button class="btn" type="button" onclick={() => model!.groups.push({ uid: nextUid(), name: '', description: '', members: [{ issuer: issuers[0] ?? '', claims: [{ key: 'sub', values: [] }] }] })}><Icon name="plus" size={14} />Group</button></div>
@@ -234,7 +253,7 @@
 
             <!-- Bindings -->
             <section>
-              <div class="sh"><h2>Bindings</h2><button class="btn" type="button" onclick={() => model!.bindings.push({ uid: nextUid(), role: roleNames[0] ?? '', team: '', groups: [], subjects: [] })}><Icon name="plus" size={14} />Binding</button></div>
+              <div class="sh"><h2>Bindings</h2><button class="btn" type="button" onclick={() => model!.bindings.push({ uid: nextUid(), role: roleNames[0] ?? '', team_mode: 'fixed', team: '', tf_claim: 'sub', tf_regex: '', tf_prefix: '', groups: [], subjects: [] })}><Icon name="plus" size={14} />Binding</button></div>
               {#each model.bindings as b, bi (b.uid)}
                 {@const path = `bindings[${bi}]`}
                 <article class="card" class:bad={has(path)}>
@@ -243,10 +262,27 @@
                       <span class="field"><select bind:value={b.role}>{#each roleNames as n (n)}<option value={n}>{n}</option>{/each}{#if b.role && !roleNames.includes(b.role)}<option value={b.role}>{b.role}</option>{/if}</select><span class="chev"><Icon name="chevron" size={12} /></span></span>
                     </label>
                     <span class="at">@</span>
-                    <label><span class="lbl">Acting for team</span><input class="in" bind:value={b.team} placeholder="web" /></label>
+                    {#if b.team_mode === 'fixed'}
+                      <label><span class="lbl">Acting for team</span><input class="in" bind:value={b.team} placeholder="web" /></label>
+                    {:else}
+                      <span class="derived"><span class="lbl">Acting for team</span><span class="mono">{teamLabel('', { claim: b.tf_claim || 'claim', regex: b.tf_regex, prefix: b.tf_prefix })}</span></span>
+                    {/if}
                   </div>
                   <FieldError {errors} path="{path}.role" />
                   <FieldError {errors} path="{path}.team" />
+                  <div class="teammode" role="radiogroup" aria-label="Owner team">
+                    <label class="check"><input type="radio" value="fixed" bind:group={b.team_mode} /> Fixed team</label>
+                    <label class="check"><input type="radio" value="claim" bind:group={b.team_mode} /> Team from a claim <span class="dim">(one team per identity)</span></label>
+                  </div>
+                  {#if b.team_mode === 'claim'}
+                    <div class="grid3">
+                      <label><span class="lbl">Claim</span><input class="in mono" bind:value={b.tf_claim} placeholder="sub" /></label>
+                      <label><span class="lbl">Regex <span class="dim">(^…$, one capture group)</span></span><input class="in mono" bind:value={b.tf_regex} placeholder="^repo:acme/([^:]+):environment:production$" /></label>
+                      <label><span class="lbl">Prefix <span class="dim">(optional)</span></span><input class="in mono" bind:value={b.tf_prefix} placeholder="ci-" /></label>
+                    </div>
+                    <FieldError {errors} path="{path}.team_from" prefix />
+                    <p class="dim small">Team = prefix + lowercased capture. Each matching identity owns its own record sets; it may also create any name its role allows that does not exist yet.</p>
+                  {/if}
                   <span class="lbl">Groups</span>
                   <ToggleChips options={groupNames} bind:values={b.groups} label="Groups" invalid={has(path + '.groups')} />
                   <FieldError {errors} path="{path}.groups" prefix />
@@ -337,6 +373,27 @@
 </PolicyFrame>
 
 <style>
+  .teammode {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s2) var(--s5);
+  }
+  .grid3 {
+    display: grid;
+    grid-template-columns: minmax(0, 0.6fr) minmax(0, 2fr) minmax(0, 0.7fr);
+    gap: var(--s3);
+  }
+  .derived {
+    display: grid;
+    gap: 4px;
+    align-content: start;
+  }
+  .derived .mono {
+    display: inline-flex;
+    align-items: center;
+    height: 32px;
+    color: var(--ink-2);
+  }
   .banner {
     display: flex;
     align-items: center;
@@ -697,7 +754,8 @@
     }
   }
   @media (max-width: 640px) {
-    .grid2 {
+    .grid2,
+    .grid3 {
       grid-template-columns: 1fr;
     }
   }

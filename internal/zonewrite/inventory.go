@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/KamorionLabs/eurodns-gate/internal/identity"
 	"github.com/KamorionLabs/eurodns-gate/internal/policy"
@@ -12,22 +13,37 @@ import (
 	"github.com/KamorionLabs/eurodns-go/rrset"
 )
 
-// cached returns the cached zone, reading upstream only when the cache is empty.
-func (e *engine) cached(ctx context.Context, zone string) (cachedZone, error) {
-	e.mu.Lock()
-	c, ok := e.cache[zone]
-	if ok && c.zone != nil {
-		out := *c
-		e.mu.Unlock()
-		return out, nil
+// cached returns the cached zone, reading upstream only when the cache is
+// empty or, when maxAge > 0, older than maxAge. Concurrent reads of the same
+// zone share one upstream request.
+func (e *engine) cached(ctx context.Context, zone string, maxAge time.Duration) (cachedZone, error) {
+	if c, ok := e.peek(zone, maxAge); ok {
+		return c, nil
 	}
-	e.mu.Unlock()
-	if _, err := e.fetch(ctx, zone); err != nil {
+	_, err, _ := e.reads.Do(zone, func() (any, error) {
+		if _, ok := e.peek(zone, maxAge); ok {
+			return nil, nil
+		}
+		return e.fetch(context.WithoutCancel(ctx), zone)
+	})
+	if err != nil {
 		return cachedZone{}, err
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return *e.cache[zone], nil
+}
+
+// peek returns the cached zone if present and fresh enough (any age when
+// maxAge is 0).
+func (e *engine) peek(zone string, maxAge time.Duration) (cachedZone, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	c, ok := e.cache[zone]
+	if !ok || c.zone == nil || (maxAge > 0 && e.now().Sub(c.syncedAt) > maxAge) {
+		return cachedZone{}, false
+	}
+	return *c, true
 }
 
 func actor(subject, name, category string) *uiapi.Actor {
@@ -37,8 +53,8 @@ func actor(subject, name, category string) *uiapi.Actor {
 	return &uiapi.Actor{Subject: subject, Name: name, Category: category}
 }
 
-func (e *engine) inventory(ctx context.Context, zone string) (*uiapi.ZoneInventory, cachedZone, error) {
-	c, err := e.cached(ctx, zone)
+func (e *engine) inventory(ctx context.Context, zone string, maxAge time.Duration) (*uiapi.ZoneInventory, cachedZone, error) {
+	c, err := e.cached(ctx, zone, maxAge)
 	if err != nil {
 		return nil, c, err
 	}
@@ -124,6 +140,20 @@ func fillOwnership(r *uiapi.RRset, o store.Ownership) {
 }
 
 func (e *engine) Inventory(ctx context.Context, s *identity.Subject, zoneIn string) (*uiapi.ZoneInventory, error) {
+	zone := normZone(zoneIn)
+	if !e.zones.Managed(zone) && e.zones.IsUnmanaged(zone) {
+		// Discovered, not managed: readable with dns.read, read on demand
+		// and reused for UnmanagedTTL (no reconcile runs on these zones).
+		if !e.cfg.Authz.Allow(s, policy.ActionDNSRead, zone) {
+			return nil, fail(ReasonForbidden, "dns.read is required to view the unmanaged zone %s", zone)
+		}
+		inv, _, err := e.inventory(ctx, zone, e.cfg.UnmanagedTTL)
+		if err != nil {
+			return nil, err
+		}
+		inv.Unmanaged = true
+		return inv, nil
+	}
 	zone, err := e.managed(zoneIn)
 	if err != nil {
 		return nil, err
@@ -131,17 +161,30 @@ func (e *engine) Inventory(ctx context.Context, s *identity.Subject, zoneIn stri
 	if !e.cfg.Authz.Allow(s, policy.ActionUIRead, zone) {
 		return nil, fail(ReasonForbidden, "not allowed to view zone %s", zone)
 	}
-	inv, _, err := e.inventory(ctx, zone)
+	inv, _, err := e.inventory(ctx, zone, 0)
 	return inv, err
+}
+
+// unmanagedSummary describes a discovered zone from the cache only: listing
+// zones never reads an unmanaged zone upstream.
+func (e *engine) unmanagedSummary(zone string) uiapi.ZoneSummary {
+	sum := uiapi.ZoneSummary{Zone: zone, Unmanaged: true}
+	if c, ok := e.peek(zone, 0); ok {
+		synced := c.syncedAt
+		sum.LastSyncedAt = &synced
+		n := len(rrset.Group(zone, c.zone.Records))
+		sum.RRsets, sum.Foreign = n, n
+	}
+	return sum
 }
 
 func (e *engine) Zones(ctx context.Context, s *identity.Subject) ([]uiapi.ZoneSummary, error) {
 	out := []uiapi.ZoneSummary{}
-	for _, zone := range e.order {
+	for _, zone := range e.zones.ManagedZones() {
 		if !e.cfg.Authz.Allow(s, policy.ActionUIRead, zone) {
 			continue
 		}
-		inv, c, err := e.inventory(ctx, zone)
+		inv, c, err := e.inventory(ctx, zone, 0)
 		if err != nil {
 			return nil, err
 		}
@@ -162,6 +205,11 @@ func (e *engine) Zones(ctx context.Context, s *identity.Subject) ([]uiapi.ZoneSu
 			}
 		}
 		out = append(out, sum)
+	}
+	for _, zone := range e.zones.UnmanagedZones() {
+		if e.cfg.Authz.Allow(s, policy.ActionUIRead, zone) {
+			out = append(out, e.unmanagedSummary(zone))
+		}
 	}
 	return out, nil
 }

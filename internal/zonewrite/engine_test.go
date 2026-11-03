@@ -735,7 +735,10 @@ func TestRunReconcilerStops(t *testing.T) {
 	e := newEnv(t, eurodnstest.Options{})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { RunReconciler(ctx, e.eng, []string{zoneName}, 10*time.Millisecond, nil); close(done) }()
+	go func() {
+		RunReconciler(ctx, e.eng, func() []string { return []string{zoneName} }, 10*time.Millisecond, nil)
+		close(done)
+	}()
 	time.Sleep(50 * time.Millisecond)
 	cancel()
 	select {

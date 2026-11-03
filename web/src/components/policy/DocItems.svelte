@@ -4,6 +4,7 @@
   import Matcher from './Matcher.svelte';
   import RuleLine from './RuleLine.svelte';
   import RelTime from '../RelTime.svelte';
+  import { teamFromText, teamLabel } from '../../lib/team';
 
   type Layered<T> = { layer: 'base' | 'managed'; rev?: string; item: T };
   let {
@@ -50,13 +51,16 @@
   {:else if kind === 'bindings'}
     {#each bindings as { layer, rev, item: b }, i (layer + i)}
       <li class="{layer} binding">
+        <div class="bmain">
         <div class="grant">
-          <span class="role mono">{b.role}</span><span class="at">@</span><span class="team">{b.team}</span>
+          <span class="role mono">{b.role}</span><span class="at">@</span><span class="team" class:derived={!!b.team_from} title={b.team_from ? teamFromText(b.team_from) : undefined}>{teamLabel(b.team, b.team_from)}</span>
           <span class="arrow" aria-label="granted to">←</span>
           <span class="who">
             {#each b.groups ?? [] as g (g)}<span class="grp mono">{g}</span>{/each}
             {#each b.subjects ?? [] as m, k (k)}<Matcher {m} />{/each}
           </span>
+        </div>
+        {#if b.team_from}<p class="desc mono derive">{teamFromText(b.team_from)}</p>{/if}
         </div>
         <LayerTag {layer} {rev} />
       </li>
@@ -183,6 +187,20 @@
   .team {
     font-weight: 600;
     color: var(--seal-ink);
+  }
+  .team.derived {
+    font-family: var(--font-record);
+    cursor: help;
+  }
+  .bmain {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+  }
+  .derive {
+    margin-top: 0;
+    font-size: 11.5px;
+    overflow-wrap: anywhere;
   }
   .arrow {
     color: var(--ink-4);

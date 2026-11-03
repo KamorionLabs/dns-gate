@@ -66,6 +66,26 @@ func ValidateManaged(c *config.Config, base uiapi.PolicyDocument, d uiapi.Policy
 		}
 	}
 
+	baseZones := map[string]bool{}
+	for _, z := range c.Zones {
+		baseZones[z] = true
+	}
+	seenZone := map[string]bool{}
+	for i, z := range d.Zones {
+		at := fmt.Sprintf("zones[%d]", i)
+		switch {
+		case z != normZone(strings.TrimSpace(z)):
+			v.add(at, "zone %q must be lowercase, without a trailing dot", z)
+		case !config.ValidFQDN(z):
+			v.add(at, "%q is not a valid domain name", z)
+		case seenZone[z]:
+			v.add(at, "zone %q listed twice", z)
+		case !baseZones[z] && !ZoneCovered(c.Policy.Bounds.Zones, z):
+			v.add(at, "zone %q is outside policy.bounds.zones", z)
+		}
+		seenZone[z] = true
+	}
+
 	for _, name := range sortedKeys(d.Groups) {
 		g := d.Groups[name]
 		at := "groups." + name
@@ -166,6 +186,14 @@ func ValidateManaged(c *config.Config, base uiapi.PolicyDocument, d uiapi.Policy
 		if b.Team != "" && !nameRe.MatchString(b.Team) {
 			v.add(at+".team", "team must be a lowercase identifier")
 		}
+		if b.TeamFrom != nil {
+			if b.Team != "" {
+				v.add(at+".team", "team and team_from are exclusive")
+			}
+			if err := config.ValidateTeamFrom(b.TeamFrom.Claim, b.TeamFrom.Regex, b.TeamFrom.Prefix); err != nil {
+				v.add(at+".team_from", "%v", err)
+			}
+		}
 		if len(b.Groups) == 0 && len(b.Subjects) == 0 {
 			v.add(at, "groups or subjects required")
 		}
@@ -220,6 +248,30 @@ func ValidateManaged(c *config.Config, base uiapi.PolicyDocument, d uiapi.Policy
 			if _, err := netip.ParsePrefix(p); err != nil {
 				v.add(fmt.Sprintf("%s.allowed_cidrs[%d]", at, j), "invalid CIDR %q", p)
 			}
+		}
+	}
+	return v
+}
+
+// ValidateZonesDiscovered checks that every zone a managed document adds
+// (not already managed by cur, the active snapshot) exists in the EuroDNS
+// account. Zones already managed are not checked again, so that a zone
+// removed from the account does not block unrelated policy changes.
+func ValidateZonesDiscovered(d uiapi.PolicyDocument, cur *Snapshot, disc Discovery, loaded bool) []uiapi.ValidationError {
+	var v verrs
+	for i, z := range d.Zones {
+		z = normZone(z)
+		if cur != nil && cur.IsManaged(z) {
+			continue
+		}
+		at := fmt.Sprintf("zones[%d]", i)
+		switch {
+		case disc == nil:
+			v.add(at, "zone %q is not managed yet: adding zones requires zones_discovery.enabled", z)
+		case !loaded:
+			v.add(at, "the zone list of the EuroDNS account is not loaded yet: retry later")
+		case !disc.Discovered(z):
+			v.add(at, "zone %q was not found in the EuroDNS account (or is filtered out by zones_discovery include/exclude)", z)
 		}
 	}
 	return v
