@@ -1,14 +1,14 @@
 <script lang="ts">
-  import type { Binding, Group, Role, VirtualKey } from '../../lib/types';
+  import type { Binding, DelegatedOwner, Group, Role, VirtualKey } from '../../lib/types';
   import LayerTag from './LayerTag.svelte';
   import Matcher from './Matcher.svelte';
   import RuleLine from './RuleLine.svelte';
   import RelTime from '../RelTime.svelte';
   import { teamFromText, teamLabel } from '../../lib/team';
   import { humanDuration } from '../../lib/duration';
-  import { bindingAllows } from '../../lib/access';
+  import { bindingAllows, type Layer } from '../../lib/access';
 
-  type Layered<T> = { layer: 'base' | 'managed'; rev?: string; item: T };
+  type Layered<T> = { layer: Layer; rev?: string; name?: string; owner?: DelegatedOwner; item: T };
   let {
     kind,
     groups = [],
@@ -39,10 +39,10 @@
       </li>
     {:else}<li class="none">No groups.</li>{/each}
   {:else if kind === 'roles'}
-    {#each roles as { layer, rev, item: [name, r] } (layer + name)}
+    {#each roles as { layer, rev, owner, item: [name, r] } (layer + name)}
       <li class={layer}>
         <div class="head">
-          <span class="name mono">{name}</span><LayerTag {layer} {rev} />
+          <span class="name mono">{name}</span><LayerTag {layer} {rev} {owner} />
           <span class="flags">
             {#if r.rebase_on_save}<span class="flag">rebase on save</span>{/if}
             {#if r.ephemeral_ttl}<span class="flag" title="Records it creates are removed after {humanDuration(r.ephemeral_ttl)}">ephemeral, {humanDuration(r.ephemeral_ttl)}</span>{/if}
@@ -54,9 +54,10 @@
       </li>
     {:else}<li class="none">No roles.</li>{/each}
   {:else if kind === 'bindings'}
-    {#each bindings as { layer, rev, item: b }, i (layer + i)}
+    {#each bindings as { layer, rev, name, owner, item: b }, i (layer + i)}
       <li class="{layer} binding">
         <div class="bmain">
+        {#if name}<div class="bname mono">{name}</div>{/if}
         <div class="grant">
           <span class="role mono">{b.role}</span><span class="at">@</span><span class="team" class:derived={!!b.team_from} title={b.team_from ? teamFromText(b.team_from) : undefined}>{teamLabel(b.team, b.team_from)}</span>
           <span class="arrow" aria-label="granted to">←</span>
@@ -81,7 +82,7 @@
           <p class="desc small">Role <span class="mono">{b.role}</span> is not defined.</p>
         {/if}
         </div>
-        <LayerTag {layer} {rev} />
+        <LayerTag {layer} {rev} {owner} />
       </li>
     {:else}<li class="none">No bindings.</li>{/each}
   {:else}
@@ -154,6 +155,11 @@
   .name {
     font-weight: 600;
     font-size: 13px;
+  }
+  .bname {
+    font-size: 11.5px;
+    color: var(--ink-3);
+    margin-bottom: 2px;
   }
   .desc {
     color: var(--ink-3);

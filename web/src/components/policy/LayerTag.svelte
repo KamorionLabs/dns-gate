@@ -1,10 +1,16 @@
 <script lang="ts">
+  import type { DelegatedOwner } from '../../lib/types';
   import Icon from '../Icon.svelte';
-  let { layer, rev }: { layer: string; rev?: string } = $props();
+  let { layer, rev, owner }: { layer: string; rev?: string; owner?: DelegatedOwner } = $props();
 </script>
 
 {#if layer === 'base'}
   <span class="tag base" title="Base layer: loaded from the configuration file, not editable here"><Icon name="lock" size={11} />base</span>
+{:else if layer === 'delegated'}
+  <span
+    class="tag delegated"
+    title={`Delegated to ${owner?.delegation ?? 'a policy delegation'}${owner?.managed_by ? `, managed by ${owner.managed_by}` : ''}: changed by its owner, not through revisions${owner?.updated_by ? ` (last by ${owner.updated_by})` : ''}`}
+  >delegated{#if owner}<span class="rev mono">{owner.delegation}{#if owner.managed_by} · {owner.managed_by}{/if}</span>{/if}</span>
 {:else}
   <span class="tag managed" title="Managed layer: editable through reviewed revisions">managed{#if rev}<span class="rev mono">{rev}</span>{/if}</span>
 {/if}
@@ -31,6 +37,10 @@
   .managed {
     color: var(--seal-ink);
     background: var(--seal-ink-wash);
+  }
+  .delegated {
+    color: var(--pencil);
+    background: var(--pencil-wash);
   }
   .rev {
     text-transform: none;

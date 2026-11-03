@@ -21,7 +21,7 @@
             <span class="team" title={lb.binding.team_from ? teamFromText(lb.binding.team_from) : undefined}>{teamLabel(lb.binding.team, lb.binding.team_from)}</span>
             <span class="dim">through</span>
             <span class="role mono">{lb.binding.role}</span>
-            <LayerTag layer={lb.layer} rev={lb.rev} />
+            <LayerTag layer={lb.layer} rev={lb.rev} owner={lb.owner} />
           </div>
           <div class="members">
             <span class="dim">Granted to</span>
