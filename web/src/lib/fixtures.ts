@@ -49,6 +49,8 @@ const acmeKey: Actor = { subject: 'key:acme-solver', name: 'acme-solver', catego
 const reconciler: Actor = { subject: 'gate:reconciler', name: 'reconciler', category: 'system' };
 const carol: Actor = { subject: 'entra:carol@example.com', name: 'carol@example.com', category: 'human' };
 const dave: Actor = { subject: 'entra:dave@example.com', name: 'dave@example.com', category: 'human' };
+// Azure DevOps service connection: the subject carries no display name.
+const adoDeploy: Actor = { subject: 'ado:sc://example-org/platform/dns-deploy', name: 'sc://example-org/platform/dns-deploy', category: 'pipeline' };
 
 // ?as=reader in the page URL switches to a read-only user.
 const asReader = new URLSearchParams(window.location.search).get('as') === 'reader';
@@ -67,7 +69,7 @@ const me: Me = asReader
       subject: 'entra:alice@example.com',
       name: 'alice@example.com',
       category: 'human',
-      roles: ['viewer', 'policy-admin', 'app-cname-writer'],
+      roles: ['viewer', 'policy-admin', 'app-cname-writer', 'adopter'],
       teams: ['web', 'platform'],
       groups: ['policy-admins', 'web-humans'],
       permissions: [
@@ -78,6 +80,7 @@ const me: Me = asReader
           hosts: ['*', '*.staging', '_*.*'],
           types: ['CNAME', 'TXT'],
         },
+        { role: 'adopter', zones: ['example.com', 'acme.example', 'cloud.example'], actions: ['dns.record.adopt'], hosts: [], types: [] },
         { role: 'policy-admin', zones: ['*'], actions: ['policy.read', 'policy.propose', 'policy.approve'], hosts: [], types: [] },
         { role: 'viewer', zones: ['*'], actions: ['dns.read', 'ui.read', 'policy.read'], hosts: [], types: [] },
       ],
@@ -205,8 +208,7 @@ const inventories: ZoneInventory[] = [
 ];
 
 // Zones of the account that zone discovery found. shop.example is managed by
-// the active managed revision; example.net and legacy.example are not managed
-// (legacy.example is also outside the policy bounds, so it cannot be added).
+// the active managed revision; example.net and legacy.example are not managed.
 inventories.push(
   {
     zone: 'shop.example',
@@ -240,8 +242,153 @@ inventories.push(
   },
 );
 
+// Deterministic pseudo-random data, so screenshots stay stable.
+function rng(seed: number) {
+  return () => {
+    seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const rand = rng(20261103);
+const pick = <T>(xs: readonly T[]): T => xs[Math.floor(rand() * xs.length)]!;
+const hex = (n: number) => Array.from({ length: n }, () => '0123456789abcdef'[Math.floor(rand() * 16)]).join('');
+const letters = (n: number) => Array.from({ length: n }, () => 'abcdefghijklmnopqrstuvwxyz'[Math.floor(rand() * 26)]).join('');
+
+// cloud.example: a large zone (1551 record sets) with long ACM validation
+// names and values, 16 of them managed by a pipeline.
+function cloudZone(): ZoneInventory {
+  const zone = 'cloud.example';
+  const services = ['api', 'auth', 'billing', 'catalog', 'checkout', 'search', 'media', 'events', 'reports', 'partners', 'status', 'docs'];
+  const regions = ['eu-central', 'eu-west', 'us-east', 'ap-south'];
+  const rrsets: RRset[] = [
+    foreign('@', 'SOA', 86400, ['ns1.eurodns.com. hostmaster.eurodns.com. 2026110301 10800 3600 604800 600']),
+    foreign('@', 'NS', 86400, ['ns1.eurodns.com.', 'ns2.eurodns.com.', 'ns3.eurodns.com.', 'ns4.eurodns.com.'], true),
+    foreign('@', 'MX', 3600, ['10 mx1.mail.example.net.', '20 mx2.mail.example.net.', '30 mx3.mail.example.net.'], true),
+    foreign('@', 'TXT', 3600, [
+      '"v=spf1 include:_spf.mail.example.net include:_spf.crm.example.net include:_spf.helpdesk.example.org ip4:198.51.100.0/24 -all"',
+      '"site-verification=Zm9vYmFyYmF6cXV4cXV1eGNvcmdlZ3JhdWx0Z2FycGx5d2FsZG8"',
+    ], true),
+    foreign('selector1._domainkey', 'TXT', 3600, [
+      '"v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAu2bq7mL0yXk3d9JZr4m1vTqP8sH2nE5cW6aG0fR3tY7uI1oP9lK4jH6gF2dS8aQ0wE3rT5yU7iO9pL1kJ3hG5fD7sA9zX2cV4bN6mM8qW0eR2tY4uI6oP8lK0jH2gF4dS6aQ8wE0rT2yU4iO6pL8kJ0hG2fD4sA6zX8cV0bN2mM4qW6eR8tY0uI2oP4lK6jH8gF0dS2aQ4wIDAQAB"',
+    ]),
+  ];
+  const seen = new Set(rrsets.map((r) => `${r.host}/${r.type}`));
+  const add = (r: RRset) => {
+    const k = `${r.host}/${r.type}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    rrsets.push(r);
+  };
+  // Managed by the platform pipeline (an Azure DevOps service connection).
+  const managedHosts = ['api', 'auth', 'billing', 'catalog', 'checkout', 'search', 'media', 'status'];
+  managedHosts.forEach((svc, i) => {
+    add({
+      host: `${svc}.eu-central`, type: 'CNAME', ttl: 300, values: [svc === 'status' ? 'status-page.hosted.example.org.' : `${svc}-alb-${hex(8)}.eu-central-1.elb.example.net.`], status: 'managed',
+      protected: false, owner: 'platform', created_by: adoDeploy, created_at: ago((20 + i) * D), updated_by: adoDeploy, updated_at: ago(i * 3 * H + 30),
+      adopted: false, last_request_id: `req_01JC${hex(6).toUpperCase()}`,
+    });
+    add({
+      host: `_${hex(32)}.${svc}.eu-central`, type: 'CNAME', ttl: 300, values: [`_${hex(32)}.${letters(10)}.acm-validations.aws.`], status: 'managed',
+      protected: false, owner: 'platform', created_by: adoDeploy, created_at: ago((20 + i) * D), adopted: false, last_request_id: `req_01JC${hex(6).toUpperCase()}`,
+    });
+  });
+  // Everything else exists at EuroDNS, not managed by the gate.
+  while (rrsets.length < 1551) {
+    const kind = rand();
+    const svc = pick(services);
+    const region = pick(regions);
+    const n = Math.floor(rand() * 90) + 1;
+    if (kind < 0.42) {
+      add(foreign(`_${hex(32)}.${svc}-${n}.${region}`, 'CNAME', 300, [`_${hex(32)}.${letters(10)}.acm-validations.aws.`]));
+    } else if (kind < 0.7) {
+      const ips = Array.from({ length: 1 + Math.floor(rand() * 4) }, () => `${pick(['198.51.100', '203.0.113', '192.0.2'])}.${Math.floor(rand() * 254) + 1}`);
+      add(foreign(`${svc}-${n}.${region}`, 'A', pick([60, 300, 3600]), [...new Set(ips)]));
+    } else if (kind < 0.85) {
+      add(foreign(`${svc}-${n}.${region}`, 'CNAME', pick([300, 3600]), [`${svc}-${n}-${hex(10)}.${region}-1.lb.example.net.`]));
+    } else if (kind < 0.95) {
+      add(foreign(`${svc}-${n}.${region}`, 'TXT', 3600, [`"${letters(6)}-verification=${hex(48)}"`]));
+    } else {
+      add(foreign(`${svc}-${n}.${region}`, 'AAAA', 300, [`2001:db8:${hex(4)}::${hex(4)}`, `2001:db8:${hex(4)}::${hex(4)}`]));
+    }
+  }
+  return { zone, last_synced_at: ago(2), rrsets };
+}
+
+inventories.push(
+  cloudZone(),
+  {
+    zone: 'mail.example',
+    last_synced_at: ago(5),
+    rrsets: [
+      foreign('@', 'NS', 86400, ['ns1.eurodns.com.', 'ns2.eurodns.com.'], true),
+      foreign('@', 'MX', 3600, ['10 mx.mail.example.'], true),
+      {
+        host: 'autoconfig', type: 'CNAME', ttl: 3600, values: ['autoconfig.provider.example.net.'], status: 'managed', protected: false,
+        owner: 'platform', created_by: adoDeploy, created_at: ago(8 * D), adopted: true, last_request_id: 'req_01JC0MAIL1',
+      },
+      foreign('webmail', 'CNAME', 3600, ['webmail.provider.example.net.']),
+    ],
+  },
+  {
+    zone: 'static.example.net',
+    last_synced_at: ago(7),
+    rrsets: [
+      foreign('@', 'NS', 86400, ['ns1.eurodns.com.', 'ns2.eurodns.com.'], true),
+      {
+        host: 'cdn', type: 'CNAME', ttl: 600, values: ['d333333abcdef1.cloudfront.net.'], status: 'managed', protected: false,
+        owner: 'web', created_by: ghWeb, created_at: ago(11 * D), updated_by: ghWeb, updated_at: ago(4 * D), adopted: false, last_request_id: 'req_01JC0CDN01',
+      },
+    ],
+  },
+  {
+    zone: 'internal.example',
+    last_synced_at: ago(3),
+    rrsets: [
+      foreign('@', 'NS', 86400, ['ns1.eurodns.com.', 'ns2.eurodns.com.'], true),
+      foreign('vpn', 'A', 3600, ['198.51.100.30']),
+      foreign('wiki', 'CNAME', 3600, ['wiki.hosted.example.org.']),
+    ],
+  },
+);
+
+// The rest of the account: hundreds of zones that are not managed. Their
+// content is generated when a zone is opened.
+const words = ['north', 'river', 'alpha', 'summit', 'harbor', 'maple', 'cedar', 'atlas', 'nova', 'orbit', 'pixel', 'meadow', 'granite', 'lumen', 'vertex', 'willow', 'ember', 'falcon', 'quartz', 'tundra'];
+const suffixes = ['', '-shop', '-labs', '-group', '-media', '-store', '-cloud', '-app'];
+const tlds = ['.example', '.example.net', '.example.org'];
+const generated: string[] = [];
+for (const t of tlds) for (const w of words) for (const x of suffixes) generated.push(w + x + t);
+const discovered: string[] = [...new Set([...inventories.map((i) => i.zone), ...generated.slice(0, 449 - inventories.length)])].sort();
+
+function findInv(zone: string): ZoneInventory | undefined {
+  let inv = inventories.find((i) => i.zone === zone);
+  if (!inv && discovered.includes(zone)) {
+    const r = rng(zone.length * 7919 + zone.charCodeAt(0));
+    const ip = () => `192.0.2.${Math.floor(r() * 254) + 1}`;
+    inv = {
+      zone,
+      rrsets: [
+        foreign('@', 'SOA', 86400, [`ns1.eurodns.com. hostmaster.eurodns.com. 2026${String(Math.floor(r() * 1e6)).padStart(6, '0')} 10800 3600 604800 600`]),
+        foreign('@', 'NS', 86400, ['ns1.eurodns.com.', 'ns2.eurodns.com.'], true),
+        foreign('@', 'A', 3600, [ip()]),
+        foreign('www', 'CNAME', 3600, [zone + '.']),
+        foreign('@', 'MX', 3600, ['10 mx.mail.example.net.'], true),
+      ],
+    };
+    inventories.push(inv);
+  }
+  return inv;
+}
+
 // Unmanaged zones whose content the gate has read (on demand, when opened).
 const readZones = new Set(['example.net']);
+
+// ?calm=1: nothing needs attention (to see the "All good" state).
+const calm = new URLSearchParams(window.location.search).get('calm') === '1';
+// ?discovery=error: the last zone listing failed.
+const discoveryError = new URLSearchParams(window.location.search).get('discovery') === 'error';
 
 function summarize(inv: ZoneInventory, lastWrite?: string): ZoneSummary {
   const count = (s: string) => inv.rrsets.filter((r) => r.status === s).length;
@@ -249,15 +396,40 @@ function summarize(inv: ZoneInventory, lastWrite?: string): ZoneSummary {
     zone: inv.zone,
     rrsets: inv.rrsets.length,
     managed: count('managed'),
-    tainted: count('tainted') + count('missing'),
-    pending: count('pending'),
+    tainted: calm ? 0 : count('tainted') + count('missing'),
+    pending: calm ? 0 : count('pending'),
     foreign: count('foreign'),
     last_synced_at: inv.last_synced_at,
     last_write_at: lastWrite,
   };
 }
 
+const mcpRead = (minutes: number, tool: string, zone?: string): AuditEntry => ({
+  time: ago(minutes), request_id: `mcp_${tool}_${minutes}`, actor: alice, teams: ['web', 'platform'], action: `mcp.${tool}`, zone, decision: 'allow',
+});
+
 const audit: AuditEntry[] = [
+  mcpRead(0.5, 'list_zones'),
+  mcpRead(0.6, 'list_rrsets', 'example.com'),
+  mcpRead(0.7, 'get_rrset', 'example.com'),
+  {
+    time: ago(0.8), request_id: 'req_01JC0RETYPE', actor: adoDeploy, teams: ['platform'], action: 'saveDnsZone', zone: 'cloud.example',
+    decision: 'allow', snapshot_id: 884301,
+    changes: [
+      { op: 'delete', host: 'status.eu-central', type: 'A', old_ttl: 300, old_values: ['198.51.100.40', '198.51.100.41'] },
+      { op: 'create', host: 'status.eu-central', type: 'CNAME', new_ttl: 300, new_values: ['status-page.hosted.example.org.'] },
+    ],
+  },
+  mcpRead(0.9, 'plan_rrset_change', 'cloud.example'),
+  ...Array.from({ length: 18 }, (_, i) => mcpRead(1.1 + i * 0.05, i % 2 ? 'list_rrsets' : 'get_rrset', i % 3 ? 'cloud.example' : 'example.com')),
+  {
+    time: ago(30), request_id: 'req_01JC0CLD16', actor: adoDeploy, teams: ['platform'], action: 'saveDnsZone', zone: 'cloud.example',
+    decision: 'allow', snapshot_id: 884250,
+    changes: [{
+      op: 'update', host: 'api.eu-central', type: 'CNAME', old_ttl: 300, old_values: ['api-alb-old.eu-central-1.elb.example.net.'],
+      new_ttl: 300, new_values: ['api-alb-3f9c2a1b.eu-central-1.elb.example.net.'],
+    }],
+  },
   {
     time: ago(1), request_id: 'req_01JBXA0003', actor: ciCorp, teams: ['corporate', 'platform'], action: 'addDnsRecords',
     zone: 'example.com', decision: 'allow',
@@ -390,6 +562,8 @@ const audit: AuditEntry[] = [
   },
 ];
 
+audit.sort((a, b) => b.time.localeCompare(a.time));
+
 const delay = <T>(v: T, ms = 180) => new Promise<T>((r) => setTimeout(() => r(structuredClone(v)), ms));
 
 function matches(e: AuditEntry, q: AuditQuery): boolean {
@@ -416,15 +590,16 @@ const ENTRA = 'entra';
 const base: EffectivePolicy['base'] = {
   config_hash: 'sha256:9f2c4e1ab07d5c3e88a1f0b6d2e4c7a9b1d3f5e7a9c1b3d5e7f9a1c3e5b7d9f1',
   loaded_at: ago(3 * D + 2 * H),
-  zones: ['example.com', 'acme.example', 'brand.example'],
+  zones: ['example.com', 'acme.example', 'brand.example', 'cloud.example', 'mail.example', 'static.example.net', 'internal.example'],
   zones_discovery: {
     enabled: true,
     include: ['*'],
     exclude: ['*.test'],
-    refresh: '1h',
+    refresh: '1h0m0s',
     loaded: true,
-    count: 6,
+    count: 449,
     last_refresh_at: ago(14),
+    error: discoveryError ? 'searchDomains: EuroDNS answered 503 Service Unavailable' : undefined,
   },
   issuers: [
     {
@@ -451,6 +626,13 @@ const base: EffectivePolicy['base'] = {
       category: 'human',
     },
     {
+      name: 'ado',
+      issuer: 'https://vstoken.dev.azure.com/00000000-0000-0000-0000-000000000000',
+      audiences: ['api://AzureADTokenExchange'],
+      subject_claim: 'sub',
+      category: 'pipeline',
+    },
+    {
       name: 'k8s',
       issuer: 'https://oidc.eks.eu-central-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B71EXAMPLE',
       audiences: ['eurodns-gate'],
@@ -462,7 +644,7 @@ const base: EffectivePolicy['base'] = {
     { zones: ['*'], hosts: ['_dmarc', '@'], types: ['TXT'] },
   ],
   bounds: {
-    zones: ['example.com', 'acme.example', 'brand.example', 'shop.example', 'example.net'],
+    zones: ['example.com', 'acme.example', 'brand.example', 'cloud.example', 'mail.example', 'internal.example', 'shop.example', '*.example', '*.example.net', '*.example.org'],
     actions: ['dns.read', 'ui.read', 'dns.record.write', 'dns.record.adopt'],
   },
   document: {
@@ -521,6 +703,10 @@ const activeDoc: PolicyDocument = {
     'web-humans': { members: [{ issuer: ENTRA, claims: { groups: ['2d4f6a8c-web-team'] } }] },
     'corporate-pipelines': { members: [{ issuer: 'aws', claims: { sub: ['arn:aws:iam::111111111111:role/ci-corporate'] } }] },
     platform: { members: [{ issuer: 'aws', claims: { sub: ['arn:aws:iam::222222222222:role/platform-*'] } }] },
+    'platform-pipelines': {
+      description: 'Azure DevOps service connections of the platform project',
+      members: [{ issuer: 'ado', claims: { sub: ['sc://example-org/platform/*'] } }],
+    },
   },
   roles: {
     'app-cname-writer': {
@@ -531,7 +717,12 @@ const activeDoc: PolicyDocument = {
     'corporate-writer': {
       rules: [{ zones: ['acme.example'], actions: ['dns.read', 'dns.record.write'], records: { types: ['A', 'AAAA', 'CNAME', 'APEX', 'TXT'] } }],
     },
-    adopter: { description: 'Take existing records under gate custody', rules: [{ zones: ['example.com', 'acme.example'], actions: ['dns.record.adopt'] }] },
+    adopter: { description: 'Bring existing records under gate management', rules: [{ zones: ['example.com', 'acme.example', 'cloud.example'], actions: ['dns.record.adopt'] }] },
+    'platform-writer': {
+      description: 'Platform services: load balancer names and their certificate validation records',
+      rules: [{ zones: ['cloud.example', 'mail.example'], actions: ['dns.read', 'dns.record.write'], records: { hosts: ['*.eu-central', '_*.*.eu-central', '*'], types: ['A', 'AAAA', 'CNAME', 'TXT'] } }],
+      max_changes_per_request: 50,
+    },
     'shop-pipeline': {
       description: 'Shop deployment pipelines, each one in its own team',
       rules: [{ zones: ['shop.example'], actions: ['dns.read', 'dns.record.write'], records: { types: ['A', 'AAAA', 'CNAME', 'TXT'] } }],
@@ -541,7 +732,8 @@ const activeDoc: PolicyDocument = {
     { role: 'app-cname-writer', team: 'web', groups: ['web-pipelines', 'web-humans'] },
     { role: 'app-cname-writer', team: 'platform', groups: ['platform'] },
     { role: 'corporate-writer', team: 'corporate', groups: ['corporate-pipelines'], subjects: [{ issuer: ENTRA, claims: { preferred_username: ['bob@example.com'] } }] },
-    { role: 'adopter', team: 'web', subjects: [{ issuer: ENTRA, claims: { preferred_username: ['bob@example.com'] } }] },
+    { role: 'adopter', team: 'web', subjects: [{ issuer: ENTRA, claims: { preferred_username: ['bob@example.com', 'alice@example.com'] } }] },
+    { role: 'platform-writer', team: 'platform', groups: ['platform-pipelines'] },
     {
       role: 'shop-pipeline',
       team: '',
@@ -622,7 +814,7 @@ const revs: Rev[] = [
   },
 ];
 
-const settings: EffectivePolicy['settings'] = { editable: true, require_approval: true, edit_max_age: '15m', require_amr: ['mfa'] };
+const settings: EffectivePolicy['settings'] = { editable: true, require_approval: true, edit_max_age: '15m0s', require_amr: ['mfa'] };
 const activeRev = () => revs.find((r) => r.s.status === 'active');
 
 function lineDiff(a: string, b: string): string {
@@ -728,7 +920,7 @@ function validate(doc: PolicyDocument): ValidationError[] {
     if (seen.has(z)) errs.push({ path: at, message: `zone "${z}" is listed twice` });
     seen.add(z);
     if (!base.bounds.zones.some((b) => zoneMatch(b, z))) errs.push({ path: at, message: `zone "${z}" is outside policy.bounds.zones` });
-    else if (!inventories.some((inv) => inv.zone === z)) errs.push({ path: at, message: `zone "${z}" was not found in the account by zone discovery` });
+    else if (!discovered.includes(z)) errs.push({ path: at, message: `zone "${z}" was not found in the account by zone discovery` });
   });
   doc.virtual_keys.forEach((k, i) => {
     if (!k.id) errs.push({ path: `virtual_keys[${i}].id`, message: 'id is required' });
@@ -882,7 +1074,7 @@ function candidate(zone: string, r: RRset, owner: string): AdoptCandidate {
 }
 
 function select(zone: string, sel: AdoptSelection): RRset[] {
-  const inv = inventories.find((i) => i.zone === zone);
+  const inv = managedZones().has(zone) ? findInv(zone) : undefined;
   if (!inv) throw new ApiError(404, 'not_found', `zone ${zone} is not managed`);
   const explicit = new Set((sel.rrsets ?? []).map((r) => `${r.host}/${r.type}`));
   const byFilter = (r: RRset) =>
@@ -927,7 +1119,7 @@ const tfName = (r: RRset) =>
   ((r.host === '@' ? 'apex' : r.host).replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'apex') + '_' + r.type.toLowerCase();
 
 function terraform(zone: string, q: TerraformQuery): string {
-  const inv = inventories.find((i) => i.zone === zone);
+  const inv = managedZones().has(zone) ? findInv(zone) : undefined;
   if (!inv) throw new ApiError(404, 'not_found', `zone ${zone} is not managed`);
   const rrs = inv.rrsets.filter(
     (r) =>
@@ -969,20 +1161,22 @@ export const fixtureBackend = {
   connect: () => delay(connect),
   zones: () => {
     const managed = managedZones();
-    const unmanaged = (inv: ZoneInventory): ZoneSummary =>
-      readZones.has(inv.zone)
+    const unmanaged = (zone: string): ZoneSummary => {
+      const inv = inventories.find((i) => i.zone === zone);
+      return inv && readZones.has(zone)
         ? { ...summarize(inv), unmanaged: true }
-        : { zone: inv.zone, rrsets: 0, managed: 0, tainted: 0, pending: 0, foreign: 0, unmanaged: true };
+        : { zone, rrsets: 0, managed: 0, tainted: 0, pending: 0, foreign: 0, unmanaged: true };
+    };
+    // Latest successful write: a change that reached EuroDNS (not a read, an adoption or a drift check).
+    const wrote = (e: AuditEntry) =>
+      e.decision === 'allow' && (e.changes ?? []).some((c) => c.op === 'create' || c.op === 'update' || c.op === 'delete' || (c.op === 'expire' && !!c.old_values?.length));
     return delay([
-      ...inventories.filter((inv) => managed.has(inv.zone)).map((inv) => {
-        const last = audit.find((e) => e.zone === inv.zone && e.decision === 'allow' && e.actor.subject !== reconciler.subject);
-        return summarize(inv, last?.time);
-      }),
-      ...inventories.filter((inv) => !managed.has(inv.zone)).map(unmanaged),
+      ...inventories.filter((inv) => managed.has(inv.zone)).map((inv) => summarize(inv, audit.find((e) => e.zone === inv.zone && wrote(e))?.time)),
+      ...discovered.filter((z) => !managed.has(z)).map(unmanaged),
     ]);
   },
   inventory: (zone: string) => {
-    const inv = inventories.find((i) => i.zone === zone);
+    const inv = findInv(zone);
     if (!inv) return Promise.reject(new Error(`Zone ${zone} is not managed by this gate`));
     if (managedZones().has(zone)) return delay(inv);
     if (!inv.last_synced_at) inv.last_synced_at = new Date().toISOString();
@@ -990,7 +1184,7 @@ export const fixtureBackend = {
     return delay({ ...inv, unmanaged: true });
   },
   audit: (q: AuditQuery): Promise<AuditPage> => {
-    const all = audit.filter((e) => matches(e, q));
+    const all = audit.filter((e) => matches(e, q) && (!calm || e.decision === 'allow'));
     const start = q.cursor ? Number(q.cursor) : 0;
     const limit = q.limit ?? 25;
     const entries = all.slice(start, start + limit);

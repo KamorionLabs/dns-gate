@@ -1,17 +1,21 @@
 <script lang="ts">
   import type { Actor } from '../lib/types';
   import { categoryLabel } from '../lib/labels';
+  import { identityLabel } from '../lib/identity';
   import Icon from './Icon.svelte';
 
+  // The one way an identity is shown: readable label, kind icon, full subject on hover.
   let { actor, quiet = false }: { actor: Actor; quiet?: boolean } = $props();
-  const system = $derived(actor.category === 'system' || actor.subject.startsWith('gate:'));
-  const icon = $derived(system ? 'gate' : (actor.category as 'human' | 'pipeline' | 'key'));
-  const kind = $derived(system ? 'Gate' : categoryLabel[actor.category]);
+  const id = $derived(identityLabel(actor));
+  const system = $derived(id.kind === 'system');
+  const icon = $derived(system ? 'gate' : (id.kind as 'human' | 'pipeline' | 'key'));
+  const kind = $derived(system ? 'Gate' : categoryLabel[id.kind]);
 </script>
 
-<span class="actor {system ? 'system' : actor.category}" class:quiet title="{kind} · {actor.subject}">
+<span class="actor {system ? 'system' : id.kind}" class:quiet title="{kind} · {id.full}">
   <span class="glyph"><Icon name={icon} size={12} /></span>
-  <span class="name">{actor.name}</span>
+  <span class="name">{id.label}</span>
+  <span class="sr-only">({kind})</span>
 </span>
 
 <style>

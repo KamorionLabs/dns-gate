@@ -5,6 +5,8 @@
   import RuleLine from './RuleLine.svelte';
   import RelTime from '../RelTime.svelte';
   import { teamFromText, teamLabel } from '../../lib/team';
+  import { humanDuration } from '../../lib/duration';
+  import { bindingAllows } from '../../lib/access';
 
   type Layered<T> = { layer: 'base' | 'managed'; rev?: string; item: T };
   let {
@@ -13,12 +15,15 @@
     roles = [],
     bindings = [],
     keys = [],
+    roleDefs = {},
   }: {
     kind: 'groups' | 'roles' | 'bindings' | 'keys';
     groups?: Layered<[string, Group]>[];
     roles?: Layered<[string, Role]>[];
     bindings?: Layered<Binding>[];
     keys?: Layered<VirtualKey>[];
+    /** Roles a binding can refer to (base and managed), to say what it allows. */
+    roleDefs?: Record<string, Role>;
   } = $props();
 
   const shortHash = (h: string) => (h.length > 16 ? h.slice(0, 8) + '…' + h.slice(-6) : h);
@@ -40,7 +45,7 @@
           <span class="name mono">{name}</span><LayerTag {layer} {rev} />
           <span class="flags">
             {#if r.rebase_on_save}<span class="flag">rebase on save</span>{/if}
-            {#if r.ephemeral_ttl}<span class="flag">ephemeral {r.ephemeral_ttl}</span>{/if}
+            {#if r.ephemeral_ttl}<span class="flag" title="Records it creates are removed after {humanDuration(r.ephemeral_ttl)}">ephemeral, {humanDuration(r.ephemeral_ttl)}</span>{/if}
             {#if r.max_changes_per_request}<span class="flag">≤ {r.max_changes_per_request} changes / request</span>{/if}
           </span>
         </div>
@@ -61,6 +66,20 @@
           </span>
         </div>
         {#if b.team_from}<p class="desc mono derive">{teamFromText(b.team_from)}</p>{/if}
+        {#if roleDefs[b.role]}
+          {@const allows = bindingAllows(b, roleDefs)}
+          <details class="allows">
+            <summary>What it allows</summary>
+            {#if allows.length}
+              <ul>{#each allows as a (a)}<li>{a}</li>{/each}</ul>
+            {:else}
+              <p class="desc">Nothing: the role has no rule with an action this console knows.</p>
+            {/if}
+            <p class="desc small">Records created through it are owned by team <b>{teamLabel(b.team, b.team_from)}</b>{#if roleDefs[b.role]?.ephemeral_ttl} and removed after {humanDuration(roleDefs[b.role]?.ephemeral_ttl)}{/if}.</p>
+          </details>
+        {:else}
+          <p class="desc small">Role <span class="mono">{b.role}</span> is not defined.</p>
+        {/if}
         </div>
         <LayerTag {layer} {rev} />
       </li>
@@ -217,6 +236,33 @@
     padding: 0 6px;
     border-radius: 10px;
     box-shadow: inset 0 0 0 1px var(--rule-strong);
+  }
+  .binding {
+    align-items: start;
+  }
+  .allows {
+    margin-top: 4px;
+  }
+  .allows summary {
+    width: max-content;
+    cursor: pointer;
+    color: var(--seal-ink);
+    font-size: 12.5px;
+    font-weight: 500;
+    border-radius: var(--r-sm);
+  }
+  .allows ul {
+    margin: var(--s1) 0;
+    padding-left: var(--s4);
+    color: var(--ink-2);
+  }
+  .small {
+    font-size: 12px;
+    margin-top: 0;
+  }
+  .small b {
+    color: var(--ink-2);
+    font-weight: 600;
   }
   .kv {
     display: grid;

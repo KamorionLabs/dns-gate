@@ -49,6 +49,7 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - run: npm ci
       - run: npm run check
+      - run: npm test
       - run: npm run build
       - name: Claude Desktop extension relay
         run: node --test ../internal/mcpb/relay.test.js

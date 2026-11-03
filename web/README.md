@@ -1,10 +1,12 @@
 # eurodns-gate web UI
 
-Console served by eurodns-gate under `/ui/`: managed zones, record sets with
-their custody (owner team, who created or last changed them, who may change
-them), drift, the journal of every write, refusal and reconciliation, a Connect page
-(Claude Code, Claude Desktop with its extension download, Terraform and API setups
-filled in for the gate),
+Console served by eurodns-gate under `/ui/`: a health summary (drift, pending
+writes, recent refusals and failures, discovery errors, stale syncs), the zones
+managed by the gate and those that are not, record sets with their owner team, who
+created or last changed them and who may change them, the journal of every write,
+refusal and reconciliation (reads hidden by default), a Connect page (Claude
+Desktop with its extension download, Claude Code, Terraform and API setups filled
+in for the gate),
 and the policy: the read-only base layer, the managed layer with its reviewed revisions
 (draft, impact, diff, approval, activation, rollback) and a decision simulator.
 
@@ -16,7 +18,8 @@ is embedded in the Go binary by `web/embed.go`.
 
 ```sh
 npm ci
-npm run dev:fixtures   # demo data, no backend needed (?as=reader: read-only user, ?mcp=readonly|off: MCP state)
+npm run dev:fixtures   # demo data, no backend needed (?as=reader: read-only user, ?mcp=readonly|off: MCP state,
+                       # ?calm=1: nothing needs attention, ?discovery=error: failed zone listing)
 npm run dev            # proxies /api and /auth to a gate on http://localhost:8080
 ```
 
@@ -24,6 +27,7 @@ npm run dev            # proxies /api and /auth to a gate on http://localhost:80
 
 ```sh
 npm run check   # svelte-check, fails on warnings
+npm test        # unit tests of the display helpers (node --test)
 npm run build   # writes dist/ (base path /ui/)
 ```
 

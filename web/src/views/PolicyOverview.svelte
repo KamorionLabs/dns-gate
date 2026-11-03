@@ -8,6 +8,9 @@
   import RelTime from '../components/RelTime.svelte';
   import CopyText from '../components/CopyText.svelte';
   import Icon from '../components/Icon.svelte';
+  import ZoneAccessView from '../components/policy/ZoneAccess.svelte';
+  import { humanDuration } from '../lib/duration';
+  import { rolesOf, whoCanDoWhat } from '../lib/access';
 
   type L<T> = { layer: 'base' | 'managed'; rev?: string; item: T };
 
@@ -35,6 +38,7 @@
   const sections = [
     ['layers', 'Layers'],
     ['zones', 'Zones'],
+    ['who', 'Who can do what'],
     ['bindings', 'Bindings'],
     ['groups', 'Groups'],
     ['roles', 'Roles'],
@@ -48,6 +52,7 @@
 <PolicyFrame tab="overview" title="Who may change what">
   {#snippet children(p)}
     {@const L = layered(p)}
+    {@const zones = [...new Set([...p.base.zones, ...(p.managed?.zones ?? [])])].sort()}
     <div class="page">
       <aside class="toc" aria-label="On this page">
         {#each sections as [id, label] (id)}<a href={'#/policy'} onclick={(e) => { e.preventDefault(); document.getElementById('sec-' + id)?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }}>{label}</a>{/each}
@@ -94,7 +99,7 @@
               {#if d.enabled}
                 <p>
                   {#if d.loaded}<span class="num">{d.count}</span> {d.count === 1 ? 'zone' : 'zones'} found in the account{#if d.last_refresh_at}, listed <RelTime iso={d.last_refresh_at} />{/if}.{:else}Not listed yet.{/if}
-                  Refreshed every <span class="mono">{d.refresh}</span>. Zones found but not managed are shown read-only on the zones page.
+                  Refreshed every {humanDuration(d.refresh)}. Zones found but not managed are shown read-only on the zones page.
                 </p>
                 <dl>
                   <dt>include</dt><dd class="mono">{d.include.join(', ') || '*'}</dd>
@@ -108,10 +113,18 @@
           {/if}
         </section>
 
+        <section id="sec-who">
+          <h2 class="sec">Who can do what <span class="count num">{zones.length} {zones.length === 1 ? 'zone' : 'zones'}</span></h2>
+          <p class="hint">Per managed zone, the teams that can act there, who they are and what they may do, from the roles of every binding. Ownership still applies: a team only changes the records it owns.</p>
+          <div class="who-grid">
+            {#each whoCanDoWhat(p, zones) as a (a.zone)}<ZoneAccessView access={a} />{/each}
+          </div>
+        </section>
+
         <section id="sec-bindings">
           <h2 class="sec">Bindings <span class="count num">{L.b.length}</span></h2>
           <p class="hint">A binding grants a role, acting for a team, to groups or subjects. The team owns what it creates.</p>
-          <DocItems kind="bindings" bindings={L.b} />
+          <DocItems kind="bindings" bindings={L.b} roleDefs={rolesOf(p)} />
         </section>
 
         <section id="sec-groups">
@@ -347,6 +360,12 @@
     padding: 1px 8px;
     border-radius: 10px;
     box-shadow: inset 0 0 0 1px var(--rule-strong);
+  }
+  .who-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr));
+    gap: var(--s5) var(--s6);
+    align-items: start;
   }
   .issuers {
     display: grid;

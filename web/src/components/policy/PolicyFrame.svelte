@@ -2,6 +2,7 @@
   import type { Snippet } from 'svelte';
   import { policyState, forbidden } from '../../lib/policy.svelte';
   import PolicyNav from './PolicyNav.svelte';
+  import { humanDuration } from '../../lib/duration';
   import type { EffectivePolicy } from '../../lib/types';
 
   let { tab, title, children }: { tab: string; title: string; children: Snippet<[EffectivePolicy]> } = $props();
@@ -22,7 +23,7 @@
       {#if !s.editable}Managed layer disabled: the policy comes from the configuration file only.
       {:else}
         {s.require_approval ? 'Every revision needs approval by another policy approver' : 'Revisions can be activated by their author'}
-        · {`edits need a sign-in within ${s.edit_max_age}${s.require_amr?.length ? ' with ' + s.require_amr.join(', ').toUpperCase() : ''}`}
+        · {`edits need a sign-in within the last ${humanDuration(s.edit_max_age)}${s.require_amr?.length ? ' with ' + s.require_amr.join(', ').toUpperCase() : ''}`}
       {/if}
     </p>
   {/if}

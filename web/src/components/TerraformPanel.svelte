@@ -28,7 +28,7 @@
     <p class="eyebrow">Export Terraform</p>
     <h2 class="mono">{zone}</h2>
   {/snippet}
-  <p class="dim">Record sets held by the gate, as <span class="mono">eurodns_record_set</span> resources with import blocks. Paste into your stack, the first plan should be empty.</p>
+  <p class="dim">Record sets managed by the gate, as <span class="mono">eurodns_record_set</span> resources with import blocks. Paste into your stack, the first plan should be empty.</p>
   <label class="team">
     <span class="lbl">Team</span>
     <span class="field"><select bind:value={team}>

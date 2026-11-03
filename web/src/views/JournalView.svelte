@@ -3,6 +3,7 @@
   import type { AuditEntry, AuditQuery, ZoneSummary } from '../lib/types';
   import { router } from '../lib/router.svelte';
   import { dayLabel } from '../lib/format';
+  import { isRead } from '../lib/journal';
   import AuditItem from '../components/AuditItem.svelte';
   import Icon from '../components/Icon.svelte';
 
@@ -25,6 +26,7 @@
     { key: 'error', label: 'Failed' },
   ];
 
+  const PAGE = 25;
   let zones = $state<ZoneSummary[]>([]);
   let entries = $state<AuditEntry[] | null>(null);
   let cursor = $state<string | undefined>(undefined);
@@ -53,30 +55,46 @@
       category: filters.category || undefined,
       decision: filters.decision || undefined,
       since: period?.minutes ? new Date(Date.now() - period.minutes * 60_000).toISOString() : undefined,
-      limit: 25,
+      limit: PAGE,
     };
+  }
+
+  // Reads and dry runs are hidden unless asked for; pages are fetched until
+  // enough writes, refusals and drift events show (or a few pages were read).
+  const includeReads = $derived(p('reads') === '1');
+  let generation = 0;
+
+  async function fill(q: AuditQuery, from: string | undefined, gen: number, start: AuditEntry[]) {
+    let got = start;
+    let next = from;
+    let pages = 0;
+    const wanted = start.filter((e) => includeReads || !isRead(e)).length + PAGE;
+    do {
+      const page = await api.audit({ ...q, cursor: next });
+      if (gen !== generation) return;
+      got = [...got, ...page.entries];
+      next = page.next_cursor;
+      pages++;
+    } while (next && !includeReads && pages < 6 && got.filter((e) => !isRead(e)).length < wanted - PAGE / 2);
+    entries = got;
+    cursor = next;
   }
 
   $effect(() => {
     const q = buildQuery();
+    void includeReads;
+    const gen = ++generation;
     entries = null;
     error = null;
-    api
-      .audit(q)
-      .then((page) => {
-        entries = page.entries;
-        cursor = page.next_cursor;
-      })
-      .catch((e: Error) => (error = e.message));
+    fill(q, undefined, gen, []).catch((e: Error) => gen === generation && (error = e.message));
   });
 
   async function loadMore() {
     if (!cursor) return;
     loadingMore = true;
+    const gen = generation;
     try {
-      const page = await api.audit({ ...buildQuery(), cursor });
-      entries = [...(entries ?? []), ...page.entries];
-      cursor = page.next_cursor;
+      await fill(buildQuery(), cursor, gen, entries ?? []);
     } catch (e) {
       error = (e as Error).message;
     } finally {
@@ -95,7 +113,7 @@
     const out: { day: string; label: string; items: AuditEntry[] }[] = [];
     const today = new Date().toDateString();
     const yesterday = new Date(Date.now() - 86_400_000).toDateString();
-    for (const e of entries ?? []) {
+    for (const e of shown) {
       const d = new Date(e.time).toDateString();
       let g = out[out.length - 1];
       if (!g || g.day !== d) {
@@ -107,7 +125,9 @@
     return out;
   });
 
-  const refused = $derived((entries ?? []).filter((e) => e.decision !== 'allow').length);
+  const shown = $derived((entries ?? []).filter((e) => includeReads || !isRead(e)));
+  const hiddenReads = $derived((entries?.length ?? 0) - shown.length);
+  const refused = $derived(shown.filter((e) => e.decision !== 'allow').length);
   const active = $derived(Object.values(filters).some(Boolean));
 </script>
 
@@ -116,7 +136,7 @@
   <h1>Every write, refusal and drift, newest first</h1>
   {#if entries}
     <p class="meta">
-      <span class="num">{entries.length}</span>{cursor ? '+' : ''} events{#if refused}, <span class="num refused">{refused}</span> refused or failed{/if}
+      <span class="num">{shown.length}</span>{cursor ? '+' : ''} events{#if refused}, <span class="num refused">{refused}</span> refused or failed{/if}{#if hiddenReads}<span class="sep" aria-hidden="true">{' · '}</span><span class="num">{hiddenReads}</span> {hiddenReads === 1 ? 'read' : 'reads'} hidden{/if}
     </p>
   {/if}
 </header>
@@ -152,13 +172,17 @@
     </select>
     <span class="chev"><Icon name="chevron" size={12} /></span>
   </label>
+  <label class="toggle" title="Also show lookups and dry runs: lists, reads, plans and adoption previews">
+    <input type="checkbox" checked={includeReads} onchange={(e) => router.setParams({ reads: e.currentTarget.checked ? '1' : undefined })} />
+    Include reads
+  </label>
   {#if active}
     <button
       class="btn quiet"
       type="button"
       onclick={() => {
         subjectInput = '';
-        router.setParams({ zone: undefined, subject: undefined, category: undefined, decision: undefined, period: undefined });
+        router.setParams({ zone: undefined, subject: undefined, category: undefined, decision: undefined, period: undefined, reads: undefined });
       }}>Clear</button
     >
   {/if}
@@ -170,8 +194,11 @@
   <div class="loading">
     {#each [0, 1, 2] as i (i)}<div class="skeleton row"></div>{/each}
   </div>
-{:else if entries.length === 0}
-  <div class="empty"><strong>Nothing recorded</strong>No event matches these filters.</div>
+{:else if shown.length === 0}
+  <div class="empty">
+    <strong>Nothing recorded</strong>
+    {#if hiddenReads}Only reads match these filters: turn on Include reads to see them.{:else}No event matches these filters.{/if}
+  </div>
 {:else}
   <div class="timeline">
     {#each groups as g (g.day)}
@@ -216,6 +243,22 @@
   }
   .who input {
     width: 220px;
+  }
+  .toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 32px;
+    padding: 0 var(--s2);
+    color: var(--ink-2);
+    cursor: pointer;
+    user-select: none;
+  }
+  .toggle input {
+    width: 15px;
+    height: 15px;
+    margin: 0;
+    accent-color: var(--seal-ink);
   }
   .seg {
     display: inline-flex;
