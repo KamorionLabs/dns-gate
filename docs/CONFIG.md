@@ -152,7 +152,23 @@ bindings:
         claims: {sub: [sc://<organization>/<project>/eurodns-gate-certificates-prd]}
 ```
 
-The step running Terraform must expose `SYSTEM_ACCESSTOKEN: $(System.AccessToken)`. When the pipeline already logs in to Azure, the Entra token above (audience = the gate application) needs no such precautions and is preferable.
+In the pipeline:
+
+- the step running Terraform must expose `SYSTEM_ACCESSTOKEN: $(System.AccessToken)`;
+- a task of the **same job** must reference the service connection, otherwise Azure DevOps answers `HTTP 400 There is no explicit reference to service connection`. A skipped step is enough, in the plan job and in the apply job:
+
+  ```yaml
+  - task: cURLUploader@2
+    displayName: Reference the eurodns-gate service connection
+    condition: false
+    inputs:
+      files: none
+      authType: ServiceEndpoint
+      serviceEndpoint: eurodns-gate-certificates-prd
+  ```
+- the provider takes the connection id from `service_connection_id`, or from `EURODNS_GATE_ADO_SERVICE_CONNECTION_ID`, which a variable group named after the pipeline can carry so that nothing holds an id.
+
+When the pipeline already logs in to Azure, the Entra token above (audience = the gate application) needs no such precautions and is preferable.
 
 ## Virtual keys
 
