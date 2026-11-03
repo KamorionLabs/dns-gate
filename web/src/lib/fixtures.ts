@@ -29,6 +29,7 @@ import type {
   ZoneInventory,
   ZoneSummary,
 } from './types';
+import { teamLabel } from './team';
 import { ApiError } from './api';
 import { toYAML } from './yaml';
 import { claimMatch, hostMatch, zoneMatch } from './glob';
@@ -202,6 +203,45 @@ const inventories: ZoneInventory[] = [
     ],
   },
 ];
+
+// Zones of the account that zone discovery found. shop.example is managed by
+// the active managed revision; example.net and legacy.example are not managed
+// (legacy.example is also outside the policy bounds, so it cannot be added).
+inventories.push(
+  {
+    zone: 'shop.example',
+    last_synced_at: ago(9),
+    rrsets: [
+      foreign('@', 'NS', 86400, ['ns1.eurodns.com.', 'ns2.eurodns.com.'], true),
+      foreign('@', 'A', 3600, ['198.51.100.20']),
+      {
+        host: 'checkout', type: 'CNAME', ttl: 600, values: ['shop-lb.example.net.'], status: 'managed', protected: false,
+        owner: 'gh-shop', created_by: ghWeb, created_at: ago(2 * D), adopted: false, last_request_id: 'req_01JBY0SHOP',
+      },
+    ],
+  },
+  {
+    zone: 'example.net',
+    last_synced_at: ago(25),
+    rrsets: [
+      foreign('@', 'SOA', 86400, ['ns1.eurodns.com. hostmaster.eurodns.com. 2026103001 10800 3600 604800 600']),
+      foreign('@', 'NS', 86400, ['ns1.eurodns.com.', 'ns2.eurodns.com.'], true),
+      foreign('@', 'MX', 3600, ['10 mx.example.net.'], true),
+      foreign('shop-lb', 'A', 300, ['198.51.100.21', '198.51.100.22']),
+      foreign('status', 'CNAME', 3600, ['status-page.example.org.']),
+    ],
+  },
+  {
+    zone: 'legacy.example',
+    rrsets: [
+      foreign('@', 'NS', 86400, ['ns1.eurodns.com.', 'ns2.eurodns.com.'], true),
+      foreign('@', 'A', 3600, ['192.0.2.200']),
+    ],
+  },
+);
+
+// Unmanaged zones whose content the gate has read (on demand, when opened).
+const readZones = new Set(['example.net']);
 
 function summarize(inv: ZoneInventory, lastWrite?: string): ZoneSummary {
   const count = (s: string) => inv.rrsets.filter((r) => r.status === s).length;
@@ -377,6 +417,15 @@ const base: EffectivePolicy['base'] = {
   config_hash: 'sha256:9f2c4e1ab07d5c3e88a1f0b6d2e4c7a9b1d3f5e7a9c1b3d5e7f9a1c3e5b7d9f1',
   loaded_at: ago(3 * D + 2 * H),
   zones: ['example.com', 'acme.example', 'brand.example'],
+  zones_discovery: {
+    enabled: true,
+    include: ['*'],
+    exclude: ['*.test'],
+    refresh: '1h',
+    loaded: true,
+    count: 6,
+    last_refresh_at: ago(14),
+  },
   issuers: [
     {
       name: 'aws',
@@ -413,7 +462,7 @@ const base: EffectivePolicy['base'] = {
     { zones: ['*'], hosts: ['_dmarc', '@'], types: ['TXT'] },
   ],
   bounds: {
-    zones: ['example.com', 'acme.example', 'brand.example'],
+    zones: ['example.com', 'acme.example', 'brand.example', 'shop.example', 'example.net'],
     actions: ['dns.read', 'ui.read', 'dns.record.write', 'dns.record.adopt'],
   },
   document: {
@@ -460,6 +509,7 @@ const base: EffectivePolicy['base'] = {
 };
 
 const activeDoc: PolicyDocument = {
+  zones: ['shop.example'],
   groups: {
     'web-pipelines': {
       description: 'CI that deploys the web front',
@@ -482,12 +532,22 @@ const activeDoc: PolicyDocument = {
       rules: [{ zones: ['acme.example'], actions: ['dns.read', 'dns.record.write'], records: { types: ['A', 'AAAA', 'CNAME', 'APEX', 'TXT'] } }],
     },
     adopter: { description: 'Take existing records under gate custody', rules: [{ zones: ['example.com', 'acme.example'], actions: ['dns.record.adopt'] }] },
+    'shop-pipeline': {
+      description: 'Shop deployment pipelines, each one in its own team',
+      rules: [{ zones: ['shop.example'], actions: ['dns.read', 'dns.record.write'], records: { types: ['A', 'AAAA', 'CNAME', 'TXT'] } }],
+    },
   },
   bindings: [
     { role: 'app-cname-writer', team: 'web', groups: ['web-pipelines', 'web-humans'] },
     { role: 'app-cname-writer', team: 'platform', groups: ['platform'] },
     { role: 'corporate-writer', team: 'corporate', groups: ['corporate-pipelines'], subjects: [{ issuer: ENTRA, claims: { preferred_username: ['bob@example.com'] } }] },
     { role: 'adopter', team: 'web', subjects: [{ issuer: ENTRA, claims: { preferred_username: ['bob@example.com'] } }] },
+    {
+      role: 'shop-pipeline',
+      team: '',
+      team_from: { claim: 'sub', regex: '^repo:acme/([a-z0-9-]+):environment:production$', prefix: 'gh-' },
+      subjects: [{ issuer: 'github', claims: { sub: ['repo:acme/shop-*:environment:production'] } }],
+    },
   ],
   virtual_keys: [],
 };
@@ -640,11 +700,35 @@ function validate(doc: PolicyDocument): ValidationError[] {
   doc.bindings.forEach((b, i) => {
     if (!allRoles.has(b.role)) errs.push({ path: `bindings[${i}].role`, message: `unknown role "${b.role}"` });
     else if (b.role in base.document.roles && base.document.roles[b.role]!.rules.some((r) => r.actions.some((a) => a.startsWith('policy.')))) errs.push({ path: `bindings[${i}].role`, message: 'roles granting policy.* are bound in the base layer only' });
-    if (!b.team) errs.push({ path: `bindings[${i}].team`, message: 'team is required' });
+    if (b.team && b.team_from) errs.push({ path: `bindings[${i}].team`, message: 'team and team_from are exclusive' });
+    else if (!b.team && !b.team_from) errs.push({ path: `bindings[${i}].team`, message: 'team is required' });
+    if (b.team_from) {
+      const at = `bindings[${i}].team_from`;
+      if (!b.team_from.claim) errs.push({ path: `${at}.claim`, message: 'claim is required' });
+      const re = b.team_from.regex;
+      if (!re.startsWith('^') || !re.endsWith('$')) errs.push({ path: `${at}.regex`, message: 'the regex must be anchored with ^ and $' });
+      else {
+        try {
+          const groups = (new RegExp(re + '|').exec('')?.length ?? 1) - 1;
+          if (groups !== 1) errs.push({ path: `${at}.regex`, message: `exactly one capture group is required, found ${groups}` });
+        } catch {
+          errs.push({ path: `${at}.regex`, message: 'invalid regular expression' });
+        }
+      }
+      if (b.team_from.prefix && !/^[a-z0-9][a-z0-9._-]*$/.test(b.team_from.prefix)) errs.push({ path: `${at}.prefix`, message: 'prefix must be lowercase letters, digits, . _ -' });
+    }
     (b.groups ?? []).forEach((g, k) => {
       if (!allGroups.has(g)) errs.push({ path: `bindings[${i}].groups[${k}]`, message: `unknown group "${g}"` });
     });
     if (!b.groups?.length && !b.subjects?.length) errs.push({ path: `bindings[${i}]`, message: 'bind at least one group or subject' });
+  });
+  const seen = new Set<string>();
+  (doc.zones ?? []).forEach((z, i) => {
+    const at = `zones[${i}]`;
+    if (seen.has(z)) errs.push({ path: at, message: `zone "${z}" is listed twice` });
+    seen.add(z);
+    if (!base.bounds.zones.some((b) => zoneMatch(b, z))) errs.push({ path: at, message: `zone "${z}" is outside policy.bounds.zones` });
+    else if (!inventories.some((inv) => inv.zone === z)) errs.push({ path: at, message: `zone "${z}" was not found in the account by zone discovery` });
   });
   doc.virtual_keys.forEach((k, i) => {
     if (!k.id) errs.push({ path: `virtual_keys[${i}].id`, message: 'id is required' });
@@ -657,6 +741,20 @@ function validate(doc: PolicyDocument): ValidationError[] {
 }
 
 let nextRev = 10;
+
+const managedZones = () => new Set([...base.zones, ...(activeRev()?.doc.zones ?? [])]);
+
+function zoneImpact(before: string[], after: string[]): ImpactItem[] {
+  const items: ImpactItem[] = [];
+  for (const z of after.filter((x) => !before.includes(x)))
+    items.push({ kind: 'gain', who: 'zone ' + z, zones: [z], message: `zone ${z} becomes managed: its records stay foreign until adopted` });
+  for (const z of before.filter((x) => !after.includes(x))) {
+    const owned = inventories.find((i) => i.zone === z)?.rrsets.filter((r) => r.owner).length ?? 0;
+    items.push({ kind: 'loss', who: 'zone ' + z, zones: [z], message: `zone ${z} is no longer managed` });
+    if (owned) items.push({ kind: 'warning', who: 'zone ' + z, zones: [z], message: `zone ${z} stops being managed while ${owned} RRset(s) are owned there: they become read-only through the gate` });
+  }
+  return items;
+}
 
 function find(id: string): Rev {
   const r = revs.find((x) => x.s.id === id);
@@ -687,6 +785,13 @@ function protectedHit(zone: string, host?: string, type?: string) {
   return base.protected.find((p) => p.zones.some((z) => zoneMatch(z, zone)) && p.hosts.some((h) => hostMatch(h, host)) && p.types.includes(type));
 }
 
+function derivedTeam(b: Binding, claims: Record<string, string[]>): string | undefined {
+  if (!b.team_from) return undefined;
+  const v = claims[b.team_from.claim]?.[0] ?? '';
+  const m = new RegExp(b.team_from.regex).exec(v);
+  return m?.[1] ? (b.team_from.prefix ?? '') + m[1].toLowerCase() : teamLabel('', b.team_from);
+}
+
 function explain(req: ExplainRequest): ExplainResponse {
   const doc = req.revision_id ? find(req.revision_id).doc : (activeRev()?.doc ?? { groups: {}, roles: {}, bindings: [], virtual_keys: [] });
   const claims = req.subject.claims ?? {};
@@ -703,7 +808,7 @@ function explain(req: ExplainRequest): ExplainResponse {
   let layer: string | undefined;
   for (const [ln, bs, roles] of layers) {
     for (const b of bs.filter(matchesSubject)) {
-      bindings.push(`${b.role}@${b.team}`);
+      bindings.push(`${b.role}@${derivedTeam(b, claims) ?? b.team}`);
       const role = roles[b.role];
       if (!matched && role) {
         const i = ruleCovers(role, req.action, req.zone, req.host, req.type);
@@ -734,7 +839,7 @@ function whoCan(q: { zone: string; host: string; type: string; action?: string }
         const role = roles[b.role];
         if (role && ruleCovers(role, action, q.zone, q.host, q.type) >= 0) {
           const keys = [...base.document.virtual_keys, ...doc.virtual_keys].filter((k) => k.roles.includes(b.role) && k.teams.includes(b.team)).map((k) => k.id);
-          entries.push({ role: b.role, team: b.team, layer, groups: b.groups, subjects: b.subjects, virtual_keys: keys.length ? keys : undefined });
+          entries.push({ role: b.role, team: b.team, team_from: b.team_from, layer, groups: b.groups, subjects: b.subjects, virtual_keys: keys.length ? keys : undefined });
         }
       }
     }
@@ -862,17 +967,27 @@ export const fixtureBackend = {
   me: () => delay(me),
   gateInfo: () => delay({ version: 'v0.0.0-demo', features: ['if-match', 'ownership', 'adopt'] }),
   connect: () => delay(connect),
-  zones: () =>
-    delay(
-      inventories.map((inv) => {
+  zones: () => {
+    const managed = managedZones();
+    const unmanaged = (inv: ZoneInventory): ZoneSummary =>
+      readZones.has(inv.zone)
+        ? { ...summarize(inv), unmanaged: true }
+        : { zone: inv.zone, rrsets: 0, managed: 0, tainted: 0, pending: 0, foreign: 0, unmanaged: true };
+    return delay([
+      ...inventories.filter((inv) => managed.has(inv.zone)).map((inv) => {
         const last = audit.find((e) => e.zone === inv.zone && e.decision === 'allow' && e.actor.subject !== reconciler.subject);
         return summarize(inv, last?.time);
       }),
-    ),
+      ...inventories.filter((inv) => !managed.has(inv.zone)).map(unmanaged),
+    ]);
+  },
   inventory: (zone: string) => {
     const inv = inventories.find((i) => i.zone === zone);
     if (!inv) return Promise.reject(new Error(`Zone ${zone} is not managed by this gate`));
-    return delay(inv);
+    if (managedZones().has(zone)) return delay(inv);
+    if (!inv.last_synced_at) inv.last_synced_at = new Date().toISOString();
+    readZones.add(zone);
+    return delay({ ...inv, unmanaged: true });
   },
   audit: (q: AuditQuery): Promise<AuditPage> => {
     const all = audit.filter((e) => matches(e, q));
@@ -905,7 +1020,10 @@ export const fixtureBackend = {
     const r: Rev = {
       s: { id: `rev_${String(nextRev++).padStart(4, '0')}`, parent_id: req.parent_id || undefined, status: 'proposed', author: { subject: me.subject, name: me.name, category: me.category }, created_at: new Date().toISOString(), comment: req.comment },
       doc: clone(req.document),
-      impact: [{ kind: 'warning', who: 'simulation', message: 'Impact is computed by the gate; the demo backend does not evaluate it.' }],
+      impact: [
+        ...zoneImpact(activeRev()?.doc.zones ?? [], req.document.zones ?? []),
+        { kind: 'warning', who: 'simulation', message: 'Impact is computed by the gate; the demo backend does not evaluate it.' },
+      ],
     };
     revs.unshift(r);
     return delay(detail(r), 400);

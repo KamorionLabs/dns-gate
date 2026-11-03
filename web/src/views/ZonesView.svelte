@@ -1,6 +1,8 @@
 <script lang="ts">
   import { api } from '../lib/api';
-  import type { ZoneSummary } from '../lib/types';
+  import type { Me, ZoneSummary } from '../lib/types';
+  import { canPropose } from '../lib/manageZone';
+  import ManageZone from '../components/ManageZone.svelte';
   import { zoneHref, journalHref, connectHref } from '../lib/router.svelte';
   import { statusHelp, statusLabel } from '../lib/labels';
   import CustodyStrip from '../components/CustodyStrip.svelte';
@@ -8,8 +10,15 @@
   import RelTime from '../components/RelTime.svelte';
   import Icon from '../components/Icon.svelte';
 
-  let zones = $state<ZoneSummary[] | null>(null);
+  let all = $state<ZoneSummary[] | null>(null);
   let error = $state<string | null>(null);
+  let me = $state<Me | null>(null);
+
+  // Managed zones carry custody counts; discovered zones that are not managed
+  // are listed apart, read-only, with the way to bring them under management.
+  const zones = $derived(all ? all.filter((z) => !z.unmanaged) : null);
+  const unmanaged = $derived((all ?? []).filter((z) => z.unmanaged).sort((a, b) => a.zone.localeCompare(b.zone)));
+  const admin = $derived(canPropose(me));
 
   const legend = ['managed', 'foreign', 'pending', 'tainted'] as const;
   const GUIDE_KEY = 'eurodns-gate.guide-dismissed';
@@ -41,8 +50,9 @@
   $effect(() => {
     api
       .zones()
-      .then((z) => (zones = [...z].sort((a, b) => b.tainted - a.tainted || a.zone.localeCompare(b.zone))))
+      .then((z) => (all = [...z].sort((a, b) => b.tainted - a.tainted || a.zone.localeCompare(b.zone))))
       .catch((e: Error) => (error = e.message));
+    api.me().then((m) => (me = m)).catch(() => (me = null));
   });
 
   const totals = $derived(
@@ -103,7 +113,10 @@
 {#if error}
   <div class="empty"><strong>Zones could not be loaded</strong>{error}</div>
 {:else if zones && zones.length === 0}
-  <div class="empty"><strong>No managed zones</strong>Add zones to the gate configuration to see them here.</div>
+  <div class="empty">
+    <strong>No managed zones</strong>
+    {unmanaged.length ? 'Bring a zone of the account under management below, or add it to the gate configuration.' : 'Add zones to the gate configuration to see them here.'}
+  </div>
 {:else}
   <ol class="register">
     {#each zones ?? [null, null, null] as z, i (z?.zone ?? i)}
@@ -147,6 +160,38 @@
       </li>
     {/each}
   </ol>
+{/if}
+
+{#if unmanaged.length}
+  <section class="discovered" aria-labelledby="discovered-title">
+    <div class="dhead">
+      <h2 id="discovered-title">In the account, not managed <span class="count num">{unmanaged.length}</span></h2>
+      <p class="hint">
+        Found in the EuroDNS account by zone discovery. Read-only through the gate: no write and no adoption until the zone is managed.
+        {#if !admin}Only a policy administrator (policy.propose) can bring a zone under management; once a revision adding it is approved and activated, it behaves like any managed zone.{/if}
+      </p>
+    </div>
+    <ol class="register">
+      {#each unmanaged as z, i (z.zone)}
+        <li class="row unmanaged" style:animation-delay="{i * 30}ms">
+          <a class="cover" href={zoneHref(z.zone)} aria-label="Open {z.zone}"></a>
+          <div class="ident">
+            <h2 class="mono">{z.zone}</h2>
+            <span class="meta">
+              {#if z.last_synced_at}<span class="num">{z.rrsets}</span> record sets · read <RelTime iso={z.last_synced_at} />{:else}not read yet{/if}
+            </span>
+          </div>
+          <div class="state">
+            <span class="badge" title="Discovered in the account, not managed by the gate">Unmanaged</span>
+            <span class="ro">read-only, every record set is foreign</span>
+          </div>
+          <div class="last">
+            {#if admin}<ManageZone zone={z.zone} {me} compact />{/if}
+          </div>
+        </li>
+      {/each}
+    </ol>
+  </section>
 {/if}
 
 <style>
@@ -308,8 +353,62 @@
     z-index: 1;
     pointer-events: none;
   }
-  .row a:not(.cover) {
+  .row a:not(.cover),
+  .row :global(button) {
     pointer-events: auto;
+  }
+  .discovered {
+    margin-top: var(--s10);
+    display: grid;
+    gap: var(--s3);
+  }
+  .dhead {
+    display: grid;
+    gap: var(--s1);
+  }
+  .dhead h2 {
+    display: flex;
+    align-items: baseline;
+    gap: var(--s2);
+    font-size: var(--t-h3);
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .dhead .count {
+    color: var(--ink-3);
+    font-weight: 500;
+    font-size: var(--t-lead);
+  }
+  .dhead .hint {
+    color: var(--ink-3);
+    max-width: 80ch;
+  }
+  .row.unmanaged {
+    padding-top: var(--s3);
+    padding-bottom: var(--s3);
+  }
+  .row.unmanaged h2 {
+    color: var(--ink-2);
+  }
+  .state {
+    display: flex;
+    align-items: center;
+    gap: var(--s3);
+    color: var(--ink-3);
+    font-size: 12px;
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    height: 20px;
+    padding: 0 8px;
+    border-radius: 999px;
+    border: 1px dashed var(--rule-strong);
+    color: var(--ink-2);
+    font-size: 11.5px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
   }
   .ident {
     display: grid;

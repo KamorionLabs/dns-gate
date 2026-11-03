@@ -50,6 +50,8 @@ export interface ZoneSummary {
   foreign: number;
   last_synced_at?: string;
   last_write_at?: string;
+  /** Zone found in the EuroDNS account but not managed by the gate: read-only, counts are 0 until it was read once. */
+  unmanaged?: boolean;
 }
 
 export interface Actor {
@@ -79,6 +81,8 @@ export interface ZoneInventory {
   zone: string;
   last_synced_at?: string;
   rrsets: RRset[];
+  /** Discovered but not managed: every RRset is foreign, no write nor adoption. */
+  unmanaged?: boolean;
 }
 
 export interface Change {
@@ -155,9 +159,18 @@ export interface Role {
   max_changes_per_request?: number;
 }
 
+/** Owner team derived from a claim: prefix + lowercased capture of the regex (one group, anchored). */
+export interface TeamFrom {
+  claim: string;
+  regex: string;
+  prefix?: string;
+}
+
 export interface Binding {
   role: string;
+  /** "" when team_from is set. */
   team: string;
+  team_from?: TeamFrom;
   groups?: string[];
   subjects?: SubjectMatcher[];
 }
@@ -174,6 +187,8 @@ export interface VirtualKey {
 }
 
 export interface PolicyDocument {
+  /** Zones the managed layer brings under management, merged with the base zones. */
+  zones?: string[];
   groups: Record<string, Group>;
   roles: Record<string, Role>;
   bindings: Binding[];
@@ -201,10 +216,23 @@ export interface Bounds {
   actions: string[];
 }
 
+/** zones_discovery settings and state of the replica that answered. */
+export interface ZonesDiscovery {
+  enabled: boolean;
+  include: string[];
+  exclude: string[];
+  refresh: string;
+  loaded: boolean;
+  count: number;
+  last_refresh_at?: string;
+  error?: string;
+}
+
 export interface BaseLayer {
   config_hash: string;
   loaded_at: string;
   zones: string[];
+  zones_discovery?: ZonesDiscovery;
   issuers: Issuer[];
   protected: Protected[];
   bounds: Bounds;
@@ -303,6 +331,7 @@ export interface ExplainResponse {
 export interface WhoCanEntry {
   role: string;
   team: string;
+  team_from?: TeamFrom;
   layer: string;
   groups?: string[];
   subjects?: SubjectMatcher[];

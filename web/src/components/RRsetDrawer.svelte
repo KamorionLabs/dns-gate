@@ -15,8 +15,9 @@
   import CopyText from './CopyText.svelte';
   import AuditItem from './AuditItem.svelte';
   import Icon from './Icon.svelte';
+  import { teamFromText, teamLabel } from '../lib/team';
 
-  let { zone, rr, onclose }: { zone: string; rr: RRset; onclose: () => void } = $props();
+  let { zone, rr, onclose, unmanaged = false }: { zone: string; rr: RRset; onclose: () => void; unmanaged?: boolean } = $props();
 
   let dialog: HTMLDialogElement;
   let panel: HTMLDivElement;
@@ -43,6 +44,11 @@
   $effect(() => {
     whoCan = null;
     whoCanHidden = false;
+    if (unmanaged) {
+      // nobody writes in a zone the gate does not manage
+      whoCanHidden = true;
+      return;
+    }
     api
       .whoCan({ zone, host: rr.host, type: rr.type, action: 'dns.record.write' })
       .then((w) => (whoCan = w))
@@ -137,7 +143,7 @@
               {#each whoCan.entries as w, i (i)}
                 <li>
                   <div class="wc-head">
-                    <span class="mono wc-role">{w.role}</span><span class="dim">@</span><span class="wc-team">{w.team}</span>
+                    <span class="mono wc-role">{w.role}</span><span class="dim">@</span><span class="wc-team" title={w.team_from ? teamFromText(w.team_from) : undefined}>{teamLabel(w.team, w.team_from)}</span>
                     <LayerTag layer={w.layer} />
                   </div>
                   <div class="wc-who">

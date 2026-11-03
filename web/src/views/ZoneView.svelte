@@ -15,6 +15,7 @@
   import RRsetDrawer from '../components/RRsetDrawer.svelte';
   import CustodyStrip from '../components/CustodyStrip.svelte';
   import Icon from '../components/Icon.svelte';
+  import ManageZone from '../components/ManageZone.svelte';
 
   let { zone }: { zone: string } = $props();
 
@@ -32,8 +33,14 @@
   const load = () =>
     api
       .inventory(zone)
-      .then((z) => (inv = z))
+      .then((z) => {
+        inv = z;
+        // a zone that is not managed has nothing to adopt or export
+        if (z.unmanaged) tfOpen = adoptOpen = selecting = false;
+      })
       .catch((e: Error) => (error = e.message));
+
+  const unmanaged = $derived(!!inv?.unmanaged);
 
   $effect(() => {
     load();
@@ -150,8 +157,18 @@
       {:else if !error}loading…{/if}
     </p>
   </div>
-  {#if summary}<div class="strip"><CustodyStrip z={summary} height={10} /></div>{/if}
+  {#if summary && !unmanaged}<div class="strip"><CustodyStrip z={summary} height={10} /></div>{/if}
 </header>
+
+{#if unmanaged}
+  <aside class="unmanaged" aria-label="Zone not managed">
+    <div class="utext">
+      <h2><Icon name="lock" size={14} /> Not managed by the gate</h2>
+      <p>This zone was found in the EuroDNS account. It is shown read-only: every record set is foreign, the gate writes nothing here, and adoption and Terraform export are unavailable until the zone is managed.</p>
+    </div>
+    <ManageZone {zone} {me} />
+  </aside>
+{/if}
 
 {#if error}
   <div class="empty"><strong>This zone could not be loaded</strong>{error}</div>
@@ -200,12 +217,12 @@
         </select>
         <span class="chev"><Icon name="chevron" size={12} /></span>
       </label>
-      {#if canAdopt && (counts.foreign ?? 0) > 0}
+      {#if canAdopt && !unmanaged && (counts.foreign ?? 0) > 0}
         <button class="btn" class:on={selecting} type="button" aria-pressed={selecting} onclick={() => { selecting = !selecting; if (!selecting) picked = []; }}>
           <Seal status="managed" size={13} />{selecting ? 'Selecting…' : 'Adopt…'}
         </button>
       {/if}
-      <button class="btn" type="button" onclick={() => (tfOpen = true)}><Icon name="download" size={13} />Export Terraform</button>
+      {#if inv && !unmanaged}<button class="btn" type="button" onclick={() => (tfOpen = true)}><Icon name="download" size={13} />Export Terraform</button>{/if}
     </div>
   </div>
 
@@ -291,7 +308,7 @@
   </div>
 {/if}
 
-{#if adoptOpen && inv}
+{#if adoptOpen && inv && !unmanaged}
   <AdoptPanel
     {zone}
     selected={pickedRefs}
@@ -305,15 +322,43 @@
   />
 {/if}
 
-{#if tfOpen}
+{#if tfOpen && !unmanaged}
   <TerraformPanel {zone} teams={me?.teams ?? []} {owners} onclose={() => { tfOpen = false; router.setParams({ export: undefined }); }} />
 {/if}
 
 {#if selected && !selecting}
-  {#key selectedKey}<RRsetDrawer {zone} rr={selected} onclose={close} />{/key}
+  {#key selectedKey}<RRsetDrawer {zone} rr={selected} onclose={close} {unmanaged} />{/key}
 {/if}
 
 <style>
+  .unmanaged {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: var(--s3) var(--s6);
+    margin-bottom: var(--s5);
+    padding: var(--s4) var(--s5);
+    border: 1px dashed var(--rule-strong);
+    border-radius: var(--r-lg);
+    background: var(--sheet);
+  }
+  .utext {
+    display: grid;
+    gap: var(--s1);
+    max-width: 70ch;
+  }
+  .utext h2 {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--s2);
+    font-size: var(--t-lead);
+    font-weight: 600;
+  }
+  .utext p {
+    margin: 0;
+    color: var(--ink-2);
+  }
   .crumbs {
     display: flex;
     gap: var(--s2);

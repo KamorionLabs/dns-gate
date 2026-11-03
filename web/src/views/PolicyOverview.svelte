@@ -34,6 +34,7 @@
 
   const sections = [
     ['layers', 'Layers'],
+    ['zones', 'Zones'],
     ['bindings', 'Bindings'],
     ['groups', 'Groups'],
     ['roles', 'Roles'],
@@ -60,7 +61,7 @@
             <dl>
               <dt>Config hash</dt><dd><CopyText text={p.base.config_hash.replace(/^sha256:/, '').slice(0, 16)} label="config hash" /></dd>
               <dt>Loaded</dt><dd><RelTime iso={p.base.loaded_at} /></dd>
-              <dt>Zones</dt><dd class="mono">{p.base.zones.join(', ')}</dd>
+              <dt>Zones</dt><dd class="mono">{p.base.zones.join(', ') || 'none'}</dd>
             </dl>
           </article>
           <article class="layer managed">
@@ -71,11 +72,40 @@
                 <dt>Proposed by</dt><dd><ActorChip actor={p.active.author} /> <RelTime iso={p.active.created_at} /></dd>
                 {#if p.active.activated_by}<dt>Activated by</dt><dd><ActorChip actor={p.active.activated_by} /> <RelTime iso={p.active.activated_at} /></dd>{/if}
                 <dt>Revision</dt><dd><a class="rev mono" href={proposalHref(p.active.id)}>{p.active.id} <Icon name="arrow" size={12} /></a></dd>
+                {#if p.managed?.zones?.length}<dt>Zones</dt><dd class="mono">{p.managed.zones.join(', ')}</dd>{/if}
               </dl>
             {:else}
               <p class="lead">No managed revision is active: only the base layer applies.</p>
             {/if}
           </article>
+        </section>
+
+        <section id="sec-zones">
+          <h2 class="sec">Managed zones <span class="count num">{p.base.zones.length + (p.managed?.zones?.length ?? 0)}</span></h2>
+          <p class="hint">Only these zones can be written through the gate. Base zones come from the configuration file; the managed layer can add zones of the account, within the bounds.</p>
+          <div class="bounds">
+            <div><span class="eyebrow">Base <LayerTag layer="base" /></span><div class="chips">{#each p.base.zones as z (z)}<span class="chip mono">{z}</span>{:else}<span class="dim">none</span>{/each}</div></div>
+            <div><span class="eyebrow">Managed {#if p.active}<LayerTag layer="managed" rev={p.active.id} />{/if}</span><div class="chips">{#each p.managed?.zones ?? [] as z (z)}<span class="chip mono">{z}</span>{:else}<span class="dim">none</span>{/each}</div></div>
+          </div>
+          {#if p.base.zones_discovery}
+            {@const d = p.base.zones_discovery}
+            <div class="discovery">
+              <span class="eyebrow">Zone discovery <LayerTag layer="base" /></span>
+              {#if d.enabled}
+                <p>
+                  {#if d.loaded}<span class="num">{d.count}</span> {d.count === 1 ? 'zone' : 'zones'} found in the account{#if d.last_refresh_at}, listed <RelTime iso={d.last_refresh_at} />{/if}.{:else}Not listed yet.{/if}
+                  Refreshed every <span class="mono">{d.refresh}</span>. Zones found but not managed are shown read-only on the zones page.
+                </p>
+                <dl>
+                  <dt>include</dt><dd class="mono">{d.include.join(', ') || '*'}</dd>
+                  {#if d.exclude.length}<dt>exclude</dt><dd class="mono">{d.exclude.join(', ')}</dd>{/if}
+                </dl>
+                {#if d.error}<p class="derr"><Icon name="alert" size={12} /> Last listing failed: {d.error}</p>{/if}
+              {:else}
+                <p class="dim">Disabled: only the zones above are visible, and the managed layer cannot add zones.</p>
+              {/if}
+            </div>
+          {/if}
         </section>
 
         <section id="sec-bindings">
@@ -141,6 +171,37 @@
 </PolicyFrame>
 
 <style>
+  .discovery {
+    display: grid;
+    gap: var(--s2);
+    padding: var(--s3) var(--s4);
+    border: 1px dashed var(--rule-strong);
+    border-radius: var(--r-md);
+  }
+  .discovery p {
+    margin: 0;
+    color: var(--ink-2);
+  }
+  .discovery dl {
+    margin: 0;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 2px var(--s3);
+    font-size: 12.5px;
+  }
+  .discovery dt {
+    color: var(--ink-3);
+  }
+  .discovery dd {
+    margin: 0;
+  }
+  .discovery .derr {
+    color: var(--wax);
+    font-size: 12.5px;
+  }
+  .dim {
+    color: var(--ink-4);
+  }
   .page {
     display: grid;
     grid-template-columns: 160px minmax(0, 1fr);
