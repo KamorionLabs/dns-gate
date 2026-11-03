@@ -1,6 +1,8 @@
 package server
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -18,6 +20,7 @@ import (
 	"github.com/KamorionLabs/eurodns-gate/internal/authn"
 	"github.com/KamorionLabs/eurodns-gate/internal/config"
 	"github.com/KamorionLabs/eurodns-gate/internal/identity"
+	"github.com/KamorionLabs/eurodns-gate/internal/mcpb"
 	"github.com/KamorionLabs/eurodns-gate/internal/oidctest"
 	"github.com/KamorionLabs/eurodns-gate/internal/policy"
 	"github.com/KamorionLabs/eurodns-gate/internal/store"
@@ -524,6 +527,70 @@ func TestUIAPIConnectEntraAndMCP(t *testing.T) {
 	_ = json.NewDecoder(r.Body).Decode(&c)
 	if !c.MCP.AllowWrites || c.BaseURL != e.srv.URL {
 		t.Fatalf("connect writes: %+v", c)
+	}
+}
+
+func TestUIAPIClaudeDesktopExtension(t *testing.T) {
+	const path = "/api/v1/connect/claude-desktop.mcpb"
+	connect := func(e *env) uiapi.Connect {
+		var c uiapi.Connect
+		_ = json.NewDecoder(e.do(t, "GET", "/api/v1/connect", e.token("writer"), "", nil).Body).Decode(&c)
+		return c
+	}
+
+	// Without MCP, or without the UI login, there is no extension.
+	for name, tweak := range map[string]func(*config.Config){
+		"mcp off": nil,
+		"ui off": func(c *config.Config) {
+			c.MCP = config.MCP{Enabled: true, PlanTTL: config.Duration(10 * time.Minute), RequestsPerMinute: 600}
+			c.UI.Enabled = false
+		},
+	} {
+		e := newEnvWith(t, tweak)
+		if tweak == nil {
+			if c := connect(e); c.ClaudeDesktopExtensionURL != "" {
+				t.Fatalf("%s: extension URL %q", name, c.ClaudeDesktopExtensionURL)
+			}
+		}
+		if r := e.do(t, "GET", path, e.token("writer"), "", nil); r.StatusCode != 404 {
+			t.Fatalf("%s: extension %d", name, r.StatusCode)
+		}
+	}
+
+	e := newEnvWith(t, func(c *config.Config) {
+		c.MCP = config.MCP{Enabled: true, PlanTTL: config.Duration(10 * time.Minute), RequestsPerMinute: 600, PublicURL: "https://gate.example.com"}
+		c.UI.CLIScope = "api://gate/.default"
+	})
+	if c := connect(e); c.ClaudeDesktopExtensionURL != "https://gate.example.com"+path {
+		t.Fatalf("extension URL: %q", c.ClaudeDesktopExtensionURL)
+	}
+	if r := e.do(t, "GET", path, "", "", nil); r.StatusCode != 401 {
+		t.Fatalf("extension without auth: %d", r.StatusCode)
+	}
+	if r := e.do(t, "GET", path, e.token("nobody"), "", nil); r.StatusCode != 403 {
+		t.Fatalf("extension without ui.read: %d", r.StatusCode)
+	}
+	r := e.do(t, "GET", path, e.token("writer"), "", nil)
+	b, _ := io.ReadAll(r.Body)
+	if r.StatusCode != 200 || r.Header.Get("Content-Type") != "application/zip" || r.Header.Get("Content-Disposition") != `attachment; filename=eurodns-gate-gate.example.com.mcpb` {
+		t.Fatalf("extension: %d %v", r.StatusCode, r.Header)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(b), int64(len(b)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m mcpb.Manifest
+	for _, f := range zr.File {
+		if f.Name == "manifest.json" {
+			rc, _ := f.Open()
+			err = json.NewDecoder(rc).Decode(&m)
+			rc.Close()
+		}
+	}
+	env := m.Server.MCPConfig.Env
+	if err != nil || env["EURODNS_GATE_MCP_URL"] != "https://gate.example.com/mcp" || env["EURODNS_GATE_ISSUER"] != e.idp.URL ||
+		env["EURODNS_GATE_CLIENT_ID"] != e.idp.ClientID || env["EURODNS_GATE_SCOPE"] != "api://gate/.default" || m.DisplayName != "EuroDNS gate (gate.example.com)" {
+		t.Fatalf("manifest: %v %+v", err, m)
 	}
 }
 

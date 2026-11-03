@@ -5,6 +5,7 @@
 //
 //	GET /api/v1/me                         -> Me
 //	GET /api/v1/connect                    -> Connect
+//	GET /api/v1/connect/claude-desktop.mcpb -> Claude Desktop extension (zip)
 //	GET /api/v1/zones                      -> []ZoneSummary
 //	GET /api/v1/zones/{zone}/rrsets        -> ZoneInventory
 //	GET /api/v1/audit?zone=&host=&type=&subject=&category=&decision=&since=&until=&limit=&cursor=
@@ -41,6 +42,9 @@ type Connect struct {
 	Issuer   *ConnectIssuer `json:"issuer,omitempty"` // UI login issuer, absent without UI
 	ClientID string         `json:"client_id,omitempty"`
 	CLIScope string         `json:"cli_scope,omitempty"` // scope a CLI requests for a gate token
+	// ClaudeDesktopExtensionURL downloads the Claude Desktop extension of the
+	// gate; empty without MCP or UI login.
+	ClaudeDesktopExtensionURL string `json:"claude_desktop_extension_url"`
 }
 
 // ConnectMCP describes the MCP endpoint.
