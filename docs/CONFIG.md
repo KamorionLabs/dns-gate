@@ -269,7 +269,7 @@ There is no policy tool: policy changes stay with humans in the UI, with step-up
 
 ### Connecting an assistant
 
-The **Connect** page of the UI (`/ui/#/connect`, data from `GET /api/v1/connect`) shows the commands below already filled in with the gate URL, the tenant and the token scope (`ui.cli_scope`), plus the Terraform provider block and a `curl` example. The gate only needs an access token of a configured issuer whose audience is the gate; with Entra ID, the Azure CLI gets one for the signed-in user.
+The **Connect** page of the UI (`/ui/#/connect`, data from `GET /api/v1/connect`) shows the commands below already filled in with the gate URL, the tenant and the token scope (`ui.cli_scope`), the Claude Desktop extension download, plus the Terraform provider block and a `curl` example. The gate only needs an access token of a configured issuer whose audience is the gate; with Entra ID, the Azure CLI gets one for the signed-in user.
 
 Claude Code, with a `headersHelper` that Claude Code runs again on each connection and on a `401` or `403`, so the token never goes stale (needs the Azure CLI signed in to the gate's tenant, `az login --tenant <tenant-id>`, and `jq`):
 
@@ -279,7 +279,36 @@ claude mcp add-json eurodns-gate '{"type":"http","url":"https://gate.example.com
 
 The helper must print `{"Authorization":"Bearer <token>"}`. With another issuer, replace the `az` command by any command printing an access token.
 
-Claude Desktop and other clients that only start local servers go through the [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) bridge (Node.js) in `claude_desktop_config.json`:
+#### Claude Desktop extension
+
+For Claude Desktop, the Connect page offers a **Claude Desktop extension**: the user downloads it, double-clicks it (or drags it into Claude Desktop, Settings, Extensions) and clicks Install. No terminal, Azure CLI, `jq` or Node.js is needed: the extension runs on the Node.js runtime shipped with Claude Desktop.
+
+The file comes from `GET /api/v1/connect/claude-desktop.mcpb` (same authentication as `/api/v1/connect`), offered when `mcp.enabled` and the UI login are both on; `/api/v1/connect` then returns its URL in `claude_desktop_extension_url` (empty otherwise, and the download answers `404`). It is an [MCP Bundle](https://github.com/modelcontextprotocol/mcpb) (manifest `0.3`, `eurodns-gate-<host>.mcpb`) generated on the fly with the MCP URL, the UI issuer, `ui.client_id` and `ui.cli_scope` baked in. It holds no secret and is the same for every user of the gate.
+
+Its local server, `internal/mcpb/relay.js` (one file, Node.js 18 or later, no dependency), forwards every MCP message to `/mcp` over Streamable HTTP (JSON and SSE answers, `Mcp-Session-Id`, messages the gate sends on its own) with the user's access token:
+
+- Sign-in is lazy: the first request that needs the gate opens the system browser on the issuer (authorization code with PKCE S256, `state` and `nonce`, scopes `openid offline_access <ui.cli_scope>`), back to a loopback redirect `http://localhost:<ephemeral port>/callback`. A sign-in not completed within 5 minutes, or refused, fails that request with a JSON-RPC error; asking again starts a new one.
+- The tokens are kept in `~/.eurodns-gate/<host>.json` (mode `0600`). The access token is refreshed silently with the refresh token; the browser opens again only when the refresh is refused (expired or revoked session).
+- Tokens are never written to the logs (Claude Desktop keeps the server's stderr in its MCP logs). When the browser cannot be opened, the sign-in URL is in those logs.
+
+The identity provider must accept `ui.client_id` as a **public client** for this flow:
+
+- a loopback redirect URI `http://localhost` with any port (RFC 8252, section 7.3; a provider that does not ignore the port of loopback redirects needs a wildcard such as `http://localhost:*/callback`);
+- the authorization code flow with PKCE and no client secret;
+- refresh tokens for `offline_access`;
+- an access token the gate accepts: issuer configured, audience listed in `audiences`.
+
+With Entra ID, on the gate app registration (the one of `ui.client_id`):
+
+- add the platform **Mobile and desktop applications** with the redirect URI `http://localhost` (Entra ignores the port of loopback redirects); in Terraform (`azuread_application`), `public_client { redirect_uris = ["http://localhost"] }`. The web redirect `https://<gate>/auth/callback` of the UI stays as it is;
+- set **Allow public client flows** to *Yes* (`fallback_public_client_enabled = true`), so Entra treats the code and refresh token requests, which carry no client secret, as coming from a public client;
+- the token is requested for `ui.cli_scope` (`api://<client_id>/.default` by default): the application must expose a delegated scope that users may consent to, or that an administrator consented to tenant-wide, and the issuer must list the application id in `audiences` with `accessTokenAcceptedVersion: 2`, as for the Azure CLI below. *Assignment required* applies as for the UI.
+
+The bundle is not signed (`mcpb sign`): organizations that restrict Claude Desktop to approved or signed extensions must allow it.
+
+#### mcp-remote and other MCP clients
+
+Claude Desktop without the extension, and other clients that only start local servers, go through the [`mcp-remote`](https://www.npmjs.com/package/mcp-remote) bridge (Node.js) in `claude_desktop_config.json`:
 
 ```json
 {
@@ -325,6 +354,7 @@ Audit events of zones the user cannot read are filtered out; events without a zo
 | `GET /.well-known/eurodns-gate` | Version and features (`if-match`, `ownership`, `adopt`), unauthenticated. |
 | `POST /.well-known/eurodns-gate/zones/{zone}/adopt` | Adopt RRsets (used by the Terraform provider on import). Foreign RRsets need `dns.record.adopt`; RRsets already owned by one of the caller's teams are a no-op and only need `dns.record.write` on the zone. |
 | `/api/v1/me`, `/api/v1/connect`, `/api/v1/zones`, `/api/v1/zones/{zone}/rrsets`, `/api/v1/audit` | UI API (`ui.read`; `/me` for any bound subject, with its groups and effective permissions; `/connect` returns the public URL, the MCP state, the login issuer and `ui.cli_scope` for the Connect page). |
+| `GET /api/v1/connect/claude-desktop.mcpb` | Claude Desktop extension of the gate (`ui.read`), when MCP and the UI login are enabled, see [Claude Desktop extension](#claude-desktop-extension). |
 | `/api/v1/policy`, `/api/v1/policy/revisions[/{id}[/approve\|reject\|activate\|rollback\|export]]`, `/api/v1/policy/explain`, `/api/v1/policy/who-can`, `/api/v1/policy/virtual-keys/generate` | Policy API, see `internal/uiapi/policy.go`. |
 | `/auth/login`, `/auth/callback`, `/auth/logout` | UI login. |
 | `/healthz`, `/readyz` | Probes. |
