@@ -5,6 +5,7 @@
   import { categoryLabel } from '../lib/labels';
   import { usingFixtures } from '../lib/api';
   import { describePermissions } from '../lib/permissions';
+  import { identityLabel } from '../lib/identity';
   import Icon from './Icon.svelte';
   import Seal from './Seal.svelte';
 
@@ -65,13 +66,13 @@
         <div class="who">
           <button class="avatar" type="button" aria-haspopup="true" aria-expanded={open} onclick={() => (open = !open)}>
             <span class="initials">{initials}</span>
-            <span class="me-name">{me.name}</span>
+            <span class="me-name">{identityLabel(me).label}</span>
             <Icon name="chevron" size={14} />
           </button>
           {#if open}
             <div class="menu" role="menu">
               <div class="menu-head">
-                <strong>{me.name}</strong>
+                <strong>{identityLabel(me).label}</strong>
                 <span class="mono sub">{me.subject}</span>
                 <span class="eyebrow">{categoryLabel[me.category]}</span>
               </div>
@@ -115,7 +116,7 @@
     border-bottom: 1px solid var(--rule);
   }
   .inner {
-    max-width: 1320px;
+    max-width: var(--page-max);
     margin: 0 auto;
     height: 52px;
     padding: 0 var(--s6);
