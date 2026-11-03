@@ -3,7 +3,8 @@
 Console served by eurodns-gate under `/ui/`: managed zones, record sets with
 their custody (owner team, who created or last changed them, who may change
 them), drift, the journal of every write, refusal and reconciliation, a Connect page
-(Claude Code, Claude Desktop, Terraform and API setups filled in for the gate),
+(Claude Code, Claude Desktop with its extension download, Terraform and API setups
+filled in for the gate),
 and the policy: the read-only base layer, the managed layer with its reviewed revisions
 (draft, impact, diff, approval, activation, rollback) and a decision simulator.
 
