@@ -10,9 +10,12 @@
   import Icon from '../components/Icon.svelte';
   import ZoneAccessView from '../components/policy/ZoneAccess.svelte';
   import { humanDuration } from '../lib/duration';
-  import { rolesOf, whoCanDoWhat } from '../lib/access';
+  import { bindingsOf, rolesOf, whoCanDoWhat, type Layer } from '../lib/access';
+  import Matcher from '../components/policy/Matcher.svelte';
+  import { teamFromText } from '../lib/team';
+  import type { DelegatedOwner } from '../lib/types';
 
-  type L<T> = { layer: 'base' | 'managed'; rev?: string; item: T };
+  type L<T> = { layer: Layer; rev?: string; name?: string; owner?: DelegatedOwner; item: T };
 
   function layered(p: EffectivePolicy) {
     const rev = p.active?.id;
@@ -23,11 +26,11 @@
     const r: L<[string, Role]>[] = [
       ...Object.entries(p.base.document.roles).map((item) => ({ layer: 'base' as const, item })),
       ...Object.entries(p.managed?.roles ?? {}).map((item) => ({ layer: 'managed' as const, rev, item })),
+      ...Object.entries(p.managed?.delegated?.roles ?? {})
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([name, role]) => ({ layer: 'delegated' as const, rev, owner: role.owner, item: [name, role] as [string, Role] })),
     ];
-    const b: L<Binding>[] = [
-      ...p.base.document.bindings.map((item) => ({ layer: 'base' as const, item })),
-      ...(p.managed?.bindings ?? []).map((item) => ({ layer: 'managed' as const, rev, item })),
-    ];
+    const b: L<Binding>[] = bindingsOf(p).map(({ binding, ...rest }) => ({ ...rest, item: binding }));
     const k: L<VirtualKey>[] = [
       ...p.base.document.virtual_keys.map((item) => ({ layer: 'base' as const, item })),
       ...(p.managed?.virtual_keys ?? []).map((item) => ({ layer: 'managed' as const, rev, item })),
@@ -40,6 +43,7 @@
     ['zones', 'Zones'],
     ['who', 'Who can do what'],
     ['bindings', 'Bindings'],
+    ['delegations', 'Delegations'],
     ['groups', 'Groups'],
     ['roles', 'Roles'],
     ['keys', 'Virtual keys'],
@@ -125,6 +129,34 @@
           <h2 class="sec">Bindings <span class="count num">{L.b.length}</span></h2>
           <p class="hint">A binding grants a role, acting for a team, to groups or subjects. The team owns what it creates.</p>
           <DocItems kind="bindings" bindings={L.b} roleDefs={rolesOf(p)} />
+        </section>
+
+        <section id="sec-delegations">
+          <h2 class="sec">Delegations <LayerTag layer="base" /> <span class="count num">{p.base.delegations?.length ?? 0}</span></h2>
+          <p class="hint">A delegation lets a trusted identity, typically the pipeline that creates other pipelines, manage its own roles and bindings within the limits below. Its changes apply at once and show here with a <i>delegated</i> tag; they are not edited through revisions.</p>
+          {#if p.base.delegations?.length}
+            <ul class="delegations">
+              {#each p.base.delegations as d (d.name)}
+                {@const owned = [...Object.values(p.managed?.delegated?.roles ?? {}), ...Object.values(p.managed?.delegated?.bindings ?? {})].filter((o) => o.owner.delegation === d.name).length}
+                <li>
+                  <div class="dhead"><span class="name mono">{d.name}</span><span class="count num">{owned} / {d.allow.max_objects} objects</span></div>
+                  {#if d.description}<p class="desc">{d.description}</p>{/if}
+                  <dl>
+                    <dt>Used by</dt><dd>{#each d.subjects as m, k (k)}<Matcher {m} />{/each}</dd>
+                    <dt>Zones</dt><dd class="chips">{#each d.allow.zones as z (z)}<span class="chip mono">{z}</span>{/each}</dd>
+                    <dt>Actions</dt><dd class="chips">{#each d.allow.actions as a (a)}<span class="chip mono">{a}</span>{/each}</dd>
+                    {#if d.allow.records}
+                      <dt>Records</dt><dd class="mono">{(d.allow.records.hosts ?? []).join(', ') || 'any host'} · {(d.allow.records.types ?? []).join(', ') || 'any type'}</dd>
+                    {/if}
+                    <dt>May bind</dt><dd>{#each d.allow.binding_subjects as m, k (k)}<Matcher {m} />{/each}{#each d.allow.groups ?? [] as g (g)}<span class="chip mono">{g}</span>{/each}</dd>
+                    <dt>Teams</dt><dd class="mono">{[...(d.allow.teams.names ?? []), ...(d.allow.teams.from_subject ? [teamFromText(d.allow.teams.from_subject)] : [])].join(' · ')}</dd>
+                  </dl>
+                </li>
+              {/each}
+            </ul>
+          {:else}
+            <p class="dim">No delegation in the configuration file.</p>
+          {/if}
         </section>
 
         <section id="sec-groups">
@@ -251,6 +283,47 @@
   .layers {
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--s4);
+  }
+  .delegations {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: var(--s3);
+  }
+  .delegations li {
+    border: 1px solid var(--rule);
+    border-radius: var(--r-md);
+    padding: var(--s3) var(--s4);
+    background: var(--sheet);
+  }
+  .delegations .dhead {
+    display: flex;
+    justify-content: space-between;
+    gap: var(--s3);
+  }
+  .delegations .name {
+    font-weight: 600;
+  }
+  .delegations .desc {
+    color: var(--ink-3);
+    margin: var(--s1) 0 var(--s2);
+  }
+  .delegations dl {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: var(--s1) var(--s3);
+    font-size: 12.5px;
+  }
+  .delegations dt {
+    color: var(--ink-3);
+  }
+  .delegations dd {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
   .layer {
     display: grid;

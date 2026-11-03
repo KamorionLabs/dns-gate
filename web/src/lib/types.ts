@@ -193,6 +193,50 @@ export interface PolicyDocument {
   roles: Record<string, Role>;
   bindings: Binding[];
   virtual_keys: VirtualKey[];
+  /** Roles and bindings owned by policy delegations (managed layer only, never edited here). */
+  delegated?: DelegatedObjects;
+}
+
+/** Who manages a delegated object. */
+export interface DelegatedOwner {
+  /** policy.delegations[].name */
+  delegation: string;
+  /** Client label, for example "terraform". */
+  managed_by?: string;
+  created_by: string;
+  created_at: string;
+  updated_by: string;
+  updated_at: string;
+}
+
+export interface DelegatedRole extends Role {
+  owner: DelegatedOwner;
+}
+
+export interface DelegatedBinding extends Binding {
+  owner: DelegatedOwner;
+}
+
+export interface DelegatedObjects {
+  roles?: Record<string, DelegatedRole>;
+  bindings?: Record<string, DelegatedBinding>;
+}
+
+/** A policy.delegations entry of the base file. */
+export interface Delegation {
+  name: string;
+  description?: string;
+  subjects: SubjectMatcher[];
+  allow: {
+    zones: string[];
+    actions: string[];
+    records?: RecordScope;
+    binding_subjects: SubjectMatcher[];
+    teams: { from_subject?: TeamFrom; names?: string[] };
+    roles?: string[];
+    groups?: string[];
+    max_objects: number;
+  };
 }
 
 export interface Issuer {
@@ -237,6 +281,8 @@ export interface BaseLayer {
   protected: Protected[];
   bounds: Bounds;
   document: PolicyDocument;
+  /** policy.delegations of the file. */
+  delegations?: Delegation[];
 }
 
 export interface PolicySettings {

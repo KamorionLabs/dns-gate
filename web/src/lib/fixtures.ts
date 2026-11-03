@@ -647,6 +647,21 @@ const base: EffectivePolicy['base'] = {
     zones: ['example.com', 'acme.example', 'brand.example', 'cloud.example', 'mail.example', 'internal.example', 'shop.example', '*.example', '*.example.net', '*.example.org'],
     actions: ['dns.read', 'ui.read', 'dns.record.write', 'dns.record.adopt'],
   },
+  delegations: [
+    {
+      name: 'ci-pipelines',
+      description: 'Gate roles and bindings of the pipelines created by the CI stack',
+      subjects: [{ issuer: 'github', claims: { sub: ['repo:acme/ci-stack:environment:production'] } }],
+      allow: {
+        zones: ['example.com', 'shop.example'],
+        actions: ['dns.read', 'dns.record.write', 'dns.record.adopt'],
+        records: { hosts: ['**'], types: ['A', 'AAAA', 'CNAME', 'TXT'] },
+        binding_subjects: [{ issuer: 'github', claims: { sub: ['repo:acme/*:environment:production'] } }],
+        teams: { names: ['web'], from_subject: { claim: 'sub', regex: '^repo:acme/([a-z0-9-]+):environment:production$', prefix: 'gh-' } },
+        max_objects: 100,
+      },
+    },
+  ],
   document: {
     groups: {
       'policy-admins': {
@@ -742,6 +757,37 @@ const activeDoc: PolicyDocument = {
     },
   ],
   virtual_keys: [],
+  delegated: {
+    roles: {
+      'gh-docs-site': {
+        description: 'DNS names written by the docs-site pipeline.',
+        rules: [{ zones: ['example.com'], actions: ['dns.read', 'dns.record.write', 'dns.record.adopt'], records: { hosts: ['docs', '_*.docs'], types: ['CNAME'] } }],
+        owner: {
+          delegation: 'ci-pipelines',
+          managed_by: 'terraform',
+          created_by: 'github:repo:acme/ci-stack:environment:production',
+          created_at: '2026-10-30T09:12:00Z',
+          updated_by: 'github:repo:acme/ci-stack:environment:production',
+          updated_at: '2026-10-30T09:12:00Z',
+        },
+      },
+    },
+    bindings: {
+      'gh-docs-site': {
+        role: 'gh-docs-site',
+        team: 'web',
+        subjects: [{ issuer: 'github', claims: { sub: ['repo:acme/docs-site:environment:production'] } }],
+        owner: {
+          delegation: 'ci-pipelines',
+          managed_by: 'terraform',
+          created_by: 'github:repo:acme/ci-stack:environment:production',
+          created_at: '2026-10-30T09:12:00Z',
+          updated_by: 'github:repo:acme/ci-stack:environment:production',
+          updated_at: '2026-10-30T09:12:00Z',
+        },
+      },
+    },
+  },
 };
 
 const clone = <T>(v: T): T => structuredClone(v);

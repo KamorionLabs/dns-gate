@@ -1,24 +1,35 @@
 // "What does this binding allow" and "who can do what in this zone",
 // resolved from the policy documents (base and managed layers).
-import type { Binding, EffectivePolicy, Permission, Role } from './types';
+import type { Binding, DelegatedOwner, EffectivePolicy, Permission, Role } from './types';
 import { describePermissions } from './permissions';
 import { zoneMatch } from './glob';
 
+/** base: configuration file; managed: reviewed revisions; delegated: owned by a policy delegation. */
+export type Layer = 'base' | 'managed' | 'delegated';
+
 export interface LayeredBinding {
-  layer: 'base' | 'managed';
+  layer: Layer;
   rev?: string;
+  /** Name of a delegated binding. */
+  name?: string;
+  owner?: DelegatedOwner;
   binding: Binding;
 }
 
-/** Roles visible to a binding of the managed layer: base roles and managed roles. */
+/** Roles visible to a binding: base, managed and delegated roles. */
 export function rolesOf(p: EffectivePolicy): Record<string, Role> {
-  return { ...p.base.document.roles, ...(p.managed?.roles ?? {}) };
+  return { ...p.base.document.roles, ...(p.managed?.roles ?? {}), ...(p.managed?.delegated?.roles ?? {}) };
 }
 
 export function bindingsOf(p: EffectivePolicy): LayeredBinding[] {
+  const rev = p.active?.id;
   return [
     ...p.base.document.bindings.map((binding) => ({ layer: 'base' as const, binding })),
-    ...(p.managed?.bindings ?? []).map((binding) => ({ layer: 'managed' as const, rev: p.active?.id, binding })),
+    ...(p.managed?.bindings ?? []).map((binding) => ({ layer: 'managed' as const, rev, binding })),
+    // Evaluated after the other managed bindings, sorted by name (as the gate does).
+    ...Object.entries(p.managed?.delegated?.bindings ?? {})
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([name, binding]) => ({ layer: 'delegated' as const, rev, name, owner: binding.owner, binding })),
   ];
 }
 
