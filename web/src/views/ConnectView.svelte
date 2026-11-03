@@ -116,6 +116,7 @@
           <li>Download the extension with the button above.</li>
           <li>Double-click the downloaded file, or drag it into Claude Desktop under <strong>Settings</strong>, <strong>Extensions</strong>. Then click <strong>Install</strong>.</li>
           <li>Your browser then opens: sign in once. The gate's tools appear in Claude as soon as you are signed in, and Claude stays signed in after that.</li>
+          <li>Start a <strong>new conversation</strong>: a conversation opened before the sign-in does not pick up the gate's tools.</li>
         </ol>
         <p class="hint">If Claude Desktop refuses to install it, your organization may only allow approved extensions: ask your Claude administrators.</p>
       {/if}
