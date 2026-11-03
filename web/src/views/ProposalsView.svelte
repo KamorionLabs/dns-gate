@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { identityLabel } from '../lib/identity';
   import { api } from '../lib/api';
   import type { RevisionSummary } from '../lib/types';
   import { router, proposalHref } from '../lib/router.svelte';
@@ -79,7 +80,7 @@
               <RelTime iso={r.created_at} />
               {#if r.approvals?.length}
                 <span class="appr">
-                  {#each r.approvals as a, i (i)}<span class="dot {a.decision}" title="{a.decision} by {a.by.name}"></span>{/each}
+                  {#each r.approvals as a, i (i)}<span class="dot {a.decision}" title="{a.decision} by {identityLabel(a.by).label}"></span>{/each}
                   {r.approvals.length} decision{r.approvals.length > 1 ? 's' : ''}
                 </span>
               {/if}

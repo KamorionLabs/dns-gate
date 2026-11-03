@@ -46,6 +46,7 @@ type engine struct {
 	cache  map[string]*cachedZone
 	reads  singleflight.Group // coalesces cache fills
 	locals map[string]chan struct{}
+	writes map[string]journalWrite // latest write per zone, read from the journal
 }
 
 type noopAudit struct{}
@@ -80,7 +81,7 @@ func newEngine(cfg Config) (*engine, error) {
 	}
 	e := &engine{
 		cfg: cfg, zones: cfg.ZoneSet, now: cfg.Now, log: cfg.Logger,
-		cache: map[string]*cachedZone{}, locals: map[string]chan struct{}{},
+		cache: map[string]*cachedZone{}, locals: map[string]chan struct{}{}, writes: map[string]journalWrite{},
 	}
 	if e.zones == nil {
 		st := &staticZones{set: map[string]bool{}}

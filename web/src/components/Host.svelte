@@ -1,7 +1,8 @@
 <script lang="ts">
-  import { fqdn } from '../lib/format';
-  let { host, zone, showZone = true }: { host: string; zone: string; showZone?: boolean } = $props();
-  const parts = $derived(fqdn(host, zone));
+  import { fqdn, shortHashes } from '../lib/format';
+  // short: long hash labels are shortened in the middle (tables).
+  let { host, zone, showZone = true, short = false }: { host: string; zone: string; showZone?: boolean; short?: boolean } = $props();
+  const parts = $derived(fqdn(short ? shortHashes(host) : host, zone));
 </script>
 
 <span class="host mono"><span class="label" class:apex={parts.name === '@'}>{parts.name}</span>{#if showZone}<span class="suffix">{parts.name === '@' ? ' ' + parts.suffix : parts.suffix}</span>{/if}</span>

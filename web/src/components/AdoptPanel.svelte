@@ -167,7 +167,7 @@
       <div class="donehead">
         <span class="mark"><Seal status="managed" size={26} /></span>
         <div>
-          <p class="big">{result.adopted.length} record set{result.adopted.length > 1 ? 's' : ''} now held by the gate</p>
+          <p class="big">{result.adopted.length} record set{result.adopted.length > 1 ? 's' : ''} now managed by the gate</p>
           <p class="dim">Owner team <b>{result.owner}</b> · request <CopyText text={result.request_id} label="request id" /> · <a href={journalHref({ zone })}>journal</a></p>
         </div>
       </div>

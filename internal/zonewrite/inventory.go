@@ -188,7 +188,7 @@ func (e *engine) Zones(ctx context.Context, s *identity.Subject) ([]uiapi.ZoneSu
 		if err != nil {
 			return nil, err
 		}
-		sum := uiapi.ZoneSummary{Zone: zone, LastSyncedAt: inv.LastSyncedAt, LastWriteAt: c.writeAt}
+		sum := uiapi.ZoneSummary{Zone: zone, LastSyncedAt: inv.LastSyncedAt, LastWriteAt: e.lastWrite(ctx, zone, c.writeAt)}
 		for _, r := range inv.RRsets {
 			if r.Status != uiapi.StatusMissing {
 				sum.RRsets++

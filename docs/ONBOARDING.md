@@ -26,7 +26,7 @@ Open the zone in the web UI (or `GET /api/v1/zones/example.com/rrsets`). The fir
 read fills the inventory cache with one EuroDNS GET; afterwards the view is refreshed
 by reconcile.
 
-All RRsets show `foreign`. Decide, with the teams, who owns what. Typical split:
+All RRsets show as *Not managed* (status `foreign` in the API). Decide, with the teams, who owns what. Typical split:
 
 | Hosts | Owner |
 |---|---|

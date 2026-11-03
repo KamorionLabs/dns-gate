@@ -28,6 +28,9 @@
 
   --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
 
+  /* page width: wider on large screens, where tables need the room */
+  --page-max: 1320px;
+
   /* paper & ink */
   --paper: #f6f5f1;
   --sheet: #fdfcf9;
@@ -90,10 +93,25 @@
   color-scheme: dark;
 }
 
+@media (min-width: 1680px) {
+  :root {
+    --page-max: 1600px;
+  }
+}
+@media (min-width: 2200px) {
+  :root {
+    --page-max: 1880px;
+  }
+}
+
 *,
 *::before,
 *::after {
   box-sizing: border-box;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--seal-ink) 22%, transparent);
 }
 
 html,

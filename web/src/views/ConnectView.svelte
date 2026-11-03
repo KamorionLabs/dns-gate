@@ -26,13 +26,14 @@
       .catch((e: Error) => (error = e.message));
   });
 
+  // Claude Desktop first: the extension is the easiest path for most people.
   const tabs = [
+    { key: 'desktop', label: 'Claude Desktop' },
     { key: 'claude-code', label: 'Claude Code' },
-    { key: 'desktop', label: 'Claude Desktop and other MCP clients' },
     { key: 'terraform', label: 'Terraform / OpenTofu' },
     { key: 'api', label: 'API' },
   ] as const;
-  const tab = $derived(tabs.find((t) => t.key === router.params.get('tab'))?.key ?? 'claude-code');
+  const tab = $derived(tabs.find((t) => t.key === router.params.get('tab'))?.key ?? 'desktop');
   const entra = $derived(info?.issuer?.kind === 'entra');
   const mcpState = $derived(!info?.mcp.enabled ? 'Disabled' : info.mcp.allow_writes ? 'Read and write' : 'Read-only');
 </script>
@@ -48,33 +49,10 @@
 {:else if !info}
   <div class="skeleton block"></div>
 {:else}
-  <dl class="facts">
-    <div><dt class="eyebrow">Gate URL</dt><dd><CopyText text={info.base_url} label="gate URL" /></dd></div>
-    <div>
-      <dt class="eyebrow">MCP endpoint</dt>
-      <dd>
-        {#if info.mcp.enabled}<CopyText text={info.mcp.url} label="MCP endpoint" />{/if}
-        <span class="state" class:off={!info.mcp.enabled} class:ro={info.mcp.enabled && !info.mcp.allow_writes}>{mcpState}</span>
-      </dd>
-    </div>
-    {#if info.issuer}
-      <div>
-        <dt class="eyebrow">Sign-in</dt>
-        <dd>
-          {#if entra && info.issuer.tenant_id}Entra ID tenant <CopyText text={info.issuer.tenant_id} label="tenant id" />
-          {:else}<CopyText text={info.issuer.url} label="issuer URL" />{/if}
-        </dd>
-      </div>
-    {/if}
-    {#if info.cli_scope}
-      <div><dt class="eyebrow">Token scope</dt><dd><CopyText text={info.cli_scope} label="token scope" /></dd></div>
-    {/if}
-  </dl>
-
   <div class="tabs" role="tablist" aria-label="Tool">
     {#each tabs as t (t.key)}
-      <button role="tab" type="button" aria-selected={tab === t.key} onclick={() => router.setParams({ tab: t.key === 'claude-code' ? undefined : t.key })}>
-        {t.label}{#if t.key === 'claude-code'}<span class="rec">Recommended</span>{/if}
+      <button role="tab" type="button" aria-selected={tab === t.key} onclick={() => router.setParams({ tab: t.key === 'desktop' ? undefined : t.key })}>
+        {t.label}{#if t.key === 'desktop'}<span class="rec">Recommended</span>{/if}
       </button>
     {/each}
   </div>
@@ -110,7 +88,7 @@
       {/if}
     {:else if tab === 'desktop' && info.mcp.enabled}
       {#if info.claude_desktop_extension_url}
-        <p class="lead">Add the gate to Claude Desktop as an extension. Nothing else to install, no terminal: you sign in with your usual account.</p>
+        <p class="lead"><strong>Recommended for most people.</strong> Add the gate to Claude Desktop as an extension: no terminal, nothing else to install, you sign in with your usual account.</p>
         <p><a class="btn primary" href={CLAUDE_DESKTOP_EXTENSION_PATH} download><Icon name="download" size={14} />Download the Claude Desktop extension</a></p>
         <ol class="steps">
           <li>Download the extension with the button above.</li>
@@ -146,6 +124,41 @@
       <p class="hint">Also <span class="mono">/api/v1/zones</span>, <span class="mono">/api/v1/zones/&lbrace;zone&rbrace;/rrsets</span> and <span class="mono">/api/v1/audit</span>. EuroDNS clients use the gate URL as their base URL.</p>
     {/if}
   </section>
+
+  <details class="tech">
+    <summary>Technical details</summary>
+    <dl class="facts">
+      <div><dt>Gate URL</dt><dd><CopyText text={info.base_url} label="gate URL" /></dd></div>
+      <div>
+        <dt>MCP endpoint</dt>
+        <dd>
+          {#if info.mcp.enabled}<CopyText text={info.mcp.url} label="MCP endpoint" />{/if}
+          <span class="state" class:off={!info.mcp.enabled} class:ro={info.mcp.enabled && !info.mcp.allow_writes}>{mcpState}</span>
+        </dd>
+      </div>
+      {#if info.issuer}
+        <div>
+          <dt>Sign-in</dt>
+          <dd>
+            {#if entra && info.issuer.tenant_id}Entra ID tenant <CopyText text={info.issuer.tenant_id} label="tenant id" />
+            {:else}<CopyText text={info.issuer.url} label="issuer URL" />{/if}
+          </dd>
+        </div>
+        {#if entra && info.issuer.tenant_id}
+          <div><dt>Issuer</dt><dd><CopyText text={info.issuer.url} label="issuer URL" /></dd></div>
+        {/if}
+      {/if}
+      {#if info.client_id}
+        <div><dt>Application (client) id</dt><dd><CopyText text={info.client_id} label="client id" /></dd></div>
+      {/if}
+      {#if info.cli_scope}
+        <div><dt>Token scope</dt><dd><CopyText text={info.cli_scope} label="token scope" /></dd></div>
+      {/if}
+      {#if info.claude_desktop_extension_url}
+        <div><dt>Extension download</dt><dd><CopyText text={info.claude_desktop_extension_url} label="extension URL" /></dd></div>
+      {/if}
+    </dl>
+  </details>
 {/if}
 
 <style>
@@ -165,17 +178,39 @@
   .block {
     height: 160px;
   }
+  .tech {
+    max-width: 880px;
+    margin-top: var(--s8);
+    padding-top: var(--s4);
+    border-top: 1px solid var(--rule-soft);
+  }
+  .tech summary {
+    width: max-content;
+    cursor: pointer;
+    color: var(--ink-2);
+    font-weight: 500;
+    border-radius: var(--r-sm);
+  }
+  .tech[open] summary {
+    margin-bottom: var(--s4);
+  }
   .facts {
-    margin: 0 0 var(--s6);
-    display: flex;
-    flex-wrap: wrap;
-    gap: var(--s3) var(--s8);
+    margin: 0;
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr);
+    gap: var(--s2) var(--s5);
+    align-items: center;
   }
   .facts div {
-    flex: none;
-    max-width: 100%;
-    display: grid;
-    gap: 2px;
+    display: contents;
+  }
+  .facts dt {
+    color: var(--ink-3);
+    font-size: 12.5px;
+  }
+  .lead strong {
+    color: var(--ink);
+    font-weight: 600;
   }
   .facts dd {
     margin: 0;
@@ -278,6 +313,15 @@
   .facts :global(.copy),
   .steps :global(.copy) {
     text-align: left;
+  }
+  @media (max-width: 560px) {
+    .facts {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 2px;
+    }
+    .facts dd {
+      margin-bottom: var(--s2);
+    }
   }
   @media (max-width: 720px) {
     .facts :global(.copy),

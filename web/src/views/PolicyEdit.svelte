@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { humanDuration } from '../lib/duration';
   import { api, ApiError, onBeforeReauth } from '../lib/api';
   import type { EffectivePolicy, GeneratedKey, PolicyDocument, ValidationError } from '../lib/types';
   import { fromDoc, nextUid, toDoc, type EModel } from '../lib/editor';
@@ -242,7 +243,7 @@
                   <button class="link" type="button" onclick={() => r.rules.push({ zones: [], actions: [], hosts: [], types: [] })}><Icon name="plus" size={12} /> rule</button>
                   <div class="opts">
                     <label class="check"><input type="checkbox" bind:checked={r.rebase_on_save} /> Rebase full-zone saves <span class="dim">(ACME clients)</span></label>
-                    <label class="inline"><span class="lbl">Ephemeral TTL</span><input class="in mono short" bind:value={r.ephemeral_ttl} placeholder="24h" /></label>
+                    <label class="inline"><span class="lbl">Ephemeral TTL</span><input class="in mono short" bind:value={r.ephemeral_ttl} placeholder="24h" />{#if r.ephemeral_ttl && humanDuration(r.ephemeral_ttl) !== r.ephemeral_ttl}<span class="dim">{humanDuration(r.ephemeral_ttl)}</span>{/if}</label>
                     <label class="inline"><span class="lbl">Max changes / request</span><input class="in mono short" type="number" min="0" bind:value={r.max_changes} placeholder="∞" /></label>
                   </div>
                   <FieldError {errors} path="{path}.ephemeral_ttl" />

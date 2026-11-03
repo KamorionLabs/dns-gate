@@ -16,8 +16,26 @@
   import AuditItem from './AuditItem.svelte';
   import Icon from './Icon.svelte';
   import { teamFromText, teamLabel } from '../lib/team';
+  import HclBlock from './HclBlock.svelte';
 
-  let { zone, rr, onclose, unmanaged = false }: { zone: string; rr: RRset; onclose: () => void; unmanaged?: boolean } = $props();
+  let {
+    zone,
+    rr,
+    onclose,
+    unmanaged = false,
+    canAdopt = false,
+    adoptHint = '',
+    onadopt,
+  }: {
+    zone: string;
+    rr: RRset;
+    onclose: () => void;
+    unmanaged?: boolean;
+    canAdopt?: boolean;
+    adoptHint?: string;
+    onadopt?: () => void;
+  } = $props();
+  const owned = $derived(rr.status !== 'foreign');
 
   let dialog: HTMLDialogElement;
   let panel: HTMLDivElement;
@@ -59,6 +77,19 @@
       });
   });
 
+  // Terraform snippet of a managed record set (same export as the zone's).
+  let hcl = $state<string | null>(null);
+  let hclError = $state<string | null>(null);
+  $effect(() => {
+    hcl = null;
+    hclError = null;
+    if (!owned || unmanaged || rr.status === 'missing') return;
+    api
+      .terraform(zone, { team: rr.owner, hosts: [rr.host], types: [rr.type] })
+      .then((h) => (hcl = h))
+      .catch((e: Error) => (hclError = e.message));
+  });
+
   function backdrop(e: MouseEvent) {
     if (e.target === dialog) onclose();
   }
@@ -73,7 +104,7 @@
         <div class="sub">
           <span class="type mono">{rr.type}</span>
           <StatusBadge status={rr.status} />
-          {#if rr.protected}<span class="flag"><Icon name="lock" size={12} /> Protected</span>{/if}
+          {#if rr.protected}<span class="flag" title="Protected by the base policy: no role can change it through the gate, even after adoption."><Icon name="lock" size={12} /> Protected</span>{/if}
           {#if rr.adopted}<span class="flag">Adopted</span>{/if}
         </div>
       </div>
@@ -82,6 +113,19 @@
 
     <div class="scroll">
       <p class="help {rr.status}">{statusHelp[rr.status]}</p>
+
+      {#if !owned && !unmanaged && onadopt}
+        <div class="adopt">
+          {#if rr.protected}
+            <p class="dim"><Icon name="lock" size={12} /> Protected by the base policy: it cannot be adopted.</p>
+          {:else if canAdopt}
+            <button class="btn primary" type="button" onclick={onadopt}><Seal status="managed" size={13} />Adopt this record set…</button>
+            <p class="dim small">Opens the adoption with this record set selected: you choose the owner team and review it before anything changes.</p>
+          {:else}
+            <p class="dim">{adoptHint}</p>
+          {/if}
+        </div>
+      {/if}
 
       <section>
         <h3 class="eyebrow">Values</h3>
@@ -92,7 +136,7 @@
 
       <section class="facts">
         <div><span class="eyebrow">TTL</span><span class="mono num">{fmtTTL(rr.ttl)} <span class="dim">({rr.ttl}s)</span></span></div>
-        <div><span class="eyebrow">Owner team</span>{#if rr.owner}<span class="team">{rr.owner}</span>{:else}<span class="dim">none (not held by the gate)</span>{/if}</div>
+        <div><span class="eyebrow">Owner team</span>{#if rr.owner}<span class="team">{rr.owner}</span>{:else}<span class="dim">— (not managed by the gate)</span>{/if}</div>
         {#if rr.expires_at}
           <div><span class="eyebrow">Expires</span><span class="expire"><Icon name="clock" size={13} /> <RelTime iso={rr.expires_at} /></span></div>
         {/if}
@@ -103,13 +147,14 @@
 
       {#if rr.created_by || rr.updated_by}
         <section>
-          <h3 class="eyebrow">Chain of custody</h3>
+          <h3 class="eyebrow">Who changed it</h3>
           <ol class="chain">
             {#if rr.created_by}
               <li>
                 <span class="step">{rr.adopted ? 'Adopted by' : 'Created by'}</span>
                 <ActorChip actor={rr.created_by} />
                 <RelTime iso={rr.created_at} />
+                <span class="subject"><CopyText text={rr.created_by.subject} label="subject" /></span>
               </li>
             {/if}
             {#if rr.updated_by}
@@ -117,6 +162,7 @@
                 <span class="step">Last changed by</span>
                 <ActorChip actor={rr.updated_by} />
                 <RelTime iso={rr.updated_at} />
+                <span class="subject"><CopyText text={rr.updated_by.subject} label="subject" /></span>
               </li>
             {/if}
             {#if rr.status === 'tainted' || rr.status === 'missing'}
@@ -155,6 +201,19 @@
               {/each}
             </ul>
             {#if rr.owner}<p class="dim small">Ownership still applies: only team <b>{rr.owner}</b> can modify it once created.</p>{/if}
+          {/if}
+        </section>
+      {/if}
+
+      {#if owned && !unmanaged && rr.status !== 'missing'}
+        <section>
+          <h3 class="eyebrow">Terraform</h3>
+          {#if hclError}
+            <p class="dim">{hclError}</p>
+          {:else if hcl}
+            <HclBlock {hcl} filename="{rr.host === '@' ? 'apex' : rr.host}_{rr.type.toLowerCase()}.tf" />
+          {:else}
+            <div class="skeleton line"></div>
           {/if}
         </section>
       {/if}
@@ -465,6 +524,36 @@
   }
   .small {
     font-size: 12px;
+  }
+  .adopt {
+    display: grid;
+    gap: var(--s2);
+    justify-items: start;
+  }
+  .adopt .dim {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .btn.primary {
+    background: var(--seal-ink);
+    color: var(--sheet);
+    border-color: transparent;
+  }
+  .subject {
+    flex: 1 1 100%;
+    padding-left: 112px;
+    min-width: 0;
+  }
+  .subject :global(.copy) {
+    max-width: 100%;
+    text-align: left;
+    word-break: break-all;
+  }
+  @media (max-width: 560px) {
+    .subject {
+      padding-left: 0;
+    }
   }
   @media (max-width: 560px) {
     .facts {

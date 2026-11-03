@@ -2,6 +2,7 @@
   import type { AuditEntry } from '../lib/types';
   import { actionLabel, decisionLabel, reasonLabel } from '../lib/labels';
   import { clockTime } from '../lib/format';
+  import { mergeTypeChanges } from '../lib/journal';
   import { zoneHref } from '../lib/router.svelte';
   import ActorChip from './ActorChip.svelte';
   import ChangeDiff from './ChangeDiff.svelte';
@@ -10,6 +11,7 @@
 
   let { entry, compact = false }: { entry: AuditEntry; compact?: boolean } = $props();
   const applied = $derived(entry.decision === 'allow');
+  const changes = $derived(mergeTypeChanges(entry.changes ?? []));
 </script>
 
 <article class="item {entry.decision}" class:compact>
@@ -33,18 +35,25 @@
       <p class="reason"><span class="code mono">{entry.reason}</span> {reasonLabel(entry.reason)}</p>
     {/if}
 
-    {#if entry.changes?.length}
+    {#if changes.length}
       <div class="changes">
-        {#each entry.changes as c, i (i)}
+        {#each changes as c, i (i)}
           <ChangeDiff change={c} zone={entry.zone} {applied} link={!compact} />
         {/each}
       </div>
     {/if}
 
     <footer>
-      <CopyText text={entry.request_id} label="request id" />
-      {#if entry.snapshot_id}<span class="mono snap">snapshot #{entry.snapshot_id}</span>{/if}
       {#if entry.teams?.length && !compact}<span class="teams">as {entry.teams.join(', ')}</span>{/if}
+      <details class="ids">
+        <summary>Details</summary>
+        <dl>
+          <dt>Identity</dt><dd><CopyText text={entry.actor.subject} label="subject" /></dd>
+          <dt>Request</dt><dd><CopyText text={entry.request_id} label="request id" /></dd>
+          {#if entry.snapshot_id}<dt>Snapshot before</dt><dd><CopyText text={String(entry.snapshot_id)} label="EuroDNS snapshot id" /></dd>{/if}
+          {#if entry.action !== actionLabel(entry.action)}<dt>Action</dt><dd class="mono">{entry.action}</dd>{/if}
+        </dl>
+      </details>
     </footer>
   </div>
 </article>
@@ -159,13 +168,43 @@
   footer {
     display: flex;
     flex-wrap: wrap;
-    align-items: center;
+    align-items: flex-start;
     gap: var(--s1) var(--s4);
     font-size: 11.5px;
     color: var(--ink-4);
   }
-  .snap {
-    font-size: 11.5px;
+  .ids[open] {
+    flex-basis: 100%;
+  }
+  .ids summary {
+    width: max-content;
+    cursor: pointer;
+    color: var(--ink-4);
+    list-style-position: inside;
+    border-radius: var(--r-sm);
+  }
+  .ids summary:hover {
+    color: var(--ink-2);
+  }
+  .ids dl {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 2px var(--s3);
+    margin: var(--s1) 0 0;
+    align-items: center;
+  }
+  .ids dt {
+    color: var(--ink-4);
+  }
+  .ids dd {
+    margin: 0;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+  .ids :global(.copy) {
+    max-width: 100%;
+    text-align: left;
+    word-break: break-all;
   }
   .compact .body {
     padding-bottom: var(--s5);

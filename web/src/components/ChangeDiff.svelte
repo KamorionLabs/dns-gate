@@ -1,12 +1,14 @@
 <script lang="ts">
-  import type { Change } from '../lib/types';
+  import type { ShownChange } from '../lib/journal';
   import { opLabel } from '../lib/labels';
   import { ttl as fmtTTL } from '../lib/format';
   import { zoneHref } from '../lib/router.svelte';
   import Host from './Host.svelte';
 
-  let { change, zone, link = true, applied = true }: { change: Change; zone?: string; link?: boolean; applied?: boolean } =
+  let { change, zone, link = true, applied = true }: { change: ShownChange; zone?: string; link?: boolean; applied?: boolean } =
     $props();
+  // A record set replaced by one of another type (A to CNAME) reads as one change.
+  const retyped = $derived(!!change.old_type && change.old_type !== change.type);
 
   const oldV = $derived(change.old_values ?? []);
   const newV = $derived(change.new_values ?? []);
@@ -23,7 +25,7 @@
 
 <div class="change {change.op}" class:proposed={!applied}>
   <div class="head">
-    <span class="op">{applied ? opLabel[change.op] : 'Proposed'}</span>
+    <span class="op">{applied ? opLabel[change.op] : 'Proposed'}{#if retyped}<span class="retype">(type {change.old_type} → {change.type})</span>{/if}</span>
     {#if link && zone}
       <a href={zoneHref(zone, { rr: `${change.host}/${change.type}` })}><Host host={change.host} {zone} showZone={false} /></a>
     {:else}
@@ -86,6 +88,13 @@
   .type {
     color: var(--ink-3);
     font-size: 11.5px;
+  }
+  .retype {
+    margin-left: 0.4em;
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 500;
+    color: var(--ink-2);
   }
   .ttl {
     color: var(--ink-4);
