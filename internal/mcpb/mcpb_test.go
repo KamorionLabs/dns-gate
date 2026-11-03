@@ -76,7 +76,7 @@ func TestBuild(t *testing.T) {
 	}
 	want := map[string]string{
 		"EURODNS_GATE_MCP_URL": p.MCPURL, "EURODNS_GATE_ISSUER": p.Issuer,
-		"EURODNS_GATE_CLIENT_ID": p.ClientID, "EURODNS_GATE_SCOPE": p.Scope,
+		"EURODNS_GATE_CLIENT_ID": p.ClientID, "EURODNS_GATE_SCOPE": "client-1/.default",
 	}
 	if len(s.MCPConfig.Env) != len(want) {
 		t.Fatalf("env: %v", s.MCPConfig.Env)
@@ -109,5 +109,26 @@ func TestBuildDefaults(t *testing.T) {
 	}
 	if _, err := Build(Params{GateURL: "https://gate.example.com"}); err == nil {
 		t.Fatal("missing issuer and client id accepted")
+	}
+}
+
+func TestRelayScope(t *testing.T) {
+	const id = "11111111-2222-3333-4444-555555555555"
+	for _, c := range []struct{ scope, want string }{
+		{"api://" + id + "/.default", id + "/.default"},
+		{"api://" + id + "/access_as_user", id + "/access_as_user"},
+		{"api://eurodns-gate/.default", "api://eurodns-gate/.default"},
+		{"api://" + id + "-other/.default", "api://" + id + "-other/.default"},
+		{"api://" + id, "api://" + id},
+		{"https://gate.example.com/" + id + "/.default", "https://gate.example.com/" + id + "/.default"},
+		{"gate.read", "gate.read"},
+		{"", ""},
+	} {
+		if got := RelayScope(c.scope, id); got != c.want {
+			t.Errorf("RelayScope(%q) = %q, want %q", c.scope, got, c.want)
+		}
+	}
+	if got := RelayScope("api://x/.default", ""); got != "api://x/.default" {
+		t.Errorf("without client id: %q", got)
 	}
 }

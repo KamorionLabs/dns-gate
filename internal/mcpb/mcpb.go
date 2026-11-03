@@ -116,6 +116,24 @@ func Filename(gateURL string) string {
 	return "eurodns-gate-" + strings.Trim(fileUnsafe.ReplaceAllString(Host(gateURL), "-"), "-.") + ".mcpb"
 }
 
+// RelayScope is the scope the relay requests. The relay signs in as the
+// client itself, and Entra ID refuses a token an application requests for
+// itself through its App ID URI (AADSTS90009): it must name itself by its
+// GUID. A scope under api://<client_id>/ is therefore requested as
+// <client_id>/...; any other scope is kept as is.
+func RelayScope(scope, clientID string) string {
+	if clientID == "" {
+		return scope
+	}
+	fields := strings.Fields(scope)
+	for i, f := range fields {
+		if rest, ok := strings.CutPrefix(f, "api://"+clientID+"/"); ok {
+			fields[i] = clientID + "/" + rest
+		}
+	}
+	return strings.Join(fields, " ")
+}
+
 // NewManifest returns the manifest of the bundle for p.
 func NewManifest(p Params) Manifest {
 	host := Host(p.GateURL)
@@ -128,8 +146,8 @@ func NewManifest(p Params) Manifest {
 		"EURODNS_GATE_ISSUER":    p.Issuer,
 		"EURODNS_GATE_CLIENT_ID": p.ClientID,
 	}
-	if p.Scope != "" {
-		env["EURODNS_GATE_SCOPE"] = p.Scope
+	if scope := RelayScope(p.Scope, p.ClientID); scope != "" {
+		env["EURODNS_GATE_SCOPE"] = scope
 	}
 	return Manifest{
 		ManifestVersion: ManifestVersion,

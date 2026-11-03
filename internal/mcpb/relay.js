@@ -5,7 +5,8 @@
 //
 // Sign-in is the authorization code flow with PKCE (S256), state and nonce,
 // through the system browser and a loopback redirect
-// (http://localhost:<ephemeral port>/callback). The refresh token is kept in
+// (http://localhost:<ephemeral port>, no path: Entra ID ignores the port of a
+// registered http://localhost, not the path). The refresh token is kept in
 // ~/.eurodns-gate/<host>.json (0600) and used silently; the browser opens
 // again only when it no longer works.
 //
@@ -37,6 +38,8 @@ const HTTP_TIMEOUT_MS = 30_000;
 const EXPIRY_MARGIN_MS = 60_000;
 const ERR_GATE = -32000;
 const ERR_SIGN_IN = -32001;
+// List methods answered empty while signed out, keyed to their result field.
+const LIST_METHODS = { 'tools/list': 'tools', 'prompts/list': 'prompts', 'resources/list': 'resources', 'resources/templates/list': 'resourceTemplates' };
 
 const log = (...a) => process.stderr.write(`[${RELAY_NAME}] ${a.join(' ')}\n`);
 
@@ -193,11 +196,13 @@ class Auth {
 
   // token returns an access token, or null when one cannot be had without
   // the browser and interactive is false. Concurrent callers share one
-  // acquisition, so a single browser sign-in happens at a time.
+  // acquisition, so a single browser sign-in happens at a time; callers that
+  // may not wait for the browser do not wait for one in progress either.
   async token(interactive) {
     for (;;) {
       const p = this.pending;
       if (!p) break;
+      if (p.interactive && !interactive) return null;
       let t = null;
       try {
         t = await p.promise;
@@ -285,7 +290,7 @@ class Auth {
     const state = randomString(16);
     const nonce = randomString(16);
     const loop = await startLoopback();
-    const redirectURI = `http://localhost:${loop.port}/callback`;
+    const redirectURI = `http://localhost:${loop.port}`;
     const auth = new URL(meta.authorization_endpoint);
     const q = auth.searchParams;
     q.set('response_type', 'code');
@@ -366,7 +371,7 @@ function startLoopback() {
       res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(html);
     };
-    if (req.method !== 'GET' || u.pathname !== '/callback' || !loop.onCallback) {
+    if (req.method !== 'GET' || u.pathname !== '/' || !loop.onCallback) {
       respond(404, page('Not found', 'Nothing here.'));
       return;
     }
@@ -432,7 +437,8 @@ class Relay {
     this.initialized = false; // upstream session initialized
     this.initializing = null;
     this.localInit = false; // initialize was answered by the relay
-    this.listChangedSent = false;
+    this.listChangedPending = false; // a list was answered empty while signed out
+    this.backgroundSignIn = null;
     this.listening = false;
     this.closed = false;
   }
@@ -472,6 +478,15 @@ class Relay {
       if (this.initialized) await this.forward(msg, false).catch((e) => log(`forward failed: ${e.message}`));
       return;
     }
+    if (LIST_METHODS[msg.method] && !(await this.hasToken())) {
+      // Claude gives up on a request after about a minute, sooner than a
+      // browser sign-in: answer empty now, sign in in the background and
+      // announce the tools once signed in.
+      this.listChangedPending = true;
+      this.reply(msg.id, { [LIST_METHODS[msg.method]]: [] });
+      this.signInInBackground();
+      return;
+    }
     try {
       await this.forward(msg, true);
     } catch (e) {
@@ -479,9 +494,26 @@ class Relay {
     }
   }
 
+  // hasToken reports whether a token is at hand without the browser.
+  async hasToken() {
+    try {
+      return Boolean(await this.auth.token(false));
+    } catch (e) {
+      log(`no token: ${e.message}`);
+      return false;
+    }
+  }
+
+  signInInBackground() {
+    if (this.backgroundSignIn) return;
+    this.backgroundSignIn = this.ensureSession(true)
+      .catch((e) => log(`sign-in failed: ${e.message}`))
+      .finally(() => (this.backgroundSignIn = null));
+  }
+
   // initialize goes to the gate when a token is available without the
-  // browser; otherwise the relay answers itself and signs in on the first
-  // request that needs the gate, so Claude never waits on a browser here.
+  // browser; otherwise the relay answers itself, so Claude never waits on a
+  // browser here, and signs in when Claude first lists or calls the tools.
   async initialize(msg) {
     this.initParams = msg.params || {};
     this.initialized = false;
@@ -511,7 +543,7 @@ class Relay {
       protocolVersion: this.initParams.protocolVersion || DEFAULT_PROTOCOL_VERSION,
       capabilities: { tools: { listChanged: true } },
       serverInfo: { name: RELAY_NAME, version: RELAY_VERSION },
-      instructions: `Tools of the EuroDNS gate at ${this.cfg.host}. The first use opens the browser once to sign in.`,
+      instructions: `Tools of the EuroDNS gate at ${this.cfg.host}. They appear once the user has signed in in the browser.`,
     });
   }
 
@@ -548,10 +580,8 @@ class Relay {
     const token = await this.auth.token(interactive);
     if (!token) throw new RelayError('not signed in', ERR_SIGN_IN);
     if (!this.initialized) await this.upstreamInit(true);
-    if (this.localInit && !this.listChangedSent) {
-      // Claude may have given up on tools/list while the user was signing
-      // in: tell it the tools are there now.
-      this.listChangedSent = true;
+    if (this.listChangedPending) {
+      this.listChangedPending = false;
       setImmediate(() => this.write({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' }));
     }
   }
@@ -710,6 +740,8 @@ function main() {
   log(`relay ${RELAY_VERSION} for ${cfg.mcpURL}`);
 }
 
-if (require.main === module) main();
+// Claude Desktop loads the entry point in an Electron utility process where
+// require.main is not this module: run unless loaded as a library.
+if (require.main === module || !process.env.EURODNS_GATE_RELAY_NO_MAIN) main();
 
 module.exports = { loadConfig, parseSSE, Relay, Auth };
