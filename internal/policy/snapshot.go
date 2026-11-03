@@ -20,10 +20,11 @@ const (
 )
 
 type compiledRole struct {
-	name      string
-	layer     string
-	role      uiapi.Role
-	ephemeral time.Duration
+	name       string
+	layer      string
+	role       uiapi.Role
+	ephemeral  time.Duration
+	delegation string // owner delegation of a delegated role, "" otherwise
 }
 
 type compiledGroup struct {
@@ -33,10 +34,12 @@ type compiledGroup struct {
 }
 
 type compiledBinding struct {
-	index   int // index within its layer
-	layer   string
-	binding uiapi.Binding
-	teamRe  *regexp.Regexp // binding.TeamFrom.Regex, nil without team_from
+	index      int // index within its layer
+	layer      string
+	binding    uiapi.Binding
+	teamRe     *regexp.Regexp // binding.TeamFrom.Regex, nil without team_from
+	name       string         // name of a delegated binding
+	delegation string         // owner delegation of a delegated binding, "" otherwise
 }
 
 // Discovery is the list of zones found in the EuroDNS account
@@ -72,6 +75,9 @@ type Snapshot struct {
 	bounds     config.Bounds
 	maxChanges int
 	issuers    map[string]config.Issuer
+	// delegations of the base file, by name (policy.editable only).
+	delegations     map[string]*config.Delegation
+	delegationNames []string
 }
 
 // BaseDocument converts the file policy to the document form.
@@ -155,6 +161,14 @@ func compile(c *config.Config, base uiapi.PolicyDocument, managed *uiapi.PolicyD
 	for _, is := range c.Issuers {
 		s.issuers[is.Name] = is
 	}
+	s.delegations = map[string]*config.Delegation{}
+	if c.Policy.Editable {
+		for i := range c.Policy.Delegations {
+			d := &c.Policy.Delegations[i]
+			s.delegations[d.Name] = d
+			s.delegationNames = append(s.delegationNames, d.Name)
+		}
+	}
 	add := func(doc *uiapi.PolicyDocument, layer string) {
 		for name, r := range doc.Roles {
 			cr := &compiledRole{name: name, layer: layer, role: r}
@@ -182,6 +196,7 @@ func compile(c *config.Config, base uiapi.PolicyDocument, managed *uiapi.PolicyD
 	add(&base, LayerBase)
 	if managed != nil {
 		add(managed, LayerManaged)
+		s.addDelegated(managed)
 	}
 	for name := range s.groups {
 		s.groupNames = append(s.groupNames, name)
@@ -230,6 +245,8 @@ type Resolution struct {
 	Teams    []string // binding order
 	Groups   []string // sorted
 	Bindings []string // "role@team" (team may be empty)
+	// Delegations the subject may act for (policy.delegations), file order.
+	Delegations []string
 }
 
 // Resolve computes the groups, roles and teams of an OIDC subject.
@@ -270,6 +287,7 @@ func (s *Snapshot) Resolve(issuer string, claims map[string]any) Resolution {
 		r.Bindings = append(r.Bindings, b.binding.Role+"@"+team)
 	}
 	sort.Strings(r.Roles)
+	r.Delegations = s.DelegationsFor(issuer, claims)
 	return r
 }
 
@@ -425,7 +443,7 @@ func (s *Snapshot) Decide(roles []string, action, zone string, key *rrset.Key) D
 			if !meta && !glob.Any(r.Zones, zone) {
 				continue
 			}
-			if cr.layer == LayerManaged && !s.withinBounds(r, action) {
+			if !s.ruleEffective(cr, r, action) {
 				continue
 			}
 			if key != nil && !meta && r.Records != nil && !scopeMatches(*r.Records, *key) {
@@ -451,7 +469,7 @@ func (s *Snapshot) Permissions(roles []string) []uiapi.Permission {
 		for _, r := range cr.role.Rules {
 			actions := []string{}
 			for _, a := range r.Actions {
-				if cr.layer != LayerManaged || s.withinBounds(r, a) {
+				if s.ruleEffective(cr, r, a) {
 					actions = append(actions, a)
 				}
 			}
@@ -467,6 +485,19 @@ func (s *Snapshot) Permissions(roles []string) []uiapi.Permission {
 		}
 	}
 	return out
+}
+
+// ruleEffective reports whether a rule of a role may grant action: always
+// for base roles; managed rules must stay within the bounds, and delegated
+// ones within their delegation too.
+func (s *Snapshot) ruleEffective(cr *compiledRole, r uiapi.Rule, action string) bool {
+	if cr.layer != LayerManaged {
+		return true
+	}
+	if !s.withinBounds(r, action) {
+		return false
+	}
+	return cr.delegation == "" || s.withinDelegation(cr.delegation, r, action)
 }
 
 // withinBounds re-checks a managed rule against the base bounds (defense
@@ -487,15 +518,7 @@ func (s *Snapshot) withinBounds(r uiapi.Rule, action string) bool {
 // the bound globs matches. Only "*" wildcards are supported: matching the
 // pattern text with a bound glob is then a sound inclusion test.
 func ZoneCovered(bounds []string, pattern string) bool {
-	if strings.Contains(pattern, "?") {
-		return false
-	}
-	for _, b := range bounds {
-		if !strings.Contains(b, "?") && glob.Match(b, pattern) {
-			return true
-		}
-	}
-	return false
+	return glob.Covered(bounds, pattern)
 }
 
 func (s *Snapshot) protectedBy(zone string, key rrset.Key) (config.Protected, bool) {

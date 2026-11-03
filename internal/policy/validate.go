@@ -112,45 +112,7 @@ func ValidateManaged(c *config.Config, base uiapi.PolicyDocument, d uiapi.Policy
 		if _, ok := base.Roles[name]; ok {
 			v.add(at, "role %q is defined by the base policy", name)
 		}
-		if len(r.Rules) == 0 {
-			v.add(at+".rules", "at least one rule is required")
-		}
-		for i, rule := range r.Rules {
-			rat := fmt.Sprintf("%s.rules[%d]", at, i)
-			if len(rule.Zones) == 0 {
-				v.add(rat+".zones", "at least one zone is required")
-			}
-			for j, z := range rule.Zones {
-				if !ZoneCovered(c.Policy.Bounds.Zones, strings.ToLower(z)) {
-					v.add(fmt.Sprintf("%s.zones[%d]", rat, j), "zone %q is outside policy.bounds.zones", z)
-				}
-			}
-			if len(rule.Actions) == 0 {
-				v.add(rat+".actions", "at least one action is required")
-			}
-			for j, a := range rule.Actions {
-				p := fmt.Sprintf("%s.actions[%d]", rat, j)
-				switch {
-				case IsMeta(a):
-					v.add(p, "%s can only be granted by the base policy", a)
-				case !knownActions[a]:
-					v.add(p, "unknown action %q", a)
-				case !contains(c.Policy.Bounds.Actions, a):
-					v.add(p, "action %q is outside policy.bounds.actions", a)
-				}
-			}
-			if rule.Records != nil && len(rule.Records.Hosts) == 0 && len(rule.Records.Types) == 0 {
-				v.add(rat+".records", "hosts or types required when records is set")
-			}
-		}
-		if r.EphemeralTTL != "" {
-			if d, err := time.ParseDuration(r.EphemeralTTL); err != nil || d < 0 {
-				v.add(at+".ephemeral_ttl", "invalid duration %q", r.EphemeralTTL)
-			}
-		}
-		if r.MaxChangesPerRequest < 0 || r.MaxChangesPerRequest > 1000 {
-			v.add(at+".max_changes_per_request", "must be between 0 (default) and 1000; unlimited is reserved to the base policy")
-		}
+		validateRole(&v, c, at, r)
 	}
 
 	// A managed binding or key may use a managed role, or a base role that
@@ -161,6 +123,10 @@ func ValidateManaged(c *config.Config, base uiapi.PolicyDocument, d uiapi.Policy
 		}
 		br, ok := base.Roles[name]
 		if !ok {
+			if dr, delegated := d.Delegated.Role(name); delegated {
+				v.add(path, "role %q belongs to delegation %q: only its delegated bindings can use it", name, dr.Owner.Delegation)
+				return
+			}
 			v.add(path, "unknown role %q", name)
 			return
 		}
@@ -180,33 +146,17 @@ func ValidateManaged(c *config.Config, base uiapi.PolicyDocument, d uiapi.Policy
 		}
 	}
 
+	groupOK := func(path, g string) {
+		_, inBase := base.Groups[g]
+		_, inDoc := d.Groups[g]
+		if !inBase && !inDoc {
+			v.add(path, "unknown group %q", g)
+		}
+	}
 	for i, b := range d.Bindings {
 		at := fmt.Sprintf("bindings[%d]", i)
 		roleOK(at+".role", b.Role)
-		if b.Team != "" && !nameRe.MatchString(b.Team) {
-			v.add(at+".team", "team must be a lowercase identifier")
-		}
-		if b.TeamFrom != nil {
-			if b.Team != "" {
-				v.add(at+".team", "team and team_from are exclusive")
-			}
-			if err := config.ValidateTeamFrom(b.TeamFrom.Claim, b.TeamFrom.Regex, b.TeamFrom.Prefix); err != nil {
-				v.add(at+".team_from", "%v", err)
-			}
-		}
-		if len(b.Groups) == 0 && len(b.Subjects) == 0 {
-			v.add(at, "groups or subjects required")
-		}
-		for j, g := range b.Groups {
-			_, inBase := base.Groups[g]
-			_, inDoc := d.Groups[g]
-			if !inBase && !inDoc {
-				v.add(fmt.Sprintf("%s.groups[%d]", at, j), "unknown group %q", g)
-			}
-		}
-		for j, m := range b.Subjects {
-			matcher(fmt.Sprintf("%s.subjects[%d]", at, j), m)
-		}
+		validateBinding(&v, at, b, groupOK, matcher)
 	}
 
 	ids, apps := map[string]bool{}, map[string]bool{}
@@ -250,7 +200,76 @@ func ValidateManaged(c *config.Config, base uiapi.PolicyDocument, d uiapi.Policy
 			}
 		}
 	}
+	validateDelegated(&v, c, base, d, roleOK, groupOK, matcher)
 	return v
+}
+
+// validateRole checks the rules and options of a managed role.
+func validateRole(v *verrs, c *config.Config, at string, r uiapi.Role) {
+	if len(r.Rules) == 0 {
+		v.add(at+".rules", "at least one rule is required")
+	}
+	for i, rule := range r.Rules {
+		rat := fmt.Sprintf("%s.rules[%d]", at, i)
+		if len(rule.Zones) == 0 {
+			v.add(rat+".zones", "at least one zone is required")
+		}
+		for j, z := range rule.Zones {
+			if !ZoneCovered(c.Policy.Bounds.Zones, strings.ToLower(z)) {
+				v.add(fmt.Sprintf("%s.zones[%d]", rat, j), "zone %q is outside policy.bounds.zones", z)
+			}
+		}
+		if len(rule.Actions) == 0 {
+			v.add(rat+".actions", "at least one action is required")
+		}
+		for j, a := range rule.Actions {
+			p := fmt.Sprintf("%s.actions[%d]", rat, j)
+			switch {
+			case IsMeta(a):
+				v.add(p, "%s can only be granted by the base policy", a)
+			case !knownActions[a]:
+				v.add(p, "unknown action %q", a)
+			case !contains(c.Policy.Bounds.Actions, a):
+				v.add(p, "action %q is outside policy.bounds.actions", a)
+			}
+		}
+		if rule.Records != nil && len(rule.Records.Hosts) == 0 && len(rule.Records.Types) == 0 {
+			v.add(rat+".records", "hosts or types required when records is set")
+		}
+	}
+	if r.EphemeralTTL != "" {
+		if d, err := time.ParseDuration(r.EphemeralTTL); err != nil || d < 0 {
+			v.add(at+".ephemeral_ttl", "invalid duration %q", r.EphemeralTTL)
+		}
+	}
+	if r.MaxChangesPerRequest < 0 || r.MaxChangesPerRequest > 1000 {
+		v.add(at+".max_changes_per_request", "must be between 0 (default) and 1000; unlimited is reserved to the base policy")
+	}
+}
+
+// validateBinding checks the team, groups and subjects of a managed binding
+// (the role is checked by the caller).
+func validateBinding(v *verrs, at string, b uiapi.Binding, groupOK func(path, g string), matcher func(path string, m uiapi.SubjectMatcher)) {
+	if b.Team != "" && !nameRe.MatchString(b.Team) {
+		v.add(at+".team", "team must be a lowercase identifier")
+	}
+	if b.TeamFrom != nil {
+		if b.Team != "" {
+			v.add(at+".team", "team and team_from are exclusive")
+		}
+		if err := config.ValidateTeamFrom(b.TeamFrom.Claim, b.TeamFrom.Regex, b.TeamFrom.Prefix); err != nil {
+			v.add(at+".team_from", "%v", err)
+		}
+	}
+	if len(b.Groups) == 0 && len(b.Subjects) == 0 {
+		v.add(at, "groups or subjects required")
+	}
+	for j, g := range b.Groups {
+		groupOK(fmt.Sprintf("%s.groups[%d]", at, j), g)
+	}
+	for j, m := range b.Subjects {
+		matcher(fmt.Sprintf("%s.subjects[%d]", at, j), m)
+	}
 }
 
 // ValidateZonesDiscovered checks that every zone a managed document adds

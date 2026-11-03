@@ -39,3 +39,28 @@ func Any(patterns []string, s string) bool {
 	}
 	return false
 }
+
+// Covered reports whether every string matched by pattern is matched by one
+// of the bounds, by matching the pattern text with each bound. This is sound
+// for "*" wildcards only: a pattern or bound containing "?" is never
+// considered covered (a "?" of the bound could match a "*" of the pattern).
+func Covered(bounds []string, pattern string) bool {
+	if containsRune(pattern, '?') {
+		return false
+	}
+	for _, b := range bounds {
+		if !containsRune(b, '?') && Match(b, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+func containsRune(s string, r rune) bool {
+	for _, c := range s {
+		if c == r {
+			return true
+		}
+	}
+	return false
+}

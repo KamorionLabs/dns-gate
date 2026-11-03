@@ -268,7 +268,7 @@ func (a *Authenticator) bind(is *issuer, claims map[string]any) (*identity.Subje
 // resolve applies the bindings of a snapshot to an OIDC subject.
 func (a *Authenticator) resolve(snap *policy.Snapshot, is *issuer, s *identity.Subject, claims map[string]any) (*identity.Subject, error) {
 	res := snap.Resolve(is.cfg.Name, claims)
-	s.Roles, s.Teams, s.Groups = res.Roles, res.Teams, res.Groups
+	s.Roles, s.Teams, s.Groups, s.Delegations = res.Roles, res.Teams, res.Groups, res.Delegations
 	teams := map[string]bool{}
 	for _, t := range s.Teams {
 		teams[t] = true
@@ -282,7 +282,7 @@ func (a *Authenticator) resolve(snap *policy.Snapshot, is *issuer, s *identity.S
 			}
 		}
 	}
-	if len(s.Roles) == 0 {
+	if len(s.Roles) == 0 && len(s.Delegations) == 0 {
 		return nil, &Error{Status: http.StatusForbidden, Reason: "no_binding", Message: "no role is bound to this identity"}
 	}
 	sort.Strings(s.Roles)

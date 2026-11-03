@@ -38,6 +38,9 @@
 - Prometheus metrics (upstream requests, waits, denials by reason, tainted RRsets).
 - Bulk adoption command for migrating existing zones.
 - Publication: GitHub releases, container registry, Terraform and OpenTofu registries.
+- Policy delegations in the UI: badge and owner on delegated roles and bindings,
+  takeover from the editor (API only today), and rebasing open proposals over
+  delegated changes instead of marking them stale.
 
 ## Later
 

@@ -26,6 +26,21 @@ import "time"
 //	GET  /api/v1/policy/who-can?zone=&host=&type=&action= -> WhoCanResponse (policy.read)
 //	POST /api/v1/policy/virtual-keys/generate     -> GeneratedKey (policy.propose); the key is shown once, only its hash goes in a proposal
 //
+// Delegation API (subjects of a policy.delegations entry of the base file,
+// see DelegatedObject). Each write is validated, then activated as a new
+// managed revision without approval:
+//
+//	GET    /api/v1/policy/delegated                  -> DelegatedIndex (delegation subjects, or policy.read)
+//	GET    /api/v1/policy/delegated/roles/{name}     -> DelegatedObject, ETag
+//	PUT    /api/v1/policy/delegated/roles/{name}     DelegatedRoleRequest -> DelegatedResult, ETag
+//	DELETE /api/v1/policy/delegated/roles/{name}     -> DelegatedResult
+//	GET    /api/v1/policy/delegated/bindings/{name}  -> DelegatedObject, ETag
+//	PUT    /api/v1/policy/delegated/bindings/{name}  DelegatedBindingRequest -> DelegatedResult, ETag
+//	DELETE /api/v1/policy/delegated/bindings/{name}  -> DelegatedResult
+//
+// PUT and DELETE honour If-Match (the object ETag) and PUT If-None-Match: *
+// (create only); a mismatch is 412 precondition.
+//
 // Every POST requires the X-Gate-CSRF header equal to the gate_csrf cookie
 // and a same-origin Origin header. Mutations by humans require a recent login
 // (policy.edit_max_age) and, if configured, an MFA claim (policy.require_amr);
@@ -120,12 +135,139 @@ type VirtualKey struct {
 // PolicyDocument is the managed (editable) layer. Zones are brought under
 // management in addition to the base zones; each must match
 // policy.bounds.zones and exist in the EuroDNS account (zones_discovery).
+// Delegated holds the roles and bindings owned by policy delegations: they
+// are changed only through the delegation API, and a proposal that omits
+// the section keeps the delegated objects of the active revision.
 type PolicyDocument struct {
-	Zones       []string         `json:"zones,omitempty"`
-	Groups      map[string]Group `json:"groups"`
-	Roles       map[string]Role  `json:"roles"`
-	Bindings    []Binding        `json:"bindings"`
-	VirtualKeys []VirtualKey     `json:"virtual_keys"`
+	Zones       []string          `json:"zones,omitempty"`
+	Groups      map[string]Group  `json:"groups"`
+	Roles       map[string]Role   `json:"roles"`
+	Bindings    []Binding         `json:"bindings"`
+	VirtualKeys []VirtualKey      `json:"virtual_keys"`
+	Delegated   *DelegatedObjects `json:"delegated,omitempty"`
+}
+
+// DelegatedObjects are the managed roles and bindings owned by delegations,
+// keyed by stable name (one namespace per kind, shared by all delegations;
+// role names are also unique across the base and managed roles).
+type DelegatedObjects struct {
+	Roles    map[string]DelegatedRole    `json:"roles,omitempty"`
+	Bindings map[string]DelegatedBinding `json:"bindings,omitempty"`
+}
+
+// Role returns a delegated role; o may be nil.
+func (o *DelegatedObjects) Role(name string) (DelegatedRole, bool) {
+	if o == nil {
+		return DelegatedRole{}, false
+	}
+	r, ok := o.Roles[name]
+	return r, ok
+}
+
+// Binding returns a delegated binding; o may be nil.
+func (o *DelegatedObjects) Binding(name string) (DelegatedBinding, bool) {
+	if o == nil {
+		return DelegatedBinding{}, false
+	}
+	b, ok := o.Bindings[name]
+	return b, ok
+}
+
+// DelegatedOwner records who manages a delegated object.
+type DelegatedOwner struct {
+	Delegation string    `json:"delegation"`           // policy.delegations[].name
+	ManagedBy  string    `json:"managed_by,omitempty"` // client label, e.g. "terraform"
+	CreatedBy  string    `json:"created_by"`           // issuer:id
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedBy  string    `json:"updated_by"` // issuer:id of the last change
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+// DelegatedRole is a role owned by a delegation.
+type DelegatedRole struct {
+	Role
+	Owner DelegatedOwner `json:"owner"`
+}
+
+// DelegatedBinding is a binding owned by a delegation.
+type DelegatedBinding struct {
+	Binding
+	Owner DelegatedOwner `json:"owner"`
+}
+
+// Delegation is a policy.delegations entry of the base file.
+type Delegation struct {
+	Name        string           `json:"name"`
+	Description string           `json:"description,omitempty"`
+	Subjects    []SubjectMatcher `json:"subjects"`
+	Allow       DelegationAllow  `json:"allow"`
+}
+
+// DelegationAllow are the limits of a delegation (see config.DelegationAllow).
+type DelegationAllow struct {
+	Zones           []string         `json:"zones"`
+	Actions         []string         `json:"actions"`
+	Records         *RecordScope     `json:"records,omitempty"`
+	BindingSubjects []SubjectMatcher `json:"binding_subjects"`
+	Teams           DelegationTeams  `json:"teams"`
+	Roles           []string         `json:"roles,omitempty"`
+	Groups          []string         `json:"groups,omitempty"`
+	MaxObjects      int              `json:"max_objects"`
+}
+
+// DelegationTeams are the teams a delegated binding may act for.
+type DelegationTeams struct {
+	FromSubject *TeamFrom `json:"from_subject,omitempty"`
+	Names       []string  `json:"names,omitempty"`
+}
+
+// DelegatedRoleRequest is the body of PUT /api/v1/policy/delegated/roles/{name}.
+// Delegation selects the delegation when the caller matches several (it
+// must be the owner's for an existing role).
+type DelegatedRoleRequest struct {
+	Role
+	Delegation string `json:"delegation,omitempty"`
+	ManagedBy  string `json:"managed_by,omitempty"`
+}
+
+// DelegatedBindingRequest is the body of PUT /api/v1/policy/delegated/bindings/{name}.
+type DelegatedBindingRequest struct {
+	Binding
+	Delegation string `json:"delegation,omitempty"`
+	ManagedBy  string `json:"managed_by,omitempty"`
+}
+
+// Kinds of delegated objects.
+const (
+	DelegatedKindRole    = "role"
+	DelegatedKindBinding = "binding"
+)
+
+// DelegatedObject is one delegated role or binding.
+type DelegatedObject struct {
+	Kind       string         `json:"kind"` // role | binding
+	Name       string         `json:"name"`
+	Role       *Role          `json:"role,omitempty"`
+	Binding    *Binding       `json:"binding,omitempty"`
+	Owner      DelegatedOwner `json:"owner"`
+	ETag       string         `json:"etag"`
+	RevisionID string         `json:"revision_id"` // active revision holding the object
+}
+
+// DelegatedResult answers a delegated PUT or DELETE.
+type DelegatedResult struct {
+	Object     *DelegatedObject `json:"object,omitempty"` // nil after a delete
+	Changed    bool             `json:"changed"`          // false: nothing to do, no revision created
+	RevisionID string           `json:"revision_id"`      // the revision activated, or the active one when unchanged
+	Impact     []ImpactItem     `json:"impact"`
+}
+
+// DelegatedIndex lists the delegations of the caller and their objects
+// (every delegation for policy.read holders).
+type DelegatedIndex struct {
+	Delegations []Delegation      `json:"delegations"`
+	Objects     []DelegatedObject `json:"objects"`
+	RevisionID  string            `json:"revision_id,omitempty"`
 }
 
 // Issuer as shown in the UI (no secrets).
@@ -161,6 +303,8 @@ type BaseLayer struct {
 	Protected  []Protected    `json:"protected"`
 	Bounds     Bounds         `json:"bounds"`
 	Document   PolicyDocument `json:"document"` // base groups, roles, bindings, keys
+	// Delegations are the policy.delegations of the file.
+	Delegations []Delegation `json:"delegations,omitempty"`
 	// Discovery is the zones_discovery state, absent when disabled.
 	Discovery *ZonesDiscovery `json:"zones_discovery,omitempty"`
 }
@@ -248,11 +392,16 @@ type RevisionDetail struct {
 	Stale    bool         `json:"stale"` // parent is no longer the active revision
 }
 
-// ProposeRequest creates a proposed revision.
+// ProposeRequest creates a proposed revision. Document.Delegated is
+// normally omitted: the delegated objects of the active revision are kept.
+// TakeOver ("roles/<name>", "bindings/<name>") removes delegated objects
+// from their delegation (policy.approve required): a taken over role may then
+// be redefined in Document.Roles, a binding in Document.Bindings.
 type ProposeRequest struct {
 	ParentID string         `json:"parent_id"` // active revision id the edit is based on ("" if none)
 	Document PolicyDocument `json:"document"`
 	Comment  string         `json:"comment"`
+	TakeOver []string       `json:"take_over,omitempty"`
 }
 
 // ValidationError is returned with 400 {"reason":"invalid_policy","errors":[...]}.

@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/KamorionLabs/eurodns-gate/internal/glob"
 )
 
 // Config is the root configuration document.
@@ -68,7 +70,57 @@ type Policy struct {
 	EditMaxAge      Duration `yaml:"edit_max_age"`
 	RequireAMR      []string `yaml:"require_amr"`
 	Bounds          Bounds   `yaml:"bounds"`
+	// Delegations let base-trusted subjects (typically the CI pipeline that
+	// creates other pipelines) manage their own roles and bindings in the
+	// managed layer, within limits, without approval.
+	Delegations []Delegation `yaml:"delegations"`
 }
+
+// Delegation grants the subjects it matches the right to create, change and
+// delete, through the delegation API, managed roles and bindings they own,
+// within Allow. Delegated changes are activated without approval.
+type Delegation struct {
+	Name        string          `yaml:"name"`
+	Description string          `yaml:"description"`
+	Subjects    []Subject       `yaml:"subjects"`
+	Allow       DelegationAllow `yaml:"allow"`
+}
+
+// DelegationAllow bounds the objects of a delegation, inside policy.bounds.
+type DelegationAllow struct {
+	// Zones are the zone globs delegated role rules may target.
+	Zones []string `yaml:"zones"`
+	// Actions delegated role rules may grant.
+	Actions []string `yaml:"actions"`
+	// Records, when set, forces delegated role rules to name hosts and/or
+	// types covered by these patterns.
+	Records *RecordScope `yaml:"records"`
+	// BindingSubjects are the matchers a delegated binding may target: each
+	// subject of a delegated binding must be covered by one of them.
+	BindingSubjects []Subject `yaml:"binding_subjects"`
+	// Teams a delegated binding may act for.
+	Teams DelegationTeams `yaml:"teams"`
+	// Roles are existing (base or managed) roles a delegated binding may
+	// grant, besides the roles of the delegation itself.
+	Roles []string `yaml:"roles"`
+	// Groups a delegated binding may target, besides its subjects.
+	Groups []string `yaml:"groups"`
+	// MaxObjects caps the roles plus bindings of the delegation (default 100).
+	MaxObjects int `yaml:"max_objects"`
+}
+
+// DelegationTeams lists the teams a delegated binding may use. FromSubject
+// is the "team from the subject" rule: a binding either derives its team
+// with exactly this team_from, or names the team this rule derives from its
+// (single-valued, wildcard-free) subjects. Names are team globs a binding may
+// set as a fixed team.
+type DelegationTeams struct {
+	FromSubject *TeamFrom `yaml:"from_subject"`
+	Names       []string  `yaml:"names"`
+}
+
+// DefaultDelegationMaxObjects is the default cap of objects per delegation.
+const DefaultDelegationMaxObjects = 100
 
 // MCP configures the Model Context Protocol endpoint (/mcp).
 type MCP struct {
@@ -412,6 +464,11 @@ func (c *Config) defaults() {
 	if c.Policy.EditMaxAge == 0 {
 		c.Policy.EditMaxAge = Duration(15 * time.Minute)
 	}
+	for i := range c.Policy.Delegations {
+		if c.Policy.Delegations[i].Allow.MaxObjects == 0 {
+			c.Policy.Delegations[i].Allow.MaxObjects = DefaultDelegationMaxObjects
+		}
+	}
 	if c.MCP.PlanTTL == 0 {
 		c.MCP.PlanTTL = Duration(10 * time.Minute)
 	}
@@ -724,6 +781,7 @@ func (c *Config) Validate() error {
 	if c.Policy.EditMaxAge.D() < time.Minute || c.Policy.EditMaxAge.D() > 24*time.Hour {
 		add("policy.edit_max_age: must be between 1m and 24h")
 	}
+	errs = append(errs, validateDelegations(c, issuers)...)
 
 	vkIDs, vkApps := map[string]bool{}, map[string]bool{}
 	for i, vk := range c.VirtualKeys {
@@ -881,6 +939,121 @@ func ValidateSubjectTemplate(tmpl string) error {
 		return errors.New("only {{claim}} placeholders and separators such as / or : are allowed")
 	}
 	return nil
+}
+
+// teamGlobRe is a team name glob of policy.delegations[].allow.teams.names.
+var teamGlobRe = regexp.MustCompile(`^[a-z0-9*][a-z0-9._*-]{0,63}$`)
+
+// validateDelegations checks policy.delegations: every limit stays inside
+// policy.bounds and never reaches policy.* actions.
+func validateDelegations(c *Config, issuers map[string]bool) []error {
+	var errs []error
+	add := func(format string, a ...any) { errs = append(errs, fmt.Errorf(format, a...)) }
+	if len(c.Policy.Delegations) > 0 && !c.Policy.Editable {
+		add("policy.delegations: requires policy.editable (delegated objects live in the managed layer)")
+	}
+	matcher := func(at string, m Subject) {
+		if !issuers[m.Issuer] {
+			add("%s.issuer: unknown issuer %q", at, m.Issuer)
+		}
+		if len(m.Claims) == 0 {
+			add("%s.claims: at least one claim is required", at)
+		}
+		for name, pats := range m.Claims {
+			if len(pats) == 0 {
+				add("%s.claims.%s: at least one pattern is required", at, name)
+			}
+			for _, p := range pats {
+				if p == "" || p == "*" {
+					add("%s.claims.%s: pattern %q matches anyone", at, name, p)
+				}
+			}
+		}
+	}
+	seen := map[string]bool{}
+	for i, d := range c.Policy.Delegations {
+		at := fmt.Sprintf("policy.delegations[%d]", i)
+		if !nameRe.MatchString(d.Name) {
+			add("%s.name: %q must be a lowercase identifier", at, d.Name)
+		}
+		if seen[d.Name] {
+			add("%s.name: %q duplicated", at, d.Name)
+		}
+		seen[d.Name] = true
+		if len(d.Subjects) == 0 {
+			add("%s.subjects: at least one subject is required", at)
+		}
+		for j, m := range d.Subjects {
+			matcher(fmt.Sprintf("%s.subjects[%d]", at, j), m)
+		}
+		al := d.Allow
+		if len(al.Zones) == 0 {
+			add("%s.allow.zones: at least one zone glob is required", at)
+		}
+		for _, z := range al.Zones {
+			if !glob.Covered(c.Policy.Bounds.Zones, strings.ToLower(z)) {
+				add("%s.allow.zones: %q is outside policy.bounds.zones", at, z)
+			}
+		}
+		if len(al.Actions) == 0 {
+			add("%s.allow.actions: at least one action is required", at)
+		}
+		for _, a := range al.Actions {
+			switch {
+			case strings.HasPrefix(a, "policy."):
+				add("%s.allow.actions: %q can only be granted by the base policy", at, a)
+			case !knownActions[a]:
+				add("%s.allow.actions: unknown action %q", at, a)
+			case !containsString(c.Policy.Bounds.Actions, a):
+				add("%s.allow.actions: %q is outside policy.bounds.actions", at, a)
+			}
+		}
+		if al.Records != nil && len(al.Records.Hosts) == 0 && len(al.Records.Types) == 0 {
+			add("%s.allow.records: hosts or types required when records is set", at)
+		}
+		if len(al.BindingSubjects) == 0 {
+			add("%s.allow.binding_subjects: at least one matcher is required", at)
+		}
+		for j, m := range al.BindingSubjects {
+			matcher(fmt.Sprintf("%s.allow.binding_subjects[%d]", at, j), m)
+		}
+		if al.Teams.FromSubject == nil && len(al.Teams.Names) == 0 {
+			add("%s.allow.teams: from_subject or names is required", at)
+		}
+		if t := al.Teams.FromSubject; t != nil {
+			if err := ValidateTeamFrom(t.Claim, t.Regex, t.Prefix); err != nil {
+				add("%s.allow.teams.from_subject: %v", at, err)
+			}
+		}
+		for _, n := range al.Teams.Names {
+			if !teamGlobRe.MatchString(n) || n == "*" {
+				add("%s.allow.teams.names: %q must be a lowercase team name or glob (not \"*\" alone)", at, n)
+			}
+		}
+		for _, r := range al.Roles {
+			if !nameRe.MatchString(r) {
+				add("%s.allow.roles: %q must be a lowercase identifier", at, r)
+			}
+		}
+		for _, g := range al.Groups {
+			if !nameRe.MatchString(g) {
+				add("%s.allow.groups: %q must be a lowercase identifier", at, g)
+			}
+		}
+		if al.MaxObjects < 1 || al.MaxObjects > 1000 {
+			add("%s.allow.max_objects: must be between 1 and 1000", at)
+		}
+	}
+	return errs
+}
+
+func containsString(ss []string, s string) bool {
+	for _, x := range ss {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 // teamPrefixRe is what may precede a derived team name: the start of a

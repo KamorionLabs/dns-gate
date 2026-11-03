@@ -343,11 +343,12 @@ Rules of the managed layer:
 | Field | Default | Description |
 |---|---|---|
 | `policy.editable` | `false` | Enables the managed layer. Without it, only the base applies and the policy API is read-only. |
-| `policy.require_approval` | `true` | Activation requires an approval by an approver other than the author. |
+| `policy.require_approval` | `true` | Activation of a proposal requires an approval by an approver other than the author. With `false`, a `policy.propose` holder (a policy administrator included) activates their own proposal alone; approving one's own proposal stays refused. [Delegated changes](#policy-delegations) never require approval, whatever this setting. |
 | `policy.edit_max_age` | `15m` | Humans must have authenticated at the IdP within this delay to change the policy. |
 | `policy.require_amr` | `[]` | Authentication methods required for changes, e.g. `["mfa"]` (the IdP must emit the `amr` claim). |
 | `policy.bounds.zones` | (required if editable) | Zone globs managed rules may target (`*` wildcards only). |
 | `policy.bounds.actions` | (required if editable) | Actions managed rules may grant (`policy.*` refused). |
+| `policy.delegations` | `[]` | Identities allowed to manage their own roles and bindings in the managed layer, within limits, see [Policy delegations](#policy-delegations). |
 
 Meta actions, granted only by base roles: `policy.read` (view the policy, revisions, diff, explain, who-can), `policy.propose` (create revisions, rollback, generate virtual keys), `policy.approve` (approve, reject, activate). Virtual keys cannot hold them.
 
@@ -355,7 +356,112 @@ Workflow: **propose** (validated, based on the active revision `parent_id`; `409
 
 Each replica checks the active revision every 10 seconds and recompiles; evaluation never calls the store. If the base file changes so that the active revision no longer validates, the replica keeps the previous policy and logs an error.
 
-Security of UI mutations: every `POST` authenticated by the session cookie must carry `X-Gate-CSRF` equal to the `gate_csrf` cookie (set at login) and an `Origin` equal to the gate origin. Humans (session or bearer token of category `human`) need a recent authentication (`auth_time` within `policy.edit_max_age`, and `amr` containing `policy.require_amr`), otherwise `403 reauth_required`; the UI then sends them to `/auth/login?reauth=1&return_to=...`, which forces `prompt=login` and `max_age`. Pipelines (bearer tokens of category `pipeline`) may propose when a base binding grants `policy.propose`, without step-up, but can never approve their own proposal.
+Security of UI mutations: every `POST`, `PUT` and `DELETE` authenticated by the session cookie must carry `X-Gate-CSRF` equal to the `gate_csrf` cookie (set at login) and an `Origin` equal to the gate origin. Humans (session or bearer token of category `human`) need a recent authentication (`auth_time` within `policy.edit_max_age`, and `amr` containing `policy.require_amr`), otherwise `403 reauth_required`; the UI then sends them to `/auth/login?reauth=1&return_to=...`, which forces `prompt=login` and `max_age`. Pipelines (bearer tokens of category `pipeline`) may propose when a base binding grants `policy.propose`, without step-up, but can never approve their own proposal. To let a pipeline manage roles and bindings on its own, without approval and within limits, use a [policy delegation](#policy-delegations) rather than `policy.propose`.
+
+## Policy delegations
+
+A delegation lets a trusted identity, typically the CI pipeline whose Terraform stack creates other pipelines, manage **its own** roles and bindings in the managed layer, within limits written in the base file, without approval. The pattern it serves: one stack creates, for each pipeline, its CI service connection and, in the same apply, the gate role and binding that let that service connection write only its own DNS names, the way it creates each pipeline's cloud role and scoped policy. The Terraform provider exposes the API below as `eurodns_gate_role` and `eurodns_gate_binding`.
+
+```yaml
+policy:
+  editable: true
+  require_approval: true              # human proposals; delegated changes never need approval
+  bounds:
+    zones: ["example.com"]
+    actions: [dns.read, dns.record.write, ui.read]
+  delegations:
+    - name: workloads-pipelines
+      description: Gate identities of the pipelines created by the workloads stack
+      subjects:                       # who may use the delegation (issuer + claim globs, as in bindings)
+        - issuer: azure-devops
+          claims: {sub: ["sc://<organization>/<project>/workloads-pipelines"]}
+      allow:
+        zones: ["example.com"]        # zone globs delegated rules may target, within policy.bounds.zones
+        actions: [dns.read, dns.record.write]   # within policy.bounds.actions, never policy.*
+        records:                      # optional: delegated rules must name hosts and types covered here
+          hosts: ["**.apps", "_acme-challenge.**.apps"]
+          types: [CNAME, TXT]
+        binding_subjects:             # identities a delegated binding may target
+          - issuer: azure-devops
+            claims: {sub: ["sc://<organization>/<project>/eurodns-gate-*"]}
+        teams:
+          from_subject:               # the team is derived from the bound subject
+            claim: sub
+            regex: "^sc://[^/]+/[^/]+/(eurodns-gate-[a-z0-9-]+)$"
+          # names: ["shared-*"]       # and/or fixed team names (globs)
+        roles: []                     # existing base or managed roles delegated bindings may also grant
+        groups: []                    # groups delegated bindings may target
+        max_objects: 100              # roles + bindings of the delegation
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `name` | (required) | Lowercase identifier, recorded as the owner of every object the delegation creates. |
+| `description` | | Free text shown in the UI and the API. |
+| `subjects[]` | (required) | Matchers (`issuer`, `claims` globs) of the identities that may use the delegation. A subject of a delegation needs no binding: it authenticates on the delegation API even if no role is bound to it (and gets nothing else). |
+| `allow.zones` | (required) | Zone globs delegated role rules may target; each must be covered by `policy.bounds.zones`. |
+| `allow.actions` | (required) | Actions delegated role rules may grant; within `policy.bounds.actions`, `policy.*` refused. |
+| `allow.records.hosts`, `allow.records.types` | | When set, every delegated rule must name hosts (types) and each must be covered by these patterns (same host syntax as rules; `*` for any type). Without it, a delegated rule may cover whole zones. |
+| `allow.binding_subjects[]` | (required) | Every subject of a delegated binding must be covered by one of these matchers: same issuer, and each claim of the matcher constrained by the binding with patterns it covers (`sc://o/p/eurodns-gate-web` and `sc://o/p/eurodns-gate-*` are covered by `sc://o/p/eurodns-gate-*`; `sc://o/*` is not). `*` alone is refused. |
+| `allow.teams.from_subject` | | The "team from the subject" rule (`claim`, `regex`, `prefix`, as [`team_from`](#team-derived-from-a-claim)). A delegated binding either sets exactly this `team_from`, or a fixed `team` equal to the team this rule derives from its subject (each subject must then carry exactly one literal value of the claim, and the binding no groups). |
+| `allow.teams.names` | | Team globs a delegated binding may set as a fixed `team` (`*` alone refused). At least one of `from_subject` and `names`. |
+| `allow.roles` | `[]` | Base or managed roles a delegated binding may grant besides the roles of the delegation; each of their rules must still be within `allow`. |
+| `allow.groups` | `[]` | Groups a delegated binding may target. |
+| `allow.max_objects` | `100` | Maximum roles plus bindings owned by the delegation (1 to 1000). |
+
+Delegations require `policy.editable`. With [Azure DevOps OIDC](#azure-devops-oidc), the issuer's `bound_claims.sub` must accept the delegation subject as well as the pipelines' service connections; give the stack its own dedicated service connection, trusted by no other federation. Delegations are part of the base file: who may delegate, and how far, is decided by a pull request on the configuration, like every `policy.*` grant.
+
+### Delegated objects
+
+Delegated roles and bindings live in the managed document, in its `delegated` section, keyed by a stable name (bindings get a name there; role names are unique across base, managed and delegated roles). Each records its owner:
+
+```yaml
+delegated:
+  roles:
+    eurodns-gate-web:
+      rules: [{zones: [example.com], actions: [dns.read, dns.record.write], records: {hosts: [web.apps], types: [CNAME]}}]
+      owner: {delegation: workloads-pipelines, managed_by: terraform, created_by: "azure-devops:sc://...", created_at: ..., updated_by: ..., updated_at: ...}
+  bindings:
+    eurodns-gate-web:
+      role: eurodns-gate-web
+      team: eurodns-gate-web
+      subjects: [{issuer: azure-devops, claims: {sub: ["sc://<organization>/<project>/eurodns-gate-web"]}}]
+      owner: {...}
+```
+
+Validation is the one of the managed layer (bounds, no `policy.*`, issuers, matchers, team syntax, ...) plus the limits of the owner delegation. A delegated role can only be bound by delegated bindings of the same delegation; managed bindings and keys cannot use it, so deleting a delegated object never breaks a human one.
+
+Delegated bindings are evaluated after the other managed bindings, sorted by name. At evaluation, a delegated rule outside its delegation (or whose delegation is no longer in the file) grants nothing.
+
+### Delegation API
+
+Authenticated like the rest of `/api/v1` (bearer token; cookie sessions need the CSRF header on `PUT` and `DELETE`). Pipelines need no step-up; humans matching a delegation need the same recent login as for policy changes.
+
+| Route | Description |
+|---|---|
+| `GET /api/v1/policy/delegated` | Delegations of the caller (all of them for `policy.read` holders) and their objects. |
+| `GET /api/v1/policy/delegated/roles/{name}`, `.../bindings/{name}` | One object with its owner and `etag` (also in the `ETag` header). `404` when it does not exist or is not delegated (taken over). |
+| `PUT /api/v1/policy/delegated/roles/{name}` | Create or replace a role. Body: the role (`description`, `rules`, `rebase_on_save`, `ephemeral_ttl`, `max_changes_per_request`), optional `delegation` (needed when the caller matches several) and `managed_by` (client label, for example `terraform`). |
+| `PUT /api/v1/policy/delegated/bindings/{name}` | Create or replace a binding: `role`, `team` or `team_from`, `subjects`, `groups`, plus `delegation` and `managed_by`. |
+| `DELETE /api/v1/policy/delegated/roles/{name}`, `.../bindings/{name}` | Delete (`?delegation=` optional). |
+
+- **Preconditions**: `If-None-Match: *` creates only (`412 precondition` if the name exists); `If-Match: <etag>` updates or deletes only that version (`412` otherwise). The ETag is per object: changes to other objects never invalidate it.
+- **Idempotent**: a `PUT` identical to the current object answers `200` with `"changed": false` and creates no revision.
+- **Ownership**: an existing object is changed only by subjects of its owner delegation (`403 not_owner`). A role name used by the base or by a managed role edited by humans is refused (`409 name_taken`).
+- **Activation**: each change is applied to the active revision, validated, stored as a new revision authored by the caller (comment `delegation <name>: put role <name>`) and activated at once, **without approval**, whatever `policy.require_approval`. The answer carries the revision id and the impact analysis (`{"object", "changed", "revision_id", "impact"}`); validation errors are `400 invalid_policy` with the same `errors` as proposals.
+- **Concurrency**: writes are serialized per replica; when another replica activates a revision at the same time, the change is applied again on the new active revision (preconditions included), up to 5 times, then `409 policy_busy` (the Terraform provider retries). Concurrent writes on different objects never lose an update.
+- **Audit**: `policy.delegated.put_role`, `policy.delegated.delete_role`, `policy.delegated.put_binding`, `policy.delegated.delete_binding` (allowed and denied, with the delegation, the object and the impact), plus `policy.activate` for each activated revision.
+
+### Humans and delegated objects
+
+- Humans see delegated objects: in `GET /api/v1/policy` (`managed.delegated`, and the delegations in `base.delegations`), in revision diffs and exports, in explain and who-can.
+- A proposal (UI or API) does not edit them: when it omits `document.delegated` (as the UI does), the delegated objects of the active revision are kept; when it sends the section, it must be unchanged, otherwise `403 delegated_object`. A rollback restores the human-edited objects and keeps the delegated ones as they are.
+- **Taking over**: a policy administrator (`policy.approve`) may take delegated objects back with `take_over` in the proposal (`["roles/<name>", "bindings/<name>"]`, API only for now): they leave the delegated section, and the proposal may redefine them in `roles` and `bindings` as ordinary managed objects. The proposal is reviewed as any other (`require_approval`), and audited as `policy.delegated.take_over`. Once active, the delegation no longer sees the objects (`404`) and cannot recreate a taken over role (`409 name_taken`).
+- A delegated change activates a new revision: proposals open at that moment become stale and must be proposed again.
+
+### Changing a delegation
+
+The limits are checked when an object is written and again on every later revision and policy reload. Narrowing or removing a delegation in the file while objects exceed it makes the active revision invalid against the new base: replicas keep their previous policy and log an error, and a replica that starts with that file serves the base layer only. Delete the objects (or take them over) **before** narrowing or removing the delegation.
 
 ## Adoption and Terraform export
 
@@ -483,11 +589,12 @@ Audit events of zones the user cannot read are filtered out; events without a zo
 | Path | Description |
 |---|---|
 | EuroDNS API paths | Opened operations: `getDnsZone`, `saveDnsZone`, `checkDnsZone`, `addDnsRecords`, `deleteDnsRecord` (zone engine), `listDnsZoneSnapshots`, `getSnapShot`, `getDnssecStatus`, `getDomain` (proxied). Every other operation returns `403 operation_denied`. Query strings, encoded separators and dot segments are refused. |
-| `GET /.well-known/eurodns-gate` | Version and features (`if-match`, `ownership`, `adopt`), unauthenticated. |
+| `GET /.well-known/eurodns-gate` | Version and features (`if-match`, `ownership`, `adopt`, `policy-delegation`), unauthenticated. |
 | `POST /.well-known/eurodns-gate/zones/{zone}/adopt` | Adopt RRsets (used by the Terraform provider on import). Foreign RRsets need `dns.record.adopt`; RRsets already owned by one of the caller's teams are a no-op and only need `dns.record.write` on the zone. |
 | `/api/v1/me`, `/api/v1/connect`, `/api/v1/zones`, `/api/v1/zones/{zone}/rrsets`, `/api/v1/audit` | UI API (`ui.read`; `/zones` lists managed zones then unmanaged ones (`"unmanaged": true`), whose `rrsets` need `dns.read`; `/me` for any bound subject, with its groups and effective permissions; `/connect` returns the public URL, the MCP state, the login issuer and `ui.cli_scope` for the Connect page). |
 | `GET /api/v1/connect/claude-desktop.mcpb` | Claude Desktop extension of the gate (`ui.read`), when MCP and the UI login are enabled, see [Claude Desktop extension](#claude-desktop-extension). |
 | `/api/v1/policy`, `/api/v1/policy/revisions[/{id}[/approve\|reject\|activate\|rollback\|export]]`, `/api/v1/policy/explain`, `/api/v1/policy/who-can`, `/api/v1/policy/virtual-keys/generate` | Policy API, see `internal/uiapi/policy.go`. |
+| `/api/v1/policy/delegated[/roles\|bindings/{name}]` | [Delegation API](#delegation-api) (`GET`, `PUT`, `DELETE`). |
 | `/auth/login`, `/auth/callback`, `/auth/logout` | UI login. |
 | `/healthz`, `/readyz` | Probes. |
 

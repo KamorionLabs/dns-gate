@@ -31,3 +31,26 @@ func TestStarAgainstLiteralStar(t *testing.T) {
 		t.Fatal("a pattern star must expand over a literal star")
 	}
 }
+
+func TestCovered(t *testing.T) {
+	cases := []struct {
+		bounds  []string
+		pattern string
+		want    bool
+	}{
+		{[]string{"*.example.com"}, "app.example.com", true},
+		{[]string{"*.example.com"}, "*.apps.example.com", true},
+		{[]string{"*.example.com"}, "*", false},
+		{[]string{"sc://org/proj/gate-*"}, "sc://org/proj/gate-web", true},
+		{[]string{"sc://org/proj/gate-*"}, "sc://org/proj/gate-*", true},
+		{[]string{"sc://org/proj/gate-*"}, "sc://org/proj/*", false},
+		{[]string{"a?c"}, "abc", false},
+		{[]string{"a*"}, "a?", false},
+		{nil, "x", false},
+	}
+	for _, c := range cases {
+		if got := Covered(c.bounds, c.pattern); got != c.want {
+			t.Errorf("Covered(%q, %q) = %v", c.bounds, c.pattern, got)
+		}
+	}
+}
