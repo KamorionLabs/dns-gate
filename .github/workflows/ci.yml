@@ -50,6 +50,8 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm run build
+      - name: Claude Desktop extension relay
+        run: node --test ../internal/mcpb/relay.test.js
 
   helm:
     runs-on: ubuntu-latest

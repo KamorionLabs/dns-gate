@@ -37,7 +37,9 @@ Also included:
   plan must be empty — see [docs/ONBOARDING.md](docs/ONBOARDING.md);
 - an **MCP server** at `/mcp` for LLM agents, with the same authentication, RBAC and
   ownership: read tools by default, writes only if enabled and always through a plan
-  then an apply bound to that plan.
+  then an apply bound to that plan. Claude Desktop users install it from the Connect
+  page as a one-click extension that signs them in through the browser, without a
+  terminal or any runtime to install — see [docs/CONFIG.md](docs/CONFIG.md#claude-desktop-extension).
 
 ## Related repositories
 

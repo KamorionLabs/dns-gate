@@ -24,6 +24,12 @@ export interface Permission {
   types: string[]; // empty: any type
 }
 
+/** GET /.well-known/eurodns-gate: version and features, unauthenticated. */
+export interface GateInfo {
+  version: string;
+  features: string[];
+}
+
 /** GET /api/v1/connect: what a client needs to reach the gate. */
 export interface Connect {
   base_url: string;
@@ -31,6 +37,8 @@ export interface Connect {
   issuer?: { url: string; kind: 'entra' | 'oidc'; tenant_id?: string };
   client_id?: string;
   cli_scope?: string;
+  /** Download of the Claude Desktop extension; empty without MCP or UI login. */
+  claude_desktop_extension_url: string;
 }
 
 export interface ZoneSummary {

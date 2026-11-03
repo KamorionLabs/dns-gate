@@ -3,6 +3,7 @@
   import type { Connect } from '../lib/types';
   import { router } from '../lib/router.svelte';
   import {
+    CLAUDE_DESKTOP_EXTENSION_PATH,
     TOKEN_COMMAND_PLACEHOLDER,
     claudeCodeCommand,
     curlCommand,
@@ -108,16 +109,30 @@
         <p class="hint">If <span class="mono">az</span> answers that consent is required (AADSTS65001), the gate application does not trust the Azure CLI yet: ask the gate administrators to pre-authorize it.</p>
       {/if}
     {:else if tab === 'desktop' && info.mcp.enabled}
-      <p class="lead">Claude Desktop and most other MCP clients only start local servers: <span class="mono">mcp-remote</span> (Node.js, run with npx) bridges them to the gate.</p>
-      <ol class="steps">
-        <li>Get a token: <CopyText text={tokenCommand(info)} label="token command" /></li>
-        <li>
-          Add the server to <span class="mono">claude_desktop_config.json</span> (Settings, Developer, Edit config) and paste the token after <span class="mono">Bearer </span>:
-          <HclBlock hcl={desktopConfig(info)} filename="claude_desktop_config.json" download={false} />
-        </li>
-        <li>Restart the client.</li>
-      </ol>
-      <p class="hint">The token lasts about an hour. To refresh it, run the token command again, replace <span class="mono">AUTH_HEADER</span> and restart the client; Claude Code refreshes it on its own. Clients that speak Streamable HTTP and accept custom headers can use the endpoint directly with an <span class="mono">Authorization: Bearer</span> header.</p>
+      {#if info.claude_desktop_extension_url}
+        <p class="lead">Add the gate to Claude Desktop as an extension. Nothing else to install, no terminal: you sign in with your usual account.</p>
+        <p><a class="btn primary" href={CLAUDE_DESKTOP_EXTENSION_PATH} download><Icon name="download" size={14} />Download the Claude Desktop extension</a></p>
+        <ol class="steps">
+          <li>Download the extension with the button above.</li>
+          <li>Double-click the downloaded file, or drag it into Claude Desktop under <strong>Settings</strong>, <strong>Extensions</strong>. Then click <strong>Install</strong>.</li>
+          <li>Your browser then opens: sign in once. The gate's tools appear in Claude as soon as you are signed in, and Claude stays signed in after that.</li>
+          <li>Start a <strong>new conversation</strong>: a conversation opened before the sign-in does not pick up the gate's tools.</li>
+        </ol>
+        <p class="hint">If Claude Desktop refuses to install it, your organization may only allow approved extensions: ask your Claude administrators.</p>
+      {/if}
+      <details class="advanced" open={!info.claude_desktop_extension_url}>
+        <summary>Advanced: <span class="mono">mcp-remote</span> and other MCP clients</summary>
+        <p class="lead">Claude Desktop and most other MCP clients only start local servers: <span class="mono">mcp-remote</span> (Node.js, run with npx) bridges them to the gate.</p>
+        <ol class="steps">
+          <li>Get a token: <CopyText text={tokenCommand(info)} label="token command" /></li>
+          <li>
+            Add the server to <span class="mono">claude_desktop_config.json</span> (Settings, Developer, Edit config) and paste the token after <span class="mono">Bearer </span>:
+            <HclBlock hcl={desktopConfig(info)} filename="claude_desktop_config.json" download={false} />
+          </li>
+          <li>Restart the client.</li>
+        </ol>
+        <p class="hint">The token lasts about an hour. To refresh it, run the token command again, replace <span class="mono">AUTH_HEADER</span> and restart the client; the extension and Claude Code refresh it on their own. Clients that speak Streamable HTTP and accept custom headers can use the endpoint directly with an <span class="mono">Authorization: Bearer</span> header.</p>
+      </details>
     {:else if tab === 'terraform'}
       <p class="lead">The <span class="mono">kamorionlabs/eurodns</span> provider in gate mode: the gate holds the EuroDNS key, Terraform only proves who runs it.</p>
       <HclBlock hcl={terraformProvider(info)} filename="provider.tf" />
@@ -273,6 +288,28 @@
   }
   .hint {
     color: var(--ink-3);
+  }
+  .btn.primary {
+    height: 38px;
+    padding: 0 var(--s4);
+    background: var(--seal-ink);
+    color: var(--sheet);
+    border-color: transparent;
+    text-decoration: none;
+  }
+  .advanced {
+    display: grid;
+    gap: var(--s4);
+    padding-top: var(--s4);
+    border-top: 1px solid var(--rule-soft);
+  }
+  .advanced summary {
+    cursor: pointer;
+    color: var(--ink-2);
+    font-weight: 500;
+  }
+  .advanced[open] summary {
+    margin-bottom: var(--s4);
   }
   a {
     color: var(--seal-ink);

@@ -3,6 +3,7 @@
   import type { Me } from './lib/types';
   import { router } from './lib/router.svelte';
   import Header from './components/Header.svelte';
+  import Footer from './components/Footer.svelte';
   import ZonesView from './views/ZonesView.svelte';
   import ZoneView from './views/ZoneView.svelte';
   import JournalView from './views/JournalView.svelte';
@@ -40,8 +41,17 @@
   {/if}
 </main>
 
+<Footer />
+
 <style>
+  :global(#app) {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
   main {
+    flex: 1;
+    width: 100%;
     max-width: 1320px;
     margin: 0 auto;
     padding: var(--s8) var(--s6) var(--s10);

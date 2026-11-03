@@ -96,6 +96,7 @@ const connect: Connect = {
   },
   client_id: UI_CLIENT_ID,
   cli_scope: `api://${UI_CLIENT_ID}/.default`,
+  claude_desktop_extension_url: mcpMode === 'off' ? '' : GATE + '/api/v1/connect/claude-desktop.mcpb',
 };
 
 const foreign = (host: string, type: string, ttl: number, values: string[], prot = false): RRset => ({
@@ -859,6 +860,7 @@ function terraform(zone: string, q: TerraformQuery): string {
 
 export const fixtureBackend = {
   me: () => delay(me),
+  gateInfo: () => delay({ version: 'v0.0.0-demo', features: ['if-match', 'ownership', 'adopt'] }),
   connect: () => delay(connect),
   zones: () =>
     delay(

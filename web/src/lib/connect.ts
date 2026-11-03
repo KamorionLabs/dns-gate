@@ -1,6 +1,9 @@
 // Snippets of the Connect page, built from GET /api/v1/connect.
 import type { Connect } from './types';
 
+/** Same-origin path of the Claude Desktop extension download (session cookie). */
+export const CLAUDE_DESKTOP_EXTENSION_PATH = '/api/v1/connect/claude-desktop.mcpb';
+
 export const TOKEN_COMMAND_PLACEHOLDER = '<command printing an access token>';
 
 const entra = (c: Connect) => c.issuer?.kind === 'entra';
