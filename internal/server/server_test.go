@@ -559,10 +559,10 @@ func TestUIAPIClaudeDesktopExtension(t *testing.T) {
 
 	e := newEnvWith(t, func(c *config.Config) {
 		c.MCP = config.MCP{Enabled: true, PlanTTL: config.Duration(10 * time.Minute), RequestsPerMinute: 600, PublicURL: "https://gate.example.com"}
-		c.UI.CLIScope = "api://gate/.default"
+		c.UI.CLIScope = "api://" + c.UI.ClientID + "/.default"
 	})
-	if c := connect(e); c.ClaudeDesktopExtensionURL != "https://gate.example.com"+path {
-		t.Fatalf("extension URL: %q", c.ClaudeDesktopExtensionURL)
+	if c := connect(e); c.ClaudeDesktopExtensionURL != "https://gate.example.com"+path || c.CLIScope != "api://"+e.idp.ClientID+"/.default" {
+		t.Fatalf("extension URL: %q, cli scope %q", c.ClaudeDesktopExtensionURL, c.CLIScope)
 	}
 	if r := e.do(t, "GET", path, "", "", nil); r.StatusCode != 401 {
 		t.Fatalf("extension without auth: %d", r.StatusCode)
@@ -589,7 +589,7 @@ func TestUIAPIClaudeDesktopExtension(t *testing.T) {
 	}
 	env := m.Server.MCPConfig.Env
 	if err != nil || env["EURODNS_GATE_MCP_URL"] != "https://gate.example.com/mcp" || env["EURODNS_GATE_ISSUER"] != e.idp.URL ||
-		env["EURODNS_GATE_CLIENT_ID"] != e.idp.ClientID || env["EURODNS_GATE_SCOPE"] != "api://gate/.default" || m.DisplayName != "EuroDNS gate (gate.example.com)" {
+		env["EURODNS_GATE_CLIENT_ID"] != e.idp.ClientID || env["EURODNS_GATE_SCOPE"] != e.idp.ClientID+"/.default" || m.DisplayName != "EuroDNS gate (gate.example.com)" {
 		t.Fatalf("manifest: %v %+v", err, m)
 	}
 }
