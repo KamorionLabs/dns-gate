@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"io/fs"
+	"mime"
 	"net/http"
 	"path"
 	"strconv"
@@ -13,9 +14,11 @@ import (
 	"github.com/KamorionLabs/eurodns-gate/internal/authn"
 	"github.com/KamorionLabs/eurodns-gate/internal/config"
 	"github.com/KamorionLabs/eurodns-gate/internal/identity"
+	"github.com/KamorionLabs/eurodns-gate/internal/mcpb"
 	"github.com/KamorionLabs/eurodns-gate/internal/policy"
 	"github.com/KamorionLabs/eurodns-gate/internal/store"
 	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
+	"github.com/KamorionLabs/eurodns-gate/internal/version"
 )
 
 // uiSubject authenticates a UI API request: session cookie first, then
@@ -99,6 +102,8 @@ func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
 		})
 	case rest == "/connect":
 		writeJSON(w, http.StatusOK, s.connectInfo(r))
+	case rest == claudeDesktopExtensionPath:
+		s.serveClaudeDesktopExtension(w, r)
 	case rest == "/zones":
 		zs, err := s.cfg.Engine.Zones(ctx, subj)
 		if err != nil {
@@ -166,6 +171,9 @@ func (s *Server) connectInfo(r *http.Request) uiapi.Connect {
 		MCP:      uiapi.ConnectMCP{Enabled: s.mcp != nil, URL: base + mcpPath, AllowWrites: s.mcp != nil && c.MCP.AllowWrites && s.cfg.Ops != nil},
 		CLIScope: c.UI.CLIScope,
 	}
+	if s.claudeDesktopAvailable() {
+		out.ClaudeDesktopExtensionURL = base + "/api/v1" + claudeDesktopExtensionPath
+	}
 	if s.ui != nil {
 		out.ClientID = c.UI.ClientID
 		out.Issuer = &uiapi.ConnectIssuer{URL: s.ui.issuer.Issuer, Kind: "oidc"}
@@ -174,6 +182,44 @@ func (s *Server) connectInfo(r *http.Request) uiapi.Connect {
 		}
 	}
 	return out
+}
+
+// claudeDesktopExtensionPath serves the Claude Desktop extension, under /api/v1.
+const claudeDesktopExtensionPath = "/connect/claude-desktop.mcpb"
+
+// claudeDesktopAvailable reports whether the Claude Desktop extension can be
+// offered: it needs the MCP endpoint and the UI login (issuer and client id),
+// whose client also signs the extension in.
+func (s *Server) claudeDesktopAvailable() bool {
+	return s.mcp != nil && s.ui != nil && s.cfg.Config.UI.ClientID != ""
+}
+
+// serveClaudeDesktopExtension returns the Claude Desktop extension (MCP
+// Bundle) of this gate, with its URLs, issuer, client id and scope baked in.
+func (s *Server) serveClaudeDesktopExtension(w http.ResponseWriter, r *http.Request) {
+	if !s.claudeDesktopAvailable() {
+		writeError(w, http.StatusNotFound, "not_found", "the Claude Desktop extension needs mcp.enabled and the UI login")
+		return
+	}
+	base := s.publicBaseURL(r)
+	bundle, err := mcpb.Build(mcpb.Params{
+		GateURL:  base,
+		MCPURL:   base + mcpPath,
+		Issuer:   s.ui.issuer.Issuer,
+		ClientID: s.cfg.Config.UI.ClientID,
+		Scope:    s.cfg.Config.UI.CLIScope,
+		Version:  version.Version,
+	})
+	if err != nil {
+		s.log.Error("claude desktop extension", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal", "extension unavailable")
+		return
+	}
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("attachment", map[string]string{"filename": mcpb.Filename(base)}))
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Length", strconv.Itoa(len(bundle)))
+	_, _ = w.Write(bundle)
 }
 
 // readableZones returns the managed zones the subject may see in the UI.

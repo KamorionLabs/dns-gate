@@ -31,6 +31,8 @@ export interface Connect {
   issuer?: { url: string; kind: 'entra' | 'oidc'; tenant_id?: string };
   client_id?: string;
   cli_scope?: string;
+  /** Download of the Claude Desktop extension; empty without MCP or UI login. */
+  claude_desktop_extension_url: string;
 }
 
 export interface ZoneSummary {

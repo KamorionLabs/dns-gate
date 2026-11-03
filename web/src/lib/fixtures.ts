@@ -96,6 +96,7 @@ const connect: Connect = {
   },
   client_id: UI_CLIENT_ID,
   cli_scope: `api://${UI_CLIENT_ID}/.default`,
+  claude_desktop_extension_url: mcpMode === 'off' ? '' : GATE + '/api/v1/connect/claude-desktop.mcpb',
 };
 
 const foreign = (host: string, type: string, ttl: number, values: string[], prot = false): RRset => ({
