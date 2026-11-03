@@ -127,7 +127,32 @@ Azure DevOps step:
       terraform apply -auto-approve
 ```
 
-Do not trust the raw Azure DevOps OIDC token (issuer `https://vstoken.dev.azure.com/<org-id>`): its audience is fixed to `api://AzureADTokenExchange`, so a token accepted by the gate could be replayed against Azure and the other way round. Exchange it for an Entra token scoped to the gate, as above.
+### Azure DevOps OIDC
+
+Azure DevOps also issues its own OIDC token for a service connection (issuer `https://vstoken.dev.azure.com/<organization-id>`, `sub` = `sc://<organization>/<project>/<service connection>`), which the Terraform provider requests with `gate.auth.azure_devops` without any cloud login. Its audience is fixed to `api://AzureADTokenExchange` for every service connection of the organization and is also what Entra ID and cloud identity federations (AWS, GCP) accept, so a token accepted by the gate could be replayed there and the other way round. Only trust it for **dedicated** service connections:
+
+- one service connection per pipeline, used for nothing but the gate (a generic service connection without credentials is enough), authorized for that pipeline only;
+- no Entra federated credential, AWS role or other federation trusts its subject (check the trust policies match subjects exactly, not with wildcards);
+- the issuer is bound to those exact subjects.
+
+```yaml
+issuers:
+  - name: azure-devops
+    issuer: https://vstoken.dev.azure.com/<organization-id>
+    audiences: ["api://AzureADTokenExchange"]
+    bound_claims:
+      sub:
+        - sc://<organization>/<project>/eurodns-gate-certificates-prd
+    category: pipeline
+bindings:
+  - role: acm-validation
+    team: platform
+    subjects:
+      - issuer: azure-devops
+        claims: {sub: [sc://<organization>/<project>/eurodns-gate-certificates-prd]}
+```
+
+The step running Terraform must expose `SYSTEM_ACCESSTOKEN: $(System.AccessToken)`. When the pipeline already logs in to Azure, the Entra token above (audience = the gate application) needs no such precautions and is preferable.
 
 ## Virtual keys
 
