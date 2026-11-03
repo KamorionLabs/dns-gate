@@ -6,16 +6,21 @@
   import AdoptPanel from '../components/AdoptPanel.svelte';
   import TerraformPanel from '../components/TerraformPanel.svelte';
   import { router, href, journalHref } from '../lib/router.svelte';
-  import { statusHelp, statusLabel } from '../lib/labels';
-  import { ttl as fmtTTL } from '../lib/format';
+  import { needsAttention, statusHelp, statusLabel } from '../lib/labels';
+  import { shortHashes, ttl as fmtTTL } from '../lib/format';
+  import { identityLabel } from '../lib/identity';
+  import { managedSplit } from '../lib/zones';
+  import { zoneMatch } from '../lib/glob';
+  import { whoCanDoWhat } from '../lib/access';
+  import { forbidden, policyState } from '../lib/policy.svelte';
   import Seal from '../components/Seal.svelte';
   import Host from '../components/Host.svelte';
   import ActorChip from '../components/ActorChip.svelte';
   import RelTime from '../components/RelTime.svelte';
   import RRsetDrawer from '../components/RRsetDrawer.svelte';
-  import CustodyStrip from '../components/CustodyStrip.svelte';
   import Icon from '../components/Icon.svelte';
   import ManageZone from '../components/ManageZone.svelte';
+  import ZoneAccessView from '../components/policy/ZoneAccess.svelte';
 
   let { zone }: { zone: string } = $props();
 
@@ -27,7 +32,7 @@
   let picked = $state<string[]>([]);
   let adoptOpen = $state(false);
   let tfOpen = $state(false);
-  let canAdopt = $state(true);
+  let adoptForbidden = $state(false);
   let restored = $state<StoredAdopt | null>(null);
 
   const load = () =>
@@ -55,6 +60,14 @@
     }
   });
 
+  // Adoption needs dns.record.adopt on this zone. Without the effective
+  // permissions in /me, the button stays and the gate answers.
+  const adoptAllowed = $derived(
+    !adoptForbidden &&
+      (!me?.permissions || me.permissions.some((p) => p.actions.includes('dns.record.adopt') && p.zones.some((z) => zoneMatch(z, zone)))),
+  );
+  const adoptWhyNot = 'Adopting needs the dns.record.adopt permission on this zone. Ask a policy administrator.';
+
   const keyOf = (r: { host: string; type: string }) => `${r.host}/${r.type}`;
   const pickedRefs = $derived(
     picked.map((k): RRsetRef => {
@@ -71,8 +84,15 @@
     load();
   }
 
+  /** Opens the adoption flow with one record set selected. */
+  function adoptOne(r: RRset) {
+    if (!adoptAllowed || r.protected || r.type === 'SOA') return;
+    router.setParams({ rr: undefined });
+    picked = [keyOf(r)];
+    adoptOpen = true;
+  }
+
   const q = $derived(router.params.get('q') ?? '');
-  const statusF = $derived(router.params.get('status') ?? '');
   const typeF = $derived(router.params.get('type') ?? '');
   const ownerF = $derived(router.params.get('owner') ?? '');
   const selectedKey = $derived(router.params.get('rr') ?? '');
@@ -85,46 +105,66 @@
   const counts = $derived(
     rrsets.reduce<Record<string, number>>((c, r) => ((c[bucket(r.status)] = (c[bucket(r.status)] ?? 0) + 1), c), {}),
   );
+  const attentionCount = $derived((counts.tainted ?? 0) + (counts.pending ?? 0));
   const types = $derived([...new Set(rrsets.map((r) => r.type))].sort());
   const owners = $derived([...new Set(rrsets.map((r) => r.owner).filter((o): o is string => !!o))].sort());
 
+  // Status filter, always visible in the URL: when absent, the zone's needs
+  // decide (attention, then managed, then all) and the URL is updated.
+  const statusKeys = ['all', 'attention', 'managed', 'tainted', 'pending', 'foreign'] as const;
+  type StatusKey = (typeof statusKeys)[number];
+  const defaultStatus = $derived<StatusKey>(attentionCount > 0 ? 'attention' : (counts.managed ?? 0) > 0 ? 'managed' : 'all');
+  const rawStatus = $derived(router.params.get('status') ?? '');
+  const statusF = $derived<StatusKey>((statusKeys as readonly string[]).includes(rawStatus) ? (rawStatus as StatusKey) : defaultStatus);
+  $effect(() => {
+    if (inv && !(statusKeys as readonly string[]).includes(rawStatus)) untrack(() => router.setParams({ status: defaultStatus }));
+  });
+
+  const inStatus = (r: RRset, s: StatusKey) =>
+    s === 'all' || (s === 'attention' ? needsAttention(r.status) : bucket(r.status) === s);
+
   const shown = $derived(
     rrsets.filter((r) => {
-      if (statusF && bucket(r.status) !== statusF) return false;
+      if (!inStatus(r, statusF)) return false;
       if (typeF && r.type !== typeF) return false;
       if (ownerF && r.owner !== ownerF) return false;
       if (q) {
         const n = q.toLowerCase();
-        const hay = [r.host, r.type, r.owner ?? '', r.created_by?.name ?? '', r.updated_by?.name ?? '', ...r.values]
-          .join(' ')
-          .toLowerCase();
+        const who = [r.created_by, r.updated_by].flatMap((a) => (a ? [a.name, identityLabel(a).label] : []));
+        const hay = [r.host, r.type, r.owner ?? '', ...who, ...r.values].join(' ').toLowerCase();
         if (!hay.includes(n)) return false;
       }
       return true;
     }),
   );
 
-  const selected = $derived(rrsets.find((r) => `${r.host}/${r.type}` === selectedKey) ?? null);
-  const summary = $derived(
-    inv
-      ? {
-          zone,
-          rrsets: rrsets.length,
-          managed: counts.managed ?? 0,
-          tainted: counts.tainted ?? 0,
-          pending: counts.pending ?? 0,
-          foreign: counts.foreign ?? 0,
-        }
-      : null,
-  );
+  // Thousands of record sets: one page at a time, page number in the URL.
+  const PAGE = 100;
+  const pages = $derived(Math.max(1, Math.ceil(shown.length / PAGE)));
+  const page = $derived(Math.min(pages, Math.max(1, Number(router.params.get('page')) || 1)));
+  const pageRows = $derived(shown.slice((page - 1) * PAGE, page * PAGE));
+  const setFilter = (u: Record<string, string | undefined>) => router.setParams({ ...u, page: undefined });
+  const goPage = (n: number) => router.setParams({ page: n > 1 ? String(n) : undefined });
 
-  const tabs: { key: string; label: string }[] = [
-    { key: '', label: 'All' },
-    { key: 'managed', label: statusLabel.managed },
-    { key: 'tainted', label: 'Drifted' },
-    { key: 'pending', label: statusLabel.pending },
-    { key: 'foreign', label: statusLabel.foreign },
-  ];
+  const selected = $derived(rrsets.find((r) => `${r.host}/${r.type}` === selectedKey) ?? null);
+
+  const tabs = $derived(
+    [
+      { key: 'all' as const, label: 'All', n: rrsets.length, always: true },
+      { key: 'attention' as const, label: 'Needs attention', n: attentionCount, always: false },
+      { key: 'managed' as const, label: statusLabel.managed, n: counts.managed ?? 0, always: true },
+      { key: 'tainted' as const, label: statusLabel.tainted, n: counts.tainted ?? 0, always: false },
+      { key: 'pending' as const, label: statusLabel.pending, n: counts.pending ?? 0, always: false },
+      { key: 'foreign' as const, label: statusLabel.foreign, n: counts.foreign ?? 0, always: true },
+    ].filter((t) => t.always || t.n > 0 || statusF === t.key),
+  );
+  const tabHelp: Partial<Record<StatusKey, string>> = {
+    attention: 'Drifted, missing or pending record sets',
+    managed: statusHelp.managed,
+    tainted: statusHelp.tainted,
+    pending: statusHelp.pending,
+    foreign: statusHelp.foreign,
+  };
 
   const open = (r: RRset) => {
     if (selecting) {
@@ -133,9 +173,10 @@
     }
     router.setParams({ rr: `${r.host}/${r.type}` }, true);
   };
-  const shownForeign = $derived(shown.filter((r) => r.status === 'foreign'));
+  const shownForeign = $derived(shown.filter((r) => r.status === 'foreign' && !r.protected));
   const close = () => router.setParams({ rr: undefined });
   const rowKey = (e: KeyboardEvent, r: RRset) => {
+    if (e.target !== e.currentTarget) return;
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
       open(r);
@@ -143,6 +184,32 @@
   };
   const lastActor = (r: RRset) => r.updated_by ?? r.created_by;
   const lastAt = (r: RRset) => r.updated_at ?? r.created_at;
+  const owned = (r: RRset) => r.status !== 'foreign';
+  const fullName = (r: RRset) => (r.host === '@' ? zone : `${r.host}.${zone}`);
+
+  // Long values stay on one line; "+N more" unfolds the rest in place.
+  let expanded = $state<string[]>([]);
+  const toggleValues = (r: RRset) =>
+    (expanded = expanded.includes(keyOf(r)) ? expanded.filter((k) => k !== keyOf(r)) : [...expanded, keyOf(r)]);
+
+  let copiedKey = $state<string | null>(null);
+  async function copyName(r: RRset) {
+    try {
+      await navigator.clipboard.writeText(fullName(r));
+      copiedKey = keyOf(r);
+      setTimeout(() => (copiedKey = null), 1400);
+    } catch {
+      copiedKey = null;
+    }
+  }
+
+  // Who can do what here, from the policy (hidden without policy.read).
+  let accessOpen = $state(false);
+  $effect(() => {
+    if (accessOpen) void policyState.load();
+  });
+  const access = $derived(policyState.data ? whoCanDoWhat(policyState.data, [zone])[0] : undefined);
+  const stop = (e: Event) => e.stopPropagation();
 </script>
 
 <nav class="crumbs" aria-label="Breadcrumb"><a href={href('/')}>Zones</a><span aria-hidden="true">/</span></nav>
@@ -152,41 +219,58 @@
     <h1 class="mono">{zone}</h1>
     <p class="meta">
       {#if inv}
-        <span class="num">{rrsets.length}</span> record sets · synced <RelTime iso={inv.last_synced_at} /> ·
+        <span class="num">{rrsets.length.toLocaleString('en')}</span> record sets · synced <RelTime iso={inv.last_synced_at} /> ·
         <a href={journalHref({ zone })}>journal</a>
       {:else if !error}loading…{/if}
     </p>
   </div>
-  {#if summary && !unmanaged}<div class="strip"><CustodyStrip z={summary} height={10} /></div>{/if}
+  {#if inv && !unmanaged}
+    <div class="summary">
+      <span class="split">{managedSplit({ managed: counts.managed ?? 0, foreign: counts.foreign ?? 0 })}</span>
+      {#if counts.tainted}<button class="chip wax" type="button" title={statusHelp.tainted} onclick={() => setFilter({ status: 'tainted' })}><Seal status="tainted" size={12} />{counts.tainted} drifted</button>{/if}
+      {#if counts.pending}<button class="chip brass" type="button" title={statusHelp.pending} onclick={() => setFilter({ status: 'pending' })}><Seal status="pending" size={12} />{counts.pending} pending</button>{/if}
+    </div>
+  {/if}
 </header>
 
 {#if unmanaged}
   <aside class="unmanaged" aria-label="Zone not managed">
     <div class="utext">
       <h2><Icon name="lock" size={14} /> Not managed by the gate</h2>
-      <p>This zone was found in the EuroDNS account. It is shown read-only: every record set is foreign, the gate writes nothing here, and adoption and Terraform export are unavailable until the zone is managed.</p>
+      <p>This zone was found in the EuroDNS account and is shown read-only: the gate writes nothing here, and adoption and Terraform export are unavailable until the zone is managed.</p>
     </div>
     <ManageZone {zone} {me} />
   </aside>
+{:else if inv && !forbidden(policyState.error)}
+  <details class="access" bind:open={accessOpen}>
+    <summary>Who can do what in this zone</summary>
+    {#if policyState.error}
+      <p class="dim">{policyState.error.message}</p>
+    {:else if access}
+      <ZoneAccessView {access} showZone={false} />
+    {:else}
+      <div class="skeleton bar"></div>
+    {/if}
+  </details>
 {/if}
 
 {#if error}
   <div class="empty"><strong>This zone could not be loaded</strong>{error}</div>
 {:else}
   <div class="filters">
-    <div class="tabs" role="tablist" aria-label="Filter by status">
+    <div class="tabs" role="radiogroup" aria-label="Filter by status">
       {#each tabs as t (t.key)}
         <button
-          role="tab"
+          role="radio"
           type="button"
-          aria-selected={statusF === t.key}
-          title={t.key ? statusHelp[t.key as Status] : undefined}
+          aria-checked={statusF === t.key}
+          title={tabHelp[t.key]}
           class="tab {t.key}"
-          onclick={() => router.setParams({ status: t.key || undefined })}
+          onclick={() => setFilter({ status: t.key })}
         >
-          {#if t.key}<Seal status={t.key as Status} size={12} />{/if}
+          {#if t.key !== 'all' && t.key !== 'attention'}<Seal status={t.key} size={12} />{/if}
           {t.label}
-          <span class="count num">{t.key ? (counts[t.key] ?? 0) : rrsets.length}</span>
+          <span class="count num">{inv ? t.n.toLocaleString('en') : '…'}</span>
         </button>
       {/each}
     </div>
@@ -198,27 +282,41 @@
           type="search"
           placeholder="Host, value, owner, actor…"
           value={q}
-          oninput={(e) => router.setParams({ q: e.currentTarget.value || undefined })}
+          oninput={(e) => setFilter({ q: e.currentTarget.value || undefined })}
         />
       </label>
       <label class="field">
         <span class="sr-only">Type</span>
-        <select value={typeF} onchange={(e) => router.setParams({ type: e.currentTarget.value || undefined })}>
+        <select value={typeF} onchange={(e) => setFilter({ type: e.currentTarget.value || undefined })}>
           <option value="">All types</option>
           {#each types as t (t)}<option value={t}>{t}</option>{/each}
         </select>
         <span class="chev"><Icon name="chevron" size={12} /></span>
       </label>
-      <label class="field">
-        <span class="sr-only">Owner team</span>
-        <select value={ownerF} onchange={(e) => router.setParams({ owner: e.currentTarget.value || undefined })}>
-          <option value="">All owners</option>
-          {#each owners as o (o)}<option value={o}>{o}</option>{/each}
-        </select>
-        <span class="chev"><Icon name="chevron" size={12} /></span>
-      </label>
-      {#if canAdopt && !unmanaged && (counts.foreign ?? 0) > 0}
-        <button class="btn" class:on={selecting} type="button" aria-pressed={selecting} onclick={() => { selecting = !selecting; if (!selecting) picked = []; }}>
+      {#if owners.length}
+        <label class="field">
+          <span class="sr-only">Owner team</span>
+          <select value={ownerF} onchange={(e) => setFilter({ owner: e.currentTarget.value || undefined })}>
+            <option value="">All owners</option>
+            {#each owners as o (o)}<option value={o}>{o}</option>{/each}
+          </select>
+          <span class="chev"><Icon name="chevron" size={12} /></span>
+        </label>
+      {/if}
+      {#if inv && !unmanaged && (counts.foreign ?? 0) > 0}
+        <button
+          class="btn"
+          class:on={selecting}
+          type="button"
+          aria-pressed={selecting}
+          aria-disabled={!adoptAllowed}
+          title={adoptAllowed ? 'Select record sets that are not managed and adopt them' : adoptWhyNot}
+          onclick={() => {
+            if (!adoptAllowed) return;
+            selecting = !selecting;
+            if (!selecting) picked = [];
+          }}
+        >
           <Seal status="managed" size={13} />{selecting ? 'Selecting…' : 'Adopt…'}
         </button>
       {/if}
@@ -226,8 +324,22 @@
     </div>
   </div>
 
+  {#if inv && !unmanaged && !adoptAllowed && (counts.foreign ?? 0) > 0 && (statusF === 'foreign' || statusF === 'all')}
+    <p class="note"><Icon name="lock" size={12} /> {adoptWhyNot}</p>
+  {/if}
+
   <div class="sheet">
-    <table>
+    <table class:ro={unmanaged}>
+      <colgroup>
+        <col class="w-seal" />
+        <col class="w-name" />
+        <col class="w-type" />
+        <col />
+        <col class="w-ttl" />
+        <col class="w-owner" />
+        <col class="w-last" />
+        {#if !unmanaged}<col class="w-act" />{/if}
+      </colgroup>
       <thead>
         <tr>
           <th class="c-seal"><span class="sr-only">Status</span></th>
@@ -236,71 +348,125 @@
           <th>Values</th>
           <th class="c-ttl">TTL</th>
           <th class="c-owner">Owner</th>
-          <th class="c-custody">Custody</th>
+          <th class="c-custody">Last change</th>
+          {#if !unmanaged}<th class="c-act"><span class="sr-only">Actions</span></th>{/if}
         </tr>
       </thead>
       <tbody>
         {#if !inv}
           {#each [0, 1, 2, 3, 4] as i (i)}
-            <tr class="loading"><td colspan="7"><div class="skeleton bar"></div></td></tr>
+            <tr class="loading"><td colspan="8"><div class="skeleton bar"></div></td></tr>
           {/each}
         {:else}
-          {#each shown as r (r.host + '/' + r.type)}
+          {#each pageRows as r (r.host + '/' + r.type)}
+            {@const k = keyOf(r)}
+            {@const isOpen = expanded.includes(k)}
             <tr
               class={r.status}
-              class:selected={selected === r || (selecting && picked.includes(keyOf(r)))}
-              class:inert={selecting && r.status !== 'foreign'}
+              class:owned={owned(r)}
+              class:selected={selected === r || (selecting && picked.includes(k))}
+              class:inert={selecting && (r.status !== 'foreign' || r.protected)}
               tabindex="0"
               onclick={() => open(r)}
               onkeydown={(e) => rowKey(e, r)}
-              aria-label="{r.host} {r.type}, {statusLabel[r.status]}"
+              aria-label="{fullName(r)} {r.type}, {statusLabel[r.status]}{r.owner ? ', owned by ' + r.owner : ''}"
             >
               <td class="c-seal">
-                {#if selecting && r.status === 'foreign'}
-                  <input type="checkbox" class="pick" checked={picked.includes(keyOf(r))} onclick={(e) => e.stopPropagation()} onchange={() => togglePick(r)} aria-label="Select {r.host} {r.type}" />
+                {#if selecting && r.status === 'foreign' && !r.protected}
+                  <input type="checkbox" class="pick" checked={picked.includes(k)} onclick={stop} onchange={() => togglePick(r)} aria-label="Select {r.host} {r.type}" />
                 {:else}
                   <Seal status={r.status} title={statusLabel[r.status]} />
                 {/if}
               </td>
               <td class="c-name">
-                <div class="name">
-                  <Host host={r.host} {zone} showZone={false} />
-                  {#if r.protected}<span class="ico" title="Protected: no role may change it"><Icon name="lock" size={12} /></span>{/if}
+                <div class="name" title={fullName(r)}>
+                  <Host host={r.host} {zone} showZone={false} short />
+                  {#if r.protected}
+                    <span class="ico" role="img" aria-label="Protected" title="Protected by the base policy: no role can change it through the gate, even after adoption."><Icon name="lock" size={12} /></span>
+                  {/if}
                   {#if r.expires_at}<span class="ephemeral" title="Ephemeral record, removed automatically"><Icon name="clock" size={12} /><RelTime iso={r.expires_at} /></span>{/if}
+                  <button class="copyname" type="button" onclick={(e) => { stop(e); void copyName(r); }} aria-label="Copy {fullName(r)}" title="Copy {fullName(r)}">
+                    <Icon name={copiedKey === k ? 'check' : 'copy'} size={12} />
+                  </button>
                 </div>
               </td>
               <td class="c-type"><span class="type mono">{r.type}</span></td>
               <td class="c-values">
-                <ul class="mono">
-                  {#each r.values.slice(0, 3) as v (v)}<li>{v}</li>{/each}
-                  {#if r.values.length > 3}<li class="more">+{r.values.length - 3} more</li>{/if}
+                <ul class="mono" class:open={isOpen}>
+                  {#each isOpen ? r.values : r.values.slice(0, 1) as v (v)}<li title={v}>{shortHashes(v)}</li>{/each}
                 </ul>
+                {#if r.values.length > 1}
+                  <button class="more" type="button" aria-expanded={isOpen} onclick={(e) => { stop(e); toggleValues(r); }}>
+                    {isOpen ? 'Show less' : `+${r.values.length - 1} more`}
+                  </button>
+                {/if}
               </td>
               <td class="c-ttl mono num">{fmtTTL(r.ttl)}</td>
-              <td class="c-owner">{#if r.owner}<span class="team">{r.owner}</span>{:else}<span class="ro">read-only</span>{/if}</td>
+              <td class="c-owner">
+                {#if r.owner}<span class="team" title="Owner team: only this team changes it"><Seal status="managed" size={11} />{r.owner}</span>
+                {:else}<span class="ro" aria-label="No owner">—</span>{/if}
+              </td>
               <td class="c-custody">
-                {#if lastActor(r)}
+                {#if owned(r) && lastActor(r)}
                   {@const a = lastActor(r)}
                   {#if a}<ActorChip actor={a} quiet />{/if}
                   <span class="when"><RelTime iso={lastAt(r)} /></span>
+                {:else if owned(r)}
+                  <span class="ro">—</span>
                 {:else}
-                  <span class="ro">registrar console</span>
+                  <span class="ro">Not managed by the gate</span>
                 {/if}
               </td>
+              {#if !unmanaged}
+                <td class="c-act">
+                  {#if owned(r)}
+                    <button class="btn quiet small act" type="button" onclick={(e) => { stop(e); open(r); }} aria-label="Details of {r.host} {r.type}">Details</button>
+                  {:else if adoptAllowed && (r.protected || r.type === 'SOA')}
+                    {@const why = r.protected ? 'Protected by the base policy: it cannot be adopted.' : 'Managed by EuroDNS: it cannot be adopted.'}
+                    <button class="btn quiet small act" type="button" aria-disabled="true" onclick={stop} title={why} aria-label="Adopt {r.host} {r.type}: not possible. {why}">Adopt</button>
+                  {:else if adoptAllowed}
+                    <button
+                      class="btn quiet small act adopt"
+                      type="button"
+                      title="Adopt this record set: the gate manages it for a team"
+                      onclick={(e) => { stop(e); adoptOne(r); }}
+                      aria-label="Adopt {r.host} {r.type}"
+                    >Adopt</button>
+                  {/if}
+                </td>
+              {/if}
             </tr>
           {:else}
-            <tr><td colspan="7"><div class="empty"><strong>No record sets match</strong>Clear the filters to see the whole zone.</div></td></tr>
+            <tr class="none">
+              <td colspan="8">
+                <div class="empty">
+                  <strong>No record sets match</strong>
+                  {#if statusF !== 'all' || q || typeF || ownerF}
+                    <button class="btn" type="button" onclick={() => setFilter({ status: 'all', q: undefined, type: undefined, owner: undefined })}>Show the whole zone</button>
+                  {/if}
+                </div>
+              </td>
+            </tr>
           {/each}
         {/if}
       </tbody>
     </table>
   </div>
+
+  {#if inv && shown.length > PAGE}
+    <nav class="pager" aria-label="Pages">
+      <span class="dim"><span class="num">{((page - 1) * PAGE + 1).toLocaleString('en')}–{Math.min(page * PAGE, shown.length).toLocaleString('en')}</span> of <span class="num">{shown.length.toLocaleString('en')}</span></span>
+      <button class="btn" type="button" disabled={page <= 1} onclick={() => goPage(page - 1)}>Previous</button>
+      <span class="num pos">Page {page} of {pages}</span>
+      <button class="btn" type="button" disabled={page >= pages} onclick={() => goPage(page + 1)}>Next</button>
+    </nav>
+  {/if}
 {/if}
 
 {#if selecting}
   <div class="pickbar" role="region" aria-label="Adoption selection">
-    <span class="n"><b class="num">{picked.length}</b> foreign record set{picked.length === 1 ? '' : 's'} selected</span>
-    <button class="btn quiet" type="button" disabled={!shownForeign.length} onclick={() => (picked = [...new Set([...picked, ...shownForeign.map(keyOf)])])}>Select all foreign shown ({shownForeign.length})</button>
+    <span class="n"><b class="num">{picked.length}</b> record set{picked.length === 1 ? '' : 's'} selected</span>
+    <button class="btn quiet" type="button" disabled={!shownForeign.length} onclick={() => (picked = [...new Set([...picked, ...shownForeign.map(keyOf)])])}>Select all shown ({shownForeign.length})</button>
     {#if picked.length}<button class="btn quiet" type="button" onclick={() => (picked = [])}>Clear</button>{/if}
     <span class="sp"></span>
     <button class="btn quiet" type="button" onclick={() => { selecting = false; picked = []; }}>Cancel</button>
@@ -316,9 +482,9 @@
     types={types}
     initialComment={restored?.comment ?? ''}
     initialFilter={restored ? { hosts: restored.selection.hosts ?? [], types: restored.selection.types ?? [], owner: restored.selection.owner } : undefined}
-    onclose={() => { adoptOpen = false; restored = null; }}
+    onclose={() => { adoptOpen = false; restored = null; if (!selecting) picked = []; }}
     onadopted={onAdopted}
-    onforbidden={() => { canAdopt = false; selecting = false; picked = []; }}
+    onforbidden={() => { adoptForbidden = true; selecting = false; picked = []; }}
   />
 {/if}
 
@@ -326,8 +492,18 @@
   <TerraformPanel {zone} teams={me?.teams ?? []} {owners} onclose={() => { tfOpen = false; router.setParams({ export: undefined }); }} />
 {/if}
 
-{#if selected && !selecting}
-  {#key selectedKey}<RRsetDrawer {zone} rr={selected} onclose={close} {unmanaged} />{/key}
+{#if selected && !selecting && !adoptOpen}
+  {#key selectedKey}
+    <RRsetDrawer
+      {zone}
+      rr={selected}
+      onclose={close}
+      {unmanaged}
+      canAdopt={adoptAllowed}
+      adoptHint={adoptWhyNot}
+      onadopt={() => adoptOne(selected)}
+    />
+  {/key}
 {/if}
 
 <style>
@@ -374,11 +550,15 @@
     color: var(--seal-ink);
   }
   .head {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(200px, 360px);
-    align-items: end;
-    gap: var(--s4) var(--s8);
-    margin-bottom: var(--s6);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: var(--s3) var(--s8);
+    margin-bottom: var(--s5);
+  }
+  .title {
+    min-width: 0;
   }
   h1 {
     font-size: var(--t-h1);
@@ -398,8 +578,64 @@
   .meta a:hover {
     color: var(--seal-ink);
   }
-  .strip {
-    padding-bottom: 6px;
+  .summary {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--s2);
+    padding-bottom: 4px;
+  }
+  .split {
+    color: var(--ink-2);
+    font-size: var(--t-lead);
+    margin-right: var(--s1);
+  }
+  .chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    height: 24px;
+    padding: 0 9px 0 7px;
+    border: 0;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .chip.wax {
+    background: var(--wax-wash);
+    color: var(--wax);
+  }
+  .chip.brass {
+    background: var(--brass-wash);
+    color: var(--brass);
+  }
+  .chip:hover {
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  .access {
+    margin-bottom: var(--s5);
+    padding: var(--s2) var(--s4);
+    border: 1px solid var(--rule-soft);
+    border-radius: var(--r-lg);
+  }
+  .access[open] {
+    padding-bottom: var(--s4);
+    background: var(--sheet);
+  }
+  .access summary {
+    cursor: pointer;
+    color: var(--ink-2);
+    font-weight: 500;
+    border-radius: var(--r-sm);
+  }
+  .access[open] summary {
+    margin-bottom: var(--s3);
+  }
+  .dim {
+    color: var(--ink-3);
   }
 
   .filters {
@@ -438,7 +674,7 @@
   .tab:hover {
     color: var(--ink);
   }
-  .tab[aria-selected='true'] {
+  .tab[aria-checked='true'] {
     background: var(--sheet-raised);
     color: var(--ink);
     box-shadow: 0 0 0 1px var(--rule);
@@ -447,8 +683,14 @@
     font-size: 11.5px;
     color: var(--ink-4);
   }
-  .tab.tainted .count {
+  .tab.tainted .count,
+  .tab.attention .count {
     color: var(--wax);
+    font-weight: 600;
+  }
+  .tab.pending .count {
+    color: var(--brass);
+    font-weight: 600;
   }
   .right {
     display: flex;
@@ -458,7 +700,22 @@
   .search input {
     width: 220px;
   }
+  .btn[aria-disabled='true'] {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .btn[aria-disabled='true']:active {
+    transform: none;
+  }
 
+  .note {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: var(--s2);
+    color: var(--ink-3);
+    font-size: 12.5px;
+  }
   .sheet {
     border: 1px solid var(--rule);
     border-radius: var(--r-lg);
@@ -468,7 +725,29 @@
   table {
     width: 100%;
     border-collapse: collapse;
-    min-width: 860px;
+    table-layout: fixed;
+    min-width: 960px;
+  }
+  .w-seal {
+    width: 36px;
+  }
+  .w-name {
+    width: 30%;
+  }
+  .w-type {
+    width: 76px;
+  }
+  .w-ttl {
+    width: 72px;
+  }
+  .w-owner {
+    width: 124px;
+  }
+  .w-last {
+    width: 200px;
+  }
+  .w-act {
+    width: 88px;
   }
   th {
     text-align: left;
@@ -482,9 +761,11 @@
     white-space: nowrap;
   }
   td {
-    padding: 10px var(--s3);
+    padding: 9px var(--s3);
     border-bottom: 1px solid var(--rule-soft);
     vertical-align: top;
+    min-width: 0;
+    overflow: hidden;
   }
   tbody tr:last-child td {
     border-bottom: 0;
@@ -496,6 +777,12 @@
   tbody tr[tabindex]:hover {
     background: var(--rule-soft);
   }
+  tbody tr.owned {
+    background: color-mix(in srgb, var(--seal-ink-wash) 45%, transparent);
+  }
+  tbody tr.owned:hover {
+    background: var(--seal-ink-wash);
+  }
   tbody tr.selected {
     background: var(--seal-ink-wash);
   }
@@ -504,40 +791,61 @@
     outline-offset: -2px;
   }
   .c-seal {
-    width: 36px;
     padding-right: 0;
   }
   .c-seal :global(svg) {
-    margin-top: 2px;
-  }
-  .c-type {
-    width: 70px;
+    margin-top: 3px;
   }
   .c-ttl {
-    width: 60px;
     color: var(--ink-3);
-  }
-  .c-owner {
-    width: 110px;
-  }
-  .c-custody {
-    width: 230px;
   }
   .name {
     display: flex;
     align-items: center;
-    flex-wrap: wrap;
     gap: 6px;
+    min-width: 0;
+  }
+  .name :global(.host) {
+    min-width: 0;
+    flex: 0 1 auto;
   }
   .ico {
+    flex: none;
     color: var(--ink-4);
+    cursor: help;
   }
   .ephemeral {
+    flex: none;
     display: inline-flex;
     align-items: center;
     gap: 3px;
     font-size: 11.5px;
     color: var(--brass);
+  }
+  .copyname {
+    flex: none;
+    display: grid;
+    place-items: center;
+    width: 22px;
+    height: 22px;
+    margin: -2px 0;
+    padding: 0;
+    border: 0;
+    border-radius: var(--r-sm);
+    background: transparent;
+    color: var(--ink-3);
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 120ms var(--ease-out);
+  }
+  .copyname:hover {
+    background: var(--rule-soft);
+    color: var(--ink);
+  }
+  tr:hover .copyname,
+  tr:focus-within .copyname,
+  .copyname:focus-visible {
+    opacity: 1;
   }
   .type {
     font-size: 11.5px;
@@ -549,17 +857,41 @@
     margin: 0;
     padding: 0;
     color: var(--ink-2);
+    min-width: 0;
   }
   .c-values li {
-    overflow-wrap: anywhere;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
-  .c-values .more {
-    color: var(--ink-4);
-    font-family: var(--font-ui);
+  .more {
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--seal-ink);
     font-size: 12px;
+    cursor: pointer;
+    border-radius: var(--r-sm);
+  }
+  .more:hover {
+    text-decoration: underline;
+    text-underline-offset: 2px;
   }
   .team {
-    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    max-width: 100%;
+    height: 20px;
+    padding: 0 7px 0 5px;
+    border-radius: 10px;
+    background: var(--seal-ink-wash);
+    color: var(--seal-ink);
+    font-size: 12px;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .ro {
     color: var(--ink-4);
@@ -573,6 +905,23 @@
     margin: 2px 0 0 26px;
     color: var(--ink-4);
     font-size: 11.5px;
+  }
+  .c-act {
+    text-align: right;
+    padding-top: 5px;
+    padding-bottom: 5px;
+  }
+  .btn.small {
+    height: 26px;
+    padding: 0 var(--s2);
+    font-size: 12.5px;
+  }
+  .act {
+    color: var(--ink-3);
+  }
+  tr:hover .act,
+  tr:focus-within .act {
+    color: var(--seal-ink);
   }
   tr.foreign td {
     color: var(--ink-3);
@@ -588,6 +937,13 @@
   tr.missing .c-values li {
     text-decoration: line-through;
     text-decoration-color: var(--rule-strong);
+  }
+  tr.none td,
+  tr.loading td {
+    overflow: visible;
+  }
+  .empty .btn {
+    margin-top: var(--s3);
   }
   .bar {
     height: 16px;
@@ -607,6 +963,20 @@
     margin: 1px 0 0;
     accent-color: var(--seal-ink);
     cursor: pointer;
+  }
+  .pager {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--s2) var(--s3);
+    margin-top: var(--s3);
+  }
+  .pager .dim {
+    margin-right: auto;
+  }
+  .pos {
+    color: var(--ink-3);
   }
   .pickbar {
     position: sticky;
@@ -636,9 +1006,6 @@
     border-color: transparent;
   }
   @media (max-width: 900px) {
-    .head {
-      grid-template-columns: 1fr;
-    }
     .search input {
       width: 160px;
     }
@@ -652,13 +1019,15 @@
     }
     table {
       min-width: 0;
+      table-layout: auto;
     }
+    colgroup,
     thead {
       display: none;
     }
     tbody tr {
       display: grid;
-      grid-template-columns: 24px minmax(0, 1fr) 56px;
+      grid-template-columns: 22px minmax(0, 1fr) auto;
       grid-template-areas:
         'seal name type'
         '. values values'
@@ -678,14 +1047,12 @@
     }
     .c-seal {
       grid-area: seal;
-      width: auto;
     }
     .c-name {
       grid-area: name;
     }
     .c-type {
       grid-area: type;
-      width: auto;
       text-align: right;
     }
     .c-values {
@@ -696,20 +1063,26 @@
     }
     .c-owner {
       grid-area: owner;
-      width: auto;
       font-size: 12px;
     }
     .c-custody {
       grid-area: custody;
-      width: auto;
       justify-self: end;
       text-align: right;
+      min-width: 0;
+    }
+    /* the row opens the details, where adoption is offered too */
+    .c-act {
+      display: none;
+    }
+    .copyname {
+      opacity: 1;
     }
     .when {
       margin-left: 0;
     }
     tr.loading,
-    tr:not([tabindex]) {
+    tr.none {
       display: block;
     }
   }
