@@ -156,6 +156,9 @@ func Normalize(d *uiapi.PolicyDocument) {
 	if d.VirtualKeys == nil {
 		d.VirtualKeys = []uiapi.VirtualKey{}
 	}
+	if d.Delegated != nil && len(d.Delegated.Roles) == 0 && len(d.Delegated.Bindings) == 0 {
+		d.Delegated = nil
+	}
 	if len(d.Zones) == 0 {
 		d.Zones = nil
 		return

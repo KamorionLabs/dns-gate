@@ -59,6 +59,8 @@ func (s *Server) handlePolicyAPI(w http.ResponseWriter, r *http.Request, subj *i
 	get, post := r.Method == http.MethodGet, r.Method == http.MethodPost
 	var e *policyError
 	switch {
+	case len(parts) >= 1 && parts[0] == "delegated":
+		e = s.handleDelegated(w, r, subj, sess, parts)
 	case len(parts) == 0 && get:
 		e = s.policyEffective(w, r, subj)
 	case len(parts) == 1 && parts[0] == "revisions" && get:
@@ -190,6 +192,9 @@ func (s *Server) baseLayer() uiapi.BaseLayer {
 		ConfigHash: c.Hash, LoadedAt: c.LoadedAt, Zones: c.Zones,
 		Bounds:   uiapi.Bounds{Zones: nonNil(c.Policy.Bounds.Zones), Actions: nonNil(c.Policy.Bounds.Actions)},
 		Document: s.cfg.Policy.Base(), Issuers: []uiapi.Issuer{}, Protected: []uiapi.Protected{},
+	}
+	if len(c.Policy.Delegations) > 0 {
+		b.Delegations = policy.DelegationViews(c)
 	}
 	for _, is := range c.Issuers {
 		ui := uiapi.Issuer{Name: is.Name, Issuer: is.Issuer, Audiences: is.Audiences, SubjectClaim: is.SubjectClaim, Category: is.Category, CategoryClaim: is.CategoryClaim}
@@ -480,12 +485,17 @@ func (s *Server) policyPropose(w http.ResponseWriter, r *http.Request, subj *ide
 	if e := decodeStrict(r, &req); e != nil {
 		return e
 	}
-	activeID, e := s.activeID(r.Context())
+	active, activeDoc, e := s.activeDoc(r.Context())
 	if e != nil {
 		return e
 	}
+	activeID := revID(active)
 	if req.ParentID != activeID {
 		return perr(http.StatusConflict, "stale_revision", "the policy changed since the edit started: reload and reapply")
+	}
+	if e := s.carryDelegated(subj, &req.Document, activeDoc, req.TakeOver); e != nil {
+		s.policyAudit(r, subj, "policy.propose", "", "deny", e.reason, map[string]any{"take_over": req.TakeOver})
+		return e
 	}
 	rev, e := s.createRevision(r.Context(), subj, activeID, req.Comment, req.Document)
 	if e != nil {
@@ -494,7 +504,12 @@ func (s *Server) policyPropose(w http.ResponseWriter, r *http.Request, subj *ide
 		}
 		return e
 	}
-	s.policyAudit(r, subj, "policy.propose", rev.ID, "allow", "", nil)
+	var extra map[string]any
+	if len(req.TakeOver) > 0 {
+		extra = map[string]any{"take_over": req.TakeOver}
+		s.policyAudit(r, subj, "policy.delegated.take_over", rev.ID, "allow", "", extra)
+	}
+	s.policyAudit(r, subj, "policy.propose", rev.ID, "allow", "", extra)
 	d, e := s.detail(r.Context(), rev, req.Document)
 	if e != nil {
 		return e
@@ -517,10 +532,14 @@ func (s *Server) policyRollback(w http.ResponseWriter, r *http.Request, subj *id
 	if e != nil {
 		return e
 	}
-	activeID, e := s.activeID(r.Context())
+	active, activeDoc, e := s.activeDoc(r.Context())
 	if e != nil {
 		return e
 	}
+	activeID := revID(active)
+	// A rollback restores the objects edited by humans; delegated objects
+	// stay as they are in the active revision.
+	doc.Delegated = activeDoc.Delegated
 	comment := strings.TrimSpace("rollback to " + src.ID + ". " + req.Comment)
 	rev, e := s.createRevision(r.Context(), subj, activeID, comment, doc)
 	if e != nil {

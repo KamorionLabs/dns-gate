@@ -73,6 +73,7 @@ func TestEndToEnd(t *testing.T) {
 	t.Run("10_import_owned_rrset_with_write_only", e.scenarioImportOwned)
 	t.Run("11_mcp", e.scenarioMCP)
 	t.Run("12_zone_discovery_and_team_from", e.scenarioDiscoveryTeamFrom)
+	t.Run("13_policy_delegation", e.scenarioDelegation)
 }
 
 func setup(t *testing.T) *env {
@@ -204,8 +205,18 @@ policy:
   bounds:
     zones: [%[3]s, %[9]s]
     actions: [dns.read, dns.record.write, ui.read]
+  delegations:
+    - name: workloads-pipelines
+      subjects: [{issuer: ci, claims: {sub: [%[10]q]}}]
+      allow:
+        zones: [%[3]s]
+        actions: [dns.read, dns.record.write, ui.read]
+        records: {hosts: ["**.wl"], types: [CNAME, TXT]}
+        binding_subjects: [{issuer: ci, claims: {sub: ["sc://org/proj/eurodns-gate-*"]}}]
+        teams:
+          from_subject: {claim: sub, regex: "^sc://[^/]+/[^/]+/(eurodns-gate-[a-z0-9-]+)$"}
 %[8]s
-`, e.upstream.URL, upstreamApp, zone, filepath.Join(t.TempDir(), "gate.db"), e.idp.URL, acmeAppID, hex.EncodeToString(sum[:]), extra, discoveredZone)
+`, e.upstream.URL, upstreamApp, zone, filepath.Join(t.TempDir(), "gate.db"), e.idp.URL, acmeAppID, hex.EncodeToString(sum[:]), extra, discoveredZone, workloadsSubject)
 	cfg, err := config.Parse([]byte(yaml), func(k string) string {
 		if k == "EURODNS_API_KEY" {
 			return upstreamKey
@@ -221,7 +232,7 @@ policy:
 // token returns a fresh JWT for sub and a file holding it.
 func (e *env) token(sub string) (string, string) {
 	tok := e.idp.Sign(map[string]any{"sub": sub, "aud": "eurodns-gate"})
-	path := filepath.Join(e.tokens, sub+".jwt")
+	path := filepath.Join(e.tokens, strings.NewReplacer("/", "_", ":", "_").Replace(sub)+".jwt")
 	if err := os.WriteFile(path, []byte(tok), 0o600); err != nil {
 		e.t.Fatal(err)
 	}

@@ -653,6 +653,46 @@ managed layer is allowed; the impact analysis warns when the gate owns RRsets
 there. Their ownership entries stay in the store, so managing the zone again
 restores them.
 
+### 15.8 Policy delegations
+
+Some policy changes are mechanical: the Terraform stack that creates CI pipelines
+creates, for each one, a cloud role scoped to that pipeline, and should create in the
+same apply the gate role and binding that let the pipeline's identity write only its
+own DNS names. Routing each of them through a human approval defeats the automation,
+and granting the stack `policy.propose` with `require_approval: false` would let it
+change anything within the bounds.
+
+A **delegation** (`policy.delegations`, base file) is a narrower grant: its subjects
+may create, change and delete roles and bindings they own, within `allow` limits
+(zones, actions, record scope, the subjects a binding may target, the teams it may
+use, a maximum number of objects), through a dedicated API
+(`/api/v1/policy/delegated`, CRUD by stable name, ETag preconditions). The review
+happens once, when the delegation is merged in the configuration; each delegated
+change is then activated without approval.
+
+- **Storage**: delegated objects live in the `delegated` section of the managed
+  document, each with its owner (delegation, `managed_by`, created/updated by and
+  at). A delegated change is an ordinary revision (author = the pipeline), created on
+  the active one and activated at once, so history, diff, export, rollback, explain
+  and who-can see it like any other.
+- **Validation**: the managed-layer rules (15.1) plus the owner delegation's limits,
+  checked at every write and on every later revision; delegated rules are re-checked
+  against their delegation at evaluation (defense in depth).
+- **Isolation from human edits**: proposals keep the delegated section of the
+  active revision (the UI never sends it) and cannot change it; a policy
+  administrator takes objects over explicitly (`take_over`), which goes through the
+  normal review. Rollbacks keep the delegated objects. Managed bindings cannot use
+  delegated roles, so a delegated delete never breaks a human object.
+- **Concurrency**: delegated writes are serialized per replica; the activation is the
+  conditional write of 15.2, and a lost race re-applies the change (and its
+  preconditions) on the new active revision, a bounded number of times, before
+  `409 policy_busy`. ETags are per object, so parallel Terraform resources do not
+  invalidate each other.
+- **Teams**: with `allow.teams.from_subject`, a delegated binding's team is the one
+  derived from its own subject, so a pipeline created by the stack owns its records
+  and cannot touch those of another pipeline, even though the stack wrote both
+  bindings.
+
 ## 16. Onboarding and adoption
 
 An existing zone is entirely **foreign** when the gate starts: read-only through the

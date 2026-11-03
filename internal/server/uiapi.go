@@ -58,7 +58,9 @@ func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/v1")
 	isPolicy := rest == "/policy" || strings.HasPrefix(rest, "/policy/")
 	isAdopt := strings.HasPrefix(rest, "/zones/") && (strings.HasSuffix(rest, "/adopt") || strings.HasSuffix(rest, "/adopt/preview"))
-	if r.Method != http.MethodGet && !((isPolicy || isAdopt) && r.Method == http.MethodPost) {
+	isDelegated := strings.HasPrefix(rest, "/policy/delegated/")
+	if r.Method != http.MethodGet && !((isPolicy || isAdopt) && r.Method == http.MethodPost) &&
+		!(isDelegated && (r.Method == http.MethodPut || r.Method == http.MethodDelete)) {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
@@ -67,7 +69,7 @@ func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
 		writeError(w, ae.Status, ae.Reason, ae.Message)
 		return
 	}
-	if r.Method == http.MethodPost && sess != nil && !s.ui.checkCSRF(r) {
+	if r.Method != http.MethodGet && sess != nil && !s.ui.checkCSRF(r) {
 		writeError(w, http.StatusForbidden, "csrf", "missing or invalid CSRF token or origin")
 		return
 	}

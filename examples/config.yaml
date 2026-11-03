@@ -247,6 +247,23 @@ policy:
   bounds:
     zones: [example.com, "*.example.com", example.org]
     actions: [dns.read, dns.record.write, ui.read]
+  # The stack that creates pipelines manages their gate roles and bindings
+  # (Terraform eurodns_gate_role / eurodns_gate_binding), without approval,
+  # within these limits.
+  delegations:
+    - name: workloads-pipelines
+      subjects:
+        - issuer: github
+          claims: {sub: ["repo:acme/workloads:environment:production"]}
+      allow:
+        zones: [example.com]
+        actions: [dns.read, dns.record.write]
+        records: {hosts: ["**.apps"], types: [CNAME, TXT]}
+        binding_subjects:
+          - issuer: github
+            claims: {sub: ["repo:acme/*:environment:production"]}
+        teams:
+          from_subject: {claim: sub, regex: "^repo:acme/([a-z0-9-]+):environment:production$", prefix: gh-}
 
 # Never writable nor adoptable, whatever the role.
 protected:

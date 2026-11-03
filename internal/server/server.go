@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/KamorionLabs/eurodns-gate/internal/audit"
@@ -90,6 +91,7 @@ type Server struct {
 	mcp      *mcpServer
 	log      *slog.Logger
 	now      func() time.Time
+	delegMu  sync.Mutex // serializes delegated policy writes in this replica
 }
 
 // New builds the server.
@@ -365,7 +367,7 @@ func (s *Server) handleGateInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, eurodns.GateInfo{
 		Version:  version.Version,
-		Features: []string{eurodns.FeatureIfMatch, eurodns.FeatureOwnership, eurodns.FeatureAdopt},
+		Features: []string{eurodns.FeatureIfMatch, eurodns.FeatureOwnership, eurodns.FeatureAdopt, FeaturePolicyDelegation},
 	})
 }
 

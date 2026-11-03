@@ -31,7 +31,7 @@ func (s *Snapshot) grants() map[grantKey]bool {
 					out[grantKey{who, roleName, "*", a}] = true
 					continue
 				}
-				if cr.layer == LayerManaged && !s.withinBounds(r, a) {
+				if !s.ruleEffective(cr, r, a) {
 					continue
 				}
 				for z := range s.zones {
@@ -90,7 +90,7 @@ func (s *Snapshot) teamWrites() map[string]map[string]bool {
 			return
 		}
 		for _, r := range cr.role.Rules {
-			if !contains(r.Actions, ActionRecordWrite) || (cr.layer == LayerManaged && !s.withinBounds(r, ActionRecordWrite)) {
+			if !contains(r.Actions, ActionRecordWrite) || !s.ruleEffective(cr, r, ActionRecordWrite) {
 				continue
 			}
 			for z := range s.zones {

@@ -21,6 +21,8 @@ type Subject struct {
 	Teams  []string       // owner teams the subject acts for
 
 	Groups []string // groups the subject belongs to (base and managed)
+	// Delegations the subject may act for (policy.delegations), file order.
+	Delegations []string
 
 	Name     string // display name (email, pipeline name, key id)
 	Category string // CategoryHuman | CategoryPipeline | CategoryKey

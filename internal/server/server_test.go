@@ -100,6 +100,7 @@ type env struct {
 	ops      *fakeOps
 	store    store.Store
 	offset   time.Duration
+	server   *Server
 }
 
 func (e *env) clock() time.Time { return time.Now().Add(e.offset) }
@@ -184,6 +185,7 @@ func newEnvDisc(t *testing.T, tweak func(*config.Config), disc ZoneDiscovery) *e
 		t.Fatal(err)
 	}
 	e.srv.Config.Handler = s.Handler()
+	e.server = s
 	return e
 }
 
