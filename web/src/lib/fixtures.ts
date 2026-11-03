@@ -860,6 +860,7 @@ function terraform(zone: string, q: TerraformQuery): string {
 
 export const fixtureBackend = {
   me: () => delay(me),
+  gateInfo: () => delay({ version: 'v0.0.0-demo', features: ['if-match', 'ownership', 'adopt'] }),
   connect: () => delay(connect),
   zones: () =>
     delay(
