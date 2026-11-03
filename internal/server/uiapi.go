@@ -19,6 +19,7 @@ import (
 	"github.com/KamorionLabs/eurodns-gate/internal/store"
 	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
 	"github.com/KamorionLabs/eurodns-gate/internal/version"
+	"github.com/KamorionLabs/eurodns-gate/internal/zonewrite"
 )
 
 // uiSubject authenticates a UI API request: session cookie first, then
@@ -129,6 +130,14 @@ func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		inv, err := s.cfg.Engine.Inventory(ctx, subj, zone)
+		if ze, ok := zonewrite.AsError(err); ok && (ze.Reason == zonewrite.ReasonForbidden || ze.Reason == zonewrite.ReasonNotFound) {
+			status := http.StatusForbidden
+			if ze.Reason == zonewrite.ReasonNotFound {
+				status = http.StatusNotFound
+			}
+			writeError(w, status, string(ze.Reason), ze.Message)
+			return
+		}
 		if err != nil {
 			s.log.Error("ui inventory", "zone", zone, "err", err)
 			writeError(w, http.StatusBadGateway, "upstream", "inventory unavailable")
@@ -222,15 +231,29 @@ func (s *Server) serveClaudeDesktopExtension(w http.ResponseWriter, r *http.Requ
 	_, _ = w.Write(bundle)
 }
 
-// readableZones returns the managed zones the subject may see in the UI.
+// readableZones returns the zones the subject may see in the UI: managed
+// zones and zones discovered in the account (unmanaged), with ui.read.
 func (s *Server) readableZones(subj *identity.Subject) map[string]bool {
 	out := map[string]bool{}
-	for _, z := range s.cfg.Config.Zones {
-		if s.cfg.Authz.Allow(subj, policy.ActionUIRead, z) {
-			out[z] = true
+	for _, list := range [][]string{s.pol.ManagedZones(), s.pol.UnmanagedZones()} {
+		for _, z := range list {
+			if s.cfg.Authz.Allow(subj, policy.ActionUIRead, z) {
+				out[z] = true
+			}
 		}
 	}
 	return out
+}
+
+// readsEveryManagedZone reports whether readable covers every managed zone
+// (audit events without a zone are shown only then).
+func (s *Server) readsEveryManagedZone(readable map[string]bool) bool {
+	for _, z := range s.pol.ManagedZones() {
+		if !readable[z] {
+			return false
+		}
+	}
+	return true
 }
 
 var auditParams = map[string]bool{
@@ -305,7 +328,7 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request, readable ma
 		writeError(w, http.StatusBadRequest, "bad_request", "invalid audit query")
 		return
 	}
-	all := len(readable) == len(s.cfg.Config.Zones)
+	all := s.readsEveryManagedZone(readable)
 	page := uiapi.AuditPage{Entries: []uiapi.AuditEntry{}, NextCursor: next}
 	for _, e := range events {
 		if (e.Zone == "" && !all) || (e.Zone != "" && !readable[e.Zone]) {

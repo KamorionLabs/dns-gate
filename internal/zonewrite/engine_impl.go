@@ -23,6 +23,7 @@ import (
 	eurodns "github.com/KamorionLabs/eurodns-go"
 	"github.com/KamorionLabs/eurodns-go/rrset"
 	"github.com/KamorionLabs/eurodns-go/zonediff"
+	"golang.org/x/sync/singleflight"
 )
 
 // pendingDelete is the PendingHash of a claim whose RRset is being deleted.
@@ -38,12 +39,12 @@ type cachedZone struct {
 
 type engine struct {
 	cfg    Config
-	zones  map[string]bool
-	order  []string
+	zones  ZoneSet
 	now    func() time.Time
 	log    *slog.Logger
 	mu     sync.Mutex
 	cache  map[string]*cachedZone
+	reads  singleflight.Group // coalesces cache fills
 	locals map[string]chan struct{}
 }
 
@@ -74,18 +75,25 @@ func newEngine(cfg Config) (*engine, error) {
 		host, _ := os.Hostname()
 		cfg.Holder = host + "-" + newID()[:8]
 	}
+	if cfg.UnmanagedTTL <= 0 {
+		cfg.UnmanagedTTL = 15 * time.Minute
+	}
 	e := &engine{
-		cfg: cfg, zones: map[string]bool{}, now: cfg.Now, log: cfg.Logger,
+		cfg: cfg, zones: cfg.ZoneSet, now: cfg.Now, log: cfg.Logger,
 		cache: map[string]*cachedZone{}, locals: map[string]chan struct{}{},
 	}
-	for _, z := range cfg.Zones {
-		z = normZone(z)
-		if z != "" && !e.zones[z] {
-			e.zones[z] = true
-			e.order = append(e.order, z)
+	if e.zones == nil {
+		st := &staticZones{set: map[string]bool{}}
+		for _, z := range cfg.Zones {
+			z = normZone(z)
+			if z != "" && !st.set[z] {
+				st.set[z] = true
+				st.order = append(st.order, z)
+			}
 		}
+		sort.Strings(st.order)
+		e.zones = st
 	}
-	sort.Strings(e.order)
 	return e, nil
 }
 
@@ -128,7 +136,7 @@ func keyString(k rrset.Key) string { return k.Host + " " + k.Type }
 
 func (e *engine) managed(zone string) (string, error) {
 	zone = normZone(zone)
-	if !e.zones[zone] {
+	if !e.zones.Managed(zone) {
 		return zone, fail(ReasonNotFound, "zone %s is not managed by this gate", zone)
 	}
 	return zone, nil

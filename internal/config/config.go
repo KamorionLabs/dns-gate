@@ -24,6 +24,7 @@ type Config struct {
 	Listen            Listen           `yaml:"listen"`
 	Upstream          Upstream         `yaml:"upstream"`
 	Zones             []string         `yaml:"zones"`
+	ZonesDiscovery    ZonesDiscovery   `yaml:"zones_discovery"`
 	CheckOnWrite      *bool            `yaml:"check_on_write"`
 	ReconcileInterval Duration         `yaml:"reconcile_interval"`
 	Limits            Limits           `yaml:"limits"`
@@ -41,6 +42,16 @@ type Config struct {
 
 	Hash     string    `yaml:"-"` // sha256 of the file
 	LoadedAt time.Time `yaml:"-"`
+}
+
+// ZonesDiscovery lists the domains of the EuroDNS account so that zones
+// outside Zones are visible (read-only) and can be brought under management
+// through the managed policy.
+type ZonesDiscovery struct {
+	Enabled bool     `yaml:"enabled"`
+	Include []string `yaml:"include"` // zone globs, default ["*"]
+	Exclude []string `yaml:"exclude"` // zone globs, win over include
+	Refresh Duration `yaml:"refresh"` // listing period, default 1h, minimum 5m
 }
 
 // Group is a named set of subject matchers (an Entra app role or group
@@ -215,12 +226,23 @@ type RecordScope struct {
 }
 
 // Binding grants a role to subjects, acting for a team (the owner of the
-// RRsets they create).
+// RRsets they create). TeamFrom derives the team from a claim of each
+// subject instead of a fixed Team.
 type Binding struct {
 	Role     string    `yaml:"role"`
 	Team     string    `yaml:"team"`
+	TeamFrom *TeamFrom `yaml:"team_from"`
 	Groups   []string  `yaml:"groups"`
 	Subjects []Subject `yaml:"subjects"`
+}
+
+// TeamFrom derives a team from a string claim: Regex (anchored, exactly one
+// capture group) is matched against the claim and the team is Prefix
+// followed by the lowercased capture.
+type TeamFrom struct {
+	Claim  string `yaml:"claim"`
+	Regex  string `yaml:"regex"`
+	Prefix string `yaml:"prefix"`
 }
 
 // Subject matches tokens of an issuer whose claims match all globs.
@@ -412,6 +434,17 @@ func (c *Config) defaults() {
 	for i := range c.Zones {
 		c.Zones[i] = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(c.Zones[i])), ".")
 	}
+	if c.ZonesDiscovery.Refresh == 0 {
+		c.ZonesDiscovery.Refresh = Duration(time.Hour)
+	}
+	if len(c.ZonesDiscovery.Include) == 0 {
+		c.ZonesDiscovery.Include = []string{"*"}
+	}
+	for _, l := range [][]string{c.ZonesDiscovery.Include, c.ZonesDiscovery.Exclude} {
+		for i := range l {
+			l[i] = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(l[i])), ".")
+		}
+	}
 	for i := range c.Issuers {
 		if len(c.Issuers[i].Algorithms) == 0 {
 			c.Issuers[i].Algorithms = DefaultAlgorithms
@@ -466,8 +499,21 @@ func (c *Config) Validate() error {
 		add("upstream.max_retries: must be >= 0")
 	}
 
-	if len(c.Zones) == 0 {
-		add("zones: at least one managed zone is required")
+	if len(c.Zones) == 0 && !c.ZonesDiscovery.Enabled {
+		add("zones: at least one managed zone is required (or zones_discovery.enabled with zones managed from the policy)")
+	}
+	if c.ZonesDiscovery.Refresh.D() < 5*time.Minute {
+		add("zones_discovery.refresh: must be >= 5m (EuroDNS rate limit)")
+	}
+	for _, l := range []struct {
+		name  string
+		globs []string
+	}{{"include", c.ZonesDiscovery.Include}, {"exclude", c.ZonesDiscovery.Exclude}} {
+		for _, g := range l.globs {
+			if g == "" || strings.ContainsAny(g, " ?/") {
+				add("zones_discovery.%s: %q: zone glob with * wildcards expected", l.name, g)
+			}
+		}
 	}
 	seenZone := map[string]bool{}
 	for _, z := range c.Zones {
@@ -612,6 +658,14 @@ func (c *Config) Validate() error {
 		}
 		if b.Team != "" && !teamRe.MatchString(b.Team) {
 			add("%s.team: %q must be a lowercase identifier", at, b.Team)
+		}
+		if b.TeamFrom != nil {
+			if b.Team != "" {
+				add("%s: team and team_from are exclusive", at)
+			}
+			if err := ValidateTeamFrom(b.TeamFrom.Claim, b.TeamFrom.Regex, b.TeamFrom.Prefix); err != nil {
+				add("%s.team_from: %v", at, err)
+			}
 		}
 		if len(b.Subjects) == 0 && len(b.Groups) == 0 {
 			add("%s: groups or subjects required", at)
@@ -825,6 +879,32 @@ func ValidateSubjectTemplate(tmpl string) error {
 	rest := placeholderRe.ReplaceAllString(tmpl, "")
 	if strings.ContainsAny(rest, "{}") || strings.ContainsAny(rest, " \t\n") {
 		return errors.New("only {{claim}} placeholders and separators such as / or : are allowed")
+	}
+	return nil
+}
+
+// teamPrefixRe is what may precede a derived team name: the start of a
+// lowercase identifier.
+var teamPrefixRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,31}$`)
+
+// ValidateTeamFrom checks a team derivation: a claim name, an anchored RE2
+// expression with exactly one capture group and an optional prefix.
+func ValidateTeamFrom(claim, expr, prefix string) error {
+	if strings.TrimSpace(claim) == "" {
+		return errors.New("claim is required")
+	}
+	if !strings.HasPrefix(expr, "^") || !strings.HasSuffix(expr, "$") {
+		return errors.New("regex must be anchored with ^ and $")
+	}
+	re, err := regexp.Compile(expr)
+	if err != nil {
+		return fmt.Errorf("regex: %v", err)
+	}
+	if re.NumSubexp() != 1 {
+		return fmt.Errorf("regex must have exactly one capture group, found %d (use (?:...) for the others)", re.NumSubexp())
+	}
+	if prefix != "" && !teamPrefixRe.MatchString(prefix) {
+		return fmt.Errorf("prefix %q must be up to 32 characters [a-z0-9._-], starting with a letter or digit", prefix)
 	}
 	return nil
 }

@@ -36,8 +36,19 @@ func (e *Engine) Holder() *Holder { return e.h }
 
 func (e *Engine) snap() *Snapshot { return e.h.Current() }
 
-// Managed reports whether the zone is managed by the gate.
-func (e *Engine) Managed(zone string) bool { return e.snap().zones[normZone(zone)] }
+// Managed reports whether the zone is managed by the gate (base zones and
+// zones of the active managed revision).
+func (e *Engine) Managed(zone string) bool { return e.snap().IsManaged(zone) }
+
+// ManagedZones returns the managed zones, sorted.
+func (e *Engine) ManagedZones() []string { return e.snap().Zones() }
+
+// IsUnmanaged reports whether the zone was discovered in the account but is
+// not managed (read-only).
+func (e *Engine) IsUnmanaged(zone string) bool { return e.snap().IsUnmanaged(zone) }
+
+// UnmanagedZones returns the discovered zones that are not managed, sorted.
+func (e *Engine) UnmanagedZones() []string { return e.snap().UnmanagedZones() }
 
 func normZone(z string) string { return strings.TrimSuffix(strings.ToLower(z), ".") }
 

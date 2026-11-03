@@ -247,3 +247,55 @@ func TestGroupsAndPolicySection(t *testing.T) {
 		}
 	}
 }
+
+func TestZonesDiscovery(t *testing.T) {
+	e := env(map[string]string{"EURODNS_API_KEY": "k"})
+	c, err := Parse([]byte(base+"zones_discovery: {enabled: true, exclude: [\"*.Internal.\"]}\n"), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := c.ZonesDiscovery
+	if !d.Enabled || d.Refresh.D() != time.Hour || strings.Join(d.Include, ",") != "*" || strings.Join(d.Exclude, ",") != "*.internal" {
+		t.Fatalf("defaults: %+v", d)
+	}
+	// Without base zones, discovery must be enabled (zones then come from the policy).
+	noZones := strings.Replace(base, "zones: [example.com]\n", "", 1)
+	if _, err := Parse([]byte(noZones), e); err == nil {
+		t.Fatal("zones required without discovery")
+	}
+	if _, err := Parse([]byte(noZones+"zones_discovery: {enabled: true}\n"), e); err != nil {
+		t.Fatal(err)
+	}
+	for name, doc := range map[string]string{
+		"refresh too short": base + "zones_discovery: {enabled: true, refresh: 1m}\n",
+		"bad glob":          base + "zones_discovery: {enabled: true, include: [\"a?b.com\"]}\n",
+		"unknown field":     base + "zones_discovery: {enabled: true, interval: 1h}\n",
+	} {
+		if _, err := Parse([]byte(doc), e); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+}
+
+func TestBindingTeamFrom(t *testing.T) {
+	e := env(map[string]string{"EURODNS_API_KEY": "k"})
+	from := strings.Replace(base, "    team: web\n", "    team_from: {claim: sub, regex: \"^repo:acme/([a-z0-9-]+):.*$\", prefix: gh-}\n", 1)
+	c, err := Parse([]byte(from), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tf := c.Bindings[0].TeamFrom; tf == nil || tf.Claim != "sub" || tf.Prefix != "gh-" {
+		t.Fatalf("team_from: %+v", tf)
+	}
+	for name, doc := range map[string]string{
+		"with team":    strings.Replace(base, "    team: web\n", "    team: web\n    team_from: {claim: sub, regex: \"^(.+)$\"}\n", 1),
+		"unanchored":   strings.Replace(from, `"^repo:acme/([a-z0-9-]+):.*$"`, `"repo:acme/([a-z0-9-]+)"`, 1),
+		"two captures": strings.Replace(from, `"^repo:acme/([a-z0-9-]+):.*$"`, `"^repo:(acme)/([a-z0-9-]+):.*$"`, 1),
+		"bad prefix":   strings.Replace(from, "prefix: gh-", "prefix: \"GH \"", 1),
+		"no claim":     strings.Replace(from, "claim: sub, ", "", 1),
+	} {
+		if _, err := Parse([]byte(doc), e); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+}

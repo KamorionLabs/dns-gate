@@ -85,11 +85,24 @@ type Role struct {
 }
 
 // Binding grants a role, acting for a team, to groups and/or subjects.
+// TeamFrom derives the team of each subject from one of its claims instead
+// of the fixed Team.
 type Binding struct {
 	Role     string           `json:"role"`
 	Team     string           `json:"team"`
+	TeamFrom *TeamFrom        `json:"team_from,omitempty"`
 	Groups   []string         `json:"groups,omitempty"`
 	Subjects []SubjectMatcher `json:"subjects,omitempty"`
+}
+
+// TeamFrom derives a team from a string claim: Regex (anchored, exactly one
+// capture group) is matched against the claim value and the team is Prefix
+// followed by the lowercased capture. A subject whose claim does not match,
+// or whose team would not be a valid team name, is not bound.
+type TeamFrom struct {
+	Claim  string `json:"claim"`
+	Regex  string `json:"regex"`
+	Prefix string `json:"prefix,omitempty"`
 }
 
 // VirtualKey as stored in a policy (never the key itself).
@@ -104,8 +117,11 @@ type VirtualKey struct {
 	AllowedCIDRs []string   `json:"allowed_cidrs,omitempty"`
 }
 
-// PolicyDocument is the managed (editable) layer.
+// PolicyDocument is the managed (editable) layer. Zones are brought under
+// management in addition to the base zones; each must match
+// policy.bounds.zones and exist in the EuroDNS account (zones_discovery).
 type PolicyDocument struct {
+	Zones       []string         `json:"zones,omitempty"`
 	Groups      map[string]Group `json:"groups"`
 	Roles       map[string]Role  `json:"roles"`
 	Bindings    []Binding        `json:"bindings"`
@@ -145,6 +161,20 @@ type BaseLayer struct {
 	Protected  []Protected    `json:"protected"`
 	Bounds     Bounds         `json:"bounds"`
 	Document   PolicyDocument `json:"document"` // base groups, roles, bindings, keys
+	// Discovery is the zones_discovery state, absent when disabled.
+	Discovery *ZonesDiscovery `json:"zones_discovery,omitempty"`
+}
+
+// ZonesDiscovery is the state of the account zone listing.
+type ZonesDiscovery struct {
+	Enabled       bool       `json:"enabled"`
+	Include       []string   `json:"include"`
+	Exclude       []string   `json:"exclude"`
+	Refresh       string     `json:"refresh"`
+	Loaded        bool       `json:"loaded"` // at least one listing succeeded
+	Count         int        `json:"count"`  // zones discovered after include/exclude
+	LastRefreshAt *time.Time `json:"last_refresh_at,omitempty"`
+	Error         string     `json:"error,omitempty"` // last listing error, if it failed
 }
 
 // PolicySettings mirrors the policy section of the config.
@@ -261,6 +291,7 @@ type ExplainResponse struct {
 type WhoCanEntry struct {
 	Role     string           `json:"role"`
 	Team     string           `json:"team"`
+	TeamFrom *TeamFrom        `json:"team_from,omitempty"`
 	Layer    string           `json:"layer"`
 	Groups   []string         `json:"groups,omitempty"`
 	Subjects []SubjectMatcher `json:"subjects,omitempty"`

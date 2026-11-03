@@ -166,14 +166,27 @@ func (m *mcpServer) canRead(subj *identity.Subject, zone string) bool {
 	return m.s.cfg.Authz.Allow(subj, policy.ActionUIRead, zone) || m.s.cfg.Authz.Allow(subj, policy.ActionDNSRead, zone)
 }
 
+// readable returns the managed and unmanaged (discovered) zones the subject
+// may read.
 func (m *mcpServer) readable(subj *identity.Subject) map[string]bool {
 	out := map[string]bool{}
-	for _, z := range m.s.cfg.Config.Zones {
-		if m.canRead(subj, z) {
-			out[z] = true
+	for _, list := range [][]string{m.s.pol.ManagedZones(), m.s.pol.UnmanagedZones()} {
+		for _, z := range list {
+			if m.canRead(subj, z) {
+				out[z] = true
+			}
 		}
 	}
 	return out
+}
+
+// inventoryError keeps refusals readable for the agent and hides upstream
+// details.
+func inventoryError(err error) error {
+	if ze, ok := zonewrite.AsError(err); ok && (ze.Reason == zonewrite.ReasonForbidden || ze.Reason == zonewrite.ReasonNotFound) {
+		return errors.New(ze.Message)
+	}
+	return errors.New("inventory unavailable")
 }
 
 func normZoneArg(z string) string {
@@ -191,7 +204,7 @@ type listZonesOut struct {
 }
 
 type listRRsetsIn struct {
-	Zone   string `json:"zone" jsonschema:"managed zone name, e.g. example.com"`
+	Zone   string `json:"zone" jsonschema:"zone name (managed or unmanaged), e.g. example.com"`
 	Status string `json:"status,omitempty" jsonschema:"filter: managed, tainted, pending, foreign or missing"`
 	Host   string `json:"host,omitempty" jsonschema:"host glob relative to the zone, * matches any characters, @ is the apex"`
 	Type   string `json:"type,omitempty" jsonschema:"record type, e.g. CNAME"`
@@ -200,12 +213,13 @@ type listRRsetsIn struct {
 
 type listRRsetsOut struct {
 	Zone         string        `json:"zone"`
+	Unmanaged    bool          `json:"unmanaged,omitempty"`
 	LastSyncedAt *time.Time    `json:"last_synced_at,omitempty"`
 	RRsets       []uiapi.RRset `json:"rrsets"`
 }
 
 type getRRsetIn struct {
-	Zone string `json:"zone" jsonschema:"managed zone name"`
+	Zone string `json:"zone" jsonschema:"zone name (managed or unmanaged)"`
 	Host string `json:"host" jsonschema:"host relative to the zone, @ for the apex"`
 	Type string `json:"type" jsonschema:"record type"`
 }
@@ -269,7 +283,7 @@ type adoptApplyIn struct {
 func (m *mcpServer) addReadTools(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_zones",
-		Description: "List the DNS zones managed by the gate that you can read, with counts of managed, foreign, tainted and pending RRsets.",
+		Description: "List the DNS zones you can read, with counts of managed, foreign, tainted and pending RRsets. Zones flagged unmanaged exist in the EuroDNS account but are not managed by the gate: their RRsets are readable (list_rrsets, get_rrset) but cannot be changed or adopted until a policy administrator brings them under management.",
 		Annotations: readOnly("List zones"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, listZonesOut, error) {
 		subj, err := m.subject(ctx, req)
@@ -306,9 +320,9 @@ func (m *mcpServer) addReadTools(srv *mcp.Server) {
 		}
 		inv, err := m.s.cfg.Engine.Inventory(ctx, subj, zone)
 		if err != nil {
-			return nil, listRRsetsOut{}, errors.New("inventory unavailable")
+			return nil, listRRsetsOut{}, inventoryError(err)
 		}
-		out := listRRsetsOut{Zone: inv.Zone, LastSyncedAt: inv.LastSyncedAt, RRsets: []uiapi.RRset{}}
+		out := listRRsetsOut{Zone: inv.Zone, Unmanaged: inv.Unmanaged, LastSyncedAt: inv.LastSyncedAt, RRsets: []uiapi.RRset{}}
 		for _, rs := range inv.RRsets {
 			if (in.Status == "" || rs.Status == in.Status) && (in.Host == "" || glob.Match(strings.ToLower(in.Host), rs.Host)) &&
 				(in.Type == "" || strings.EqualFold(in.Type, rs.Type)) && (in.Owner == "" || rs.Owner == in.Owner) {
@@ -334,7 +348,7 @@ func (m *mcpServer) addReadTools(srv *mcp.Server) {
 		}
 		inv, err := m.s.cfg.Engine.Inventory(ctx, subj, zone)
 		if err != nil {
-			return nil, getRRsetOut{}, errors.New("inventory unavailable")
+			return nil, getRRsetOut{}, inventoryError(err)
 		}
 		out := getRRsetOut{History: []uiapi.AuditEntry{}}
 		host := strings.ToLower(in.Host)
@@ -395,7 +409,7 @@ func (m *mcpServer) addReadTools(srv *mcp.Server) {
 		if err != nil {
 			return nil, uiapi.AuditPage{}, errors.New("invalid audit query")
 		}
-		all := len(readable) == len(m.s.cfg.Config.Zones)
+		all := m.s.readsEveryManagedZone(readable)
 		page := uiapi.AuditPage{Entries: []uiapi.AuditEntry{}, NextCursor: next}
 		for _, e := range events {
 			if (e.Zone == "" && all) || readable[e.Zone] {

@@ -212,3 +212,48 @@ func TestSubjectFromClaims(t *testing.T) {
 		t.Fatal("bound claims not enforced on UI subjects")
 	}
 }
+
+// One binding for every pipeline whose subject matches a glob, each with its
+// own team derived from the subject; the issuer bound claim is a glob too.
+func TestTeamFromSubject(t *testing.T) {
+	p := oidctest.New()
+	t.Cleanup(p.Close)
+	c := &config.Config{
+		Issuers: []config.Issuer{{
+			Name: "ci", Issuer: p.URL, Audiences: []string{"eurodns-gate"},
+			BoundClaims: map[string]config.StringList{"sub": {"sc://org/project/*"}},
+			Category:    "pipeline", Algorithms: config.DefaultAlgorithms, ClockSkew: config.Duration(time.Minute),
+		}},
+		Roles: map[string]config.Role{"pipeline-writer": {}},
+		Bindings: []config.Binding{{
+			Role:     "pipeline-writer",
+			TeamFrom: &config.TeamFrom{Claim: "sub", Regex: `^sc://[^/]+/[^/]+/(eurodns-gate-.+)$`},
+			Subjects: []config.Subject{{Issuer: "ci", Claims: map[string]config.StringList{"sub": {"sc://org/project/eurodns-gate-*"}}}},
+		}},
+	}
+	a, err := New(c, p.Client(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for sub, team := range map[string]string{"sc://org/project/eurodns-gate-web": "eurodns-gate-web", "sc://org/project/eurodns-gate-shop": "eurodns-gate-shop"} {
+		s, err := a.Authenticate(bearer(p.Sign(map[string]any{"sub": sub, "aud": "eurodns-gate"})))
+		if err != nil {
+			t.Fatalf("%s: %v", sub, err)
+		}
+		if strings.Join(s.Teams, ",") != team || strings.Join(s.Roles, ",") != "pipeline-writer" {
+			t.Fatalf("%s: roles %v teams %v", sub, s.Roles, s.Teams)
+		}
+	}
+	// Matching the issuer but not the binding: no role.
+	if _, err := a.Authenticate(bearer(p.Sign(map[string]any{"sub": "sc://org/project/other", "aud": "eurodns-gate"}))); status(err) != http.StatusForbidden {
+		t.Fatalf("unbound subject: %v", err)
+	}
+	// Derived team that is not a valid team name: the binding does not apply.
+	if _, err := a.Authenticate(bearer(p.Sign(map[string]any{"sub": "sc://org/project/eurodns-gate-a b", "aud": "eurodns-gate"}))); status(err) != http.StatusForbidden {
+		t.Fatalf("invalid derived team: %v", err)
+	}
+	// Outside the issuer bound claim glob.
+	if _, err := a.Authenticate(bearer(p.Sign(map[string]any{"sub": "sc://org/other/eurodns-gate-web", "aud": "eurodns-gate"}))); status(err) != http.StatusForbidden {
+		t.Fatalf("bound claims: %v", err)
+	}
+}
