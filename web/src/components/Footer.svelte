@@ -29,7 +29,7 @@
     font-size: var(--t-caption);
   }
   .inner {
-    max-width: 1320px;
+    max-width: var(--page-max);
     margin: 0 auto;
     padding: var(--s4) var(--s6);
     display: flex;

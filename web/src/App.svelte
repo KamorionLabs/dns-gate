@@ -52,7 +52,7 @@
   main {
     flex: 1;
     width: 100%;
-    max-width: 1320px;
+    max-width: var(--page-max);
     margin: 0 auto;
     padding: var(--s8) var(--s6) var(--s10);
   }
