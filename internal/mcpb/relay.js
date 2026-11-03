@@ -5,7 +5,8 @@
 //
 // Sign-in is the authorization code flow with PKCE (S256), state and nonce,
 // through the system browser and a loopback redirect
-// (http://localhost:<ephemeral port>/callback). The refresh token is kept in
+// (http://localhost:<ephemeral port>, no path: Entra ID ignores the port of a
+// registered http://localhost, not the path). The refresh token is kept in
 // ~/.eurodns-gate/<host>.json (0600) and used silently; the browser opens
 // again only when it no longer works.
 //
@@ -289,7 +290,7 @@ class Auth {
     const state = randomString(16);
     const nonce = randomString(16);
     const loop = await startLoopback();
-    const redirectURI = `http://localhost:${loop.port}/callback`;
+    const redirectURI = `http://localhost:${loop.port}`;
     const auth = new URL(meta.authorization_endpoint);
     const q = auth.searchParams;
     q.set('response_type', 'code');
@@ -370,7 +371,7 @@ function startLoopback() {
       res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       res.end(html);
     };
-    if (req.method !== 'GET' || u.pathname !== '/callback' || !loop.onCallback) {
+    if (req.method !== 'GET' || u.pathname !== '/' || !loop.onCallback) {
       respond(404, page('Not found', 'Nothing here.'));
       return;
     }

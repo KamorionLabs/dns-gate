@@ -63,7 +63,7 @@ function fakeServer() {
       assert.equal(q.get('client_id'), f.clientID);
       assert.equal(q.get('code_challenge_method'), 'S256');
       assert.equal(q.get('scope'), 'openid offline_access api://gate/.default');
-      assert.match(redirect, /^http:\/\/localhost:\d+\/callback$/);
+      assert.match(redirect, /^http:\/\/localhost:\d+$/, 'loopback redirect without a path');
       assert.ok(q.get('state') && q.get('nonce') && q.get('code_challenge'));
       const back = new URL(redirect);
       back.searchParams.set('state', q.get('state'));
@@ -209,7 +209,7 @@ function startRelay(f, tokenDir, extraEnv = {}, args = [RELAY]) {
 }
 
 // browse plays the user's browser: authorize, then follow the redirect to
-// the loopback callback.
+// the loopback listener.
 async function browse(url) {
   const a = await fetch(url, { redirect: 'manual' });
   assert.equal(a.status, 302);
