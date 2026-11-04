@@ -131,21 +131,16 @@
   .decision {
     margin-left: auto;
     font-size: 12px;
-    font-weight: 600;
-    padding: 1px 8px;
-    border-radius: 6px;
+    font-weight: 500;
   }
   .decision.allow {
     color: var(--stamp);
-    background: var(--stamp-wash);
   }
   .decision.deny {
     color: var(--wax);
-    background: var(--wax-wash);
   }
   .decision.error {
     color: var(--brass);
-    background: var(--brass-wash);
   }
   .reason {
     color: var(--ink-2);

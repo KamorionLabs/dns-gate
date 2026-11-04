@@ -594,20 +594,17 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    height: 24px;
-    padding: 0 9px 0 7px;
+    padding: 0;
     border: 0;
-    border-radius: 12px;
+    background: none;
     font-size: 12px;
-    font-weight: 600;
+    font-weight: 500;
     cursor: pointer;
   }
   .chip.wax {
-    background: var(--wax-wash);
     color: var(--wax);
   }
   .chip.brass {
-    background: var(--brass-wash);
     color: var(--brass);
   }
   .chip:hover {

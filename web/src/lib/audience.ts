@@ -168,6 +168,21 @@ export function inZone(a: Audience, zone: string): Audience | undefined {
   return { ...a, read, writes };
 }
 
+export interface ZoneGrants {
+  /** A zone, or "*" for every zone. */
+  zone: string;
+  grants: Omit<WriteGrant, 'zones'>[];
+}
+
+/** The write grants of an audience, one entry per zone ("*" first), each with what it may change there. */
+export function writesByZone(a: Audience): ZoneGrants[] {
+  const by = new Map<string, Omit<WriteGrant, 'zones'>[]>();
+  for (const { zones, ...g } of a.writes) for (const z of zones) by.set(z, [...(by.get(z) ?? []), g]);
+  return [...by.entries()]
+    .sort(([x], [y]) => (x === '*' ? -1 : y === '*' ? 1 : x.localeCompare(y)))
+    .map(([zone, grants]) => ({ zone, grants }));
+}
+
 /** "any name", "@ (the domain)", "validation names (_…)", or the list. */
 export function hostsText(hosts: string[]): string {
   if (!hosts.length || hosts.includes('**')) return 'any name';
