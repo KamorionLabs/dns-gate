@@ -29,18 +29,31 @@
   `eurodns_zone` and `eurodns_record_set` data sources; token sources `token`,
   `token_file`, `token_command`, `aws_web_identity`.
 
-## v0.2
+## Shipped since v0.1 (up to v0.5)
 
 - Virtual keys (scoped, hashed, expiring, CIDR-bound) for existing EuroDNS clients.
-- `rebase` and `ephemeral_ttl` roles for ACME clients; upstream pull request to lego
-  for a configurable API URL.
+- `rebase_on_save` and `ephemeral_ttl` roles for ACME clients.
+- Azure DevOps OIDC issuer, bound to dedicated service connections, and teams
+  derived from a claim (`team_from`).
+- Zone discovery: every zone of the account listed read-only, brought under
+  management from the UI by a policy revision.
+- Policy delegations: a pipeline stack manages its own roles and bindings within
+  bounds, without approval; delegated objects shown with a badge in the UI.
+- Web UI: Connect page, Claude Desktop extension for the MCP endpoint, simple and
+  expert policy views.
+- Publication: GitHub releases, multi-arch image and Helm chart on GHCR, Terraform
+  provider on the OpenTofu registry.
+- First production use (November 2026): 14 zones, OpenTofu pipelines writing
+  certificate validation and site records, the web UI and the MCP server.
+
+## Next
+
+- Upstream pull request to lego for a configurable API URL.
 - Shared rate limiter in the store for multiple replicas.
 - Prometheus metrics (upstream requests, waits, denials by reason, tainted RRsets).
-- Bulk adoption command for migrating existing zones.
-- Publication: GitHub releases, container registry, Terraform and OpenTofu registries.
-- Policy delegations in the UI: badge and owner on delegated roles and bindings,
-  takeover from the editor (API only today), and rebasing open proposals over
-  delegated changes instead of marking them stale.
+- Terraform provider on the HashiCorp registry.
+- Policy delegations in the UI: takeover from the editor (API only today), and
+  rebasing open proposals over delegated changes instead of marking them stale.
 
 ## Later
 
@@ -60,9 +73,11 @@
   repository holding the base config, instead of (or before) activating it in the
   store.
 
-## To validate against the real API
+## Open questions on the EuroDNS API
 
-Spike on a test domain before v0.1 is called usable:
+Production use has exercised full-zone saves through the gate, adoption of existing
+records, apex records and zone discovery over a whole account without hitting the
+points below, but none of them has had a dedicated test yet:
 
 1. **PUT semantics**: does `PUT /dns-zones/{d}` replace the whole zone (records
    absent from the body deleted)? Behaviour of URL and mail forwards when omitted.

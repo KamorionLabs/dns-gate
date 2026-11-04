@@ -1,7 +1,8 @@
 # eurodns-gate — Design
 
-Status: pre-alpha. Nothing in this document has been validated against the live
-EuroDNS API yet; see [ROADMAP.md](ROADMAP.md#to-validate-against-the-real-api).
+Status: beta. The design below has run in production against the live EuroDNS API
+since November 2026; the points of the API still worth an explicit test are listed in
+[ROADMAP.md](ROADMAP.md#open-questions-on-the-eurodns-api).
 
 ## 1. Problem
 

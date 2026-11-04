@@ -2,6 +2,8 @@
 
 A security gateway in front of the [EuroDNS](https://www.eurodns.com) REST API.
 
+**How it works, with diagrams: <https://kamorionlabs.github.io/eurodns-gate/>**
+
 EuroDNS API keys carry no scope: one key reaches every domain, contact, nameserver
 profile, subscription and DNS zone of the account. eurodns-gate holds that key
 alone, authenticates clients with short-lived OIDC tokens and enforces, on every
@@ -27,8 +29,10 @@ request:
 The API contract stays the EuroDNS one: an existing EuroDNS client works through the
 gate by changing its base URL and credentials.
 
-> Status: **pre-alpha**. Not yet tested against the live EuroDNS API. Do not use in
-> production.
+> Status: **beta**. In production since November 2026 for one organization: 14 zones,
+> OpenTofu pipelines through the Terraform provider, the web UI and the MCP server.
+> Versions are still 0.x: configuration and API may change before 1.0, always with
+> a note in the release.
 
 Also included:
 
@@ -57,14 +61,61 @@ Also included:
 
 ## How it works
 
-```
- Terraform / CI / ACME / humans ──(OIDC token or scoped key)──► eurodns-gate ──(EuroDNS key)──► rest-api.eurodns.com
-                                                                     │
-                                                         store: ownership, locks, audit
+```mermaid
+flowchart LR
+  subgraph callers["Callers, each with its own identity"]
+    direction TB
+    tf["OpenTofu / Terraform<br/>provider in gate mode"]
+    ci["CI pipelines<br/>OIDC token"]
+    people["People<br/>web UI, Entra ID SSO"]
+    agents["AI assistants<br/>MCP at /mcp"]
+    legacy["Existing EuroDNS clients<br/>scoped virtual key"]
+  end
+
+  subgraph gate["eurodns-gate"]
+    direction TB
+    authn["1 · Authenticate<br/>issuer, signature, expiry, audience"]
+    route["2 · Route<br/>unknown operation: denied"]
+    zone["3 · Zone<br/>must be managed"]
+    rbac["4 · RBAC<br/>zone, host pattern, record type"]
+    own["5 · Ownership<br/>only record sets the team owns"]
+    write["6 · Safe write<br/>zone lock, If-Match, dry run, limits"]
+    audit["7 · Audit<br/>who, what, diff, snapshot"]
+    authn --> route --> zone --> rbac --> own --> write --> audit
+  end
+
+  store[("Store<br/>ownership, zone locks,<br/>audit, policy revisions")]
+  eurodns["EuroDNS REST API<br/>rest-api.eurodns.com"]
+
+  callers -- "short-lived token" --> gate
+  gate -- "the only EuroDNS key,<br/>one shared rate budget" --> eurodns
+  gate <--> store
 ```
 
 Three layers of protection: the EuroDNS user scope (upstream), RBAC and ownership
-(gate). Details in [docs/DESIGN.md](docs/DESIGN.md).
+(gate). Every write, whatever the client sent, becomes one checked save of the zone
+as it is now:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant C as Client
+  participant G as eurodns-gate
+  participant S as Store
+  participant E as EuroDNS
+  C->>G: change (token, If-Match)
+  G->>S: lock the zone, compare the zone version
+  G->>E: read the current zone
+  Note over G: diff the request against it, check RBAC,<br/>ownership, protected records, change limit
+  G->>S: pending ownership claim
+  G->>E: check (dry run), then save the whole zone
+  G->>E: read back
+  G->>S: claim active, version bumped, unlock, audit
+  G-->>C: EuroDNS response with the new ETag
+```
+
+Details in [docs/DESIGN.md](docs/DESIGN.md) and on the
+[project site](https://kamorionlabs.github.io/eurodns-gate/).
 
 ## Authentication
 
@@ -77,8 +128,13 @@ GitHub Actions, GitLab CI, Kubernetes service accounts and **Entra ID**:
   registration (`api://<gate-app>/.default`);
 - bindings use app roles (`roles` claim, not groups), the subject is `tid`+`oid`,
   the actor category comes from `idtyp`;
-- tenant-specific issuers only (`/common` is refused), and the raw Azure DevOps
-  OIDC token (audience `api://AzureADTokenExchange`) is never accepted.
+- tenant-specific issuers only (`/common` is refused).
+
+Azure DevOps pipelines can also present the OIDC token Azure DevOps issues for a
+service connection, without any cloud login. Its audience (`api://AzureADTokenExchange`)
+is shared by every service connection of the organization, so the gate only trusts it
+bound to the exact subjects of service connections dedicated to the gate — see
+[docs/CONFIG.md](docs/CONFIG.md#azure-devops-oidc).
 
 Existing EuroDNS clients (ACME) can use scoped virtual keys instead. Details in
 [docs/DESIGN.md](docs/DESIGN.md#9-authentication).
