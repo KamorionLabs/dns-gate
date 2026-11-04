@@ -14,6 +14,27 @@
   import Matcher from '../components/policy/Matcher.svelte';
   import { teamFromText } from '../lib/team';
   import type { DelegatedOwner } from '../lib/types';
+  import SimpleAccess from '../components/policy/SimpleAccess.svelte';
+
+  // Simple view by default; the expert view lists every layer and object.
+  const VIEW_KEY = 'eurodns-gate.policy.view';
+  let view = $state<'simple' | 'expert'>(
+    (() => {
+      try {
+        return localStorage.getItem(VIEW_KEY) === 'expert' ? 'expert' : 'simple';
+      } catch {
+        return 'simple';
+      }
+    })(),
+  );
+  function setView(v: 'simple' | 'expert') {
+    view = v;
+    try {
+      localStorage.setItem(VIEW_KEY, v);
+    } catch {
+      // private mode: the choice lasts for this page only
+    }
+  }
 
   type L<T> = { layer: Layer; rev?: string; name?: string; owner?: DelegatedOwner; item: T };
 
@@ -57,6 +78,13 @@
   {#snippet children(p)}
     {@const L = layered(p)}
     {@const zones = [...new Set([...p.base.zones, ...(p.managed?.zones ?? [])])].sort()}
+    <div class="viewswitch" role="group" aria-label="View">
+      <button type="button" aria-pressed={view === 'simple'} onclick={() => setView('simple')}>Simple</button>
+      <button type="button" aria-pressed={view === 'expert'} onclick={() => setView('expert')}>Expert</button>
+    </div>
+    {#if view === 'simple'}
+      <SimpleAccess policy={p} {zones} />
+    {:else}
     <div class="page">
       <aside class="toc" aria-label="On this page">
         {#each sections as [id, label] (id)}<a href={'#/policy'} onclick={(e) => { e.preventDefault(); document.getElementById('sec-' + id)?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }}>{label}</a>{/each}
@@ -212,10 +240,35 @@
         </section>
       </div>
     </div>
+    {/if}
   {/snippet}
 </PolicyFrame>
 
 <style>
+  .viewswitch {
+    display: inline-flex;
+    justify-self: start;
+    margin: calc(-1 * var(--s3)) 0 var(--s5);
+    padding: 2px;
+    border-radius: var(--r-md);
+    background: var(--rule-soft);
+  }
+  .viewswitch button {
+    border: 0;
+    background: none;
+    padding: 4px var(--s3);
+    border-radius: var(--r-sm);
+    color: var(--ink-3);
+    font: inherit;
+    font-size: 12.5px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  .viewswitch button[aria-pressed='true'] {
+    background: var(--sheet);
+    color: var(--ink);
+    box-shadow: 0 1px 2px var(--rule-strong);
+  }
   .discovery {
     display: grid;
     gap: var(--s2);
