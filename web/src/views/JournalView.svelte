@@ -203,7 +203,7 @@
   <div class="timeline">
     {#each groups as g (g.day)}
       <section>
-        <h2 class="day">{g.label}</h2>
+        <h2 class="day">{g.label} <span class="dcount num">{g.items.length} {g.items.length === 1 ? 'event' : 'events'}</span></h2>
         {#each g.items as e (e.request_id + e.time)}<AuditItem entry={e} />{/each}
       </section>
     {/each}
@@ -301,6 +301,11 @@
   }
   section + section {
     margin-top: var(--s2);
+  }
+  .dcount {
+    margin-left: var(--s2);
+    font-weight: 400;
+    color: var(--ink-4);
   }
   .day {
     position: sticky;

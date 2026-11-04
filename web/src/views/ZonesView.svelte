@@ -513,19 +513,15 @@
     display: inline-flex;
     align-items: center;
     gap: 5px;
-    height: 22px;
-    padding: 0 8px 0 6px;
-    border-radius: 11px;
+    padding: 0;
     font-size: 12px;
-    font-weight: 600;
+    font-weight: 500;
     text-decoration: none;
   }
   .chip.wax {
-    background: var(--wax-wash);
     color: var(--wax);
   }
   .chip.brass {
-    background: var(--brass-wash);
     color: var(--brass);
   }
   .chip:hover {
