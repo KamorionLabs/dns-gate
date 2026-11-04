@@ -277,7 +277,7 @@
     color: var(--ink-3);
     cursor: pointer;
     font-weight: 500;
-    font-size: 12.5px;
+    font-size: 13px;
   }
   .seg button:hover {
     color: var(--ink);

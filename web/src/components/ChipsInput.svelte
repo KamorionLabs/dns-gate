@@ -27,7 +27,7 @@
 
 <div class="chips" class:mono class:invalid>
   {#each values as v, i (v)}
-    <span class="chip">{v}<button type="button" aria-label="Remove {v}" onclick={() => (values = values.filter((_, k) => k !== i))}><Icon name="x" size={10} /></button></span>
+    <span class="chip">{v}<button type="button" aria-label="Remove {v}" onclick={() => (values = values.filter((_, k) => k !== i))}><Icon name="x" size={12} /></button></span>
   {/each}
   <input {id} aria-label={label} placeholder={values.length ? '' : placeholder} bind:value={text} onkeydown={onkey} onblur={commit} />
 </div>

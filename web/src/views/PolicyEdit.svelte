@@ -208,7 +208,7 @@
                   <FieldError {errors} {path} />
                   <span class="lbl">Members <span class="dim">(a token matching any member is in the group)</span></span>
                   <MatcherEditor bind:matchers={g.members} {issuers} path="{path}.members" {errors} />
-                  <button class="rm" type="button" onclick={() => model!.groups.splice(gi, 1)}><Icon name="trash" size={13} />Remove group</button>
+                  <button class="rm" type="button" onclick={() => model!.groups.splice(gi, 1)}><Icon name="trash" size={14} />Remove group</button>
                 </article>
               {/each}
             </section>
@@ -247,7 +247,7 @@
                     <label class="inline"><span class="lbl">Max changes / request</span><input class="in mono short" type="number" min="0" bind:value={r.max_changes} placeholder="∞" /></label>
                   </div>
                   <FieldError {errors} path="{path}.ephemeral_ttl" />
-                  <button class="rm" type="button" onclick={() => model!.roles.splice(ri, 1)}><Icon name="trash" size={13} />Remove role</button>
+                  <button class="rm" type="button" onclick={() => model!.roles.splice(ri, 1)}><Icon name="trash" size={14} />Remove role</button>
                 </article>
               {/each}
             </section>
@@ -290,7 +290,7 @@
                   <span class="lbl">Individual subjects</span>
                   <MatcherEditor bind:matchers={b.subjects} {issuers} path="{path}.subjects" {errors} noun="subject" />
                   <FieldError {errors} {path} />
-                  <button class="rm" type="button" onclick={() => model!.bindings.splice(bi, 1)}><Icon name="trash" size={13} />Remove binding</button>
+                  <button class="rm" type="button" onclick={() => model!.bindings.splice(bi, 1)}><Icon name="trash" size={14} />Remove binding</button>
                 </article>
               {/each}
             </section>
@@ -333,7 +333,7 @@
                   </div>
                   <span class="lbl">Allowed source CIDRs</span>
                   <ChipsInput bind:values={k.cidrs} label="Allowed CIDRs" placeholder="10.0.0.0/8" />
-                  <button class="rm" type="button" onclick={() => model!.keys.splice(ki, 1)}><Icon name="trash" size={13} />Remove key</button>
+                  <button class="rm" type="button" onclick={() => model!.keys.splice(ki, 1)}><Icon name="trash" size={14} />Remove key</button>
                 </article>
               {/each}
             </section>
@@ -463,7 +463,7 @@
     align-items: center;
     gap: var(--s2);
     color: var(--ink-3);
-    font-size: 12.5px;
+    font-size: 13px;
   }
   section {
     display: grid;
@@ -525,7 +525,7 @@
   }
   .in.mono {
     font-family: var(--font-record);
-    font-size: 12.5px;
+    font-size: 13px;
   }
   textarea.in {
     height: auto;
@@ -607,7 +607,7 @@
     color: var(--seal-ink);
     cursor: pointer;
     font-weight: 500;
-    font-size: 12.5px;
+    font-size: 13px;
   }
   .secret {
     display: flex;
@@ -647,7 +647,7 @@
   }
   .pair :global(.copy) {
     color: var(--ink);
-    font-size: 12.5px;
+    font-size: 13px;
     word-break: break-all;
     text-align: left;
   }
@@ -681,7 +681,7 @@
     grid-template-columns: 1fr auto;
     gap: 4px var(--s3);
     margin: 0;
-    font-size: 12.5px;
+    font-size: 13px;
   }
   .sum dt {
     color: var(--ink-3);
@@ -712,7 +712,7 @@
     border-radius: var(--r-md);
     background: var(--wax-wash);
     color: var(--wax);
-    font-size: 12.5px;
+    font-size: 13px;
   }
   .errsum ul {
     margin: 4px 0 0;
@@ -733,7 +733,7 @@
     text-decoration: underline;
   }
   .errsum .mono {
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ink-2);
   }
   .fail {

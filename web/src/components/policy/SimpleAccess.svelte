@@ -35,7 +35,7 @@
       Who can do what through the gate. Anyone not listed here is refused, and a team only changes the records it owns.
     </p>
     <label class="filter">
-      <Icon name="filter" size={13} />
+      <Icon name="filter" size={14} />
       <select bind:value={zone} aria-label="Show one zone">
         <option value="">All zones</option>
         {#each zones as z (z)}<option value={z}>{z}</option>{/each}
@@ -44,9 +44,9 @@
   </div>
 
   <p class="summary">
-    <span><Icon name="shield" size={13} />{plural(people.length, 'group of people', 'groups of people')}</span>
-    <span><Icon name="flask" size={13} />{plural(pipelines.length, 'pipeline', 'pipelines')}</span>
-    {#if keys.length || !zone}<span><Icon name="key" size={13} />{plural(keys.length, 'API key', 'API keys')}</span>{/if}
+    <span><Icon name="shield" size={14} />{plural(people.length, 'group of people', 'groups of people')}</span>
+    <span><Icon name="flask" size={14} />{plural(pipelines.length, 'pipeline', 'pipelines')}</span>
+    {#if keys.length || !zone}<span><Icon name="key" size={14} />{plural(keys.length, 'API key', 'API keys')}</span>{/if}
   </p>
 
   <section>
@@ -159,7 +159,7 @@
     gap: var(--s4);
     margin: calc(-1 * var(--s3)) 0 0;
     color: var(--ink-3);
-    font-size: 12.5px;
+    font-size: 13px;
   }
   .summary span {
     display: inline-flex;
@@ -190,7 +190,7 @@
   }
   .card h3 {
     font-size: 15px;
-    font-weight: 650;
+    font-weight: 600;
     overflow-wrap: anywhere;
   }
   .sub {
@@ -216,14 +216,12 @@
   .caps li.ro {
     display: block;
     color: var(--ink-3);
-    font-style: italic;
   }
   .verb {
     justify-self: start;
     font-size: 11px;
     font-weight: 600;
-    letter-spacing: 0.02em;
-    text-transform: uppercase;
+    letter-spacing: 0.01em;
     padding: 1px 6px;
     border-radius: var(--r-sm);
   }
@@ -250,7 +248,7 @@
   }
   .note {
     margin-left: 6px;
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ink-3);
   }
   .zones {
@@ -262,9 +260,9 @@
     font-size: 12px;
   }
   .zchip {
-    font-size: 11.5px;
+    font-size: 12px;
     padding: 0 7px;
-    border-radius: 10px;
+    border-radius: 6px;
     color: var(--ink);
     box-shadow: inset 0 0 0 1px var(--rule-strong);
   }
@@ -289,7 +287,7 @@
   }
   .plist th {
     text-align: left;
-    font-size: 11.5px;
+    font-size: 12px;
     font-weight: 600;
     color: var(--ink-3);
     padding: 0 var(--s3) var(--s2);

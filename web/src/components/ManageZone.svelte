@@ -34,7 +34,7 @@
 <div class="manage" class:compact>
   {#if admin}
     <button class="btn primary" type="button" disabled={busy} onclick={manage}>
-      <Icon name="shield" size={13} />{busy ? 'Preparing proposal…' : 'Manage this zone'}
+      <Icon name="shield" size={14} />{busy ? 'Preparing proposal…' : 'Manage this zone'}
     </button>
     {#if !compact}
       <p class="hint">Creates a policy proposal adding {zone} to the managed zones. Once another approver approves it and it is activated, the zone behaves like any managed zone and its records can be adopted.</p>
@@ -68,7 +68,7 @@
     gap: 6px;
     margin: 0;
     color: var(--ink-3);
-    font-size: 12.5px;
+    font-size: 13px;
     max-width: 60ch;
   }
   .compact .hint {
@@ -89,7 +89,7 @@
     border-radius: var(--r-md);
     background: var(--wax-wash);
     color: var(--wax);
-    font-size: 12.5px;
+    font-size: 13px;
   }
   .err ul {
     margin: var(--s1) 0 0;

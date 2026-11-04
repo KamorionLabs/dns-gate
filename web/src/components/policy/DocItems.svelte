@@ -157,7 +157,7 @@
     font-size: 13px;
   }
   .bname {
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ink-3);
     margin-bottom: 2px;
   }
@@ -172,7 +172,7 @@
     margin-left: auto;
   }
   .flag {
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ink-3);
     padding: 0 6px;
     border-radius: 3px;
@@ -224,7 +224,7 @@
   }
   .derive {
     margin-top: 0;
-    font-size: 11.5px;
+    font-size: 12px;
     overflow-wrap: anywhere;
   }
   .arrow {
@@ -240,7 +240,7 @@
   .grp {
     font-size: 12px;
     padding: 0 6px;
-    border-radius: 10px;
+    border-radius: 6px;
     box-shadow: inset 0 0 0 1px var(--rule-strong);
   }
   .binding {
@@ -253,7 +253,7 @@
     width: max-content;
     cursor: pointer;
     color: var(--seal-ink);
-    font-size: 12.5px;
+    font-size: 13px;
     font-weight: 500;
     border-radius: var(--r-sm);
   }

@@ -98,7 +98,7 @@
     padding: 2px 0;
     color: var(--seal-ink);
     cursor: pointer;
-    font-size: 12.5px;
+    font-size: 13px;
     font-weight: 500;
   }
   .link:hover {

@@ -93,7 +93,7 @@
       <div class="content">
         <section id="sec-layers" class="layers">
           <article class="layer base">
-            <header><Icon name="lock" size={15} /><h2>Base layer</h2><LayerTag layer="base" /></header>
+            <header><Icon name="lock" size={16} /><h2>Base layer</h2><LayerTag layer="base" /></header>
             <p class="lead">Loaded from the configuration file. Changes go through Git and a redeploy, never through this console. Issuers, protected records, bounds and every policy.* grant live here.</p>
             <dl>
               <dt>Config hash</dt><dd><CopyText text={p.base.config_hash.replace(/^sha256:/, '').slice(0, 16)} label="config hash" /></dd>
@@ -102,7 +102,7 @@
             </dl>
           </article>
           <article class="layer managed">
-            <header><Icon name="shield" size={15} /><h2>Managed layer</h2>{#if p.active}<LayerTag layer="managed" rev={p.active.id} />{/if}</header>
+            <header><Icon name="shield" size={16} /><h2>Managed layer</h2>{#if p.active}<LayerTag layer="managed" rev={p.active.id} />{/if}</header>
             {#if p.active}
               <p class="lead">“{p.active.comment}”</p>
               <dl>
@@ -161,7 +161,7 @@
 
         <section id="sec-delegations">
           <h2 class="sec">Delegations <LayerTag layer="base" /> <span class="count num">{p.base.delegations?.length ?? 0}</span></h2>
-          <p class="hint">A delegation lets a trusted identity, typically the pipeline that creates other pipelines, manage its own roles and bindings within the limits below. Its changes apply at once and show here with a <i>delegated</i> tag; they are not edited through revisions.</p>
+          <p class="hint">A delegation lets a trusted identity, typically the pipeline that creates other pipelines, manage its own roles and bindings within the limits below. Its changes apply at once and show here with a <span class="mono">delegated</span> tag; they are not edited through revisions.</p>
           {#if p.base.delegations?.length}
             <ul class="delegations">
               {#each p.base.delegations as d (d.name)}
@@ -260,7 +260,7 @@
     border-radius: var(--r-sm);
     color: var(--ink-3);
     font: inherit;
-    font-size: 12.5px;
+    font-size: 13px;
     font-weight: 500;
     cursor: pointer;
   }
@@ -285,7 +285,7 @@
     display: grid;
     grid-template-columns: auto 1fr;
     gap: 2px var(--s3);
-    font-size: 12.5px;
+    font-size: 13px;
   }
   .discovery dt {
     color: var(--ink-3);
@@ -295,7 +295,7 @@
   }
   .discovery .derr {
     color: var(--wax);
-    font-size: 12.5px;
+    font-size: 13px;
   }
   .dim {
     color: var(--ink-4);
@@ -317,7 +317,7 @@
     border-radius: var(--r-sm);
     color: var(--ink-3);
     text-decoration: none;
-    font-size: 12.5px;
+    font-size: 13px;
   }
   .toc a:hover {
     color: var(--ink);
@@ -366,7 +366,7 @@
     display: grid;
     grid-template-columns: max-content minmax(0, 1fr);
     gap: var(--s1) var(--s3);
-    font-size: 12.5px;
+    font-size: 13px;
   }
   .delegations dt {
     color: var(--ink-3);
@@ -484,7 +484,7 @@
   .chip {
     font-size: 12px;
     padding: 1px 8px;
-    border-radius: 10px;
+    border-radius: 6px;
     box-shadow: inset 0 0 0 1px var(--rule-strong);
   }
   .who-grid {
@@ -514,11 +514,11 @@
     font-weight: 600;
   }
   .cat {
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ink-3);
   }
   .url {
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ink-3);
     overflow-wrap: anywhere;
   }

@@ -164,7 +164,7 @@ textarea {
 
 .mono {
   font-family: var(--font-record);
-  font-size: 12.5px;
+  font-size: 13px;
 }
 
 .num {
@@ -174,8 +174,7 @@ textarea {
 .eyebrow {
   font-size: var(--t-caption);
   font-weight: 500;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  letter-spacing: 0.01em;
   color: var(--ink-3);
 }
 

@@ -136,7 +136,6 @@
     font-weight: 600;
     font-size: 13px;
     color: var(--ink);
-    letter-spacing: -0.01em;
   }
   .dim {
     color: var(--ink-3);
@@ -185,7 +184,7 @@
     color: var(--brass);
     background: var(--brass-wash);
     padding: 2px 8px;
-    border-radius: 10px;
+    border-radius: 6px;
   }
   .who {
     position: relative;
@@ -215,7 +214,7 @@
     border-radius: 50%;
     background: var(--seal-ink);
     color: var(--sheet);
-    font-size: 10.5px;
+    font-size: 11px;
     font-weight: 600;
     letter-spacing: 0.02em;
   }
@@ -252,7 +251,7 @@
   }
   .sub {
     color: var(--ink-3);
-    font-size: 11.5px;
+    font-size: 12px;
     word-break: break-all;
   }
   dl {
@@ -269,7 +268,7 @@
   .tag {
     font-size: 12px;
     padding: 1px 8px;
-    border-radius: 10px;
+    border-radius: 6px;
     background: var(--seal-ink-wash);
     color: var(--seal-ink);
     font-weight: 500;
@@ -278,7 +277,7 @@
     background: var(--rule-soft);
     color: var(--ink-2);
     font-family: var(--font-record);
-    font-size: 11.5px;
+    font-size: 12px;
   }
   .can {
     display: grid;
@@ -301,7 +300,7 @@
     position: relative;
     padding-left: 12px;
     color: var(--ink-2);
-    font-size: 12.5px;
+    font-size: 13px;
     line-height: 1.45;
   }
   .can li::before {

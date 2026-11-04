@@ -5,7 +5,7 @@
 </script>
 
 {#if layer === 'base'}
-  <span class="tag base" title="Base layer: loaded from the configuration file, not editable here"><Icon name="lock" size={11} />base</span>
+  <span class="tag base" title="Base layer: loaded from the configuration file, not editable here"><Icon name="lock" size={12} />base</span>
 {:else if layer === 'delegated'}
   <span
     class="tag delegated"
@@ -23,10 +23,9 @@
     height: 18px;
     padding: 0 6px;
     border-radius: 4px;
-    font-size: 10.5px;
+    font-size: 11px;
     font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
+    letter-spacing: 0.01em;
     white-space: nowrap;
     flex: none;
   }
@@ -46,7 +45,7 @@
     text-transform: none;
     letter-spacing: 0;
     font-weight: 500;
-    font-size: 10.5px;
+    font-size: 11px;
     opacity: 0.85;
   }
 </style>

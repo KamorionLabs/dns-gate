@@ -133,9 +133,9 @@
           {/each}
         </dl>
         <ul class="next" aria-label="Next steps">
-          {#if adoptZone}<li><a href={zoneHref(adoptZone.zone, { status: 'foreign' })}>Adopt existing records <Icon name="arrow" size={13} /></a></li>{/if}
-          {#if exportZone}<li><a href={zoneHref(exportZone.zone, { export: 'terraform' })}>Export Terraform <Icon name="arrow" size={13} /></a></li>{/if}
-          <li><a href={connectHref()}>Connect your tools <Icon name="arrow" size={13} /></a></li>
+          {#if adoptZone}<li><a href={zoneHref(adoptZone.zone, { status: 'foreign' })}>Adopt existing records <Icon name="arrow" size={14} /></a></li>{/if}
+          {#if exportZone}<li><a href={zoneHref(exportZone.zone, { export: 'terraform' })}>Export Terraform <Icon name="arrow" size={14} /></a></li>{/if}
+          <li><a href={connectHref()}>Connect your tools <Icon name="arrow" size={14} /></a></li>
         </ul>
       </aside>
     {/if}
@@ -203,10 +203,9 @@
                   {/if}
                 </div>
                 <div class="last">
-                  <span class="lbl">Last gate write</span>
-                  {#if z.last_write_at}<RelTime iso={z.last_write_at} />{:else}<span class="never">never</span>{/if}
+                  {#if z.last_write_at}<span class="lbl">Last write</span> <RelTime iso={z.last_write_at} />{:else}<span class="never">No gate write yet</span>{/if}
                 </div>
-                <a class="journal" href={journalHref({ zone: z.zone })} aria-label="Journal of {z.zone}"><Icon name="history" size={13} /><span>Journal</span></a>
+                <a class="journal" href={journalHref({ zone: z.zone })} aria-label="Journal of {z.zone}"><Icon name="history" size={14} /><span>Journal</span></a>
               </li>
             {/each}
           </ol>
@@ -219,7 +218,7 @@
         <div class="dhead">
           <h2 class="sec" id="discovered-title">Not managed (read-only) <span class="count num">{shownUnmanaged.length.toLocaleString('en')}</span></h2>
           <p class="hint">
-            Found in the EuroDNS account. The gate shows them read-only: no write and no adoption until a zone is managed.
+            Found in the EuroDNS account. The gate shows them read-only: no write and no adoption until a zone is managed. Their records are read when you open them.
             {#if !admin}Only a policy administrator can bring a zone under management.{/if}
           </p>
         </div>
@@ -230,9 +229,7 @@
             {#each pageUnmanaged as z (z.zone)}
               <li class="mini" class:open={managing === z.zone}>
                 <a class="zname mono" href={zoneHref(z.zone)}>{z.zone}</a>
-                <span class="mmeta">
-                  {#if z.last_synced_at}{plural(z.rrsets, 'record set')}{:else}not read yet{/if}
-                </span>
+                {#if z.last_synced_at}<span class="mmeta">{plural(z.rrsets, 'record set')}</span>{/if}
                 {#if admin && managing !== z.zone}
                   <button class="btn quiet small manage" type="button" onclick={() => (managing = z.zone)} aria-label="Manage {z.zone}…">Manage…</button>
                 {/if}
@@ -327,7 +324,6 @@
   }
   .guide h2 {
     font-size: var(--t-lead);
-    letter-spacing: -0.01em;
   }
   .guide .lead {
     color: var(--ink-2);
@@ -357,7 +353,7 @@
   .legend dd {
     margin: 0;
     color: var(--ink-3);
-    font-size: 12.5px;
+    font-size: 13px;
   }
   .next {
     list-style: none;
@@ -425,7 +421,7 @@
     box-shadow: 0 0 0 1px var(--rule);
   }
   .count {
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ink-4);
     font-weight: 500;
   }
@@ -494,7 +490,6 @@
   h3 {
     font-size: var(--t-lead);
     font-weight: 600;
-    letter-spacing: -0.01em;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -538,14 +533,16 @@
     text-underline-offset: 2px;
   }
   .last {
-    display: grid;
-    justify-items: end;
-    gap: 0;
+    display: flex;
+    justify-content: flex-end;
+    align-items: baseline;
+    gap: 4px;
     color: var(--ink-2);
+    font-size: 12px;
     white-space: nowrap;
   }
   .lbl {
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ink-4);
   }
   .never {
@@ -624,7 +621,7 @@
   .btn.small {
     height: 26px;
     padding: 0 var(--s2);
-    font-size: 12.5px;
+    font-size: 13px;
   }
   /* Shown on hover or focus, over the end of the row: it reserves no room. */
   .manage {

@@ -80,9 +80,9 @@
     font-size: 12px;
   }
   .grp {
-    font-size: 11.5px;
+    font-size: 12px;
     padding: 0 6px;
-    border-radius: 10px;
+    border-radius: 6px;
     box-shadow: inset 0 0 0 1px var(--rule-strong);
   }
   .dim {
