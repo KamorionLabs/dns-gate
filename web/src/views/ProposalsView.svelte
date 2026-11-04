@@ -85,7 +85,7 @@
                 </span>
               {/if}
               {#if r.status === 'superseded' && p.me.can_propose && p.settings.editable}
-                <button class="btn quiet roll" type="button" disabled={busy === r.id} onclick={() => rollback(r.id)}><Icon name="undo" size={13} />Roll back to this</button>
+                <button class="btn quiet roll" type="button" disabled={busy === r.id} onclick={() => rollback(r.id)}><Icon name="undo" size={14} />Roll back to this</button>
               {/if}
             </div>
           </li>
@@ -173,7 +173,7 @@
     align-items: center;
     gap: var(--s2) var(--s4);
     color: var(--ink-3);
-    font-size: 12.5px;
+    font-size: 13px;
   }
   .appr {
     display: inline-flex;

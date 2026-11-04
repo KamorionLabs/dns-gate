@@ -73,8 +73,7 @@
   .op {
     font-size: var(--t-caption);
     font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
+    letter-spacing: 0.01em;
     color: var(--ink-3);
   }
   .taint .op,
@@ -87,7 +86,7 @@
   }
   .type {
     color: var(--ink-3);
-    font-size: 11.5px;
+    font-size: 12px;
   }
   .retype {
     margin-left: 0.4em;
@@ -98,7 +97,7 @@
   }
   .ttl {
     color: var(--ink-4);
-    font-size: 11.5px;
+    font-size: 12px;
   }
   .values {
     list-style: none;

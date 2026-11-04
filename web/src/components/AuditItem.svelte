@@ -130,10 +130,10 @@
   }
   .decision {
     margin-left: auto;
-    font-size: 11.5px;
+    font-size: 12px;
     font-weight: 600;
     padding: 1px 8px;
-    border-radius: 10px;
+    border-radius: 6px;
   }
   .decision.allow {
     color: var(--stamp);
@@ -154,7 +154,7 @@
     color: var(--wax);
   }
   .code {
-    font-size: 11.5px;
+    font-size: 12px;
     padding: 0 6px;
     border-radius: var(--r-sm);
     background: var(--rule-soft);
@@ -170,7 +170,7 @@
     flex-wrap: wrap;
     align-items: flex-start;
     gap: var(--s1) var(--s4);
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ink-4);
   }
   .ids[open] {

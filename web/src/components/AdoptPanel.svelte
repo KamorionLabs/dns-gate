@@ -192,7 +192,7 @@
         <div class="filter">
           <div><span class="lbl">Hosts <span class="dim">(globs: * one label, ** several, @ apex)</span></span><ChipsInput bind:values={hosts} label="Hosts" placeholder="*.legacy, vpn" /></div>
           <div><span class="lbl">Types <span class="dim">(none = any)</span></span><ToggleChips options={typeOptions} bind:values={types} label="Types" /></div>
-          <button class="btn" type="button" onclick={runPreview}><Icon name="filter" size={13} />Preview this filter</button>
+          <button class="btn" type="button" onclick={runPreview}><Icon name="filter" size={14} />Preview this filter</button>
         </div>
       {/if}
       <label class="owner">
@@ -366,7 +366,7 @@
     gap: var(--s2);
     padding: 7px var(--s3);
     border-bottom: 1px solid var(--rule-soft);
-    font-size: 12.5px;
+    font-size: 13px;
   }
   .cands li:last-child {
     border-bottom: 0;
@@ -399,19 +399,19 @@
     color: var(--ink-3);
   }
   .type {
-    font-size: 11.5px;
+    font-size: 12px;
     font-weight: 600;
     color: var(--ink-2);
   }
   .vals {
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ink-3);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
   .ttl {
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ink-4);
   }
   .why {

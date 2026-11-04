@@ -25,8 +25,8 @@
     align-items: center;
     height: 20px;
     padding: 0 8px;
-    border-radius: 10px;
-    font-size: 11.5px;
+    border-radius: 6px;
+    font-size: 12px;
     font-weight: 600;
     white-space: nowrap;
   }

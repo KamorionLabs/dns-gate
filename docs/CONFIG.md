@@ -580,6 +580,8 @@ Read-only web UI under `/ui/` and its JSON API under `/api/v1` (action `ui.read`
 
 Login is the authorization code flow with PKCE (S256), `state` and `nonce` checked. The ID token is verified with the issuer keys and `aud = client_id`; issuer `bound_claims` apply. The session cookie (`__Host-` prefixed when the redirect URL is HTTPS) is encrypted with AES-256-GCM, `HttpOnly`, `Secure`, `SameSite=Lax`. It keeps the identity claims of the ID token (protocol claims dropped) plus `auth_time` and `amr`; roles, groups and teams are recomputed on every request, so a policy change applies immediately. A login whose claims do not fit in a cookie fails with `session_too_large`: reduce the emitted claims (Entra: app roles rather than groups). `POST /auth/logout` clears it.
 
+The policy page opens on a **simple** view: one card per group of people (named after the app role or directory group it maps to), one row per pipeline and one card per API key, each with what it sees, which records it can change in which zones, and its policy rights, with a filter on one zone. The **expert** view, kept as the last choice in the browser, lists the layers, bindings, delegations, groups, roles, keys, protected records, bounds and issuers.
+
 With [zone discovery](#zone-discovery), the zones view also lists the unmanaged zones the user can read, with a "Manage this zone" action for holders of `policy.propose` (it creates a proposal adding the zone to the managed layer) and a hint for the others.
 
 Audit events of zones the user cannot read are filtered out; events without a zone (authentication failures) are shown only to users who can read every managed zone.

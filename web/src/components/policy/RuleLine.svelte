@@ -35,10 +35,10 @@
   }
   .lbl {
     color: var(--ink-4);
-    font-size: 11.5px;
+    font-size: 12px;
   }
   .v {
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ink);
   }
   .act {

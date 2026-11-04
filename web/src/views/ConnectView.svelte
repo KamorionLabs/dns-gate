@@ -206,7 +206,7 @@
   }
   .facts dt {
     color: var(--ink-3);
-    font-size: 12.5px;
+    font-size: 13px;
   }
   .lead strong {
     color: var(--ink);
@@ -223,7 +223,7 @@
   .state {
     font-size: 12px;
     padding: 1px 8px;
-    border-radius: 10px;
+    border-radius: 6px;
     background: var(--stamp-wash);
     color: var(--stamp);
     font-weight: 500;

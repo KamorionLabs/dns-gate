@@ -147,7 +147,6 @@
   }
   h2 {
     font-size: var(--t-lead);
-    letter-spacing: -0.01em;
   }
   p {
     color: var(--ink-2);

@@ -120,7 +120,7 @@
           <section>
             <div class="sh">
               <h2>Changes</h2>
-              <a class="dl" href={exportURL(rev.id)} download="{rev.id}.yaml"><Icon name="download" size={13} />Export YAML</a>
+              <a class="dl" href={exportURL(rev.id)} download="{rev.id}.yaml"><Icon name="download" size={14} />Export YAML</a>
             </div>
             {#if rev.diff_yaml.trim()}<DiffView diff={rev.diff_yaml} />{:else}<p class="dim">Identical to its parent.</p>{/if}
             <button class="link" type="button" onclick={() => (showDoc = !showDoc)}>{showDoc ? 'Hide' : 'Show'} the full managed document</button>
@@ -185,7 +185,7 @@
     margin-bottom: var(--s4);
     color: var(--ink-3);
     text-decoration: none;
-    font-size: 12.5px;
+    font-size: 13px;
   }
   .back :global(svg) {
     transform: scaleX(-1);
@@ -261,7 +261,7 @@
     align-items: center;
     gap: 4px;
     color: var(--ink-3);
-    font-size: 12.5px;
+    font-size: 13px;
     text-decoration: none;
   }
   .dl:hover {
@@ -288,7 +288,7 @@
     width: 24px;
     height: 24px;
     border-radius: 50%;
-    font-weight: 700;
+    font-weight: 600;
     font-family: var(--font-record);
   }
   .gain {
@@ -324,14 +324,13 @@
   }
   .detail {
     color: var(--ink-3);
-    font-size: 11.5px;
+    font-size: 12px;
     margin-top: 2px;
   }
   .kind {
     font-size: 11px;
     font-weight: 600;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
+    letter-spacing: 0.01em;
     color: var(--ink-3);
   }
   .gain .kind {
@@ -348,7 +347,7 @@
     padding: 0;
     color: var(--seal-ink);
     cursor: pointer;
-    font-size: 12.5px;
+    font-size: 13px;
     font-weight: 500;
   }
   .yaml {
@@ -381,7 +380,7 @@
   .trail li {
     position: relative;
     color: var(--ink-3);
-    font-size: 12.5px;
+    font-size: 13px;
   }
   .trail li > div {
     display: flex;
@@ -417,7 +416,6 @@
   .say {
     flex-basis: 100%;
     color: var(--ink-2);
-    font-style: italic;
   }
   .lbl {
     font-size: 12px;

@@ -47,7 +47,7 @@
   }
   .t.mono {
     font-family: var(--font-record);
-    font-size: 11.5px;
+    font-size: 12px;
   }
   .t:hover {
     color: var(--ink);

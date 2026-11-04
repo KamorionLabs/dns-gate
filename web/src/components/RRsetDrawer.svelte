@@ -138,7 +138,7 @@
         <div><span class="eyebrow">TTL</span><span class="mono num">{fmtTTL(rr.ttl)} <span class="dim">({rr.ttl}s)</span></span></div>
         <div><span class="eyebrow">Owner team</span>{#if rr.owner}<span class="team">{rr.owner}</span>{:else}<span class="dim">— (not managed by the gate)</span>{/if}</div>
         {#if rr.expires_at}
-          <div><span class="eyebrow">Expires</span><span class="expire"><Icon name="clock" size={13} /> <RelTime iso={rr.expires_at} /></span></div>
+          <div><span class="eyebrow">Expires</span><span class="expire"><Icon name="clock" size={14} /> <RelTime iso={rr.expires_at} /></span></div>
         {/if}
         {#if rr.last_request_id}
           <div><span class="eyebrow">Last request</span><CopyText text={rr.last_request_id} label="request id" /></div>
@@ -181,7 +181,7 @@
           {#if !whoCan}
             <div class="skeleton line"></div>
           {:else if whoCan.protected}
-            <p class="who-prot"><Icon name="lock" size={13} /> Protected by the base policy: no role can change it through the gate.</p>
+            <p class="who-prot"><Icon name="lock" size={14} /> Protected by the base policy: no role can change it through the gate.</p>
           {:else if whoCan.entries.length === 0}
             <p class="dim">No binding grants write on this record set.</p>
           {:else}
@@ -195,7 +195,7 @@
                   <div class="wc-who">
                     {#each w.groups ?? [] as g (g)}<span class="wc-grp mono">{g}</span>{/each}
                     {#each w.subjects ?? [] as m, k (k)}<Matcher {m} />{/each}
-                    {#each w.virtual_keys ?? [] as kid (kid)}<span class="wc-key mono"><Icon name="key" size={11} />{kid}</span>{/each}
+                    {#each w.virtual_keys ?? [] as kid (kid)}<span class="wc-key mono"><Icon name="key" size={12} />{kid}</span>{/each}
                   </div>
                 </li>
               {/each}
@@ -373,7 +373,7 @@
   }
   .values :global(.copy) {
     color: var(--ink);
-    font-size: 12.5px;
+    font-size: 13px;
     word-break: break-all;
     text-align: left;
   }
@@ -497,7 +497,7 @@
   }
   .wc-role {
     font-weight: 600;
-    font-size: 12.5px;
+    font-size: 13px;
   }
   .wc-team {
     font-weight: 600;
@@ -510,16 +510,16 @@
     align-items: baseline;
   }
   .wc-grp {
-    font-size: 11.5px;
+    font-size: 12px;
     padding: 0 6px;
-    border-radius: 10px;
+    border-radius: 6px;
     box-shadow: inset 0 0 0 1px var(--rule-strong);
   }
   .wc-key {
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--brass);
   }
   .small {

@@ -320,7 +320,7 @@
           <Seal status="managed" size={13} />{selecting ? 'Selecting…' : 'Adopt…'}
         </button>
       {/if}
-      {#if inv && !unmanaged}<button class="btn" type="button" onclick={() => (tfOpen = true)}><Icon name="download" size={13} />Export Terraform</button>{/if}
+      {#if inv && !unmanaged}<button class="btn" type="button" onclick={() => (tfOpen = true)}><Icon name="download" size={14} />Export Terraform</button>{/if}
     </div>
   </div>
 
@@ -680,7 +680,7 @@
     box-shadow: 0 0 0 1px var(--rule);
   }
   .count {
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--ink-4);
   }
   .tab.tainted .count,
@@ -714,7 +714,7 @@
     gap: 6px;
     margin-bottom: var(--s2);
     color: var(--ink-3);
-    font-size: 12.5px;
+    font-size: 13px;
   }
   .sheet {
     border: 1px solid var(--rule);
@@ -753,8 +753,7 @@
     text-align: left;
     font-size: var(--t-caption);
     font-weight: 500;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
+    letter-spacing: 0.01em;
     color: var(--ink-3);
     padding: var(--s2) var(--s3);
     border-bottom: 1px solid var(--rule);
@@ -819,7 +818,7 @@
     display: inline-flex;
     align-items: center;
     gap: 3px;
-    font-size: 11.5px;
+    font-size: 12px;
     color: var(--brass);
   }
   .copyname {
@@ -848,7 +847,7 @@
     opacity: 1;
   }
   .type {
-    font-size: 11.5px;
+    font-size: 12px;
     font-weight: 600;
     color: var(--ink-2);
   }
@@ -884,7 +883,7 @@
     max-width: 100%;
     height: 20px;
     padding: 0 7px 0 5px;
-    border-radius: 10px;
+    border-radius: 6px;
     background: var(--seal-ink-wash);
     color: var(--seal-ink);
     font-size: 12px;
@@ -898,13 +897,13 @@
     font-size: 12px;
   }
   .c-custody {
-    font-size: 12.5px;
+    font-size: 13px;
   }
   .when {
     display: block;
     margin: 2px 0 0 26px;
     color: var(--ink-4);
-    font-size: 11.5px;
+    font-size: 12px;
   }
   .c-act {
     text-align: right;
@@ -914,7 +913,7 @@
   .btn.small {
     height: 26px;
     padding: 0 var(--s2);
-    font-size: 12.5px;
+    font-size: 13px;
   }
   .act {
     color: var(--ink-3);

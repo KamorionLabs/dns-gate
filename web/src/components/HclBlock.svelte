@@ -24,8 +24,8 @@
 <div class="hcl">
   <div class="bar">
     <span class="mono name">{filename}</span>
-    <button class="btn quiet" type="button" onclick={copy}><Icon name={copied ? 'check' : 'copy'} size={13} />{copied ? 'Copied' : 'Copy'}</button>
-    {#if download}<button class="btn quiet" type="button" onclick={() => downloadText(filename, hcl)}><Icon name="download" size={13} />Download</button>{/if}
+    <button class="btn quiet" type="button" onclick={copy}><Icon name={copied ? 'check' : 'copy'} size={14} />{copied ? 'Copied' : 'Copy'}</button>
+    {#if download}<button class="btn quiet" type="button" onclick={() => downloadText(filename, hcl)}><Icon name="download" size={14} />Download</button>{/if}
   </div>
   <pre class="mono" class:wrap>{hcl}</pre>
 </div>

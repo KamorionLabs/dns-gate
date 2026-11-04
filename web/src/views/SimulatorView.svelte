@@ -179,8 +179,7 @@
     padding: 0 6px;
     font-size: var(--t-caption);
     font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
+    letter-spacing: 0.01em;
     color: var(--ink-3);
   }
   label {
@@ -215,7 +214,7 @@
     border-radius: var(--r-md);
     background: var(--well);
     min-width: 0;
-    font-size: 12.5px;
+    font-size: 13px;
   }
   .grid {
     display: grid;
@@ -232,7 +231,7 @@
     color: var(--seal-ink);
     cursor: pointer;
     font-weight: 500;
-    font-size: 12.5px;
+    font-size: 13px;
   }
   .btn.primary {
     justify-self: start;
@@ -305,7 +304,7 @@
     align-items: baseline;
   }
   .why .mono {
-    font-size: 12.5px;
+    font-size: 13px;
     overflow-wrap: anywhere;
   }
   .why.deny .mono {
@@ -319,7 +318,7 @@
   .chip {
     font-size: 12px;
     padding: 1px 8px;
-    border-radius: 10px;
+    border-radius: 6px;
     background: var(--sheet-raised);
     box-shadow: inset 0 0 0 1px var(--rule);
   }

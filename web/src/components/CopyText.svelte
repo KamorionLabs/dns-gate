@@ -32,7 +32,7 @@
     background: transparent;
     color: var(--ink-3);
     cursor: pointer;
-    font-size: 11.5px;
+    font-size: 12px;
   }
   .copy:hover {
     background: var(--rule-soft);
