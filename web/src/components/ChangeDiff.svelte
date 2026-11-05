@@ -15,8 +15,9 @@
   // A record set replaced by one of another type (A to CNAME) reads as one change.
   const retyped = $derived(!!change.old_type && change.old_type !== change.type);
 
-  const oldV = $derived(change.old_values ?? []);
-  const newV = $derived(change.new_values ?? []);
+  const aliasLine = (a?: { target: string } | null) => (a ? [`alias ${a.target}`] : []);
+  const oldV = $derived(change.old_values?.length ? change.old_values : aliasLine(change.old_alias));
+  const newV = $derived(change.new_values?.length ? change.new_values : aliasLine(change.new_alias));
   const lines = $derived.by(() => {
     const out: { kind: 'add' | 'del' | 'keep'; v: string }[] = [];
     for (const v of oldV) if (!newV.includes(v)) out.push({ kind: 'del', v });

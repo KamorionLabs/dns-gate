@@ -481,7 +481,7 @@ const audit: AuditEntry[] = [
   mcpRead(0.7, 'get_rrset', 'example.com'),
   {
     time: ago(0.8), request_id: 'req_01JC0RETYPE', actor: adoDeploy, teams: ['platform'], action: 'saveDnsZone', zone: 'cloud.example',
-    decision: 'allow', snapshot_id: 884301,
+    decision: 'allow', snapshot_id: '884301',
     changes: [
       { op: 'delete', host: 'status.eu-central', type: 'A', old_ttl: 300, old_values: ['198.51.100.40', '198.51.100.41'] },
       { op: 'create', host: 'status.eu-central', type: 'CNAME', new_ttl: 300, new_values: ['status-page.hosted.example.org.'] },
@@ -491,7 +491,7 @@ const audit: AuditEntry[] = [
   ...Array.from({ length: 18 }, (_, i) => mcpRead(1.1 + i * 0.05, i % 2 ? 'list_rrsets' : 'get_rrset', i % 3 ? 'cloud.example' : 'example.com')),
   {
     time: ago(30), request_id: 'req_01JC0CLD16', actor: adoDeploy, teams: ['platform'], action: 'saveDnsZone', zone: 'cloud.example',
-    decision: 'allow', snapshot_id: 884250,
+    decision: 'allow', snapshot_id: '884250',
     changes: [{
       op: 'update', host: 'api.eu-central', type: 'CNAME', old_ttl: 300, old_values: ['api-alb-old.eu-central-1.elb.example.net.'],
       new_ttl: 300, new_values: ['api-alb-3f9c2a1b.eu-central-1.elb.example.net.'],
@@ -509,7 +509,7 @@ const audit: AuditEntry[] = [
   },
   {
     time: ago(12), request_id: 'req_01JBXA0001', actor: acmeKey, teams: ['security'], action: 'saveDnsZone', zone: 'acme.example',
-    decision: 'allow', snapshot_id: 884213,
+    decision: 'allow', snapshot_id: '884213',
     changes: [{
       op: 'create', host: '_acme-challenge', type: 'TXT', new_ttl: 600,
       new_values: ['"aW50ZXJuYWwtdG9rZW4tYWJjZGVm"', '"c2Vjb25kLXRva2VuLWZvci13aWxkY2FyZA"'],
@@ -517,12 +517,12 @@ const audit: AuditEntry[] = [
   },
   {
     time: ago(40), request_id: 'req_01JBX9AC3M', actor: acmeKey, teams: ['security'], action: 'saveDnsZone', zone: 'example.com',
-    decision: 'allow', snapshot_id: 884190,
+    decision: 'allow', snapshot_id: '884190',
     changes: [{ op: 'create', host: '_acme-challenge.intranet', type: 'TXT', new_ttl: 600, new_values: ['"Zm9vYmFyLWNoYWxsZW5nZS10b2tlbi0xMjM0"'] }],
   },
   {
     time: ago(2 * H), request_id: 'req_01JBX7Q4M2', actor: ghWeb, teams: ['web'], action: 'saveDnsZone', zone: 'example.com',
-    decision: 'allow', snapshot_id: 884102,
+    decision: 'allow', snapshot_id: '884102',
     changes: [{
       op: 'update', host: 'www', type: 'CNAME', old_ttl: 3600, old_values: ['www-legacy.hosting.example.org.'],
       new_ttl: 600, new_values: ['d111111abcdef8.cloudfront.net.'],
@@ -546,7 +546,7 @@ const audit: AuditEntry[] = [
   },
   {
     time: ago(26 * H), request_id: 'req_01JBQ0Z8C1', actor: ciApp, teams: ['web', 'platform'], action: 'saveDnsZone',
-    zone: 'example.com', decision: 'allow', snapshot_id: 883551,
+    zone: 'example.com', decision: 'allow', snapshot_id: '883551',
     changes: [{
       op: 'update', host: 'staging', type: 'CNAME', old_ttl: 600, old_values: ['staging-v1.edge.example.net.'],
       new_ttl: 600, new_values: ['staging.edge.example.net.'],
@@ -563,7 +563,7 @@ const audit: AuditEntry[] = [
   },
   {
     time: ago(2 * D), request_id: 'req_01JBRM5V8N', actor: bob, teams: ['corporate'], action: 'addDnsRecords', zone: 'acme.example',
-    decision: 'allow', snapshot_id: 882990,
+    decision: 'allow', snapshot_id: '882990',
     changes: [{ op: 'create', host: 'careers', type: 'CNAME', new_ttl: 1800, new_values: ['acme.careers.example.org.'] }],
   },
   {
@@ -573,7 +573,7 @@ const audit: AuditEntry[] = [
   },
   {
     time: ago(3 * D), request_id: 'req_01JBA7S2LK', actor: ciCorp, teams: ['corporate'], action: 'saveDnsZone', zone: 'acme.example',
-    decision: 'allow', snapshot_id: 882100,
+    decision: 'allow', snapshot_id: '882100',
     changes: [{ op: 'update', host: '@', type: 'APEX', old_ttl: 3600, old_values: ['acme-old.hosting.example.org.'], new_ttl: 600, new_values: ['d222222fedcba9.cloudfront.net.'] }],
   },
   {
@@ -591,12 +591,12 @@ const audit: AuditEntry[] = [
   },
   {
     time: ago(6 * D), request_id: 'req_01JAMR4E0P', actor: ciApp, teams: ['web'], action: 'saveDnsZone', zone: 'example.com',
-    decision: 'allow', snapshot_id: 880771,
+    decision: 'allow', snapshot_id: '880771',
     changes: [{ op: 'update', host: 'shop', type: 'CNAME', old_ttl: 3600, old_values: ['shop-v1.edge.example.net.'], new_ttl: 600, new_values: ['shop.edge.example.net.'] }],
   },
   {
     time: ago(9 * D), request_id: 'req_01JAVK2N7T', actor: ciApp, teams: ['web'], action: 'addDnsRecords', zone: 'example.com',
-    decision: 'allow', snapshot_id: 879400,
+    decision: 'allow', snapshot_id: '879400',
     changes: [
       { op: 'create', host: 'www', type: 'CNAME', new_ttl: 3600, new_values: ['www-legacy.hosting.example.org.'] },
       { op: 'create', host: '_3f1c9a7b2d.www', type: 'CNAME', new_ttl: 600, new_values: ['_8e2d41c0b9.mhbtsbpdnt.acm-validations.aws.'] },
@@ -604,17 +604,17 @@ const audit: AuditEntry[] = [
   },
   {
     time: ago(12 * D), request_id: 'req_01JAZZ1P4E', actor: ciCorp, teams: ['corporate'], action: 'addDnsRecords', zone: 'acme.example',
-    decision: 'allow', snapshot_id: 878002,
+    decision: 'allow', snapshot_id: '878002',
     changes: [{ op: 'create', host: 'www', type: 'CNAME', new_ttl: 600, new_values: ['d222222fedcba9.cloudfront.net.'] }],
   },
   {
     time: ago(14 * D), request_id: 'req_01JB2W9QHD', actor: ciApp, teams: ['platform'], action: 'addDnsRecords', zone: 'example.com',
-    decision: 'allow', snapshot_id: 877310,
+    decision: 'allow', snapshot_id: '877310',
     changes: [{ op: 'create', host: 'api.staging', type: 'CNAME', new_ttl: 900, new_values: ['alb-api-stg.eu-central-1.elb.example.net.'] }],
   },
   {
     time: ago(21 * D), request_id: 'req_01JAQ7B2ZR', actor: alice, teams: ['web'], action: 'addDnsRecords', zone: 'example.com',
-    decision: 'allow', snapshot_id: 875533,
+    decision: 'allow', snapshot_id: '875533',
     changes: [{ op: 'create', host: 'staging', type: 'CNAME', new_ttl: 600, new_values: ['staging-v1.edge.example.net.'] }],
   },
   {
@@ -624,7 +624,7 @@ const audit: AuditEntry[] = [
   },
   {
     time: ago(40 * D), request_id: 'req_01J9ZP3K5S', actor: ghWeb, teams: ['web'], action: 'addDnsRecords', zone: 'example.com',
-    decision: 'allow', snapshot_id: 870020,
+    decision: 'allow', snapshot_id: '870020',
     changes: [{ op: 'create', host: 'docs', type: 'CNAME', new_ttl: 3600, new_values: ['docs.pages.example.net.'] }],
   },
 ];

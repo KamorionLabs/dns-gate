@@ -122,8 +122,10 @@ export interface Change {
   type: string;
   old_ttl?: number;
   old_values?: string[];
+  old_alias?: Alias;
   new_ttl?: number;
   new_values?: string[];
+  new_alias?: Alias;
 }
 
 export interface AuditEntry {
@@ -136,7 +138,10 @@ export interface AuditEntry {
   decision: Decision;
   reason?: string;
   changes?: Change[];
-  snapshot_id?: number;
+  /** Provider instance id of the zone. */
+  provider?: Provider;
+  /** Provider snapshot taken before the write (EuroDNS). */
+  snapshot_id?: string;
 }
 
 export interface AuditPage {
