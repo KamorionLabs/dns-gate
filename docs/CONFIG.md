@@ -1,6 +1,6 @@
 # Configuration reference
 
-dns-gate reads one YAML file (`-config`, default `/etc/dns-gate/config.yaml`, or `DNS_GATE_CONFIG`). Decoding is strict: an unknown field stops the gate at startup. `dns-gate -check -config file.yaml` validates a file and exits.
+dns-gate reads one YAML file (`-config`, default `/etc/dns-gate/config.yaml`, or `DNS_GATE_CONFIG_URI` / `DNS_GATE_CONFIG`): a file path, `s3://bucket/key` or `ssm:/parameter/name`. Decoding is strict: an unknown field stops the gate at startup. `dns-gate -check -config file.yaml` validates a file and exits.
 
 A complete example is in [`examples/config.yaml`](../examples/config.yaml).
 
@@ -17,6 +17,8 @@ Secrets never live in the YAML file. Each one is read from an environment variab
 | `DNS_GATE_UI_CLIENT_SECRET` | OIDC client secret of the UI | no (public client with PKCE) |
 
 `<ID>` is the provider id in upper case, every character other than a letter or a digit replaced by `_` (`eu-2` gives `EURODNS_EU_2_API_KEY`); the unprefixed variables serve every EuroDNS provider without its own. Route53 providers use the default AWS credential chain (IRSA, Pod Identity, instance role, environment), optionally assuming a role.
+
+`DNS_GATE_SECRETS_ARN` names a Secrets Manager secret holding a JSON object of these variables (`{"EURODNS_API_KEY":"…"}`), loaded into the environment at startup; a variable already set wins. See [DEPLOY-LAMBDA.md](DEPLOY-LAMBDA.md#configuration).
 
 Other environment variables: `POD_NAME` (lock holder id, defaults to the hostname) and `DNS_GATE_REPLICAS` (only used to warn when a single-replica store runs with several replicas).
 

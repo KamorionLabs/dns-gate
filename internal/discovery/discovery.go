@@ -193,6 +193,28 @@ func (d *Discoverer) RefreshIfOlder(ctx context.Context, age time.Duration) erro
 	return errors.Join(errs...)
 }
 
+// RefreshDue lists again the providers whose period has elapsed (5 minutes
+// after a failure): the one-pass equivalent of Run for runtimes without
+// background loops.
+func (d *Discoverer) RefreshDue(ctx context.Context) error {
+	d.refreshMu.Lock()
+	defer d.refreshMu.Unlock()
+	var errs []error
+	for _, s := range d.srcs {
+		d.mu.RLock()
+		wait := s.Refresh
+		if s.err != nil {
+			wait = min(wait, retryAfterError)
+		}
+		due := s.tried.IsZero() || d.cfg.Now().Sub(s.tried) >= wait
+		d.mu.RUnlock()
+		if due {
+			errs = append(errs, d.refreshLocked(ctx, s))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // Run lists every provider at once, then each one every Refresh (every 5
 // minutes after a failure) until ctx is done.
 func (d *Discoverer) Run(ctx context.Context) {

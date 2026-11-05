@@ -16,6 +16,7 @@ import (
 
 	"github.com/KamorionLabs/dns-gate/internal/app"
 	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/lambdarun"
 	"github.com/KamorionLabs/dns-gate/internal/version"
 )
 
@@ -27,11 +28,14 @@ func main() {
 }
 
 func run() error {
-	defaultPath := os.Getenv("DNS_GATE_CONFIG")
-	if defaultPath == "" {
-		defaultPath = "/etc/dns-gate/config.yaml"
+	defaultURI := os.Getenv(config.EnvConfigURI)
+	if defaultURI == "" {
+		defaultURI = os.Getenv("DNS_GATE_CONFIG")
 	}
-	configPath := flag.String("config", defaultPath, "configuration file (env DNS_GATE_CONFIG)")
+	if defaultURI == "" {
+		defaultURI = "/etc/dns-gate/config.yaml"
+	}
+	configURI := flag.String("config", defaultURI, "configuration: file path, s3://bucket/key or ssm:/parameter/name (env DNS_GATE_CONFIG_URI or DNS_GATE_CONFIG)")
 	checkOnly := flag.Bool("check", false, "validate the configuration and exit")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
@@ -40,8 +44,19 @@ func run() error {
 		return nil
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
 	log := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	cfg, err := config.Load(*configPath)
+	src := &config.Sources{}
+	loaded, err := src.LoadSecretsFromEnv(ctx)
+	if err != nil {
+		return err
+	}
+	if len(loaded) > 0 {
+		log.Info("secrets loaded into the environment", "secret", os.Getenv(config.EnvSecretsARN), "variables", loaded)
+	}
+	cfg, err := src.Load(ctx, *configURI)
 	if err != nil {
 		return err
 	}
@@ -50,8 +65,9 @@ func run() error {
 		return nil
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	if lambdarun.Enabled() {
+		return runLambda(ctx, cfg, log)
+	}
 
 	gate, err := app.New(ctx, cfg, log, app.Options{})
 	if err != nil {
@@ -88,5 +104,17 @@ func run() error {
 			return err
 		}
 	}
+	return nil
+}
+
+// runLambda serves API Gateway and scheduled events; no goroutine outlives
+// an invocation, the background work runs from the maintenance event.
+func runLambda(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
+	gate, err := app.New(ctx, cfg, log, app.Options{Holder: lambdarun.InstanceID()})
+	if err != nil {
+		return err
+	}
+	log.Info("lambda ready", "version", version.Version, "zones", cfg.Zones)
+	lambdarun.Start(&lambdarun.Handler{HTTP: gate.LambdaHandler(), Maintenance: gate.Maintenance, Log: log})
 	return nil
 }

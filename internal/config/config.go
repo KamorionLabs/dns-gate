@@ -403,7 +403,11 @@ func Parse(data []byte, getenv func(string) string) (*Config, error) {
 		return nil, err
 	}
 	c.defaults()
-	if err := c.Validate(); err != nil {
+	err := c.Validate()
+	if getenv(EnvLambdaRuntime) != "" && c.Store.Type != "dynamodb" {
+		err = errors.Join(err, fmt.Errorf("store.type: %q is not supported on AWS Lambda, dynamodb required", c.Store.Type))
+	}
+	if err != nil {
 		return nil, err
 	}
 	return &c, nil

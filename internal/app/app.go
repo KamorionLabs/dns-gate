@@ -49,6 +49,10 @@ type App struct {
 	handler   http.Handler
 	opts      Options
 	log       *slog.Logger
+
+	// PlanGC deletes the expired MCP plans; Run and Maintenance call it
+	// when set.
+	PlanGC func(context.Context) error
 }
 
 // New builds every component; background loops start with Run.
@@ -147,14 +151,19 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 // Handler is the HTTP handler of the gate.
 func (a *App) Handler() http.Handler { return a.handler }
 
-// Run starts the policy reload, zone discovery and reconcile loops; they
-// stop with ctx. Reconcile follows the managed zones of the current policy.
+// Run starts the policy reload, zone discovery, reconcile and plan GC
+// loops; they stop with ctx. Reconcile follows the managed zones of the
+// current policy. It is the container mode; Maintenance is the one-pass
+// equivalent for AWS Lambda.
 func (a *App) Run(ctx context.Context) {
 	go a.Policy.Run(ctx, a.Store, a.opts.PolicyReloadInterval, a.log)
 	if a.Discovery != nil {
 		go a.Discovery.Run(ctx)
 	}
 	go zonewrite.RunReconciler(ctx, a.Engine, a.authz.ManagedZones, a.Config.ReconcileInterval.D(), a.log)
+	if a.PlanGC != nil {
+		go a.runPlanGC(ctx, a.PlanGC)
+	}
 }
 
 // newProvider builds the adapter of a configured provider.
