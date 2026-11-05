@@ -36,6 +36,7 @@
 //	AUDIT#_all              <time>#<request id>      copy of every event (cross-zone queries)
 //	POLICY                  REV#<id>                 one policy revision (document as binary)
 //	POLICY                  ACTIVE                   revision_id of the active revision
+//	PLAN#<id>               PLAN                     one RRset plan (subject, zone, changes as JSON, zone_version, expires_at)
 //
 // Ownership attributes: owner, created_by, created_at, updated_at,
 // request_id, content_hash, pending_hash, state, adopted, expires_at
@@ -43,9 +44,15 @@
 //
 // Enable DynamoDB TTL on the attribute "ttl" (N, unix seconds). LOCK items
 // carry it as a cleanup of abandoned leases, audit items for retention
-// (DynamoDBConfig.AuditRetention, default 400 days). Ephemeral ownership
+// (DynamoDBConfig.AuditRetention, default 400 days), plan items for expiry
+// (TakePlan also checks expires_at, the TTL deletion being lazy). Ephemeral ownership
 // entries never carry it: the gate must delete the upstream records before
 // the entry disappears.
+//
+// RRset plans are taken once: a conditional delete on the subject (SQL
+// DELETE ... RETURNING, DynamoDB DeleteItem with ReturnValues ALL_OLD), so
+// that one plan is never applied twice, even by two gate instances. GCPlans
+// purges expired plans on the SQL backends; call it from a periodic task.
 //
 // Put semantics: Version 0 creates (fails with ErrConflict if the entry
 // exists); any other Version must match the stored one. On success the

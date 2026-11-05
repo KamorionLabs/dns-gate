@@ -52,6 +52,7 @@ var (
 // Store is implemented by memory and DynamoDB backends.
 type Store interface {
 	PolicyStore
+	PlanStore
 
 	Get(ctx context.Context, zone, host, typ string) (*Ownership, error)
 	List(ctx context.Context, zone string) ([]Ownership, error)
