@@ -1,5 +1,7 @@
 package uiapi
 
+import "github.com/KamorionLabs/dns-gate/internal/dns"
+
 // Adoption brings RRsets created outside the gate (foreign) under its
 // ownership, for a team. It requires dns.record.adopt on each RRset and never
 // applies to protected or server-managed (SOA, locked) records.
@@ -64,11 +66,17 @@ type AdoptResult struct {
 // RRsetChange is a desired state for one RRset (Values nil or empty with
 // Delete=true removes it). Used by MCP plan/apply and the UI.
 type RRsetChange struct {
-	Host   string   `json:"host"`
-	Type   string   `json:"type"`
-	TTL    int      `json:"ttl,omitempty"`
-	Values []string `json:"values,omitempty"`
-	Delete bool     `json:"delete,omitempty"`
+	Host   string     `json:"host"`
+	Type   string     `json:"type"`
+	TTL    int        `json:"ttl,omitempty"`
+	Values []string   `json:"values,omitempty"`
+	Alias  *dns.Alias `json:"alias,omitempty"`
+	Delete bool       `json:"delete,omitempty"`
+	// ExpectedHash, when set, is the content hash (dns.ContentHash) the
+	// RRset must have upstream for the change to apply: precondition
+	// otherwise. MustNotExist refuses the change if the RRset exists.
+	ExpectedHash string `json:"expected_hash,omitempty"`
+	MustNotExist bool   `json:"must_not_exist,omitempty"`
 }
 
 // PlanResult is a dry run of RRset changes for a subject.

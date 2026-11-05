@@ -12,7 +12,11 @@
 //	                                       -> AuditPage
 package uiapi
 
-import "time"
+import (
+	"time"
+
+	"github.com/KamorionLabs/dns-gate/internal/dns"
+)
 
 // Me describes the logged-in user.
 type Me struct {
@@ -66,6 +70,7 @@ type ConnectIssuer struct {
 // has been read once).
 type ZoneSummary struct {
 	Zone         string     `json:"zone"`
+	Provider     string     `json:"provider"`
 	Unmanaged    bool       `json:"unmanaged,omitempty"`
 	RRsets       int        `json:"rrsets"`  // total upstream RRsets
 	Managed      int        `json:"managed"` // owned by the gate (active)
@@ -91,6 +96,9 @@ type RRset struct {
 	Type          string     `json:"type"`
 	TTL           int        `json:"ttl"`
 	Values        []string   `json:"values"`
+	Alias         *dns.Alias `json:"alias,omitempty"`
+	ReadOnly      string     `json:"read_only,omitempty"`
+	Hash          string     `json:"hash"`
 	Status        string     `json:"status"`
 	Protected     bool       `json:"protected"`
 	Owner         string     `json:"owner,omitempty"` // team
