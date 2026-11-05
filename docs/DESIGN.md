@@ -364,6 +364,24 @@ libdns-eurodns, lego once it accepts a custom URL), the gate issues virtual keys
 bound to one role and team, has an expiry, and can be bound to source CIDRs.
 Recommended only for the `acme-solver` role.
 
+### 9.4 SAML users and gate-issued tokens
+
+Humans may sign in to the UI with SAML 2.0 instead of OIDC (`ui.saml`, e.g. an AWS
+IAM Identity Center custom application). The validated assertion becomes a session
+exactly like an ID token: `sub` = NameID, mapped attributes as claims, bound under a
+configured issuer name (`identity-center`), with optional group names looked up in
+the Identity Center identity store.
+
+Those users have no bearer token for the API, MCP or Terraform, so the gate can be its
+own issuer (`issuers[].self`): it signs short-lived JWTs (ES256 or EdDSA, JWKS at
+`/.well-known/jwks.json`) carrying the session claims plus `gate_iss`, and binds them
+back as that issuer, so one set of bindings covers the session and its tokens. Tokens
+come from `POST /api/v1/tokens` (session + CSRF) or from a stateless OAuth
+authorization server (`/oauth/authorize`, `/oauth/token`, PKCE, loopback redirects
+only, consent page) used by the Claude Desktop extension. Codes and refresh tokens
+are sealed with the session key; nothing is stored, so the gate stays stateless
+across instances (Lambda).
+
 ## 10. Extensions to the EuroDNS contract
 
 Kept minimal and invisible to plain EuroDNS clients:
@@ -498,7 +516,8 @@ view is.
 ### 14.4 Login and session
 
 - OIDC authorization code flow with PKCE against a configured issuer (e.g. Entra ID,
-  any OIDC provider); the same bindings map the user to roles and teams.
+  any OIDC provider), or SAML 2.0 (9.4); the same bindings map the user to roles and
+  teams.
 - Session in an encrypted, `HttpOnly`, `Secure`, `SameSite=Strict` cookie, short
   lifetime, no token stored in the browser's JavaScript-accessible storage.
 - Strict Content Security Policy (no inline script, `default-src 'self'`,
