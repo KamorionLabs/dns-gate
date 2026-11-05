@@ -46,32 +46,81 @@
 - First production use (November 2026): 14 zones, OpenTofu pipelines writing
   certificate validation and site records, the web UI and the MCP server.
 
+## v0.6 — dns-gate, multi-provider (in progress)
+
+- Project renamed `dns-gate`; gate detection on `/.well-known/dns-gate` only.
+- Provider-neutral core (`internal/dns`, `internal/provider`): EuroDNS and Route53
+  adapters, `providers:` configuration, one provider per zone name.
+- Route53: one atomic, conditional change batch per write (exact DELETE of the old
+  content), alias records, routing-policy records read-only.
+- Neutral REST API (`/api/v1/zones/{zone}/rrsets/{host}/{type}`, plan and apply)
+  with a published OpenAPI spec and API docs on the project site.
+- `terraform-provider-dnsgate`: `dnsgate_record_set`, `dnsgate_role`,
+  `dnsgate_binding`; Terraform export in its format.
+- DNS writes from the web UI (stage, plan, apply), with CSRF and step-up.
+- SAML 2.0 login (IAM Identity Center), groups from the identity store,
+  gate-issued tokens for the API, Terraform and the Claude Desktop extension.
+- AWS Lambda runtime (API Gateway HTTP API, scheduled maintenance, plans in the
+  store) and the `terraform-aws-dns-gate` module.
+
 ## Next
 
-- Upstream pull request to lego for a configurable API URL.
+- Providers, first wave (credentials that cannot be scoped per record, or our
+  users' clouds): Cloudflare (zone-scoped tokens, batch API), OVHcloud
+  (application keys scoped by API path only), Azure DNS (record-set ETags).
+- ACME front-ends independent of the provider: an endpoint compatible with lego's
+  `httpreq` provider (`/present`, `/cleanup`, basic auth mapped to virtual keys) and
+  an acme-dns compatible endpoint (cert-manager, Caddy, certbot).
+- external-dns webhook provider protocol (`GET /records`, `POST /records`,
+  `POST /adjustendpoints`), so Kubernetes clusters write DNS through the gate with
+  its RBAC and ownership instead of TXT registry records.
+- Signing key rotation for gate-issued tokens (several keys in the JWKS).
 - Shared rate limiter in the store for multiple replicas.
 - Prometheus metrics (upstream requests, waits, denials by reason, tainted RRsets).
-- Terraform provider on the HashiCorp registry.
+- Terraform providers on the HashiCorp registry.
 - Policy delegations in the UI: takeover from the editor (API only today), and
   rebasing open proposals over delegated changes instead of marking them stale.
+- Upstream pull request to lego for a configurable EuroDNS API URL.
 
 ## Later
 
-- Other registrars with all-or-nothing API keys, through upstream adapters (route
-  table + zone semantics per upstream).
-- external-dns webhook provider (Kubernetes ingresses → DNS records via the gate).
-- `cert-manager-webhook-eurodns` DNS-01 solver.
+- Providers, second wave: Google Cloud DNS (atomic changes with exact deletions),
+  Gandi LiveDNS, Infomaniak, Scaleway, IONOS, PowerDNS Authoritative (atomic
+  RRset PATCH), RFC 2136 dynamic updates (BIND, Knot, Windows DNS; prerequisites as
+  compare-and-swap, TSIG).
+- Long tail through a generic libdns 1.x adapter (DigitalOcean, Hetzner, GoDaddy,
+  Namecheap, Porkbun, deSEC...): no conditional writes upstream, so the zone lock
+  plus reads before and after the write stand in for them.
+- Route53 routing policies (weighted, latency, failover, geolocation) writable,
+  keyed by set identifier.
+- Zone names served by several providers (split horizon), keyed by provider and
+  zone id instead of the zone name.
+- `cert-manager` DNS-01 webhook solver.
 - Optional ownership markers in the zone (opaque TXT records signed with HMAC), to
   rebuild the store if lost.
 - Two-person approval for sensitive changes (apex, MX, NS, CAA).
-- Response filtering on list endpoints (`POST /domains/search`) per subject.
-- Postgres store.
-- MCP login without a pre-configured token, once the authorization server supports
-  dynamic client registration (not available with Entra ID).
+- Response filtering on list endpoints per subject.
+- MCP login without a pre-configured client, through dynamic client registration
+  on the gate's authorization server.
 - Pluggable policy engine (Cedar or OPA) behind the `Authorizer` interface.
 - Optional: turn an approved policy revision into a pull request on the git
   repository holding the base config, instead of (or before) activating it in the
   store.
+
+## Not planned
+
+- lego as a provider backend: its DNS providers only present and clean up ACME TXT
+  records (no zone listing, no other types, no update), and their API clients are
+  internal packages. lego stays a client of the gate (`httpreq`).
+- DNSControl providers as a library: not a supported API, heavy dependency tree,
+  and opaque corrections that cannot be checked change by change for ownership.
+
+## Open questions on Route53 and IAM Identity Center
+
+1. Octal escapes inside TXT values as returned by `ListResourceRecordSets`, to
+   confirm on a real account.
+2. Whether Identity Center honours `ForceAuthn` (step-up), the AuthnContext it
+   sends, and which user attribute to use for the identity store lookup.
 
 ## Open questions on the EuroDNS API
 
