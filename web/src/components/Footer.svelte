@@ -1,7 +1,7 @@
 <script lang="ts">
   import { api } from '../lib/api';
 
-  const REPO = 'https://github.com/KamorionLabs/eurodns-gate';
+  const REPO = 'https://github.com/KamorionLabs/dns-gate';
 
   let version = $state('');
   $effect(() => {
@@ -15,7 +15,7 @@
 <footer class="foot">
   <div class="inner">
     <span class="project">
-      <a href={REPO} target="_blank" rel="noopener">github.com/KamorionLabs/eurodns-gate</a>
+      <a href={REPO} target="_blank" rel="noopener">github.com/KamorionLabs/dns-gate</a>
       {#if version}<span class="version mono" title="Gate version">{version}</span>{/if}
     </span>
     <span class="made">Made with <span role="img" aria-label="love">❤️</span> by <a href="https://kamorion.com" target="_blank" rel="noopener">Kamorion</a></span>

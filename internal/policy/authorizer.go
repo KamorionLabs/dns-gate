@@ -4,7 +4,7 @@ package policy
 import (
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/identity"
+	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/eurodns-go/rrset"
 )
 

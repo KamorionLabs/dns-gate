@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/mcpb"
+	"github.com/KamorionLabs/dns-gate/internal/mcpb"
 )
 
 // TestClaudeDesktopRelayAgainstGate runs the relay of a downloaded bundle,
@@ -53,10 +53,10 @@ func TestClaudeDesktopRelayAgainstGate(t *testing.T) {
 	}
 
 	env := m.Server.MCPConfig.Env
-	u, _ := url.Parse(env["EURODNS_GATE_MCP_URL"])
+	u, _ := url.Parse(env["DNS_GATE_MCP_URL"])
 	tokens := filepath.Join(dir, "tokens")
 	saved, _ := json.Marshal(map[string]any{
-		"issuer": env["EURODNS_GATE_ISSUER"], "client_id": env["EURODNS_GATE_CLIENT_ID"], "scope": "openid offline_access",
+		"issuer": env["DNS_GATE_ISSUER"], "client_id": env["DNS_GATE_CLIENT_ID"], "scope": "openid offline_access",
 		"access_token": e.token("writer"), "expires_at": time.Now().Add(time.Hour).UnixMilli(),
 	})
 	_ = os.MkdirAll(tokens, 0o700)
@@ -69,7 +69,7 @@ func TestClaudeDesktopRelayAgainstGate(t *testing.T) {
 		args[i] = strings.ReplaceAll(a, "${__dirname}", filepath.Join(dir, "ext"))
 	}
 	cmd := exec.Command(node, args...)
-	cmd.Env = append(os.Environ(), "EURODNS_GATE_TOKEN_DIR="+tokens, "EURODNS_GATE_NO_BROWSER=1")
+	cmd.Env = append(os.Environ(), "DNS_GATE_TOKEN_DIR="+tokens, "DNS_GATE_NO_BROWSER=1")
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -116,7 +116,7 @@ func TestClaudeDesktopRelayAgainstGate(t *testing.T) {
 
 	send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"claude-desktop-test","version":"0"}}}`)
 	init := recv(1)
-	if res, _ := init["result"].(map[string]any); res == nil || res["serverInfo"].(map[string]any)["name"] != "eurodns-gate" || res["instructions"] == nil {
+	if res, _ := init["result"].(map[string]any); res == nil || res["serverInfo"].(map[string]any)["name"] != "dns-gate" || res["instructions"] == nil {
 		t.Fatalf("initialize: %v", init)
 	}
 	send(`{"jsonrpc":"2.0","method":"notifications/initialized"}`)

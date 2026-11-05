@@ -1,5 +1,5 @@
 // Package app wires the gate components from a configuration. It is shared
-// by the eurodns-gate command and the end-to-end tests.
+// by the dns-gate command and the end-to-end tests.
 package app
 
 import (
@@ -11,16 +11,16 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/audit"
-	"github.com/KamorionLabs/eurodns-gate/internal/authn"
-	"github.com/KamorionLabs/eurodns-gate/internal/config"
-	"github.com/KamorionLabs/eurodns-gate/internal/discovery"
-	"github.com/KamorionLabs/eurodns-gate/internal/policy"
-	"github.com/KamorionLabs/eurodns-gate/internal/server"
-	"github.com/KamorionLabs/eurodns-gate/internal/store"
-	"github.com/KamorionLabs/eurodns-gate/internal/version"
-	"github.com/KamorionLabs/eurodns-gate/internal/zonewrite"
-	"github.com/KamorionLabs/eurodns-gate/web"
+	"github.com/KamorionLabs/dns-gate/internal/audit"
+	"github.com/KamorionLabs/dns-gate/internal/authn"
+	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/discovery"
+	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/server"
+	"github.com/KamorionLabs/dns-gate/internal/store"
+	"github.com/KamorionLabs/dns-gate/internal/version"
+	"github.com/KamorionLabs/dns-gate/internal/zonewrite"
+	"github.com/KamorionLabs/dns-gate/web"
 	eurodns "github.com/KamorionLabs/eurodns-go"
 )
 
@@ -55,19 +55,19 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		eurodns.WithAuth(eurodns.APIKeyAuth{AppID: cfg.Upstream.AppID, APIKey: cfg.Upstream.APIKey}),
 		eurodns.WithRateLimit(cfg.Upstream.Rate.Every.D(), cfg.Upstream.Rate.Burst),
 		eurodns.WithMaxRetries(*cfg.Upstream.MaxRetries),
-		eurodns.WithUserAgent("eurodns-gate/"+version.Version),
+		eurodns.WithUserAgent("dns-gate/"+version.Version),
 	)
 	client, err := eurodns.New(
 		eurodns.WithBaseURL(cfg.Upstream.BaseURL),
 		eurodns.WithTransport(transport),
-		eurodns.WithUserAgent("eurodns-gate/"+version.Version),
+		eurodns.WithUserAgent("dns-gate/"+version.Version),
 	)
 	if err != nil {
 		return nil, err
 	}
 
 	if cfg.SingleReplicaStore() {
-		if n, err := strconv.Atoi(os.Getenv("EURODNS_GATE_REPLICAS")); err == nil && n > 1 {
+		if n, err := strconv.Atoi(os.Getenv("DNS_GATE_REPLICAS")); err == nil && n > 1 {
 			log.Error("store does not support several replicas: ownership and locks would diverge", "store", cfg.Store.Type, "replicas", n)
 		}
 	}

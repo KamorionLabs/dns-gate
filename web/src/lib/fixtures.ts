@@ -88,7 +88,7 @@ const me: Me = asReader
 
 // ?mcp=readonly or ?mcp=off in the page URL changes the MCP state of the Connect page.
 const mcpMode = new URLSearchParams(window.location.search).get('mcp');
-const GATE = 'https://eurodns-gate.example.com';
+const GATE = 'https://dns-gate.example.com';
 const UI_CLIENT_ID = '3f2a1b0c-9d8e-4f7a-b6c5-d4e3f2a1b0c9';
 const connect: Connect = {
   base_url: GATE,
@@ -605,7 +605,7 @@ const base: EffectivePolicy['base'] = {
     {
       name: 'aws',
       issuer: 'https://3f8a1c2e-0b7d-4e9a-a1c3-5d7f9b1e3a5c.tokens.sts.global.api.aws',
-      audiences: ['eurodns-gate'],
+      audiences: ['dns-gate'],
       bound_claims: { 'https://sts.amazonaws.com/org_id': ['o-a1b2c3d4e5'] },
       subject_claim: 'sub',
       category: 'pipeline',
@@ -613,7 +613,7 @@ const base: EffectivePolicy['base'] = {
     {
       name: 'github',
       issuer: 'https://token.actions.githubusercontent.com',
-      audiences: ['eurodns-gate'],
+      audiences: ['dns-gate'],
       bound_claims: { repository_owner: ['acme'] },
       subject_claim: 'sub',
       category: 'pipeline',
@@ -621,7 +621,7 @@ const base: EffectivePolicy['base'] = {
     {
       name: ENTRA,
       issuer: 'https://login.microsoftonline.com/7c1e2d3f-4a5b-6c7d-8e9f-0a1b2c3d4e5f/v2.0',
-      audiences: ['api://eurodns-gate'],
+      audiences: ['api://dns-gate'],
       subject_claim: 'preferred_username',
       category: 'human',
     },
@@ -635,7 +635,7 @@ const base: EffectivePolicy['base'] = {
     {
       name: 'k8s',
       issuer: 'https://oidc.eks.eu-central-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B71EXAMPLE',
-      audiences: ['eurodns-gate'],
+      audiences: ['dns-gate'],
       category: 'pipeline',
     },
   ],
@@ -1175,7 +1175,7 @@ function terraform(zone: string, q: TerraformQuery): string {
       (!q.types?.length || q.types.includes(r.type)),
   );
   const lines = [
-    `# eurodns-gate export of ${zone}${q.team ? ` for team ${q.team}` : ''}, ${new Date().toISOString().slice(0, 10)}`,
+    `# dns-gate export of ${zone}${q.team ? ` for team ${q.team}` : ''}, ${new Date().toISOString().slice(0, 10)}`,
     '# Provider: registry.terraform.io/kamorionlabs/eurodns (gate mode).',
     '',
   ];

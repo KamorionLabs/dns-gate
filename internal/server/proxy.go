@@ -6,9 +6,9 @@ import (
 	"net/http/httputil"
 	"strings"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/requestid"
-	"github.com/KamorionLabs/eurodns-gate/internal/routes"
-	"github.com/KamorionLabs/eurodns-gate/internal/version"
+	"github.com/KamorionLabs/dns-gate/internal/requestid"
+	"github.com/KamorionLabs/dns-gate/internal/routes"
+	"github.com/KamorionLabs/dns-gate/internal/version"
 )
 
 type matchKey struct{}
@@ -33,7 +33,7 @@ func (s *Server) newProxy() http.Handler {
 					h.Set(k, v)
 				}
 			}
-			h.Set("User-Agent", "eurodns-gate/"+version.Version)
+			h.Set("User-Agent", "dns-gate/"+version.Version)
 			out.Header = h
 			out.Body = http.NoBody
 			out.ContentLength = 0

@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/config"
-	"github.com/KamorionLabs/eurodns-gate/internal/glob"
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
+	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/glob"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 )
 
 // managedByRe bounds the client label of delegated objects.

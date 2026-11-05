@@ -1,6 +1,6 @@
 # Configuration reference
 
-eurodns-gate reads one YAML file (`-config`, default `/etc/eurodns-gate/config.yaml`, or `EURODNS_GATE_CONFIG`). Decoding is strict: an unknown field stops the gate at startup. `eurodns-gate -check -config file.yaml` validates a file and exits.
+dns-gate reads one YAML file (`-config`, default `/etc/dns-gate/config.yaml`, or `DNS_GATE_CONFIG`). Decoding is strict: an unknown field stops the gate at startup. `dns-gate -check -config file.yaml` validates a file and exits.
 
 A complete example is in [`examples/config.yaml`](../examples/config.yaml).
 
@@ -12,11 +12,11 @@ Secrets never live in the YAML file. Each one is read from an environment variab
 |---|---|---|
 | `EURODNS_API_KEY` | EuroDNS `X-API-KEY` | yes |
 | `EURODNS_APP_ID` | EuroDNS `X-APP-ID`, overrides `upstream.app_id` | if `upstream.app_id` is empty |
-| `EURODNS_GATE_POSTGRES_DSN` | Postgres connection string | with `store.type: postgres` |
-| `EURODNS_GATE_SESSION_KEY` | 32-byte key (hex or base64) encrypting UI cookies | with `ui.enabled` |
-| `EURODNS_GATE_UI_CLIENT_SECRET` | OIDC client secret of the UI | no (public client with PKCE) |
+| `DNS_GATE_POSTGRES_DSN` | Postgres connection string | with `store.type: postgres` |
+| `DNS_GATE_SESSION_KEY` | 32-byte key (hex or base64) encrypting UI cookies | with `ui.enabled` |
+| `DNS_GATE_UI_CLIENT_SECRET` | OIDC client secret of the UI | no (public client with PKCE) |
 
-Other environment variables: `POD_NAME` (lock holder id, defaults to the hostname) and `EURODNS_GATE_REPLICAS` (only used to warn when a single-replica store runs with several replicas).
+Other environment variables: `POD_NAME` (lock holder id, defaults to the hostname) and `DNS_GATE_REPLICAS` (only used to warn when a single-replica store runs with several replicas).
 
 Generate a session key with `openssl rand -hex 32`.
 
@@ -70,7 +70,7 @@ zones_discovery:
 | `store.type` | `memory` | `memory`, `sqlite`, `postgres` or `dynamodb`. |
 | `store.audit_retention` | `9600h` (400 days) | Audit events older than this are purged (minimum `24h`). |
 | `store.sqlite.path` | | Database file, on a persistent volume. |
-| `store.postgres.max_conns` | `5` | Pool size (1 to 100). The DSN comes from `EURODNS_GATE_POSTGRES_DSN`. |
+| `store.postgres.max_conns` | `5` | Pool size (1 to 100). The DSN comes from `DNS_GATE_POSTGRES_DSN`. |
 | `store.dynamodb.table`, `region`, `endpoint` | | Single-table backend; credentials from the default AWS chain (EKS Pod Identity, IRSA, environment). |
 
 `memory` loses ownership on restart: tests only. `memory` and `sqlite` support **one replica** (the chart refuses `replicaCount > 1` with them); use `postgres` or `dynamodb` to run several replicas.
@@ -109,7 +109,7 @@ Azure Managed Identity, AKS Workload Identity and Azure DevOps service connectio
 issuers:
   - name: entra
     issuer: https://login.microsoftonline.com/<tenant-id>/v2.0
-    audiences: ["api://eurodns-gate", "<gate-application-id>"]
+    audiences: ["api://dns-gate", "<gate-application-id>"]
     subject_template: "{{tid}}/{{oid}}"
     bound_claims: {tid: "<tenant-id>"}
     category_claim: idtyp
@@ -118,7 +118,7 @@ issuers:
 ```
 
 - Issuers are fixed tenants only: `/common`, `/organizations` and `/consumers` are refused (their `iss` is not fixed). v2 (`https://login.microsoftonline.com/<tid>/v2.0`) and v1 (`https://sts.windows.net/<tid>/`) are accepted when configured explicitly; for v1 the JWKS URL defaults to the tenant keys (`https://login.microsoftonline.com/<tid>/discovery/v2.0/keys`). Entra audiences must be the application id (GUID) or an `api://` URI.
-- App registration of the gate: expose an Application ID URI (`api://eurodns-gate`), set `accessTokenAcceptedVersion: 2` in the manifest (tokens then carry the v2 issuer), declare **app roles** (for example `DNS.Write`, `DNS.Read` for applications, `DNS.Admin` for users) and set *Assignment required* on the enterprise application so only assigned identities obtain a token.
+- App registration of the gate: expose an Application ID URI (`api://dns-gate`), set `accessTokenAcceptedVersion: 2` in the manifest (tokens then carry the v2 issuer), declare **app roles** (for example `DNS.Write`, `DNS.Read` for applications, `DNS.Admin` for users) and set *Assignment required* on the enterprise application so only assigned identities obtain a token.
 - Bind on `oid` (object id of the managed identity or service principal, stable) or on `roles` (app roles assigned in Entra). `sub` is pairwise per application and `appid`/`azp` identify the client application, not the identity.
 
 ```yaml
@@ -149,7 +149,7 @@ Azure DevOps step:
     scriptType: bash
     scriptLocation: inlineScript
     inlineScript: |
-      export EURODNS_GATE_TOKEN=$(az account get-access-token --scope api://eurodns-gate/.default --query accessToken -o tsv)
+      export DNS_GATE_TOKEN=$(az account get-access-token --scope api://dns-gate/.default --query accessToken -o tsv)
       terraform apply -auto-approve
 ```
 
@@ -168,14 +168,14 @@ issuers:
     audiences: ["api://AzureADTokenExchange"]
     bound_claims:
       sub:
-        - sc://<organization>/<project>/eurodns-gate-certificates-prd
+        - sc://<organization>/<project>/dns-gate-certificates-prd
     category: pipeline
 bindings:
   - role: acm-validation
     team: platform
     subjects:
       - issuer: azure-devops
-        claims: {sub: [sc://<organization>/<project>/eurodns-gate-certificates-prd]}
+        claims: {sub: [sc://<organization>/<project>/dns-gate-certificates-prd]}
 ```
 
 In the pipeline:
@@ -185,14 +185,14 @@ In the pipeline:
 
   ```yaml
   - task: cURLUploader@2
-    displayName: Reference the eurodns-gate service connection
+    displayName: Reference the dns-gate service connection
     condition: false
     inputs:
       files: none
       authType: ServiceEndpoint
-      serviceEndpoint: eurodns-gate-certificates-prd
+      serviceEndpoint: dns-gate-certificates-prd
   ```
-- the provider takes the connection id from `service_connection_id`, or from `EURODNS_GATE_ADO_SERVICE_CONNECTION_ID`, which a variable group named after the pipeline can carry so that nothing holds an id.
+- the provider takes the connection id from `service_connection_id`, or from `DNS_GATE_ADO_SERVICE_CONNECTION_ID`, which a variable group named after the pipeline can carry so that nothing holds an id.
 
 One binding for every dedicated service connection, each one owning its records (team = service connection name), so that a new pipeline needs a service connection but no gate change:
 
@@ -202,16 +202,16 @@ issuers:
     issuer: https://vstoken.dev.azure.com/<organization-id>
     audiences: ["api://AzureADTokenExchange"]
     bound_claims:
-      sub: ["sc://<organization>/<project>/eurodns-gate-*"]   # prefix dedicated to the gate
+      sub: ["sc://<organization>/<project>/dns-gate-*"]   # prefix dedicated to the gate
     category: pipeline
 bindings:
   - role: pipeline-writer
     team_from:
       claim: sub
-      regex: "^sc://[^/]+/[^/]+/(eurodns-gate-[a-z0-9-]+)$"   # team eurodns-gate-<name>
+      regex: "^sc://[^/]+/[^/]+/(dns-gate-[a-z0-9-]+)$"   # team dns-gate-<name>
     subjects:
       - issuer: azure-devops
-        claims: {sub: ["sc://<organization>/<project>/eurodns-gate-*"]}
+        claims: {sub: ["sc://<organization>/<project>/dns-gate-*"]}
 ```
 
 The glob turns the right to create service connections into the right to mint gate identities: see the trade-off under [Team derived from a claim](#team-derived-from-a-claim).
@@ -289,7 +289,7 @@ Binding pipeline identities one by one is heavy when each pipeline should own it
 issuers:
   - name: github
     issuer: https://token.actions.githubusercontent.com
-    audiences: [eurodns-gate]
+    audiences: [dns-gate]
     bound_claims: {sub: ["repo:acme/*"]}         # globs: new repositories need no gate change
 
 bindings:
@@ -315,7 +315,7 @@ Other subjects that encode one pipeline per value: Kubernetes service accounts (
 
 With Azure DevOps, the glob means that anyone allowed to **create a service connection** in the project with a name under the prefix, and to **authorize it for a pipeline they control**, mints a new trusted gate identity. That identity gets its own team, so it cannot change or delete the records of other teams, but it can create any not-yet-existing name its role allows. Mitigations:
 
-- keep the glob prefix (`eurodns-gate-*`) dedicated to the gate, and make sure no Entra federated credential, AWS role or other federation trusts subjects under it;
+- keep the glob prefix (`dns-gate-*`) dedicated to the gate, and make sure no Entra federated credential, AWS role or other federation trusts subjects under it;
 - restrict who may create service connections in the project (*Endpoint Creators* and *Endpoint Administrators* of the project, and organization-level service connection permissions) to the people who would otherwise change the gate configuration;
 - require approvals and checks on the service connections (or on the environments the pipelines deploy to), so a new pipeline cannot use one unreviewed;
 - watch the audit log: every write carries the subject (`azure-devops:sc://...`) and the derived team, and a team that appears for the first time is a new service connection.
@@ -383,11 +383,11 @@ policy:
           types: [CNAME, TXT]
         binding_subjects:             # identities a delegated binding may target
           - issuer: azure-devops
-            claims: {sub: ["sc://<organization>/<project>/eurodns-gate-*"]}
+            claims: {sub: ["sc://<organization>/<project>/dns-gate-*"]}
         teams:
           from_subject:               # the team is derived from the bound subject
             claim: sub
-            regex: "^sc://[^/]+/[^/]+/(eurodns-gate-[a-z0-9-]+)$"
+            regex: "^sc://[^/]+/[^/]+/(dns-gate-[a-z0-9-]+)$"
           # names: ["shared-*"]       # and/or fixed team names (globs)
         roles: []                     # existing base or managed roles delegated bindings may also grant
         groups: []                    # groups delegated bindings may target
@@ -402,7 +402,7 @@ policy:
 | `allow.zones` | (required) | Zone globs delegated role rules may target; each must be covered by `policy.bounds.zones`. |
 | `allow.actions` | (required) | Actions delegated role rules may grant; within `policy.bounds.actions`, `policy.*` refused. |
 | `allow.records.hosts`, `allow.records.types` | | When set, every delegated rule must name hosts (types) and each must be covered by these patterns (same host syntax as rules; `*` for any type). Without it, a delegated rule may cover whole zones. |
-| `allow.binding_subjects[]` | (required) | Every subject of a delegated binding must be covered by one of these matchers: same issuer, and each claim of the matcher constrained by the binding with patterns it covers (`sc://o/p/eurodns-gate-web` and `sc://o/p/eurodns-gate-*` are covered by `sc://o/p/eurodns-gate-*`; `sc://o/*` is not). `*` alone is refused. |
+| `allow.binding_subjects[]` | (required) | Every subject of a delegated binding must be covered by one of these matchers: same issuer, and each claim of the matcher constrained by the binding with patterns it covers (`sc://o/p/dns-gate-web` and `sc://o/p/dns-gate-*` are covered by `sc://o/p/dns-gate-*`; `sc://o/*` is not). `*` alone is refused. |
 | `allow.teams.from_subject` | | The "team from the subject" rule (`claim`, `regex`, `prefix`, as [`team_from`](#team-derived-from-a-claim)). A delegated binding either sets exactly this `team_from`, or a fixed `team` equal to the team this rule derives from its subject (each subject must then carry exactly one literal value of the claim, and the binding no groups). |
 | `allow.teams.names` | | Team globs a delegated binding may set as a fixed `team` (`*` alone refused). At least one of `from_subject` and `names`. |
 | `allow.roles` | `[]` | Base or managed roles a delegated binding may grant besides the roles of the delegation; each of their rules must still be within `allow`. |
@@ -418,14 +418,14 @@ Delegated roles and bindings live in the managed document, in its `delegated` se
 ```yaml
 delegated:
   roles:
-    eurodns-gate-web:
+    dns-gate-web:
       rules: [{zones: [example.com], actions: [dns.read, dns.record.write], records: {hosts: [web.apps], types: [CNAME]}}]
       owner: {delegation: workloads-pipelines, managed_by: terraform, created_by: "azure-devops:sc://...", created_at: ..., updated_by: ..., updated_at: ...}
   bindings:
-    eurodns-gate-web:
-      role: eurodns-gate-web
-      team: eurodns-gate-web
-      subjects: [{issuer: azure-devops, claims: {sub: ["sc://<organization>/<project>/eurodns-gate-web"]}}]
+    dns-gate-web:
+      role: dns-gate-web
+      team: dns-gate-web
+      subjects: [{issuer: azure-devops, claims: {sub: ["sc://<organization>/<project>/dns-gate-web"]}}]
       owner: {...}
 ```
 
@@ -510,7 +510,7 @@ The **Connect** page of the UI (`/ui/#/connect`, data from `GET /api/v1/connect`
 Claude Code, with a `headersHelper` that Claude Code runs again on each connection and on a `401` or `403`, so the token never goes stale (needs the Azure CLI signed in to the gate's tenant, `az login --tenant <tenant-id>`, and `jq`):
 
 ```sh
-claude mcp add-json eurodns-gate '{"type":"http","url":"https://gate.example.com/mcp","headersHelper":"az account get-access-token --scope api://<client-id>/.default --query accessToken -o tsv | jq -Rc \"{Authorization: (\\\"Bearer \\\" + .)}\""}' --scope user
+claude mcp add-json dns-gate '{"type":"http","url":"https://gate.example.com/mcp","headersHelper":"az account get-access-token --scope api://<client-id>/.default --query accessToken -o tsv | jq -Rc \"{Authorization: (\\\"Bearer \\\" + .)}\""}' --scope user
 ```
 
 The helper must print `{"Authorization":"Bearer <token>"}`. With another issuer, replace the `az` command by any command printing an access token.
@@ -519,12 +519,12 @@ The helper must print `{"Authorization":"Bearer <token>"}`. With another issuer,
 
 For Claude Desktop, the Connect page offers a **Claude Desktop extension**: the user downloads it, double-clicks it (or drags it into Claude Desktop, Settings, Extensions) and clicks Install. No terminal, Azure CLI, `jq` or Node.js is needed: the extension runs on the Node.js runtime shipped with Claude Desktop.
 
-The file comes from `GET /api/v1/connect/claude-desktop.mcpb` (same authentication as `/api/v1/connect`), offered when `mcp.enabled` and the UI login are both on; `/api/v1/connect` then returns its URL in `claude_desktop_extension_url` (empty otherwise, and the download answers `404`). It is an [MCP Bundle](https://github.com/modelcontextprotocol/mcpb) (manifest `0.3`, `eurodns-gate-<host>.mcpb`) generated on the fly with the MCP URL, the UI issuer, `ui.client_id` and the token scope (from `ui.cli_scope`, see Entra ID below) baked in. It holds no secret and is the same for every user of the gate.
+The file comes from `GET /api/v1/connect/claude-desktop.mcpb` (same authentication as `/api/v1/connect`), offered when `mcp.enabled` and the UI login are both on; `/api/v1/connect` then returns its URL in `claude_desktop_extension_url` (empty otherwise, and the download answers `404`). It is an [MCP Bundle](https://github.com/modelcontextprotocol/mcpb) (manifest `0.3`, `dns-gate-<host>.mcpb`) generated on the fly with the MCP URL, the UI issuer, `ui.client_id` and the token scope (from `ui.cli_scope`, see Entra ID below) baked in. It holds no secret and is the same for every user of the gate.
 
 Its local server, `internal/mcpb/relay.js` (one file, Node.js 18 or later, no dependency), forwards every MCP message to `/mcp` over Streamable HTTP (JSON and SSE answers, `Mcp-Session-Id`, messages the gate sends on its own) with the user's access token:
 
 - Sign-in uses the system browser on the issuer (authorization code with PKCE S256, `state` and `nonce`, scopes `openid offline_access <scope>`, see below), back to a loopback redirect `http://localhost:<ephemeral port>`, without a path. Without a usable token, `initialize` and the list requests (`tools/list`, `prompts/list`, `resources/list`, `resources/templates/list`) are answered at once, the lists empty, since Claude Desktop gives up on a request after about a minute; the sign-in then runs in the background and the relay sends `notifications/tools/list_changed` once signed in, so Claude fetches the tools again. Conversations already open keep the tool list they started with: start a new conversation after the first sign-in. A tool call made before that waits for the sign-in. A sign-in not completed within 5 minutes, or refused, fails the waiting requests with a JSON-RPC error; asking again starts a new one. With a usable token, every message goes straight to the gate.
-- The tokens are kept in `~/.eurodns-gate/<host>.json` (mode `0600`). The access token is refreshed silently with the refresh token; the browser opens again only when the refresh is refused (expired or revoked session).
+- The tokens are kept in `~/.dns-gate/<host>.json` (mode `0600`). The access token is refreshed silently with the refresh token; the browser opens again only when the refresh is refused (expired or revoked session).
 - Tokens are never written to the logs (Claude Desktop keeps the server's stderr in its MCP logs). When the browser cannot be opened, the sign-in URL is in those logs.
 
 The identity provider must accept `ui.client_id` as a **public client** for this flow:
@@ -538,7 +538,7 @@ With Entra ID, on the gate app registration (the one of `ui.client_id`):
 
 - add the platform **Mobile and desktop applications** with the redirect URI exactly `http://localhost`: Entra ignores the port of loopback redirects but not the path, so do not add `/callback` or a trailing slash; in Terraform (`azuread_application`), `public_client { redirect_uris = ["http://localhost"] }`. The web redirect `https://<gate>/auth/callback` of the UI stays as it is;
 - set **Allow public client flows** to *Yes* (`fallback_public_client_enabled = true`), so Entra treats the code and refresh token requests, which carry no client secret, as coming from a public client;
-- the token is requested for `ui.cli_scope` (`api://<client_id>/.default` by default). The extension signs in as `ui.client_id` itself, and Entra refuses a token an application requests for itself through its App ID URI (`AADSTS90009`): the bundle therefore carries a `ui.cli_scope` of the form `api://<client_id>/<scope>` as `<client_id>/<scope>`, the GUID form Entra requires; other scopes are kept as they are, and `ui.cli_scope` itself is unchanged for the Azure CLI. A custom App ID URI of the same application (`api://eurodns-gate/.default`) is not rewritten and hits the same error: keep `ui.cli_scope` under `api://<client_id>/` for the extension. The application must expose a delegated scope that users may consent to, or that an administrator consented to tenant-wide, and the issuer must list the application id in `audiences` with `accessTokenAcceptedVersion: 2`, as for the Azure CLI below. *Assignment required* applies as for the UI.
+- the token is requested for `ui.cli_scope` (`api://<client_id>/.default` by default). The extension signs in as `ui.client_id` itself, and Entra refuses a token an application requests for itself through its App ID URI (`AADSTS90009`): the bundle therefore carries a `ui.cli_scope` of the form `api://<client_id>/<scope>` as `<client_id>/<scope>`, the GUID form Entra requires; other scopes are kept as they are, and `ui.cli_scope` itself is unchanged for the Azure CLI. A custom App ID URI of the same application (`api://dns-gate/.default`) is not rewritten and hits the same error: keep `ui.cli_scope` under `api://<client_id>/` for the extension. The application must expose a delegated scope that users may consent to, or that an administrator consented to tenant-wide, and the issuer must list the application id in `audiences` with `accessTokenAcceptedVersion: 2`, as for the Azure CLI below. *Assignment required* applies as for the UI.
 
 The bundle is not signed (`mcpb sign`): organizations that restrict Claude Desktop to approved or signed extensions must allow it.
 
@@ -549,7 +549,7 @@ Claude Desktop without the extension, and other clients that only start local se
 ```json
 {
   "mcpServers": {
-    "eurodns-gate": {
+    "dns-gate": {
       "command": "npx",
       "args": ["-y", "mcp-remote", "https://gate.example.com/mcp", "--header", "Authorization:${AUTH_HEADER}"],
       "env": { "AUTH_HEADER": "Bearer <access token>" }
@@ -591,8 +591,8 @@ Audit events of zones the user cannot read are filtered out; events without a zo
 | Path | Description |
 |---|---|
 | EuroDNS API paths | Opened operations: `getDnsZone`, `saveDnsZone`, `checkDnsZone`, `addDnsRecords`, `deleteDnsRecord` (zone engine), `listDnsZoneSnapshots`, `getSnapShot`, `getDnssecStatus`, `getDomain` (proxied). Every other operation returns `403 operation_denied`. Query strings, encoded separators and dot segments are refused. |
-| `GET /.well-known/eurodns-gate` | Version and features (`if-match`, `ownership`, `adopt`, `policy-delegation`), unauthenticated. |
-| `POST /.well-known/eurodns-gate/zones/{zone}/adopt` | Adopt RRsets (used by the Terraform provider on import). Foreign RRsets need `dns.record.adopt`; RRsets already owned by one of the caller's teams are a no-op and only need `dns.record.write` on the zone. |
+| `GET /.well-known/dns-gate` | Version and features (`if-match`, `ownership`, `adopt`, `policy-delegation`), unauthenticated. |
+| `POST /.well-known/dns-gate/zones/{zone}/adopt` | Adopt RRsets (used by the Terraform provider on import). Foreign RRsets need `dns.record.adopt`; RRsets already owned by one of the caller's teams are a no-op and only need `dns.record.write` on the zone. |
 | `/api/v1/me`, `/api/v1/connect`, `/api/v1/zones`, `/api/v1/zones/{zone}/rrsets`, `/api/v1/audit` | UI API (`ui.read`; `/zones` lists managed zones then unmanaged ones (`"unmanaged": true`), whose `rrsets` need `dns.read`; `/me` for any bound subject, with its groups and effective permissions; `/connect` returns the public URL, the MCP state, the login issuer and `ui.cli_scope` for the Connect page). |
 | `GET /api/v1/connect/claude-desktop.mcpb` | Claude Desktop extension of the gate (`ui.read`), when MCP and the UI login are enabled, see [Claude Desktop extension](#claude-desktop-extension). |
 | `/api/v1/policy`, `/api/v1/policy/revisions[/{id}[/approve\|reject\|activate\|rollback\|export]]`, `/api/v1/policy/explain`, `/api/v1/policy/who-can`, `/api/v1/policy/virtual-keys/generate` | Policy API, see `internal/uiapi/policy.go`. |

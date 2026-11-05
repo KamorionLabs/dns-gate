@@ -24,7 +24,7 @@ export interface Permission {
   types: string[]; // empty: any type
 }
 
-/** GET /.well-known/eurodns-gate: version and features, unauthenticated. */
+/** GET /.well-known/dns-gate: version and features, unauthenticated. */
 export interface GateInfo {
   version: string;
   features: string[];

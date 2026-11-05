@@ -1,4 +1,4 @@
-# eurodns-gate — Design
+# dns-gate — Design
 
 Status: beta. The design below has run in production against the live EuroDNS API
 since November 2026; the points of the API still worth an explicit test are listed in
@@ -42,7 +42,7 @@ Goals:
 Non-goals (v0.x):
 
 - Re-implementing or extending the EuroDNS API beyond a few headers and a
-  reserved `/.well-known/eurodns-gate` prefix.
+  reserved `/.well-known/dns-gate` prefix.
 - Domain lifecycle (registration, transfers, contacts, billing): denied by default.
 - Multi-registrar support (the internal interfaces leave room for it, see ROADMAP).
 
@@ -78,7 +78,7 @@ and 3 are enforced by the gate on every request.
           └──────────────────────┼────────────────────────┘
                                  ▼
    ┌──────────────────────────────────────────────────────────┐
-   │ eurodns-gate                                             │
+   │ dns-gate                                             │
    │                                                          │
    │ 1. authn     multi-issuer JWT (JWKS), audience enforced  │
    │ 2. routing   operationId → action, deny by default       │
@@ -101,7 +101,7 @@ Repositories:
 | Repository | Content |
 |---|---|
 | `KamorionLabs/eurodns-go` | Go client (`eurodns`), RRset helpers (`rrset`), zone delta (`zonediff`), fake server (`eurodnstest`). Shared by the gate and the provider. |
-| `KamorionLabs/eurodns-gate` | The gate (this repository), Helm chart, container image. |
+| `KamorionLabs/dns-gate` | The gate (this repository), Helm chart, container image. |
 | `KamorionLabs/terraform-provider-eurodns` | One Terraform/OpenTofu provider with two modes: direct to EuroDNS, or through a gate. |
 
 Main packages of the gate:
@@ -136,7 +136,7 @@ request
   ├─ dispatch
   │     passthrough-read  → reverse proxy with injected EuroDNS credentials
   │     engine            → zonewrite.Engine (all DNS zone writes and zone reads)
-  │     gate extension    → /.well-known/eurodns-gate[...]
+  │     gate extension    → /.well-known/dns-gate[...]
   └─ audit event (allow | deny | error)
 ```
 
@@ -206,7 +206,7 @@ records exist at the same host is a foreign collision.
 ### 6.3 Adoption
 
 Records that existed before the gate are foreign and read-only through the gate.
-`POST /.well-known/eurodns-gate/zones/{domain}/adopt` (action `dns.record.adopt`,
+`POST /.well-known/dns-gate/zones/{domain}/adopt` (action `dns.record.adopt`,
 admin role) creates ownership entries for listed RRsets, with their current content
 hash and `Adopted = true`. Adopting an RRset already owned by the caller's team is
 a no-op. In gate mode, `terraform import` of an `eurodns_record_set` calls adopt.
@@ -372,8 +372,8 @@ Kept minimal and invisible to plain EuroDNS clients:
 |---|---|
 | `ETag` on `GET /dns-zones/{d}` | zone version |
 | `If-Match` on writes | `412` if the zone version changed. EuroDNS ignores the header, so clients can always send it. |
-| `GET /.well-known/eurodns-gate` | `{"version": "...", "features": ["if-match", "ownership", "adopt"]}`. Plain EuroDNS returns 404: this is how the provider detects a gate. |
-| `POST /.well-known/eurodns-gate/zones/{d}/adopt` | adoption (see 6.3) |
+| `GET /.well-known/dns-gate` | `{"version": "...", "features": ["if-match", "ownership", "adopt"]}`. Plain EuroDNS returns 404: this is how the provider detects a gate. |
+| `POST /.well-known/dns-gate/zones/{d}/adopt` | adoption (see 6.3) |
 | Error body | `{"reason": "<code>", "message": "..."}` with the reason codes of 6.2 |
 
 ## 11. Rate limit and high availability

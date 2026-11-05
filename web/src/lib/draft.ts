@@ -1,7 +1,7 @@
 import type { PolicyDocument } from './types';
 
 // The policy draft survives a step-up re-authentication round trip.
-const KEY = 'eurodns-gate.policy-draft';
+const KEY = 'dns-gate.policy-draft';
 
 export interface StoredDraft {
   parent_id: string;

@@ -16,7 +16,7 @@ upstream:
 issuers:
   - name: ci
     issuer: https://token.example.net
-    audiences: [eurodns-gate]
+    audiences: [dns-gate]
 roles:
   writer:
     rules:
@@ -77,8 +77,8 @@ func TestAPIKeyFromFile(t *testing.T) {
 func TestValidationErrors(t *testing.T) {
 	cases := map[string]string{
 		"missing key":      base,
-		"hmac alg":         strings.Replace(base, "audiences: [eurodns-gate]", "audiences: [eurodns-gate]\n    algorithms: [HS256]", 1),
-		"no audience":      strings.Replace(base, "audiences: [eurodns-gate]", "audiences: []", 1),
+		"hmac alg":         strings.Replace(base, "audiences: [dns-gate]", "audiences: [dns-gate]\n    algorithms: [HS256]", 1),
+		"no audience":      strings.Replace(base, "audiences: [dns-gate]", "audiences: []", 1),
 		"unknown action":   strings.Replace(base, "dns.record.write]", "dns.record.delete]", 1),
 		"unknown role":     strings.Replace(base, "- role: writer", "- role: ghost", 1),
 		"bad zone":         strings.Replace(base, "zones: [example.com]", "zones: [example]", 1),
@@ -101,8 +101,8 @@ func TestValidationErrors(t *testing.T) {
 func TestUISessionKey(t *testing.T) {
 	doc := base + "ui: {enabled: true, issuer: ci, client_id: x, redirect_url: https://gate.example.com/auth/callback}\n"
 	c, err := Parse([]byte(doc), env(map[string]string{
-		"EURODNS_API_KEY":          "k",
-		"EURODNS_GATE_SESSION_KEY": strings.Repeat("ab", 32),
+		"EURODNS_API_KEY":      "k",
+		"DNS_GATE_SESSION_KEY": strings.Repeat("ab", 32),
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -115,9 +115,9 @@ func TestUISessionKey(t *testing.T) {
 func TestUICLIScope(t *testing.T) {
 	const tenant = "11111111-2222-3333-4444-555555555555"
 	const client = "99999999-8888-7777-6666-555555555555"
-	e := env(map[string]string{"EURODNS_API_KEY": "k", "EURODNS_GATE_SESSION_KEY": strings.Repeat("ab", 32)})
+	e := env(map[string]string{"EURODNS_API_KEY": "k", "DNS_GATE_SESSION_KEY": strings.Repeat("ab", 32)})
 	ui := "ui: {enabled: true, issuer: ci, client_id: " + client + ", redirect_url: https://gate.example.com/auth/callback%s}\n"
-	entra := strings.NewReplacer("https://token.example.net", "https://login.microsoftonline.com/"+tenant+"/v2.0", "audiences: [eurodns-gate]", "audiences: ["+client+"]").Replace(base)
+	entra := strings.NewReplacer("https://token.example.net", "https://login.microsoftonline.com/"+tenant+"/v2.0", "audiences: [dns-gate]", "audiences: ["+client+"]").Replace(base)
 
 	c, err := Parse([]byte(entra+fmt.Sprintf(ui, "")), e)
 	if err != nil {
@@ -126,7 +126,7 @@ func TestUICLIScope(t *testing.T) {
 	if c.UI.CLIScope != "api://"+client+"/.default" {
 		t.Fatalf("Entra default cli_scope: %q", c.UI.CLIScope)
 	}
-	if c, err = Parse([]byte(entra+fmt.Sprintf(ui, ", cli_scope: api://eurodns-gate/.default")), e); err != nil || c.UI.CLIScope != "api://eurodns-gate/.default" {
+	if c, err = Parse([]byte(entra+fmt.Sprintf(ui, ", cli_scope: api://dns-gate/.default")), e); err != nil || c.UI.CLIScope != "api://dns-gate/.default" {
 		t.Fatalf("explicit cli_scope: %v %q", err, c.UI.CLIScope)
 	}
 	if c, err = Parse([]byte(base+fmt.Sprintf(ui, "")), e); err != nil || c.UI.CLIScope != "" {
@@ -145,8 +145,8 @@ func TestExampleConfig(t *testing.T) {
 		t.Skip("examples/config.yaml absent")
 	}
 	if _, err := Parse(data, env(map[string]string{
-		"EURODNS_API_KEY":          "k",
-		"EURODNS_GATE_SESSION_KEY": strings.Repeat("ab", 32),
+		"EURODNS_API_KEY":      "k",
+		"DNS_GATE_SESSION_KEY": strings.Repeat("ab", 32),
 	})); err != nil {
 		t.Fatal(err)
 	}
@@ -155,13 +155,13 @@ func TestExampleConfig(t *testing.T) {
 func TestEntraIssuers(t *testing.T) {
 	const tenant = "11111111-2222-3333-4444-555555555555"
 	doc := func(issuer, aud string) string {
-		return strings.NewReplacer("https://token.example.net", issuer, "audiences: [eurodns-gate]", "audiences: ["+aud+"]").Replace(base)
+		return strings.NewReplacer("https://token.example.net", issuer, "audiences: [dns-gate]", "audiences: ["+aud+"]").Replace(base)
 	}
 	e := env(map[string]string{"EURODNS_API_KEY": "k"})
 	ok := []struct{ issuer, aud string }{
-		{"https://login.microsoftonline.com/" + tenant + "/v2.0", "api://eurodns-gate"},
+		{"https://login.microsoftonline.com/" + tenant + "/v2.0", "api://dns-gate"},
 		{"https://login.microsoftonline.com/" + tenant + "/v2.0", "99999999-8888-7777-6666-555555555555"},
-		{"https://sts.windows.net/" + tenant + "/", "api://eurodns-gate"},
+		{"https://sts.windows.net/" + tenant + "/", "api://dns-gate"},
 	}
 	for _, c := range ok {
 		cfg, err := Parse([]byte(doc(c.issuer, c.aud)), e)
@@ -174,13 +174,13 @@ func TestEntraIssuers(t *testing.T) {
 		}
 	}
 	ko := []struct{ issuer, aud string }{
-		{"https://login.microsoftonline.com/common/v2.0", "api://eurodns-gate"},
-		{"https://login.microsoftonline.com/organizations/v2.0", "api://eurodns-gate"},
-		{"https://login.microsoftonline.com/consumers/v2.0", "api://eurodns-gate"},
-		{"https://login.microsoftonline.com/" + tenant, "api://eurodns-gate"},
-		{"https://login.microsoftonline.com/" + tenant + "/v2.0", "eurodns-gate"},
-		{"https://sts.windows.net/common/", "api://eurodns-gate"},
-		{"https://sts.windows.net/" + tenant, "api://eurodns-gate"},
+		{"https://login.microsoftonline.com/common/v2.0", "api://dns-gate"},
+		{"https://login.microsoftonline.com/organizations/v2.0", "api://dns-gate"},
+		{"https://login.microsoftonline.com/consumers/v2.0", "api://dns-gate"},
+		{"https://login.microsoftonline.com/" + tenant, "api://dns-gate"},
+		{"https://login.microsoftonline.com/" + tenant + "/v2.0", "dns-gate"},
+		{"https://sts.windows.net/common/", "api://dns-gate"},
+		{"https://sts.windows.net/" + tenant, "api://dns-gate"},
 	}
 	for _, c := range ko {
 		if _, err := Parse([]byte(doc(c.issuer, c.aud)), e); err == nil {
@@ -192,7 +192,7 @@ func TestEntraIssuers(t *testing.T) {
 func TestSubjectTemplate(t *testing.T) {
 	e := env(map[string]string{"EURODNS_API_KEY": "k"})
 	with := func(extra string) string {
-		return strings.Replace(base, "audiences: [eurodns-gate]", "audiences: [eurodns-gate]\n    "+extra, 1)
+		return strings.Replace(base, "audiences: [dns-gate]", "audiences: [dns-gate]\n    "+extra, 1)
 	}
 	c, err := Parse([]byte(with(`subject_template: "{{tid}}/{{oid}}"`)), e)
 	if err != nil {

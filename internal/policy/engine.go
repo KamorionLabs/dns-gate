@@ -4,8 +4,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/config"
-	"github.com/KamorionLabs/eurodns-gate/internal/identity"
+	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/eurodns-go/rrset"
 )
 

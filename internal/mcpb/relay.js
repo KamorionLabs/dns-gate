@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// eurodns-gate relay: a local stdio MCP server that forwards every JSON-RPC
+// dns-gate relay: a local stdio MCP server that forwards every JSON-RPC
 // message to the gate's /mcp endpoint (Streamable HTTP) with an OIDC access
 // token of the signed-in user.
 //
@@ -7,20 +7,20 @@
 // through the system browser and a loopback redirect
 // (http://localhost:<ephemeral port>, no path: Entra ID ignores the port of a
 // registered http://localhost, not the path). The refresh token is kept in
-// ~/.eurodns-gate/<host>.json (0600) and used silently; the browser opens
+// ~/.dns-gate/<host>.json (0600) and used silently; the browser opens
 // again only when it no longer works.
 //
 // Node.js >= 18, built-in modules only. Nothing is ever written to stdout but
 // JSON-RPC messages; diagnostics go to stderr. Tokens are never logged.
 //
 // Environment (baked into the bundle manifest by the gate):
-//   EURODNS_GATE_MCP_URL      MCP endpoint of the gate (required)
-//   EURODNS_GATE_ISSUER       OIDC issuer URL (required)
-//   EURODNS_GATE_CLIENT_ID    OAuth client id, a public client (required)
-//   EURODNS_GATE_SCOPE        extra scopes, e.g. the gate API scope (optional)
-//   EURODNS_GATE_TOKEN_DIR    token directory (default ~/.eurodns-gate)
-//   EURODNS_GATE_NO_BROWSER   when set, only print the sign-in URL on stderr
-//   EURODNS_GATE_LOGIN_TIMEOUT  seconds to wait for the browser sign-in (default 300)
+//   DNS_GATE_MCP_URL      MCP endpoint of the gate (required)
+//   DNS_GATE_ISSUER       OIDC issuer URL (required)
+//   DNS_GATE_CLIENT_ID    OAuth client id, a public client (required)
+//   DNS_GATE_SCOPE        extra scopes, e.g. the gate API scope (optional)
+//   DNS_GATE_TOKEN_DIR    token directory (default ~/.dns-gate)
+//   DNS_GATE_NO_BROWSER   when set, only print the sign-in URL on stderr
+//   DNS_GATE_LOGIN_TIMEOUT  seconds to wait for the browser sign-in (default 300)
 'use strict';
 
 const crypto = require('node:crypto');
@@ -31,7 +31,7 @@ const path = require('node:path');
 const readline = require('node:readline');
 const { spawn } = require('node:child_process');
 
-const RELAY_NAME = 'eurodns-gate';
+const RELAY_NAME = 'dns-gate';
 const RELAY_VERSION = '1.0.0';
 const DEFAULT_PROTOCOL_VERSION = '2025-06-18';
 const HTTP_TIMEOUT_MS = 30_000;
@@ -73,22 +73,22 @@ function checkURL(name, value) {
 }
 
 function loadConfig(env) {
-  for (const k of ['EURODNS_GATE_MCP_URL', 'EURODNS_GATE_ISSUER', 'EURODNS_GATE_CLIENT_ID']) {
+  for (const k of ['DNS_GATE_MCP_URL', 'DNS_GATE_ISSUER', 'DNS_GATE_CLIENT_ID']) {
     if (!env[k]) throw new Error(`${k} is not set`);
   }
-  const mcpURL = checkURL('EURODNS_GATE_MCP_URL', env.EURODNS_GATE_MCP_URL);
-  checkURL('EURODNS_GATE_ISSUER', env.EURODNS_GATE_ISSUER);
-  const extra = (env.EURODNS_GATE_SCOPE || '').split(/\s+/).filter(Boolean);
+  const mcpURL = checkURL('DNS_GATE_MCP_URL', env.DNS_GATE_MCP_URL);
+  checkURL('DNS_GATE_ISSUER', env.DNS_GATE_ISSUER);
+  const extra = (env.DNS_GATE_SCOPE || '').split(/\s+/).filter(Boolean);
   const scope = [...new Set(['openid', 'offline_access', ...extra])].join(' ');
-  const timeout = Number(env.EURODNS_GATE_LOGIN_TIMEOUT || 300);
+  const timeout = Number(env.DNS_GATE_LOGIN_TIMEOUT || 300);
   return {
     mcpURL: mcpURL.href,
     host: mcpURL.host,
-    issuer: env.EURODNS_GATE_ISSUER.replace(/\/+$/, ''),
-    clientID: env.EURODNS_GATE_CLIENT_ID,
+    issuer: env.DNS_GATE_ISSUER.replace(/\/+$/, ''),
+    clientID: env.DNS_GATE_CLIENT_ID,
     scope,
-    tokenFile: path.join(env.EURODNS_GATE_TOKEN_DIR || path.join(os.homedir(), '.eurodns-gate'), mcpURL.host.replace(/[^A-Za-z0-9.-]/g, '_') + '.json'),
-    openBrowser: !env.EURODNS_GATE_NO_BROWSER,
+    tokenFile: path.join(env.DNS_GATE_TOKEN_DIR || path.join(os.homedir(), '.dns-gate'), mcpURL.host.replace(/[^A-Za-z0-9.-]/g, '_') + '.json'),
+    openBrowser: !env.DNS_GATE_NO_BROWSER,
     loginTimeoutMs: (Number.isFinite(timeout) && timeout > 0 ? timeout : 300) * 1000,
   };
 }
@@ -453,7 +453,7 @@ class Relay {
     const message =
       code === ERR_SIGN_IN
         ? `Sign-in to ${this.cfg.host} failed: ${e.message}. Ask again to restart the sign-in.`
-        : `eurodns-gate (${this.cfg.host}): ${e.message}`;
+        : `dns-gate (${this.cfg.host}): ${e.message}`;
     this.write({ jsonrpc: '2.0', id, error: { code, message } });
   }
 
@@ -742,6 +742,6 @@ function main() {
 
 // Claude Desktop loads the entry point in an Electron utility process where
 // require.main is not this module: run unless loaded as a library.
-if (require.main === module || !process.env.EURODNS_GATE_RELAY_NO_MAIN) main();
+if (require.main === module || !process.env.DNS_GATE_RELAY_NO_MAIN) main();
 
 module.exports = { loadConfig, parseSSE, Relay, Auth };

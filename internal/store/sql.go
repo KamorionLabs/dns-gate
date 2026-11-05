@@ -18,7 +18,7 @@ import (
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/audit"
+	"github.com/KamorionLabs/dns-gate/internal/audit"
 )
 
 //go:embed migrations

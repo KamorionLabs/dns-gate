@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/config"
-	"github.com/KamorionLabs/eurodns-gate/internal/identity"
-	"github.com/KamorionLabs/eurodns-gate/internal/oidctest"
+	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/identity"
+	"github.com/KamorionLabs/dns-gate/internal/oidctest"
 )
 
 const (
@@ -27,7 +27,7 @@ func entraSetup(t *testing.T) (*Authenticator, *oidctest.Provider) {
 	t.Cleanup(p.Close)
 	c := &config.Config{
 		Issuers: []config.Issuer{{
-			Name: "entra", Issuer: p.URL, Audiences: []string{"api://eurodns-gate", gateApp},
+			Name: "entra", Issuer: p.URL, Audiences: []string{"api://dns-gate", gateApp},
 			SubjectTemplate: "{{tid}}/{{oid}}",
 			BoundClaims:     map[string]config.StringList{"tid": {tid}},
 			CategoryClaim:   "idtyp", CategoryMap: map[string]string{"app": "pipeline", "user": "human"},
@@ -73,7 +73,7 @@ func TestEntraV2AppToken(t *testing.T) {
 func TestEntraV1ManagedIdentity(t *testing.T) {
 	a, p := entraSetup(t)
 	tok := p.Sign(map[string]any{
-		"ver": "1.0", "aud": "api://eurodns-gate", "tid": tid, "oid": miOID, "sub": miOID,
+		"ver": "1.0", "aud": "api://dns-gate", "tid": tid, "oid": miOID, "sub": miOID,
 		"appid": miAppID, "idtyp": "app",
 	})
 	s, err := a.Authenticate(bearer(tok))

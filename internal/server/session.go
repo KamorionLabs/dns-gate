@@ -94,9 +94,9 @@ const (
 
 func newCookieNames(secure bool) cookieNames {
 	if secure {
-		return cookieNames{session: "__Host-eurodns-gate-session", login: "__Host-eurodns-gate-login", secure: true}
+		return cookieNames{session: "__Host-dns-gate-session", login: "__Host-dns-gate-login", secure: true}
 	}
-	return cookieNames{session: "eurodns-gate-session", login: "eurodns-gate-login"}
+	return cookieNames{session: "dns-gate-session", login: "dns-gate-login"}
 }
 
 func (c cookieNames) cookie(name, value string, maxAge time.Duration) *http.Cookie {

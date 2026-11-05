@@ -25,10 +25,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/app"
-	"github.com/KamorionLabs/eurodns-gate/internal/config"
-	"github.com/KamorionLabs/eurodns-gate/internal/oidctest"
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
+	"github.com/KamorionLabs/dns-gate/internal/app"
+	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/oidctest"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 	eurodns "github.com/KamorionLabs/eurodns-go"
 	"github.com/KamorionLabs/eurodns-go/eurodnstest"
 )
@@ -148,7 +148,7 @@ store:
 issuers:
   - name: ci
     issuer: %[5]s
-    audiences: [eurodns-gate]
+    audiences: [dns-gate]
     category: pipeline
 virtual_keys:
   - id: vk-acme
@@ -212,9 +212,9 @@ policy:
         zones: [%[3]s]
         actions: [dns.read, dns.record.write, ui.read]
         records: {hosts: ["**.wl"], types: [CNAME, TXT]}
-        binding_subjects: [{issuer: ci, claims: {sub: ["sc://org/proj/eurodns-gate-*"]}}]
+        binding_subjects: [{issuer: ci, claims: {sub: ["sc://org/proj/dns-gate-*"]}}]
         teams:
-          from_subject: {claim: sub, regex: "^sc://[^/]+/[^/]+/(eurodns-gate-[a-z0-9-]+)$"}
+          from_subject: {claim: sub, regex: "^sc://[^/]+/[^/]+/(dns-gate-[a-z0-9-]+)$"}
 %[8]s
 `, e.upstream.URL, upstreamApp, zone, filepath.Join(t.TempDir(), "gate.db"), e.idp.URL, acmeAppID, hex.EncodeToString(sum[:]), extra, discoveredZone, workloadsSubject)
 	cfg, err := config.Parse([]byte(yaml), func(k string) string {
@@ -231,7 +231,7 @@ policy:
 
 // token returns a fresh JWT for sub and a file holding it.
 func (e *env) token(sub string) (string, string) {
-	tok := e.idp.Sign(map[string]any{"sub": sub, "aud": "eurodns-gate"})
+	tok := e.idp.Sign(map[string]any{"sub": sub, "aud": "dns-gate"})
 	path := filepath.Join(e.tokens, strings.NewReplacer("/", "_", ":", "_").Replace(sub)+".jwt")
 	if err := os.WriteFile(path, []byte(tok), 0o600); err != nil {
 		e.t.Fatal(err)

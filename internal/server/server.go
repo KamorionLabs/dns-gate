@@ -1,4 +1,4 @@
-// Package server is the HTTP layer of eurodns-gate: the EuroDNS-compatible
+// Package server is the HTTP layer of dns-gate: the EuroDNS-compatible
 // API (engine or passthrough), the gate extension endpoints, the read-only
 // UI API and the UI itself.
 package server
@@ -15,18 +15,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/audit"
-	"github.com/KamorionLabs/eurodns-gate/internal/authn"
-	"github.com/KamorionLabs/eurodns-gate/internal/config"
-	"github.com/KamorionLabs/eurodns-gate/internal/discovery"
-	"github.com/KamorionLabs/eurodns-gate/internal/identity"
-	"github.com/KamorionLabs/eurodns-gate/internal/policy"
-	"github.com/KamorionLabs/eurodns-gate/internal/requestid"
-	"github.com/KamorionLabs/eurodns-gate/internal/routes"
-	"github.com/KamorionLabs/eurodns-gate/internal/store"
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
-	"github.com/KamorionLabs/eurodns-gate/internal/version"
-	"github.com/KamorionLabs/eurodns-gate/internal/zonewrite"
+	"github.com/KamorionLabs/dns-gate/internal/audit"
+	"github.com/KamorionLabs/dns-gate/internal/authn"
+	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/discovery"
+	"github.com/KamorionLabs/dns-gate/internal/identity"
+	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/requestid"
+	"github.com/KamorionLabs/dns-gate/internal/routes"
+	"github.com/KamorionLabs/dns-gate/internal/store"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
+	"github.com/KamorionLabs/dns-gate/internal/version"
+	"github.com/KamorionLabs/dns-gate/internal/zonewrite"
 	eurodns "github.com/KamorionLabs/eurodns-go"
 )
 
@@ -150,9 +150,9 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		s.mcp.ServeHTTP(w, r)
 	case (p == resourceMetaPath || p == resourceMetaPath+mcpPath) && s.mcp != nil:
 		s.mcp.serveResourceMetadata(w, r)
-	case p == eurodns.GateInfoPath:
+	case p == GateInfoPath:
 		s.handleGateInfo(w, r)
-	case strings.HasPrefix(p, eurodns.GateInfoPath+"/"):
+	case strings.HasPrefix(p, GateInfoPath+"/"):
 		s.handleExtension(w, r)
 	case p == "/" && s.ui != nil:
 		http.Redirect(w, r, "/ui/", http.StatusFound)
@@ -371,9 +371,13 @@ func (s *Server) handleGateInfo(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleExtension serves POST /.well-known/eurodns-gate/zones/{domain}/adopt.
+// GateInfoPath is the gate's discovery document, also used by clients to
+// detect a gate.
+const GateInfoPath = "/.well-known/dns-gate"
+
+// handleExtension serves POST /.well-known/dns-gate/zones/{domain}/adopt.
 func (s *Server) handleExtension(w http.ResponseWriter, r *http.Request) {
-	rest := strings.TrimPrefix(r.URL.Path, eurodns.GateInfoPath+"/")
+	rest := strings.TrimPrefix(r.URL.Path, GateInfoPath+"/")
 	parts := strings.Split(rest, "/")
 	if len(parts) != 3 || parts[0] != "zones" || parts[2] != "adopt" || r.URL.RawQuery != "" || r.URL.EscapedPath() != r.URL.Path {
 		writeError(w, http.StatusNotFound, "not_found", "unknown extension endpoint")

@@ -1,5 +1,5 @@
 image:
-  repository: ghcr.io/kamorionlabs/eurodns-gate
+  repository: ghcr.io/kamorionlabs/dns-gate
   tag: ""          # defaults to the chart appVersion
   pullPolicy: IfNotPresent
 imagePullSecrets: []
@@ -16,7 +16,7 @@ config:
   store:
     type: sqlite
     sqlite:
-      path: /var/lib/eurodns-gate/gate.db
+      path: /var/lib/dns-gate/gate.db
   issuers: []
   roles: {}
   bindings: []
@@ -49,7 +49,7 @@ persistence:
   storageClass: ""
   accessModes: [ReadWriteOnce]
   size: 1Gi
-  mountPath: /var/lib/eurodns-gate
+  mountPath: /var/lib/dns-gate
 
 serviceAccount:
   create: true

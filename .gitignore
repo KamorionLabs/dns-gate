@@ -1,4 +1,4 @@
-/eurodns-gate
+/dns-gate
 /dist/
 *.test
 *.out

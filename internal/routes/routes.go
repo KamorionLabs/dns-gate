@@ -12,8 +12,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/config"
-	"github.com/KamorionLabs/eurodns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/policy"
 )
 
 // Operation is one upstream API operation.

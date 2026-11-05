@@ -126,7 +126,7 @@ const rev = (id: string) => '/api/v1/policy/revisions/' + encodeURIComponent(id)
 
 const http: Backend = {
   me: () => request('GET', '/api/v1/me'),
-  gateInfo: () => request('GET', '/.well-known/eurodns-gate'),
+  gateInfo: () => request('GET', '/.well-known/dns-gate'),
   connect: () => request('GET', '/api/v1/connect'),
   zones: () => request('GET', '/api/v1/zones'),
   inventory: (zone) => request('GET', `/api/v1/zones/${encodeURIComponent(zone)}/rrsets`),

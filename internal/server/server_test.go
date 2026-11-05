@@ -16,16 +16,16 @@ import (
 	"testing/fstest"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/audit"
-	"github.com/KamorionLabs/eurodns-gate/internal/authn"
-	"github.com/KamorionLabs/eurodns-gate/internal/config"
-	"github.com/KamorionLabs/eurodns-gate/internal/identity"
-	"github.com/KamorionLabs/eurodns-gate/internal/mcpb"
-	"github.com/KamorionLabs/eurodns-gate/internal/oidctest"
-	"github.com/KamorionLabs/eurodns-gate/internal/policy"
-	"github.com/KamorionLabs/eurodns-gate/internal/store"
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
-	"github.com/KamorionLabs/eurodns-gate/internal/zonewrite"
+	"github.com/KamorionLabs/dns-gate/internal/audit"
+	"github.com/KamorionLabs/dns-gate/internal/authn"
+	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/identity"
+	"github.com/KamorionLabs/dns-gate/internal/mcpb"
+	"github.com/KamorionLabs/dns-gate/internal/oidctest"
+	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/store"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
+	"github.com/KamorionLabs/dns-gate/internal/zonewrite"
 	eurodns "github.com/KamorionLabs/eurodns-go"
 )
 
@@ -139,7 +139,7 @@ func newEnvDisc(t *testing.T, tweak func(*config.Config), disc ZoneDiscovery) *e
 		Limits:   config.Limits{MaxBodyBytes: 4096, MaxChangesPerRequest: 20},
 		Upstream: config.Upstream{BaseURL: e.upstream.URL},
 		Issuers: []config.Issuer{{
-			Name: "idp", Issuer: e.idp.URL, Audiences: []string{"eurodns-gate"}, Category: "pipeline",
+			Name: "idp", Issuer: e.idp.URL, Audiences: []string{"dns-gate"}, Category: "pipeline",
 			NameClaim: "email", Algorithms: config.DefaultAlgorithms, ClockSkew: config.Duration(time.Minute),
 		}},
 		Roles: map[string]config.Role{
@@ -190,7 +190,7 @@ func newEnvDisc(t *testing.T, tweak func(*config.Config), disc ZoneDiscovery) *e
 }
 
 func (e *env) token(sub string) string {
-	return e.idp.Sign(map[string]any{"sub": sub, "aud": "eurodns-gate", "email": sub + "@example.com"})
+	return e.idp.Sign(map[string]any{"sub": sub, "aud": "dns-gate", "email": sub + "@example.com"})
 }
 
 func (e *env) do(t *testing.T, method, path, tok, body string, hdr map[string]string) *http.Response {
@@ -312,24 +312,24 @@ func TestVirtualKeyNotForwarded(t *testing.T) {
 
 func TestGateInfoAndAdopt(t *testing.T) {
 	e := newEnv(t)
-	r := e.do(t, "GET", eurodns.GateInfoPath, "", "", nil)
+	r := e.do(t, "GET", GateInfoPath, "", "", nil)
 	var info eurodns.GateInfo
 	_ = json.NewDecoder(r.Body).Decode(&info)
 	if r.StatusCode != 200 || !info.HasFeature(eurodns.FeatureOwnership) {
 		t.Fatalf("gate info: %d %+v", r.StatusCode, info)
 	}
 	body := `{"rrsets":[{"host":"www","type":"A"}]}`
-	if r = e.do(t, "POST", eurodns.GateInfoPath+"/zones/example.org/adopt", e.token("writer"), body, nil); r.StatusCode != 403 {
+	if r = e.do(t, "POST", GateInfoPath+"/zones/example.org/adopt", e.token("writer"), body, nil); r.StatusCode != 403 {
 		t.Fatalf("adopt without adopt nor write: %d", r.StatusCode)
 	}
 	// A writer reaches the engine: importing its own RRsets is a no-op there.
-	if r = e.do(t, "POST", eurodns.GateInfoPath+"/zones/example.com/adopt", e.token("writer"), body, nil); r.StatusCode != 204 {
+	if r = e.do(t, "POST", GateInfoPath+"/zones/example.com/adopt", e.token("writer"), body, nil); r.StatusCode != 204 {
 		t.Fatalf("no-op adopt by the owner team: %d", r.StatusCode)
 	}
-	if r = e.do(t, "POST", eurodns.GateInfoPath+"/zones/example.com/adopt", e.token("admin"), body, nil); r.StatusCode != 204 {
+	if r = e.do(t, "POST", GateInfoPath+"/zones/example.com/adopt", e.token("admin"), body, nil); r.StatusCode != 204 {
 		t.Fatalf("adopt: %d", r.StatusCode)
 	}
-	if r = e.do(t, "POST", eurodns.GateInfoPath+"/zones/example.com/delete", e.token("admin"), body, nil); r.StatusCode != 404 {
+	if r = e.do(t, "POST", GateInfoPath+"/zones/example.com/delete", e.token("admin"), body, nil); r.StatusCode != 404 {
 		t.Fatalf("unknown extension: %d", r.StatusCode)
 	}
 }
@@ -584,7 +584,7 @@ func TestUIAPIClaudeDesktopExtension(t *testing.T) {
 	}
 	r := e.do(t, "GET", path, e.token("writer"), "", nil)
 	b, _ := io.ReadAll(r.Body)
-	if r.StatusCode != 200 || r.Header.Get("Content-Type") != "application/zip" || r.Header.Get("Content-Disposition") != `attachment; filename=eurodns-gate-gate.example.com.mcpb` {
+	if r.StatusCode != 200 || r.Header.Get("Content-Type") != "application/zip" || r.Header.Get("Content-Disposition") != `attachment; filename=dns-gate-gate.example.com.mcpb` {
 		t.Fatalf("extension: %d %v", r.StatusCode, r.Header)
 	}
 	zr, err := zip.NewReader(bytes.NewReader(b), int64(len(b)))
@@ -600,8 +600,8 @@ func TestUIAPIClaudeDesktopExtension(t *testing.T) {
 		}
 	}
 	env := m.Server.MCPConfig.Env
-	if err != nil || env["EURODNS_GATE_MCP_URL"] != "https://gate.example.com/mcp" || env["EURODNS_GATE_ISSUER"] != e.idp.URL ||
-		env["EURODNS_GATE_CLIENT_ID"] != e.idp.ClientID || env["EURODNS_GATE_SCOPE"] != e.idp.ClientID+"/.default" || m.DisplayName != "EuroDNS gate (gate.example.com)" {
+	if err != nil || env["DNS_GATE_MCP_URL"] != "https://gate.example.com/mcp" || env["DNS_GATE_ISSUER"] != e.idp.URL ||
+		env["DNS_GATE_CLIENT_ID"] != e.idp.ClientID || env["DNS_GATE_SCOPE"] != e.idp.ClientID+"/.default" || m.DisplayName != "EuroDNS gate (gate.example.com)" {
 		t.Fatalf("manifest: %v %+v", err, m)
 	}
 }

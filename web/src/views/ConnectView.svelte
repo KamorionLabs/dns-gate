@@ -81,7 +81,7 @@
           Add the server{#if !entra}, replacing <span class="mono">{TOKEN_COMMAND_PLACEHOLDER}</span>{/if}:
           <HclBlock hcl={claudeCodeCommand(info)} filename="shell" download={false} wrap />
         </li>
-        <li>In Claude Code, <span class="mono">/mcp</span> lists <span class="mono">eurodns-gate</span> as connected.</li>
+        <li>In Claude Code, <span class="mono">/mcp</span> lists <span class="mono">dns-gate</span> as connected.</li>
       </ol>
       {#if entra}
         <p class="hint">If <span class="mono">az</span> answers that consent is required (AADSTS65001), the gate application does not trust the Azure CLI yet: ask the gate administrators to pre-authorize it.</p>

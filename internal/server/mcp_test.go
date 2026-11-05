@@ -13,11 +13,11 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/config"
-	"github.com/KamorionLabs/eurodns-gate/internal/identity"
-	"github.com/KamorionLabs/eurodns-gate/internal/policy"
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
-	"github.com/KamorionLabs/eurodns-gate/internal/zonewrite"
+	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/identity"
+	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
+	"github.com/KamorionLabs/dns-gate/internal/zonewrite"
 )
 
 type fakeOps struct {
@@ -281,7 +281,7 @@ func TestAdoptEndpoints(t *testing.T) {
 		t.Fatalf("preview without adopt: %d", r.StatusCode)
 	}
 	// Humans need a recent authentication to adopt.
-	old := e.idp.Sign(map[string]any{"sub": "human-adopter", "aud": "eurodns-gate", "kind": "user", "auth_time": time.Now().Add(-time.Hour).Unix()})
+	old := e.idp.Sign(map[string]any{"sub": "human-adopter", "aud": "dns-gate", "kind": "user", "auth_time": time.Now().Add(-time.Hour).Unix()})
 	e.ops.conflict = false
 	if r = e.do(t, "POST", "/api/v1/zones/example.com/adopt", old, body, nil); r.StatusCode != 403 || reason(t, r) != "reauth_required" {
 		t.Fatalf("step-up: %d", r.StatusCode)

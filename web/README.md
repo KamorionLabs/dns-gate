@@ -1,6 +1,6 @@
-# eurodns-gate web UI
+# dns-gate web UI
 
-Console served by eurodns-gate under `/ui/`: a health summary (drift, pending
+Console served by dns-gate under `/ui/`: a health summary (drift, pending
 writes, recent refusals and failures, discovery errors, stale syncs), the zones
 managed by the gate and those that are not, record sets with their owner team, who
 created or last changed them and who may change them, the journal of every write,

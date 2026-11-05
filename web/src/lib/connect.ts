@@ -30,7 +30,7 @@ const shq = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
 
 export function claudeCodeCommand(c: Connect): string {
   const server = JSON.stringify({ type: 'http', url: c.mcp.url, headersHelper: headersHelper(c) });
-  return `claude mcp add-json eurodns-gate ${shq(server)} --scope user`;
+  return `claude mcp add-json dns-gate ${shq(server)} --scope user`;
 }
 
 export function desktopConfig(c: Connect): string {
@@ -39,7 +39,7 @@ export function desktopConfig(c: Connect): string {
     args: ['-y', 'mcp-remote', c.mcp.url, '--header', 'Authorization:${AUTH_HEADER}'],
     env: { AUTH_HEADER: 'Bearer <paste the access token here>' },
   };
-  return JSON.stringify({ mcpServers: { 'eurodns-gate': server } }, null, 2) + '\n';
+  return JSON.stringify({ mcpServers: { 'dns-gate': server } }, null, 2) + '\n';
 }
 
 export function terraformProvider(c: Connect): string {

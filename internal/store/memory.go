@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/audit"
+	"github.com/KamorionLabs/dns-gate/internal/audit"
 )
 
 type memKey struct{ zone, host, typ string }

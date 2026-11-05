@@ -1,11 +1,11 @@
-{{- $store := include "eurodns-gate.storeType" . -}}
+{{- $store := include "dns-gate.storeType" . -}}
 {{- $sqlite := eq $store "sqlite" -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "eurodns-gate.fullname" . }}
+  name: {{ include "dns-gate.fullname" . }}
   labels:
-    {{- include "eurodns-gate.labels" . | nindent 4 }}
+    {{- include "dns-gate.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
   {{- if or $sqlite (eq $store "memory") }}
@@ -14,7 +14,7 @@ spec:
   {{- end }}
   selector:
     matchLabels:
-      {{- include "eurodns-gate.selectorLabels" . | nindent 6 }}
+      {{- include "dns-gate.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       annotations:
@@ -23,12 +23,12 @@ spec:
         {{- toYaml . | nindent 8 }}
         {{- end }}
       labels:
-        {{- include "eurodns-gate.selectorLabels" . | nindent 8 }}
+        {{- include "dns-gate.selectorLabels" . | nindent 8 }}
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
-      serviceAccountName: {{ include "eurodns-gate.serviceAccountName" . }}
+      serviceAccountName: {{ include "dns-gate.serviceAccountName" . }}
       automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -45,7 +45,7 @@ spec:
         - name: gate
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          args: ["-config", "/etc/eurodns-gate/config.yaml"]
+          args: ["-config", "/etc/dns-gate/config.yaml"]
           ports:
             - name: http
               containerPort: 8080
@@ -54,7 +54,7 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            - name: EURODNS_GATE_REPLICAS
+            - name: DNS_GATE_REPLICAS
               value: {{ .Values.replicaCount | quote }}
             - name: EURODNS_API_KEY_FILE
               value: /var/run/secrets/eurodns/{{ .Values.eurodns.apiKeyKey }}
@@ -63,14 +63,14 @@ spec:
               value: /var/run/secrets/eurodns/{{ .Values.eurodns.appIdKey }}
             {{- end }}
             {{- if eq $store "postgres" }}
-            - name: EURODNS_GATE_POSTGRES_DSN_FILE
+            - name: DNS_GATE_POSTGRES_DSN_FILE
               value: /var/run/secrets/postgres/{{ .Values.postgres.dsnKey }}
             {{- end }}
             {{- if (.Values.config.ui | default dict).enabled }}
-            - name: EURODNS_GATE_SESSION_KEY_FILE
+            - name: DNS_GATE_SESSION_KEY_FILE
               value: /var/run/secrets/ui/{{ .Values.ui.sessionKeyKey }}
             {{- if .Values.ui.clientSecretKey }}
-            - name: EURODNS_GATE_UI_CLIENT_SECRET_FILE
+            - name: DNS_GATE_UI_CLIENT_SECRET_FILE
               value: /var/run/secrets/ui/{{ .Values.ui.clientSecretKey }}
             {{- end }}
             {{- end }}
@@ -92,7 +92,7 @@ spec:
               drop: [ALL]
           volumeMounts:
             - name: config
-              mountPath: /etc/eurodns-gate
+              mountPath: /etc/dns-gate
               readOnly: true
             - name: eurodns
               mountPath: /var/run/secrets/eurodns
@@ -116,7 +116,7 @@ spec:
       volumes:
         - name: config
           configMap:
-            name: {{ include "eurodns-gate.fullname" . }}
+            name: {{ include "dns-gate.fullname" . }}
         - name: eurodns
           secret:
             secretName: {{ .Values.eurodns.existingSecret }}
@@ -134,7 +134,7 @@ spec:
         - name: data
           {{- if .Values.persistence.enabled }}
           persistentVolumeClaim:
-            claimName: {{ .Values.persistence.existingClaim | default (include "eurodns-gate.fullname" .) }}
+            claimName: {{ .Values.persistence.existingClaim | default (include "dns-gate.fullname" .) }}
           {{- else }}
           emptyDir: {}
           {{- end }}

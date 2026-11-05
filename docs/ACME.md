@@ -1,4 +1,4 @@
-# ACME / certificates with eurodns-gate
+# ACME / certificates with dns-gate
 
 Three cases, from the most static to the most dynamic.
 

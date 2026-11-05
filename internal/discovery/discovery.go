@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/config"
-	"github.com/KamorionLabs/eurodns-gate/internal/glob"
+	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/glob"
 )
 
 // MinOnDemand is the minimum age of the list before an on-demand refresh.

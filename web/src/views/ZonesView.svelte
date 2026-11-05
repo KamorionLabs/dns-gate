@@ -18,7 +18,7 @@
   const admin = $derived(canPropose(me));
 
   const legend = ['managed', 'foreign', 'pending', 'tainted'] as const;
-  const GUIDE_KEY = 'eurodns-gate.guide-dismissed';
+  const GUIDE_KEY = 'dns-gate.guide-dismissed';
   let guide = $state(readGuide());
 
   function readGuide(): boolean {

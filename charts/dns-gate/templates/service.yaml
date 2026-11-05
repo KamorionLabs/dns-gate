@@ -1,13 +1,13 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "eurodns-gate.fullname" . }}
+  name: {{ include "dns-gate.fullname" . }}
   labels:
-    {{- include "eurodns-gate.labels" . | nindent 4 }}
+    {{- include "dns-gate.labels" . | nindent 4 }}
 spec:
   type: {{ .Values.service.type }}
   selector:
-    {{- include "eurodns-gate.selectorLabels" . | nindent 4 }}
+    {{- include "dns-gate.selectorLabels" . | nindent 4 }}
   ports:
     - name: http
       port: {{ .Values.service.port }}

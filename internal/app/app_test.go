@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/config"
 )
 
 // The binary must expose adoption, the Terraform export and MCP writes:

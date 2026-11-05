@@ -6,14 +6,14 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/config"
-	"github.com/KamorionLabs/eurodns-gate/internal/glob"
-	"github.com/KamorionLabs/eurodns-gate/internal/identity"
-	"github.com/KamorionLabs/eurodns-gate/internal/policy"
-	"github.com/KamorionLabs/eurodns-gate/internal/routes"
-	"github.com/KamorionLabs/eurodns-gate/internal/tfexport"
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
-	"github.com/KamorionLabs/eurodns-gate/internal/version"
+	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/glob"
+	"github.com/KamorionLabs/dns-gate/internal/identity"
+	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/routes"
+	"github.com/KamorionLabs/dns-gate/internal/tfexport"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
+	"github.com/KamorionLabs/dns-gate/internal/version"
 	"github.com/KamorionLabs/eurodns-go/rrset"
 )
 
@@ -202,7 +202,7 @@ func InventoryTerraform(e Engine) TerraformRenderer {
 			}
 			sets = append(sets, rrset.Set{Key: rrset.Key{Host: r.Host, Type: r.Type}, TTL: r.TTL, Values: r.Values})
 		}
-		header := []string{"Managed RRsets exported by eurodns-gate " + version.Version + "."}
+		header := []string{"Managed RRsets exported by dns-gate " + version.Version + "."}
 		if f.Team != "" {
 			header = append(header, "Owner team: "+f.Team+".")
 		}

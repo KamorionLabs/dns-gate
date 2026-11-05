@@ -23,7 +23,7 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/kamorionlabs/eurodns-gate
+          images: ghcr.io/kamorionlabs/dns-gate
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -48,5 +48,5 @@ jobs:
         run: |
           v="${VERSION#v}"
           echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u "${{ github.actor }}" --password-stdin
-          helm package charts/eurodns-gate --version "$v" --app-version "$v"
-          helm push "eurodns-gate-$v.tgz" oci://ghcr.io/kamorionlabs/charts
+          helm package charts/dns-gate --version "$v" --app-version "$v"
+          helm push "dns-gate-$v.tgz" oci://ghcr.io/kamorionlabs/charts

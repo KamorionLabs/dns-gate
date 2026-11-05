@@ -80,7 +80,7 @@ function groupTitle(name: string, members: SubjectMatcher[]): { title: string; s
 function subjectTitle(m: SubjectMatcher): { title: string; subtitle: string } {
   const sub = m.claims?.sub ?? [];
   const sc = sub.map((s) => serviceConnectionName(s)).find(Boolean);
-  if (sc) return { title: sc.replace(/^eurodns-gate-/, ''), subtitle: `${m.issuer} pipeline · ${sc}` };
+  if (sc) return { title: sc.replace(/^dns-gate-/, ''), subtitle: `${m.issuer} pipeline · ${sc}` };
   const pn = sub.map((s) => pipelineName(s)).find(Boolean);
   if (pn) return { title: pn, subtitle: `${m.issuer} pipeline` };
   return { title: memberLabel(m), subtitle: `${m.issuer} identity` };

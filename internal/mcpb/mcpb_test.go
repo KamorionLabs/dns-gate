@@ -67,7 +67,7 @@ func TestBuild(t *testing.T) {
 	}
 	var m Manifest
 	_ = json.Unmarshal(files["manifest.json"], &m)
-	if m.ManifestVersion != "0.3" || m.Name != "eurodns-gate-dns-example-com" || m.DisplayName != "EuroDNS gate (dns.example.com)" || m.Version != "1.2.3" {
+	if m.ManifestVersion != "0.3" || m.Name != "dns-gate-dns-example-com" || m.DisplayName != "EuroDNS gate (dns.example.com)" || m.Version != "1.2.3" {
 		t.Fatalf("manifest identity: %+v", m)
 	}
 	s := m.Server
@@ -75,8 +75,8 @@ func TestBuild(t *testing.T) {
 		t.Fatalf("manifest server: %+v", s)
 	}
 	want := map[string]string{
-		"EURODNS_GATE_MCP_URL": p.MCPURL, "EURODNS_GATE_ISSUER": p.Issuer,
-		"EURODNS_GATE_CLIENT_ID": p.ClientID, "EURODNS_GATE_SCOPE": "client-1/.default",
+		"DNS_GATE_MCP_URL": p.MCPURL, "DNS_GATE_ISSUER": p.Issuer,
+		"DNS_GATE_CLIENT_ID": p.ClientID, "DNS_GATE_SCOPE": "client-1/.default",
 	}
 	if len(s.MCPConfig.Env) != len(want) {
 		t.Fatalf("env: %v", s.MCPConfig.Env)
@@ -98,13 +98,13 @@ func TestBuild(t *testing.T) {
 
 func TestBuildDefaults(t *testing.T) {
 	m := NewManifest(Params{GateURL: "https://gate.example.com:8443/", MCPURL: "https://gate.example.com:8443/mcp", Issuer: "https://idp", ClientID: "c", Version: "dev"})
-	if m.Version != "0.0.0" || m.Name != "eurodns-gate-gate-example-com-8443" || m.Homepage != "https://gate.example.com:8443/ui/" {
+	if m.Version != "0.0.0" || m.Name != "dns-gate-gate-example-com-8443" || m.Homepage != "https://gate.example.com:8443/ui/" {
 		t.Fatalf("manifest: %+v", m)
 	}
-	if _, ok := m.Server.MCPConfig.Env["EURODNS_GATE_SCOPE"]; ok {
+	if _, ok := m.Server.MCPConfig.Env["DNS_GATE_SCOPE"]; ok {
 		t.Fatal("empty scope must not be set")
 	}
-	if got := Filename("https://gate.example.com:8443"); got != "eurodns-gate-gate.example.com-8443.mcpb" {
+	if got := Filename("https://gate.example.com:8443"); got != "dns-gate-gate.example.com-8443.mcpb" {
 		t.Fatalf("filename: %s", got)
 	}
 	if _, err := Build(Params{GateURL: "https://gate.example.com"}); err == nil {
@@ -117,7 +117,7 @@ func TestRelayScope(t *testing.T) {
 	for _, c := range []struct{ scope, want string }{
 		{"api://" + id + "/.default", id + "/.default"},
 		{"api://" + id + "/access_as_user", id + "/access_as_user"},
-		{"api://eurodns-gate/.default", "api://eurodns-gate/.default"},
+		{"api://dns-gate/.default", "api://dns-gate/.default"},
 		{"api://" + id + "-other/.default", "api://" + id + "-other/.default"},
 		{"api://" + id, "api://" + id},
 		{"https://gate.example.com/" + id + "/.default", "https://gate.example.com/" + id + "/.default"},

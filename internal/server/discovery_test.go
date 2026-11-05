@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/config"
-	"github.com/KamorionLabs/eurodns-gate/internal/discovery"
-	"github.com/KamorionLabs/eurodns-gate/internal/policy"
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
+	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/discovery"
+	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 )
 
 // fakeDiscovery is a ZoneDiscovery; zones in later appear on the next refresh.
@@ -113,7 +113,7 @@ func TestDiscoveredZonesReadOnly(t *testing.T) {
 	if r := e.do(t, "GET", "/api/v1/zones/other.net/terraform", reader, "", nil); r.StatusCode != 404 {
 		t.Fatalf("terraform export: %d", r.StatusCode)
 	}
-	if r := e.do(t, "POST", "/.well-known/eurodns-gate/zones/other.net/adopt", e.token("admin"), `{"rrsets":[{"host":"www","type":"A"}]}`, nil); r.StatusCode != 403 {
+	if r := e.do(t, "POST", "/.well-known/dns-gate/zones/other.net/adopt", e.token("admin"), `{"rrsets":[{"host":"www","type":"A"}]}`, nil); r.StatusCode != 403 {
 		t.Fatalf("adopt extension: %d", r.StatusCode)
 	}
 }

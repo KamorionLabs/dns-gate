@@ -1,5 +1,5 @@
 export type Theme = 'light' | 'dark';
-const KEY = 'eurodns-gate.theme';
+const KEY = 'dns-gate.theme';
 
 function stored(): Theme | null {
   try {

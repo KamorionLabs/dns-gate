@@ -85,7 +85,7 @@ type Compatibility struct {
 }
 
 const (
-	sourceURL  = "https://github.com/KamorionLabs/eurodns-gate"
+	sourceURL  = "https://github.com/KamorionLabs/dns-gate"
 	entryPoint = "server/index.js"
 )
 
@@ -111,9 +111,9 @@ func slug(host string) string {
 	return strings.Trim(nonAlnum.ReplaceAllString(strings.ToLower(host), "-"), "-")
 }
 
-// Filename is the download name of the bundle, e.g. eurodns-gate-dns.example.com.mcpb.
+// Filename is the download name of the bundle, e.g. dns-gate-dns.example.com.mcpb.
 func Filename(gateURL string) string {
-	return "eurodns-gate-" + strings.Trim(fileUnsafe.ReplaceAllString(Host(gateURL), "-"), "-.") + ".mcpb"
+	return "dns-gate-" + strings.Trim(fileUnsafe.ReplaceAllString(Host(gateURL), "-"), "-.") + ".mcpb"
 }
 
 // RelayScope is the scope the relay requests. The relay signs in as the
@@ -142,21 +142,21 @@ func NewManifest(p Params) Manifest {
 		version = "0.0.0"
 	}
 	env := map[string]string{
-		"EURODNS_GATE_MCP_URL":   p.MCPURL,
-		"EURODNS_GATE_ISSUER":    p.Issuer,
-		"EURODNS_GATE_CLIENT_ID": p.ClientID,
+		"DNS_GATE_MCP_URL":   p.MCPURL,
+		"DNS_GATE_ISSUER":    p.Issuer,
+		"DNS_GATE_CLIENT_ID": p.ClientID,
 	}
 	if scope := RelayScope(p.Scope, p.ClientID); scope != "" {
-		env["EURODNS_GATE_SCOPE"] = scope
+		env["DNS_GATE_SCOPE"] = scope
 	}
 	return Manifest{
 		ManifestVersion: ManifestVersion,
-		Name:            "eurodns-gate-" + slug(host),
+		Name:            "dns-gate-" + slug(host),
 		DisplayName:     "EuroDNS gate (" + host + ")",
 		Version:         version,
 		Description:     "EuroDNS zones and records through the gate at " + host + ", with your own permissions.",
 		LongDescription: "Connects Claude to the EuroDNS gate at " + host + ". You sign in once in your browser with your usual account; the gate then applies your permissions and records every action in its journal. When the gate allows changes, they are always planned before they are applied, and only on records your teams own.",
-		Author:          Author{Name: "eurodns-gate", URL: sourceURL},
+		Author:          Author{Name: "dns-gate", URL: sourceURL},
 		Repository:      Repository{Type: "git", URL: sourceURL + ".git"},
 		Homepage:        strings.TrimSuffix(p.GateURL, "/") + "/ui/",
 		Server: Server{

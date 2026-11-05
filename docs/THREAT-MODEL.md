@@ -1,6 +1,6 @@
-# eurodns-gate — Threat model
+# dns-gate — Threat model
 
-Scope: an eurodns-gate deployment in front of the EuroDNS API, used by CI pipelines
+Scope: an dns-gate deployment in front of the EuroDNS API, used by CI pipelines
 (Terraform), ACME clients and humans. See [DESIGN.md](DESIGN.md) for the mechanisms
 referenced below.
 

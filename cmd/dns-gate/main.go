@@ -1,4 +1,4 @@
-// Command eurodns-gate runs the gate: an OIDC-authenticated, RBAC-enforcing
+// Command dns-gate runs the gate: an OIDC-authenticated, RBAC-enforcing
 // proxy in front of the EuroDNS API that only modifies the records it owns.
 package main
 
@@ -14,24 +14,24 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/app"
-	"github.com/KamorionLabs/eurodns-gate/internal/config"
-	"github.com/KamorionLabs/eurodns-gate/internal/version"
+	"github.com/KamorionLabs/dns-gate/internal/app"
+	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/version"
 )
 
 func main() {
 	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "eurodns-gate:", err)
+		fmt.Fprintln(os.Stderr, "dns-gate:", err)
 		os.Exit(1)
 	}
 }
 
 func run() error {
-	defaultPath := os.Getenv("EURODNS_GATE_CONFIG")
+	defaultPath := os.Getenv("DNS_GATE_CONFIG")
 	if defaultPath == "" {
-		defaultPath = "/etc/eurodns-gate/config.yaml"
+		defaultPath = "/etc/dns-gate/config.yaml"
 	}
-	configPath := flag.String("config", defaultPath, "configuration file (env EURODNS_GATE_CONFIG)")
+	configPath := flag.String("config", defaultPath, "configuration file (env DNS_GATE_CONFIG)")
 	checkOnly := flag.Bool("check", false, "validate the configuration and exit")
 	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()

@@ -4,8 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/audit"
-	"github.com/KamorionLabs/eurodns-gate/internal/store"
+	"github.com/KamorionLabs/dns-gate/internal/audit"
+	"github.com/KamorionLabs/dns-gate/internal/store"
 	"github.com/KamorionLabs/eurodns-go/zonediff"
 )
 

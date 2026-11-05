@@ -2,13 +2,13 @@
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "eurodns-gate.fullname" . }}
+  name: {{ include "dns-gate.fullname" . }}
   labels:
-    {{- include "eurodns-gate.labels" . | nindent 4 }}
+    {{- include "dns-gate.labels" . | nindent 4 }}
 spec:
   podSelector:
     matchLabels:
-      {{- include "eurodns-gate.selectorLabels" . | nindent 6 }}
+      {{- include "dns-gate.selectorLabels" . | nindent 6 }}
   policyTypes: [Ingress, Egress]
   ingress:
     - ports:
@@ -28,7 +28,7 @@ spec:
         - ipBlock:
             cidr: {{ . }}
         {{- end }}
-    {{- if eq (include "eurodns-gate.storeType" .) "postgres" }}
+    {{- if eq (include "dns-gate.storeType" .) "postgres" }}
     - ports:
         - {port: 5432, protocol: TCP}
     {{- end }}

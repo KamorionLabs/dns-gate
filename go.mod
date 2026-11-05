@@ -1,4 +1,4 @@
-module github.com/KamorionLabs/eurodns-gate
+module github.com/KamorionLabs/dns-gate
 
 go 1.26.0
 

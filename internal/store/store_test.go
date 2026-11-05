@@ -12,8 +12,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/audit"
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
+	"github.com/KamorionLabs/dns-gate/internal/audit"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 )
 
 type fakeClock struct {
@@ -199,7 +199,7 @@ func TestDynamoDB(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
 	ctx := context.Background()
-	table := "eurodns-gate-test-" + time.Now().Format("150405.000000")
+	table := "dns-gate-test-" + time.Now().Format("150405.000000")
 	st, err := NewDynamoDB(ctx, DynamoDBConfig{Table: table, Region: "us-east-1", Endpoint: endpoint})
 	if err != nil {
 		t.Fatal(err)

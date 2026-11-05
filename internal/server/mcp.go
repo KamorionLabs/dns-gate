@@ -15,16 +15,16 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/audit"
-	"github.com/KamorionLabs/eurodns-gate/internal/authn"
-	"github.com/KamorionLabs/eurodns-gate/internal/glob"
-	"github.com/KamorionLabs/eurodns-gate/internal/identity"
-	"github.com/KamorionLabs/eurodns-gate/internal/policy"
-	"github.com/KamorionLabs/eurodns-gate/internal/requestid"
-	"github.com/KamorionLabs/eurodns-gate/internal/store"
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
-	"github.com/KamorionLabs/eurodns-gate/internal/version"
-	"github.com/KamorionLabs/eurodns-gate/internal/zonewrite"
+	"github.com/KamorionLabs/dns-gate/internal/audit"
+	"github.com/KamorionLabs/dns-gate/internal/authn"
+	"github.com/KamorionLabs/dns-gate/internal/glob"
+	"github.com/KamorionLabs/dns-gate/internal/identity"
+	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/requestid"
+	"github.com/KamorionLabs/dns-gate/internal/store"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
+	"github.com/KamorionLabs/dns-gate/internal/version"
+	"github.com/KamorionLabs/dns-gate/internal/zonewrite"
 	eurodns "github.com/KamorionLabs/eurodns-go"
 )
 
@@ -53,8 +53,8 @@ func (s *Server) newMCP() *mcpServer {
 		plans:   newPlanStore(s.cfg.Config.MCP.PlanTTL.D(), s.now),
 		limiter: newSubjectLimiter(s.cfg.Config.MCP.RequestsPerMinute, s.now),
 	}
-	srv := mcp.NewServer(&mcp.Implementation{Name: "eurodns-gate", Version: version.Version}, &mcp.ServerOptions{
-		Instructions: "eurodns-gate manages EuroDNS zones under RBAC and record ownership. Read tools are always available; changes are made with plan_rrset_change then apply_rrset_change, and only on RRsets owned by your team. " + recordRules,
+	srv := mcp.NewServer(&mcp.Implementation{Name: "dns-gate", Version: version.Version}, &mcp.ServerOptions{
+		Instructions: "dns-gate manages EuroDNS zones under RBAC and record ownership. Read tools are always available; changes are made with plan_rrset_change then apply_rrset_change, and only on RRsets owned by your team. " + recordRules,
 	})
 	m.addReadTools(srv)
 	if s.cfg.Config.MCP.AllowWrites && s.cfg.Ops != nil {
@@ -76,7 +76,7 @@ func (m *mcpServer) serveResourceMetadata(w http.ResponseWriter, r *http.Request
 		"authorization_servers":    []string{},
 		"bearer_methods_supported": []string{"header"},
 		"scopes_supported":         []string{},
-		"resource_name":            "eurodns-gate",
+		"resource_name":            "dns-gate",
 	}
 	if m.s.ui != nil {
 		doc["authorization_servers"] = []string{m.s.ui.issuer.Issuer}

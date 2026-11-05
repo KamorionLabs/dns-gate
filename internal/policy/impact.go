@@ -5,8 +5,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/glob"
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
+	"github.com/KamorionLabs/dns-gate/internal/glob"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 )
 
 // OwnedCounter returns the number of RRsets a team owns in a zone; an empty

@@ -9,7 +9,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/audit"
+	"github.com/KamorionLabs/dns-gate/internal/audit"
 )
 
 // Audit items: pk=AUDIT#<zone> (AUDIT#_global for zone-less events) plus a

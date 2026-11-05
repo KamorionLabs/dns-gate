@@ -1,4 +1,4 @@
-// Package config loads and validates the eurodns-gate configuration.
+// Package config loads and validates the dns-gate configuration.
 package config
 
 import (
@@ -18,7 +18,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/glob"
+	"github.com/KamorionLabs/dns-gate/internal/glob"
 )
 
 // Config is the root configuration document.
@@ -151,8 +151,8 @@ type UI struct {
 	// api://<client_id>/.default.
 	CLIScope string `yaml:"cli_scope"`
 
-	ClientSecret string `yaml:"-"` // EURODNS_GATE_UI_CLIENT_SECRET(_FILE), optional (public client)
-	SessionKey   []byte `yaml:"-"` // EURODNS_GATE_SESSION_KEY(_FILE), 32 bytes, hex or base64
+	ClientSecret string `yaml:"-"` // DNS_GATE_UI_CLIENT_SECRET(_FILE), optional (public client)
+	SessionKey   []byte `yaml:"-"` // DNS_GATE_SESSION_KEY(_FILE), 32 bytes, hex or base64
 }
 
 // Listen configures the HTTP server.
@@ -205,7 +205,7 @@ type SQLite struct {
 }
 
 // Postgres backend settings. The DSN carries credentials: it is read from
-// EURODNS_GATE_POSTGRES_DSN or EURODNS_GATE_POSTGRES_DSN_FILE only.
+// DNS_GATE_POSTGRES_DSN or DNS_GATE_POSTGRES_DSN_FILE only.
 type Postgres struct {
 	MaxConns int `yaml:"max_conns"`
 
@@ -371,11 +371,20 @@ func Parse(data []byte, getenv func(string) string) (*Config, error) {
 }
 
 func (c *Config) applyEnv(getenv func(string) string) error {
-	read := func(name string) (string, error) {
+	legacy := func(name string) string {
 		if v := getenv(name); v != "" {
+			return v
+		}
+		if rest, ok := strings.CutPrefix(name, "DNS_GATE_"); ok {
+			return getenv("EURODNS_GATE_" + rest)
+		}
+		return ""
+	}
+	read := func(name string) (string, error) {
+		if v := legacy(name); v != "" {
 			return v, nil
 		}
-		if f := getenv(name + "_FILE"); f != "" {
+		if f := legacy(name + "_FILE"); f != "" {
 			b, err := os.ReadFile(f)
 			if err != nil {
 				return "", fmt.Errorf("config: %s_FILE: %w", name, err)
@@ -394,19 +403,19 @@ func (c *Config) applyEnv(getenv func(string) string) error {
 	if c.Upstream.APIKey, err = read("EURODNS_API_KEY"); err != nil {
 		return err
 	}
-	if c.Store.Postgres.DSN, err = read("EURODNS_GATE_POSTGRES_DSN"); err != nil {
+	if c.Store.Postgres.DSN, err = read("DNS_GATE_POSTGRES_DSN"); err != nil {
 		return err
 	}
-	if c.UI.ClientSecret, err = read("EURODNS_GATE_UI_CLIENT_SECRET"); err != nil {
+	if c.UI.ClientSecret, err = read("DNS_GATE_UI_CLIENT_SECRET"); err != nil {
 		return err
 	}
-	k, err := read("EURODNS_GATE_SESSION_KEY")
+	k, err := read("DNS_GATE_SESSION_KEY")
 	if err != nil {
 		return err
 	}
 	if k != "" {
 		if c.UI.SessionKey, err = decodeKey(k); err != nil {
-			return fmt.Errorf("config: EURODNS_GATE_SESSION_KEY: %w", err)
+			return fmt.Errorf("config: DNS_GATE_SESSION_KEY: %w", err)
 		}
 	}
 	return nil
@@ -591,7 +600,7 @@ func (c *Config) Validate() error {
 		}
 	case "postgres":
 		if c.Store.Postgres.DSN == "" {
-			add("store.postgres: DSN missing (EURODNS_GATE_POSTGRES_DSN or EURODNS_GATE_POSTGRES_DSN_FILE)")
+			add("store.postgres: DSN missing (DNS_GATE_POSTGRES_DSN or DNS_GATE_POSTGRES_DSN_FILE)")
 		}
 		if c.Store.Postgres.MaxConns < 1 || c.Store.Postgres.MaxConns > 100 {
 			add("store.postgres.max_conns: must be between 1 and 100")
@@ -869,7 +878,7 @@ func (c *Config) Validate() error {
 			add("ui.scopes: must include openid")
 		}
 		if len(c.UI.SessionKey) != 32 {
-			add("ui: session key missing or not 32 bytes (EURODNS_GATE_SESSION_KEY or EURODNS_GATE_SESSION_KEY_FILE)")
+			add("ui: session key missing or not 32 bytes (DNS_GATE_SESSION_KEY or DNS_GATE_SESSION_KEY_FILE)")
 		}
 		if c.UI.SessionTTL.D() < time.Minute || c.UI.SessionTTL.D() > 24*time.Hour {
 			add("ui.session_ttl: must be between 1m and 24h")

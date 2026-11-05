@@ -5,7 +5,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 )
 
 // Event is one audit record (JSON line).

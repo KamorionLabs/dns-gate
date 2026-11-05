@@ -1,11 +1,11 @@
-# eurodns-gate
+# dns-gate
 
 A security gateway in front of the [EuroDNS](https://www.eurodns.com) REST API.
 
-**How it works, with diagrams: <https://kamorionlabs.github.io/eurodns-gate/>**
+**How it works, with diagrams: <https://kamorionlabs.github.io/dns-gate/>**
 
 EuroDNS API keys carry no scope: one key reaches every domain, contact, nameserver
-profile, subscription and DNS zone of the account. eurodns-gate holds that key
+profile, subscription and DNS zone of the account. dns-gate holds that key
 alone, authenticates clients with short-lived OIDC tokens and enforces, on every
 request:
 
@@ -56,7 +56,7 @@ Also included:
 | Repository | Role |
 |---|---|
 | [eurodns-go](https://github.com/KamorionLabs/eurodns-go) | Go client, RRset helpers, zone delta, fake server. Used by the gate and the provider. |
-| **eurodns-gate** | This gateway, container image, Helm chart. |
+| **dns-gate** | This gateway, container image, Helm chart. |
 | [terraform-provider-eurodns](https://github.com/KamorionLabs/terraform-provider-eurodns) | One Terraform/OpenTofu provider, direct to EuroDNS or through the gate. |
 
 ## How it works
@@ -72,7 +72,7 @@ flowchart LR
     legacy["Existing EuroDNS clients<br/>scoped virtual key"]
   end
 
-  subgraph gate["eurodns-gate"]
+  subgraph gate["dns-gate"]
     direction TB
     authn["1 · Authenticate<br/>issuer, signature, expiry, audience"]
     route["2 · Route<br/>unknown operation: denied"]
@@ -100,7 +100,7 @@ as it is now:
 sequenceDiagram
   autonumber
   participant C as Client
-  participant G as eurodns-gate
+  participant G as dns-gate
   participant S as Store
   participant E as EuroDNS
   C->>G: change (token, If-Match)
@@ -115,7 +115,7 @@ sequenceDiagram
 ```
 
 Details in [docs/DESIGN.md](docs/DESIGN.md) and on the
-[project site](https://kamorionlabs.github.io/eurodns-gate/).
+[project site](https://kamorionlabs.github.io/dns-gate/).
 
 ## Authentication
 
@@ -144,13 +144,13 @@ Existing EuroDNS clients (ACME) can use scoped virtual keys instead. Details in
 ```sh
 export EURODNS_APP_ID=...   # EuroDNS credentials, held by the gate only
 export EURODNS_API_KEY=...
-go run ./cmd/eurodns-gate --config examples/config.yaml
+go run ./cmd/dns-gate --config examples/config.yaml
 ```
 
 Then point a client at `http://localhost:8080` with a token from one of the issuers
 declared in the config. Configuration reference: [docs/CONFIG.md](docs/CONFIG.md).
 
-Kubernetes: Helm chart in `charts/eurodns-gate`.
+Kubernetes: Helm chart in `charts/dns-gate`.
 
 ## Documentation
 
