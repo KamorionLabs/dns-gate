@@ -141,3 +141,43 @@ roles:
 		t.Fatalf("EuroDNS API on an unmanaged zone: %d", rec.Code)
 	}
 }
+
+// A route53 provider is built from its configuration (no AWS call at
+// startup), and the plan GC of Run and Maintenance is the store's.
+func TestNewWiresRoute53AndPlanGC(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	t.Setenv("AWS_CONFIG_FILE", filepath.Join(t.TempDir(), "none"))
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "none"))
+	yaml := `
+providers:
+  - id: r53
+    kind: route53
+    route53: {region: eu-west-3, hosted_zones: {example.com: Z1EXAMPLE}}
+zones: [example.com]
+issuers:
+  - {name: ci, issuer: "https://token.example.net", audiences: [dns-gate]}
+roles:
+  reader:
+    rules: [{zones: [example.com], actions: [dns.read]}]
+`
+	cfg, err := config.Parse([]byte(yaml), func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := New(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), Options{Holder: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := a.Discovery.Status()
+	if len(st.Providers) != 1 || st.Providers[0].ID != "r53" || st.Providers[0].Kind != "route53" {
+		t.Fatalf("providers %+v", st.Providers)
+	}
+	if a.PlanGC == nil {
+		t.Fatal("plan GC not wired")
+	}
+	if err := a.PlanGC(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}

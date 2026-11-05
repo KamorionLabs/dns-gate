@@ -47,7 +47,7 @@ A provider is one DNS account: a EuroDNS account or an AWS account for Route53. 
 | Field | Default | Description |
 |---|---|---|
 | `providers[].id` | (required) | Unique lowercase identifier, shown in the UI, the audit (`provider`) and zone summaries. |
-| `providers[].kind` | (required) | `eurodns` or `route53`. |
+| `providers[].kind` | (required) | `eurodns` or `route53` ([providers/route53.md](providers/route53.md)). |
 | `providers[].zones.include` | `["*"]` | Zone globs (`*` wildcards) the provider serves. |
 | `providers[].zones.exclude` | `[]` | Zone globs removed; they win over `include`. |
 | `providers[].zones.refresh` | `1h` | Account listing period (minimum `5m`), see [Zone discovery](#zone-discovery). |
