@@ -61,7 +61,7 @@ func discoveryEnv(t *testing.T) (*env, *fakeDiscovery) {
 		c.Issuers[0].CategoryClaim = "kind"
 		c.Issuers[0].CategoryMap = map[string]string{"user": "human"}
 		c.MCP = config.MCP{Enabled: true, PlanTTL: config.Duration(10 * time.Minute), RequestsPerMinute: 600}
-		c.ZonesDiscovery = config.ZonesDiscovery{Enabled: true, Include: []string{"*"}, Refresh: config.Duration(time.Hour)}
+		c.Providers = []config.Provider{{ID: "eurodns", Kind: config.KindEuroDNS, Zones: config.ProviderZones{Include: []string{"*"}, Refresh: config.Duration(time.Hour)}}}
 		c.Roles["reader"] = config.Role{Rules: []config.Rule{{Zones: []string{"*"}, Actions: []string{policy.ActionDNSRead, policy.ActionUIRead}}}}
 		c.Roles["padmin"] = config.Role{Rules: []config.Rule{{Zones: []string{"*"}, Actions: []string{"policy.read", "policy.propose", "policy.approve", policy.ActionUIRead}}}}
 		c.Bindings = append(c.Bindings,
@@ -147,7 +147,7 @@ func TestManageZoneThroughPolicy(t *testing.T) {
 	bob := e.human("bob", time.Minute)
 
 	// Not in the account (even after the on-demand refresh), outside the bounds.
-	for zone, want := range map[string]string{"absent.example.net": "not found in the EuroDNS account", "other.net": "outside policy.bounds.zones"} {
+	for zone, want := range map[string]string{"absent.example.net": "not found in a provider account", "other.net": "outside policy.bounds.zones"} {
 		if status, msg := proposeErr(t, e, alice, uiapi.PolicyDocument{Zones: []string{zone}}); status != 400 || !strings.Contains(msg, want) {
 			t.Fatalf("%s: %d %s", zone, status, msg)
 		}
@@ -205,7 +205,7 @@ func TestManagedZonesNeedDiscovery(t *testing.T) {
 	if r, _ := propose(t, e, alice, "", uiapi.PolicyDocument{Zones: []string{"example.com"}}); r.StatusCode != 201 {
 		t.Fatalf("base zone repeated: %d", r.StatusCode)
 	}
-	if status, msg := proposeErr(t, e, alice, uiapi.PolicyDocument{Zones: []string{"sub.example.com"}}); status != 400 || !strings.Contains(msg, "requires zones_discovery.enabled") {
+	if status, msg := proposeErr(t, e, alice, uiapi.PolicyDocument{Zones: []string{"sub.example.com"}}); status != 400 || !strings.Contains(msg, "requires the zone listing of the providers") {
 		t.Fatalf("without discovery: %d %s", status, msg)
 	}
 }

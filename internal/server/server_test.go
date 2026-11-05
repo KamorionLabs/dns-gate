@@ -10,6 +10,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -19,10 +20,13 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/audit"
 	"github.com/KamorionLabs/dns-gate/internal/authn"
 	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/eurodnsapi"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/mcpb"
 	"github.com/KamorionLabs/dns-gate/internal/oidctest"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/provider"
+	eurodnsprov "github.com/KamorionLabs/dns-gate/internal/provider/eurodns"
 	"github.com/KamorionLabs/dns-gate/internal/store"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 	"github.com/KamorionLabs/dns-gate/internal/zonewrite"
@@ -31,36 +35,43 @@ import (
 
 type fakeEngine struct {
 	zonewrite.Engine
-	extra     []uiapi.ZoneSummary // appended to Zones (unmanaged zones)
+	extra []uiapi.ZoneSummary // appended to Zones (unmanaged zones)
+}
+
+// fakeFacade answers the engine-backed EuroDNS operations; passthrough goes
+// through the real facade, towards the test upstream.
+type fakeFacade struct {
+	*eurodnsapi.Facade
 	mu        sync.Mutex
 	lastMatch string
-	lastZone  *eurodns.Zone
 	saveErr   error
 }
 
-func (f *fakeEngine) GetZone(ctx context.Context, s *identity.Subject, zone string) (*eurodns.Zone, error) {
-	return &eurodns.Zone{Name: zone, Records: []eurodns.Record{{Type: "A", Host: "www", TTL: 600, RData: "192.0.2.1"}}, ETag: `"v7"`}, nil
-}
-
-func (f *fakeEngine) SaveZone(ctx context.Context, s *identity.Subject, zone string, z *eurodns.Zone, ifMatch string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.lastMatch, f.lastZone = ifMatch, z
-	return f.saveErr
-}
-
-func (f *fakeEngine) AddRecords(ctx context.Context, s *identity.Subject, zone string, recs []eurodns.Record, ifMatch string) (*eurodns.Zone, error) {
-	return &eurodns.Zone{Name: zone, Records: recs, ETag: "v8"}, nil
-}
-
-func (f *fakeEngine) DeleteRecord(ctx context.Context, s *identity.Subject, zone string, id int64, ifMatch string) (*eurodns.Zone, error) {
-	if id != 42 {
-		return nil, &zonewrite.Error{Reason: zonewrite.ReasonForeignRRset, Message: "record not owned by the gate"}
+func (f *fakeFacade) Do(ctx context.Context, s *identity.Subject, c eurodnsapi.Call) (*eurodnsapi.Reply, error) {
+	switch c.Op {
+	case "getDnsZone":
+		return &eurodnsapi.Reply{Status: http.StatusOK, ETag: `"v7"`, Body: map[string]any{"name": c.Zone,
+			"records": []map[string]any{{"type": "A", "host": "www", "ttl": 600, "rdata": "192.0.2.1"}}}}, nil
+	case "saveDnsZone":
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.lastMatch = c.IfMatch
+		if f.saveErr != nil {
+			return nil, f.saveErr
+		}
+		return &eurodnsapi.Reply{Status: http.StatusNoContent}, nil
+	case "addDnsRecords":
+		return &eurodnsapi.Reply{Status: http.StatusOK, ETag: "v8", Body: map[string]any{"name": c.Zone, "records": c.Body}}, nil
+	case "deleteDnsRecord":
+		if c.Params["record-id"] != "42" {
+			return nil, &zonewrite.Error{Reason: zonewrite.ReasonForeignRRset, Message: "record not owned by the gate"}
+		}
+		return &eurodnsapi.Reply{Status: http.StatusOK, Body: map[string]any{"name": c.Zone}}, nil
 	}
-	return &eurodns.Zone{Name: zone}, nil
+	return nil, &eurodnsapi.BadRequestError{Message: "unexpected " + c.Op}
 }
 
-func (f *fakeEngine) Adopt(ctx context.Context, s *identity.Subject, zone string, req eurodns.AdoptRequest) error {
+func (f *fakeFacade) AdoptJSON(ctx context.Context, s *identity.Subject, zone string, body json.RawMessage) error {
 	return nil
 }
 
@@ -93,6 +104,7 @@ type env struct {
 	srv      *httptest.Server
 	idp      *oidctest.Provider
 	engine   *fakeEngine
+	facade   *fakeFacade
 	audit    *memAudit
 	upstream *httptest.Server
 	upReq    chan *http.Request
@@ -104,15 +116,6 @@ type env struct {
 }
 
 func (e *env) clock() time.Time { return time.Now().Add(e.offset) }
-
-// keyTransport plays the role of eurodns.Transport: it injects the API key.
-type keyTransport struct{}
-
-func (keyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	r = r.Clone(r.Context())
-	r.Header.Set("X-API-KEY", "upstream-secret")
-	return http.DefaultTransport.RoundTrip(r)
-}
 
 func newEnv(t *testing.T) *env { return newEnvWith(t, nil) }
 
@@ -133,11 +136,17 @@ func newEnvDisc(t *testing.T, tweak func(*config.Config), disc ZoneDiscovery) *e
 		_, _ = w.Write([]byte(`[{"id":1}]`))
 	}))
 	t.Cleanup(e.upstream.Close)
+	client, err := eurodns.New(eurodns.WithBaseURL(e.upstream.URL), eurodns.WithAuth(eurodns.APIKeyAuth{AppID: "gate", APIKey: "upstream-secret"}),
+		eurodns.WithRateLimit(time.Microsecond, 100))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prov := provider.Single(eurodnsprov.NewWithClient("eurodns", e.upstream.URL, client))
+	e.facade = &fakeFacade{Facade: eurodnsapi.New(eurodnsapi.Config{Providers: prov})}
 
 	cfg := &config.Config{
-		Zones:    []string{"example.com", "example.org"},
-		Limits:   config.Limits{MaxBodyBytes: 4096, MaxChangesPerRequest: 20},
-		Upstream: config.Upstream{BaseURL: e.upstream.URL},
+		Zones:  []string{"example.com", "example.org"},
+		Limits: config.Limits{MaxBodyBytes: 4096, MaxChangesPerRequest: 20},
 		Issuers: []config.Issuer{{
 			Name: "idp", Issuer: e.idp.URL, Audiences: []string{"dns-gate"}, Category: "pipeline",
 			NameClaim: "email", Algorithms: config.DefaultAlgorithms, ClockSkew: config.Duration(time.Minute),
@@ -178,7 +187,7 @@ func newEnvDisc(t *testing.T, tweak func(*config.Config), disc ZoneDiscovery) *e
 		Config: cfg, Authn: an, Authz: policy.New(h), Engine: e.engine, Audit: e.audit, AuditReader: e.audit,
 		Policy: h, PolicyStore: e.store, Ownership: e.store, Now: func() time.Time { return e.clock() },
 		Ops: e.ops, Terraform: e.ops.terraform, Discovery: disc,
-		Upstream: keyTransport{}, HTTPClient: e.idp.Client(),
+		EuroDNS: e.facade, HTTPClient: e.idp.Client(),
 		UIFiles: fstest.MapFS{"index.html": {Data: []byte("<html>ui</html>")}, "assets/app.js": {Data: []byte("js")}},
 	})
 	if err != nil {
@@ -229,15 +238,15 @@ func TestEngineRoutes(t *testing.T) {
 	}
 
 	r = e.do(t, "PUT", "/dns-zones/example.com", tok, `{"records":[],"urlForwards":[],"mailForwards":[]}`, map[string]string{"If-Match": `W/"v7"`})
-	if r.StatusCode != 204 || e.engine.lastMatch != "v7" {
-		t.Fatalf("save: %d if-match=%q", r.StatusCode, e.engine.lastMatch)
+	if r.StatusCode != 204 || e.facade.lastMatch != "v7" {
+		t.Fatalf("save: %d if-match=%q", r.StatusCode, e.facade.lastMatch)
 	}
 
-	e.engine.saveErr = &zonewrite.Error{Reason: zonewrite.ReasonPrecondition, Message: "zone changed"}
+	e.facade.saveErr = &zonewrite.Error{Reason: zonewrite.ReasonPrecondition, Message: "zone changed"}
 	if r = e.do(t, "PUT", "/dns-zones/example.com", tok, `{}`, nil); r.StatusCode != 412 || reason(t, r) != "precondition" {
 		t.Fatalf("precondition: %d", r.StatusCode)
 	}
-	e.engine.saveErr = &zonewrite.Error{Reason: zonewrite.ReasonTainted, Message: "x"}
+	e.facade.saveErr = &zonewrite.Error{Reason: zonewrite.ReasonTainted, Message: "x"}
 	if r = e.do(t, "PUT", "/dns-zones/example.com", tok, `{}`, nil); r.StatusCode != 409 {
 		t.Fatalf("tainted: %d", r.StatusCode)
 	}
@@ -313,9 +322,9 @@ func TestVirtualKeyNotForwarded(t *testing.T) {
 func TestGateInfoAndAdopt(t *testing.T) {
 	e := newEnv(t)
 	r := e.do(t, "GET", GateInfoPath, "", "", nil)
-	var info eurodns.GateInfo
+	var info GateInfo
 	_ = json.NewDecoder(r.Body).Decode(&info)
-	if r.StatusCode != 200 || !info.HasFeature(eurodns.FeatureOwnership) {
+	if r.StatusCode != 200 || !slices.Contains(info.Features, FeatureOwnership) {
 		t.Fatalf("gate info: %d %+v", r.StatusCode, info)
 	}
 	body := `{"rrsets":[{"host":"www","type":"A"}]}`

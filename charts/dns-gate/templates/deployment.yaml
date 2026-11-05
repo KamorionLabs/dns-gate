@@ -58,7 +58,7 @@ spec:
               value: {{ .Values.replicaCount | quote }}
             - name: EURODNS_API_KEY_FILE
               value: /var/run/secrets/eurodns/{{ .Values.eurodns.apiKeyKey }}
-            {{- if not ((.Values.config.upstream | default dict).app_id) }}
+            {{- if .Values.eurodns.appIdKey }}
             - name: EURODNS_APP_ID_FILE
               value: /var/run/secrets/eurodns/{{ .Values.eurodns.appIdKey }}
             {{- end }}

@@ -23,7 +23,8 @@ func TestNewWiresOperations(t *testing.T) {
 	sum := sha256.Sum256([]byte("secret"))
 	keyHash := hex.EncodeToString(sum[:])
 	yaml := `
-upstream: {base_url: "http://127.0.0.1:1", app_id: app, max_retries: 0}
+providers:
+  - {id: eurodns, kind: eurodns, eurodns: {base_url: "http://127.0.0.1:1", app_id: app, max_retries: 0}}
 zones: [example.com]
 store: {type: sqlite, sqlite: {path: ` + filepath.Join(t.TempDir(), "g.db") + `}}
 mcp: {enabled: true, allow_writes: true}
@@ -62,8 +63,8 @@ roles:
 	}
 }
 
-// zones_discovery: the account listing goes through the shared upstream
-// transport and discovered zones are served read-only.
+// Zone discovery: the account listing goes through the shared upstream
+// transport of the provider and discovered zones are served read-only.
 func TestZonesDiscoveryWiring(t *testing.T) {
 	var searches atomic.Int32
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -87,9 +88,11 @@ func TestZonesDiscoveryWiring(t *testing.T) {
 	defer up.Close()
 	sum := sha256.Sum256([]byte("secret"))
 	yaml := `
-upstream: {base_url: "` + up.URL + `", app_id: app, rate: {every: 1ms, burst: 10}}
+providers:
+  - id: eurodns
+    kind: eurodns
+    eurodns: {base_url: "` + up.URL + `", app_id: app, rate: {every: 1ms, burst: 10}}
 zones: [example.com]
-zones_discovery: {enabled: true}
 virtual_keys:
   - {id: t, app_id: vk, key_sha256: ` + hex.EncodeToString(sum[:]) + `, roles: [reader], expires_at: 2099-01-01T00:00:00Z}
 roles:
@@ -127,10 +130,11 @@ roles:
 		a.Handler().ServeHTTP(rec, req)
 		return rec
 	}
-	if rec := get("/api/v1/zones"); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"zone":"other.org","unmanaged":true`) {
+	if rec := get("/api/v1/zones"); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"zone":"other.org","provider":"eurodns","unmanaged":true`) ||
+		!strings.Contains(rec.Body.String(), `"zone":"example.com","provider":"eurodns"`) {
 		t.Fatalf("zones: %d %s", rec.Code, rec.Body.String())
 	}
-	if rec := get("/api/v1/zones/other.org/rrsets"); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"unmanaged":true`) {
+	if rec := get("/api/v1/zones/other.org/rrsets"); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"provider":"eurodns","unmanaged":true`) {
 		t.Fatalf("rrsets: %d %s", rec.Code, rec.Body.String())
 	}
 	if rec := get("/dns-zones/other.org"); rec.Code != http.StatusForbidden {

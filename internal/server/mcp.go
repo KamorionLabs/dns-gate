@@ -25,7 +25,6 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 	"github.com/KamorionLabs/dns-gate/internal/version"
 	"github.com/KamorionLabs/dns-gate/internal/zonewrite"
-	eurodns "github.com/KamorionLabs/eurodns-go"
 )
 
 const (
@@ -37,7 +36,7 @@ const (
 	subjectRefHeader = "X-Gate-Internal-Subject-Ref"
 )
 
-const recordRules = "Hosts are relative to the zone, \"@\" is the apex. Targets of CNAME, MX, NS, SRV and PTR records must be fully qualified with a trailing dot (\"target.example.net.\"), otherwise EuroDNS appends the zone. TXT values are raw text, without surrounding quotes. TTL must be one of 600, 900, 1800, 3600, 7200, 14400, 21600, 43200, 86400, 172800, 432000, 604800."
+const recordRules = "Hosts are relative to the zone, \"@\" is the apex. Targets of CNAME, MX, NS, SRV and PTR records must be fully qualified with a trailing dot (\"target.example.net.\"), otherwise EuroDNS appends the zone. TXT values are raw text, without surrounding quotes. Accepted TTLs depend on the provider of the zone (list_zones gives it): EuroDNS only accepts 600, 900, 1800, 3600, 7200, 14400, 21600, 43200, 86400, 172800, 432000, 604800."
 
 type mcpServer struct {
 	s       *Server
@@ -54,7 +53,7 @@ func (s *Server) newMCP() *mcpServer {
 		limiter: newSubjectLimiter(s.cfg.Config.MCP.RequestsPerMinute, s.now),
 	}
 	srv := mcp.NewServer(&mcp.Implementation{Name: "dns-gate", Version: version.Version}, &mcp.ServerOptions{
-		Instructions: "dns-gate manages EuroDNS zones under RBAC and record ownership. Read tools are always available; changes are made with plan_rrset_change then apply_rrset_change, and only on RRsets owned by your team. " + recordRules,
+		Instructions: "dns-gate manages DNS zones (EuroDNS, Route53) under RBAC and record ownership. Read tools are always available; changes are made with plan_rrset_change then apply_rrset_change, and only on RRsets owned by your team. " + recordRules,
 	})
 	m.addReadTools(srv)
 	if s.cfg.Config.MCP.AllowWrites && s.cfg.Ops != nil {
@@ -283,7 +282,7 @@ type adoptApplyIn struct {
 func (m *mcpServer) addReadTools(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_zones",
-		Description: "List the DNS zones you can read, with counts of managed, foreign, tainted and pending RRsets. Zones flagged unmanaged exist in the EuroDNS account but are not managed by the gate: their RRsets are readable (list_rrsets, get_rrset) but cannot be changed or adopted until a policy administrator brings them under management.",
+		Description: "List the DNS zones you can read, with counts of managed, foreign, tainted and pending RRsets. Zones flagged unmanaged exist in a provider account but are not managed by the gate: their RRsets are readable (list_rrsets, get_rrset) but cannot be changed or adopted until a policy administrator brings them under management.",
 		Annotations: readOnly("List zones"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, listZonesOut, error) {
 		subj, err := m.subject(ctx, req)
@@ -469,7 +468,7 @@ func (m *mcpServer) addReadTools(srv *mcp.Server) {
 func (m *mcpServer) addWriteTools(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "plan_rrset_change",
-		Description: "Dry run of RRset changes in a zone: checks RBAC, ownership and EuroDNS validation without writing, and returns the changes and a plan_id valid for a few minutes. Each change is the full desired state of one RRset (host, type, ttl, values) or delete=true. " +
+		Description: "Dry run of RRset changes in a zone: checks RBAC, ownership and the provider validation without writing, and returns the changes and a plan_id valid for a few minutes. Each change is the full desired state of one RRset (host, type, ttl, values) or delete=true. " +
 			recordRules + " Only RRsets owned by your team, or new ones in your scope, can change. Show the plan to the user before applying it.",
 		Annotations: readOnly("Plan RRset changes"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in planIn) (*mcp.CallToolResult, uiapi.PlanResult, error) {
@@ -581,10 +580,6 @@ func reasonOf(err error) string {
 func toolError(err error) error {
 	if ze, ok := zonewrite.AsError(err); ok {
 		return fmt.Errorf("%s: %s", ze.Reason, ze.Message)
-	}
-	var ae *eurodns.APIError
-	if errors.As(err, &ae) {
-		return errors.New("upstream: EuroDNS returned an error")
 	}
 	return errors.New("internal error")
 }

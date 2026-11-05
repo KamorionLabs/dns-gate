@@ -28,3 +28,20 @@ func TestTee(t *testing.T) {
 		t.Fatal("store not called")
 	}
 }
+
+// Events stored before the provider-neutral model carry a numeric EuroDNS
+// snapshot id; they must still decode.
+func TestSnapshotIDCompat(t *testing.T) {
+	var old Event
+	if err := json.Unmarshal([]byte(`{"request_id":"r","decision":"allow","snapshot_id":884301}`), &old); err != nil || old.SnapshotID != "884301" {
+		t.Fatalf("numeric id: %q %v", old.SnapshotID, err)
+	}
+	b, _ := json.Marshal(Event{SnapshotID: "42", Provider: "eurodns"})
+	var back Event
+	if err := json.Unmarshal(b, &back); err != nil || back.SnapshotID != "42" || back.Provider != "eurodns" || !bytes.Contains(b, []byte(`"snapshot_id":"42"`)) {
+		t.Fatalf("round trip %s: %v", b, err)
+	}
+	if b, _ := json.Marshal(Event{}); bytes.Contains(b, []byte("snapshot_id")) || bytes.Contains(b, []byte("provider")) {
+		t.Fatalf("empty fields must be omitted: %s", b)
+	}
+}

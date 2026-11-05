@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
 	"github.com/KamorionLabs/dns-gate/internal/store"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
-	"github.com/KamorionLabs/eurodns-go/rrset"
 )
 
 const (
@@ -145,10 +145,10 @@ func TestDelegatedRoleAndBinding(t *testing.T) {
 	if len(res2.Roles) != 1 || res2.Roles[0] != "dns-gate-x" || len(res2.Teams) != 1 || res2.Teams[0] != "dns-gate-x" {
 		t.Fatalf("resolve: %+v", res2)
 	}
-	if !snap.Decide(res2.Roles, policy.ActionRecordWrite, "example.com", &rrset.Key{Host: "x.apps", Type: "CNAME"}).Allowed {
+	if !snap.Decide(res2.Roles, policy.ActionRecordWrite, "example.com", &dns.Key{Host: "x.apps", Type: "CNAME"}).Allowed {
 		t.Fatal("bound pipeline cannot write its own name")
 	}
-	if snap.Decide(res2.Roles, policy.ActionRecordWrite, "example.com", &rrset.Key{Host: "y.apps", Type: "CNAME"}).Allowed {
+	if snap.Decide(res2.Roles, policy.ActionRecordWrite, "example.com", &dns.Key{Host: "y.apps", Type: "CNAME"}).Allowed {
 		t.Fatal("bound pipeline can write another name")
 	}
 	me := e.do(t, "GET", "/api/v1/me", e.pipeline(pipelineX), "", nil)

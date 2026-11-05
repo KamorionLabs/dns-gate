@@ -82,6 +82,39 @@ var (
 type InvalidError struct {
 	Key     dns.Key
 	Message string
+	// Code is an optional machine-readable reason (for example
+	// "relative_target"), reported to adoption candidates.
+	Code string
 }
 
 func (e *InvalidError) Error() string { return "invalid " + e.Key.String() + ": " + e.Message }
+
+// ErrNotApplied wraps a provider error known to have written nothing (a
+// request the provider refused), so that the core can roll back its claims.
+var ErrNotApplied = errors.New("provider: request refused, nothing written")
+
+// RejectedError is returned when the provider refuses a write or a read as
+// invalid (EuroDNS 400 with a validation report). Nothing was written.
+type RejectedError struct {
+	Message string
+	// Details is the provider report, returned to the client as is.
+	Details any
+}
+
+func (e *RejectedError) Error() string { return "rejected: " + e.Message }
+
+// Is makes a RejectedError match ErrNotApplied.
+func (e *RejectedError) Is(target error) bool { return target == ErrNotApplied }
+
+// Resolver returns the provider serving a zone. A zone is served by exactly
+// one provider; an error is returned when none or several match.
+type Resolver interface {
+	Provider(zone string) (Provider, error)
+}
+
+// Single is a Resolver serving every zone with one provider.
+func Single(p Provider) Resolver { return single{p} }
+
+type single struct{ p Provider }
+
+func (s single) Provider(string) (Provider, error) { return s.p, nil }

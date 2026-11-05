@@ -24,9 +24,8 @@ import (
 // Config is the root configuration document.
 type Config struct {
 	Listen            Listen           `yaml:"listen"`
-	Upstream          Upstream         `yaml:"upstream"`
+	Providers         []Provider       `yaml:"providers"`
 	Zones             []string         `yaml:"zones"`
-	ZonesDiscovery    ZonesDiscovery   `yaml:"zones_discovery"`
 	CheckOnWrite      *bool            `yaml:"check_on_write"`
 	ReconcileInterval Duration         `yaml:"reconcile_interval"`
 	Limits            Limits           `yaml:"limits"`
@@ -46,15 +45,66 @@ type Config struct {
 	LoadedAt time.Time `yaml:"-"`
 }
 
-// ZonesDiscovery lists the domains of the EuroDNS account so that zones
-// outside Zones are visible (read-only) and can be brought under management
-// through the managed policy.
-type ZonesDiscovery struct {
-	Enabled bool     `yaml:"enabled"`
+// Provider kinds.
+const (
+	KindEuroDNS = "eurodns"
+	KindRoute53 = "route53"
+)
+
+// Provider is one upstream DNS account. Each zone is served by exactly one
+// provider: the one whose zones filter matches it and, when several match,
+// whose account lists it.
+type Provider struct {
+	ID      string         `yaml:"id"`
+	Kind    string         `yaml:"kind"` // eurodns | route53
+	Zones   ProviderZones  `yaml:"zones"`
+	EuroDNS *EuroDNSConfig `yaml:"eurodns"`
+	Route53 *Route53Config `yaml:"route53"`
+}
+
+// ProviderZones selects the zones of the account the gate serves. The
+// account is listed every Refresh: listed zones that are not managed by the
+// policy are visible read-only and can be brought under management.
+type ProviderZones struct {
 	Include []string `yaml:"include"` // zone globs, default ["*"]
 	Exclude []string `yaml:"exclude"` // zone globs, win over include
 	Refresh Duration `yaml:"refresh"` // listing period, default 1h, minimum 5m
 }
+
+// Matches reports whether the zone filter of the provider selects zone.
+func (p Provider) Matches(zone string) bool {
+	zone = normZone(zone)
+	return glob.Any(p.Zones.Include, zone) && !glob.Any(p.Zones.Exclude, zone)
+}
+
+// EuroDNSConfig configures a EuroDNS account. The API key is never read
+// from the file: it comes from EURODNS_<ID>_API_KEY or EURODNS_API_KEY (or
+// their _FILE variants), the app id from eurodns.app_id, EURODNS_<ID>_APP_ID
+// or EURODNS_APP_ID; <ID> is the provider id in upper case, every other
+// character than letters and digits replaced by "_".
+type EuroDNSConfig struct {
+	BaseURL    string `yaml:"base_url"`
+	AppID      string `yaml:"app_id"`
+	Rate       Rate   `yaml:"rate"`
+	MaxRetries *int   `yaml:"max_retries"`
+
+	APIKey string `yaml:"-"`
+}
+
+// Route53Config configures an AWS account for Route53. Credentials come
+// from the default AWS chain (IRSA, instance role, environment), optionally
+// assuming a role in the target account.
+type Route53Config struct {
+	Region        string `yaml:"region"`
+	AssumeRoleARN string `yaml:"assume_role_arn"`
+	ExternalID    string `yaml:"external_id"`
+	// HostedZones pins zone names to hosted zone ids (needed when a name has
+	// several hosted zones, or to skip listing the account).
+	HostedZones    map[string]string `yaml:"hosted_zones"`
+	IncludePrivate bool              `yaml:"include_private"`
+}
+
+func normZone(z string) string { return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(z)), ".") }
 
 // Group is a named set of subject matchers (an Entra app role or group
 // object id, a GitHub repository, explicit users).
@@ -159,17 +209,6 @@ type UI struct {
 type Listen struct {
 	Address        string   `yaml:"address"`
 	TrustedProxies []string `yaml:"trusted_proxies"` // CIDRs allowed to set X-Forwarded-For
-}
-
-// Upstream configures the EuroDNS API. The API key is never read from the
-// file: it comes from EURODNS_API_KEY or EURODNS_API_KEY_FILE.
-type Upstream struct {
-	BaseURL    string `yaml:"base_url"`
-	AppID      string `yaml:"app_id"`
-	Rate       Rate   `yaml:"rate"`
-	MaxRetries *int   `yaml:"max_retries"`
-
-	APIKey string `yaml:"-"`
 }
 
 // Rate is the client-side limiter towards EuroDNS (10 req / 10 s per IP).
@@ -393,16 +432,31 @@ func (c *Config) applyEnv(getenv func(string) string) error {
 		}
 		return "", nil
 	}
-	v, err := read("EURODNS_APP_ID")
-	if err != nil {
-		return err
+	for i := range c.Providers {
+		p := &c.Providers[i]
+		if p.Kind != KindEuroDNS || p.EuroDNS == nil {
+			continue
+		}
+		prefix := "EURODNS_" + envName(p.ID) + "_"
+		for _, f := range []struct {
+			name string
+			dst  *string
+		}{{"APP_ID", &p.EuroDNS.AppID}, {"API_KEY", &p.EuroDNS.APIKey}} {
+			v, err := read(prefix + f.name)
+			if err != nil {
+				return err
+			}
+			if v == "" {
+				if v, err = read("EURODNS_" + f.name); err != nil {
+					return err
+				}
+			}
+			if v != "" {
+				*f.dst = v
+			}
+		}
 	}
-	if v != "" {
-		c.Upstream.AppID = v
-	}
-	if c.Upstream.APIKey, err = read("EURODNS_API_KEY"); err != nil {
-		return err
-	}
+	var err error
 	if c.Store.Postgres.DSN, err = read("DNS_GATE_POSTGRES_DSN"); err != nil {
 		return err
 	}
@@ -425,18 +479,42 @@ func (c *Config) defaults() {
 	if c.Listen.Address == "" {
 		c.Listen.Address = ":8080"
 	}
-	if c.Upstream.BaseURL == "" {
-		c.Upstream.BaseURL = "https://rest-api.eurodns.com"
-	}
-	if c.Upstream.Rate.Every == 0 {
-		c.Upstream.Rate.Every = Duration(1100 * time.Millisecond)
-	}
-	if c.Upstream.Rate.Burst == 0 {
-		c.Upstream.Rate.Burst = 5
-	}
-	if c.Upstream.MaxRetries == nil {
-		n := 3
-		c.Upstream.MaxRetries = &n
+	for i := range c.Providers {
+		p := &c.Providers[i]
+		p.ID, p.Kind = strings.TrimSpace(p.ID), strings.ToLower(strings.TrimSpace(p.Kind))
+		if len(p.Zones.Include) == 0 {
+			p.Zones.Include = []string{"*"}
+		}
+		for _, l := range [][]string{p.Zones.Include, p.Zones.Exclude} {
+			for j := range l {
+				l[j] = normZone(l[j])
+			}
+		}
+		if p.Zones.Refresh == 0 {
+			p.Zones.Refresh = Duration(time.Hour)
+		}
+		if e := p.EuroDNS; e != nil {
+			if e.BaseURL == "" {
+				e.BaseURL = "https://rest-api.eurodns.com"
+			}
+			if e.Rate.Every == 0 {
+				e.Rate.Every = Duration(1100 * time.Millisecond)
+			}
+			if e.Rate.Burst == 0 {
+				e.Rate.Burst = 5
+			}
+			if e.MaxRetries == nil {
+				n := 3
+				e.MaxRetries = &n
+			}
+		}
+		if r := p.Route53; r != nil && len(r.HostedZones) > 0 {
+			hz := make(map[string]string, len(r.HostedZones))
+			for z, id := range r.HostedZones {
+				hz[normZone(z)] = strings.TrimSpace(id)
+			}
+			r.HostedZones = hz
+		}
 	}
 	if c.CheckOnWrite == nil {
 		t := true
@@ -500,17 +578,6 @@ func (c *Config) defaults() {
 	for i := range c.Zones {
 		c.Zones[i] = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(c.Zones[i])), ".")
 	}
-	if c.ZonesDiscovery.Refresh == 0 {
-		c.ZonesDiscovery.Refresh = Duration(time.Hour)
-	}
-	if len(c.ZonesDiscovery.Include) == 0 {
-		c.ZonesDiscovery.Include = []string{"*"}
-	}
-	for _, l := range [][]string{c.ZonesDiscovery.Include, c.ZonesDiscovery.Exclude} {
-		for i := range l {
-			l[i] = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(l[i])), ".")
-		}
-	}
 	for i := range c.Issuers {
 		if len(c.Issuers[i].Algorithms) == 0 {
 			c.Issuers[i].Algorithms = DefaultAlgorithms
@@ -547,40 +614,7 @@ func (c *Config) Validate() error {
 			add("listen.trusted_proxies: %q: %v", p, err)
 		}
 	}
-	if u, err := url.Parse(c.Upstream.BaseURL); err != nil || u.Scheme == "" || u.Host == "" {
-		add("upstream.base_url: invalid URL %q", c.Upstream.BaseURL)
-	} else if u.Scheme != "https" && !isLoopback(u.Hostname()) {
-		add("upstream.base_url: https required")
-	}
-	if c.Upstream.AppID == "" {
-		add("upstream: app id missing (upstream.app_id, EURODNS_APP_ID or EURODNS_APP_ID_FILE)")
-	}
-	if c.Upstream.APIKey == "" {
-		add("upstream: api key missing (EURODNS_API_KEY or EURODNS_API_KEY_FILE)")
-	}
-	if c.Upstream.Rate.Every.D() < 0 || c.Upstream.Rate.Burst < 1 {
-		add("upstream.rate: every must be >= 0 and burst >= 1")
-	}
-	if *c.Upstream.MaxRetries < 0 {
-		add("upstream.max_retries: must be >= 0")
-	}
-
-	if len(c.Zones) == 0 && !c.ZonesDiscovery.Enabled {
-		add("zones: at least one managed zone is required (or zones_discovery.enabled with zones managed from the policy)")
-	}
-	if c.ZonesDiscovery.Refresh.D() < 5*time.Minute {
-		add("zones_discovery.refresh: must be >= 5m (EuroDNS rate limit)")
-	}
-	for _, l := range []struct {
-		name  string
-		globs []string
-	}{{"include", c.ZonesDiscovery.Include}, {"exclude", c.ZonesDiscovery.Exclude}} {
-		for _, g := range l.globs {
-			if g == "" || strings.ContainsAny(g, " ?/") {
-				add("zones_discovery.%s: %q: zone glob with * wildcards expected", l.name, g)
-			}
-		}
-	}
+	c.validateProviders(add)
 	seenZone := map[string]bool{}
 	for _, z := range c.Zones {
 		if !ValidFQDN(z) {
@@ -590,6 +624,9 @@ func (c *Config) Validate() error {
 			add("zones: %q listed twice", z)
 		}
 		seenZone[z] = true
+		if len(c.Providers) > 0 && len(c.ProvidersFor(z)) == 0 {
+			add("zones: %q is selected by no provider (providers[].zones include/exclude)", z)
+		}
 	}
 
 	switch c.Store.Type {
@@ -1199,4 +1236,132 @@ func isLoopback(host string) bool {
 	}
 	ip, err := netip.ParseAddr(host)
 	return err == nil && ip.IsLoopback()
+}
+
+var (
+	envNameRe   = regexp.MustCompile(`[^A-Z0-9]+`)
+	hostedZone  = regexp.MustCompile(`^(/hostedzone/)?[A-Z0-9]{1,32}$`)
+	roleARNRe   = regexp.MustCompile(`^arn:aws[a-z-]*:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]{1,512}$`)
+	awsRegionRe = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-[0-9]$`)
+)
+
+// envName is the environment variable fragment of a provider id.
+func envName(id string) string {
+	return strings.Trim(envNameRe.ReplaceAllString(strings.ToUpper(id), "_"), "_")
+}
+
+// ProvidersFor returns the ids of the providers whose zone filter selects
+// zone.
+func (c *Config) ProvidersFor(zone string) []string {
+	var out []string
+	for _, p := range c.Providers {
+		if p.Matches(zone) {
+			out = append(out, p.ID)
+		}
+	}
+	return out
+}
+
+func (c *Config) validateProviders(add func(string, ...any)) {
+	if len(c.Providers) == 0 {
+		add("providers: at least one provider is required")
+	}
+	ids := map[string]bool{}
+	pinned := map[string]string{}
+	for i, p := range c.Providers {
+		at := fmt.Sprintf("providers[%d]", i)
+		if !nameRe.MatchString(p.ID) {
+			add("%s.id: %q must be a lowercase identifier", at, p.ID)
+		}
+		if ids[p.ID] {
+			add("%s.id: %q duplicated", at, p.ID)
+		}
+		ids[p.ID] = true
+		for _, l := range []struct {
+			name  string
+			globs []string
+		}{{"include", p.Zones.Include}, {"exclude", p.Zones.Exclude}} {
+			for _, g := range l.globs {
+				if g == "" || strings.ContainsAny(g, " ?/") {
+					add("%s.zones.%s: %q: zone glob with * wildcards expected", at, l.name, g)
+				}
+			}
+		}
+		if p.Zones.Refresh.D() < 5*time.Minute {
+			add("%s.zones.refresh: must be >= 5m (provider rate limits)", at)
+		}
+		switch p.Kind {
+		case KindEuroDNS:
+			if p.Route53 != nil {
+				add("%s.route53: not allowed for kind eurodns", at)
+			}
+			if p.EuroDNS == nil {
+				add("%s.eurodns: required for kind eurodns", at)
+				continue
+			}
+			validateEuroDNS(at+".eurodns", p.ID, p.EuroDNS, add)
+		case KindRoute53:
+			if p.EuroDNS != nil {
+				add("%s.eurodns: not allowed for kind route53", at)
+			}
+			if p.Route53 == nil {
+				add("%s.route53: required for kind route53", at)
+				continue
+			}
+			validateRoute53(at+".route53", p, add)
+			for z := range p.Route53.HostedZones {
+				if other, dup := pinned[z]; dup {
+					add("%s.route53.hosted_zones: %q is also pinned by provider %s", at, z, other)
+				}
+				pinned[z] = p.ID
+			}
+		default:
+			add("%s.kind: %q (expected eurodns or route53)", at, p.Kind)
+		}
+	}
+}
+
+func validateEuroDNS(at, id string, e *EuroDNSConfig, add func(string, ...any)) {
+	if u, err := url.Parse(e.BaseURL); err != nil || u.Scheme == "" || u.Host == "" {
+		add("%s.base_url: invalid URL %q", at, e.BaseURL)
+	} else if u.Scheme != "https" && !isLoopback(u.Hostname()) {
+		add("%s.base_url: https required", at)
+	}
+	env := "EURODNS_" + envName(id)
+	if e.AppID == "" {
+		add("%s: app id missing (%s.app_id, %s_APP_ID or EURODNS_APP_ID, or their _FILE variants)", at, at, env)
+	}
+	if e.APIKey == "" {
+		add("%s: api key missing (%s_API_KEY or EURODNS_API_KEY, or their _FILE variants)", at, env)
+	}
+	if e.Rate.Every.D() < 0 || e.Rate.Burst < 1 {
+		add("%s.rate: every must be >= 0 and burst >= 1", at)
+	}
+	if *e.MaxRetries < 0 {
+		add("%s.max_retries: must be >= 0", at)
+	}
+}
+
+func validateRoute53(at string, p Provider, add func(string, ...any)) {
+	r := p.Route53
+	if r.Region != "" && !awsRegionRe.MatchString(r.Region) {
+		add("%s.region: %q is not an AWS region", at, r.Region)
+	}
+	if r.AssumeRoleARN != "" && !roleARNRe.MatchString(r.AssumeRoleARN) {
+		add("%s.assume_role_arn: %q is not an IAM role ARN", at, r.AssumeRoleARN)
+	}
+	if r.ExternalID != "" && r.AssumeRoleARN == "" {
+		add("%s.external_id: requires assume_role_arn", at)
+	}
+	for z, id := range r.HostedZones {
+		if !ValidFQDN(z) {
+			add("%s.hosted_zones: %q is not a valid domain name", at, z)
+		}
+		if !hostedZone.MatchString(id) {
+			add("%s.hosted_zones[%s]: %q is not a hosted zone id", at, z, id)
+		}
+		if !p.Matches(z) {
+			add("%s.hosted_zones: %q is excluded by the zones filter of the provider", at, z)
+		}
+	}
 }

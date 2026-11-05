@@ -5,8 +5,8 @@ import (
 	"time"
 
 	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
-	"github.com/KamorionLabs/eurodns-go/rrset"
 )
 
 func testEngine() *Engine {
@@ -55,8 +55,8 @@ func TestDenyByDefault(t *testing.T) {
 func TestRecordScope(t *testing.T) {
 	e := testEngine()
 	s := subj("web")
-	ok := []rrset.Key{{Host: "www.staging", Type: "CNAME"}, {Host: "APP", Type: "txt"}}
-	ko := []rrset.Key{{Host: "a.b.staging", Type: "CNAME"}, {Host: "www.staging", Type: "A"}, {Host: "www", Type: "CNAME"}}
+	ok := []dns.Key{{Host: "www.staging", Type: "CNAME"}, {Host: "APP", Type: "txt"}}
+	ko := []dns.Key{{Host: "a.b.staging", Type: "CNAME"}, {Host: "www.staging", Type: "A"}, {Host: "www", Type: "CNAME"}}
 	for _, k := range ok {
 		if !e.AllowRRset(s, ActionRecordWrite, "example.com", k) {
 			t.Errorf("%v should be allowed", k)
@@ -67,21 +67,21 @@ func TestRecordScope(t *testing.T) {
 			t.Errorf("%v should be denied", k)
 		}
 	}
-	if e.AllowRRset(s, ActionRecordWrite, "example.org", rrset.Key{Host: "app", Type: "CNAME"}) {
+	if e.AllowRRset(s, ActionRecordWrite, "example.org", dns.Key{Host: "app", Type: "CNAME"}) {
 		t.Error("web role is limited to example.com")
 	}
 }
 
 func TestProtectedWins(t *testing.T) {
 	e := testEngine()
-	mx := rrset.Key{Host: "@", Type: "MX"}
-	if e.AllowRRset(subj("admin"), ActionRecordWrite, "example.com", mx) || e.AllowRRset(subj("admin"), ActionRecordAdopt, "example.com", rrset.Key{Host: "", Type: "ns"}) {
+	mx := dns.Key{Host: "@", Type: "MX"}
+	if e.AllowRRset(subj("admin"), ActionRecordWrite, "example.com", mx) || e.AllowRRset(subj("admin"), ActionRecordAdopt, "example.com", dns.Key{Host: "", Type: "ns"}) {
 		t.Fatal("protected records are never writable")
 	}
 	if !e.AllowRRset(subj("reader"), ActionDNSRead, "example.com", mx) {
 		t.Fatal("protected records stay readable")
 	}
-	if !e.IsProtected("example.org", rrset.Key{Host: "@", Type: "SOA"}) || e.IsProtected("example.org", rrset.Key{Host: "www", Type: "MX"}) {
+	if !e.IsProtected("example.org", dns.Key{Host: "@", Type: "SOA"}) || e.IsProtected("example.org", dns.Key{Host: "www", Type: "MX"}) {
 		t.Fatal("IsProtected mismatch")
 	}
 }
@@ -89,11 +89,11 @@ func TestProtectedWins(t *testing.T) {
 func TestACMERole(t *testing.T) {
 	e := testEngine()
 	s := subj("acme")
-	if !e.AllowRRset(s, ActionRecordWrite, "example.org", rrset.Key{Host: "_acme-challenge.www", Type: "TXT"}) ||
-		!e.AllowRRset(s, ActionRecordWrite, "example.org", rrset.Key{Host: "_acme-challenge", Type: "TXT"}) {
+	if !e.AllowRRset(s, ActionRecordWrite, "example.org", dns.Key{Host: "_acme-challenge.www", Type: "TXT"}) ||
+		!e.AllowRRset(s, ActionRecordWrite, "example.org", dns.Key{Host: "_acme-challenge", Type: "TXT"}) {
 		t.Fatal("acme challenge allowed")
 	}
-	if e.AllowRRset(s, ActionRecordWrite, "example.org", rrset.Key{Host: "www", Type: "TXT"}) {
+	if e.AllowRRset(s, ActionRecordWrite, "example.org", dns.Key{Host: "www", Type: "TXT"}) {
 		t.Fatal("acme limited to challenges")
 	}
 	if !e.RebaseOnSave(s) || e.RebaseOnSave(subj("web")) {

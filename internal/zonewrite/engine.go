@@ -4,9 +4,10 @@ import (
 	"context"
 	"errors"
 
+	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
+	"github.com/KamorionLabs/dns-gate/internal/provider"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
-	eurodns "github.com/KamorionLabs/eurodns-go"
 )
 
 // Error reasons, mapped to HTTP statuses by the HTTP layer and returned in
@@ -14,13 +15,13 @@ import (
 type Reason string
 
 const (
-	ReasonForbidden     Reason = "forbidden"        // 403 RBAC or protected record
+	ReasonForbidden     Reason = "forbidden"        // 403 RBAC, protected or read-only record
 	ReasonForeignRRset  Reason = "foreign_rrset"    // 409 RRset exists and is not owned by the gate
 	ReasonNotOwner      Reason = "not_owner"        // 403 owned by another team
 	ReasonTainted       Reason = "tainted"          // 409 changed outside the gate
-	ReasonPrecondition  Reason = "precondition"     // 412 If-Match mismatch
+	ReasonPrecondition  Reason = "precondition"     // 412 If-Match, expected hash or upstream conflict
 	ReasonTooMany       Reason = "too_many_changes" // 403 blast radius
-	ReasonInvalid       Reason = "invalid_zone"     // 400 EuroDNS check failed
+	ReasonInvalid       Reason = "invalid_zone"     // 400 refused by the provider or its validation
 	ReasonLocked        Reason = "zone_locked"      // 423/503 lock not acquired in time
 	ReasonUpstream      Reason = "upstream"         // 502
 	ReasonNotFound      Reason = "not_found"        // 404 zone not managed, record id or RRset absent
@@ -45,18 +46,45 @@ func AsError(err error) (*Error, bool) {
 	return e, ok
 }
 
-// Engine is implemented by this package (New) and consumed by the HTTP layer.
+// Plan is a write computed against the current zone, under the zone lock.
+type Plan struct {
+	// Changes are the RRset changes. The engine takes Old and Op from the
+	// current zone and replaces New with its provider.Normalize form.
+	Changes []dns.Change
+	// Ignored lists out-of-scope differences skipped by a rebase (audited).
+	Ignored []string
+	// Settings marks a change of provider zone settings besides RRsets
+	// (EuroDNS forwards); it requires dns.zone.admin.
+	Settings bool
+	// Base, when set, replaces the current zone as the zone the changes are
+	// applied onto (checked and written): it carries the new settings.
+	Base *dns.Zone
+}
+
+// BuildFunc turns a request into a Plan against the current zone. The zone
+// must not be modified.
+type BuildFunc func(cur *dns.Zone) (*Plan, error)
+
+// Engine is implemented by this package (New) and consumed by the HTTP
+// layer, the MCP server and the provider API facades.
 type Engine interface {
-	// GetZone returns the upstream zone with ETag set to the gate zone version.
-	GetZone(ctx context.Context, s *identity.Subject, zone string) (*eurodns.Zone, error)
-	AddRecords(ctx context.Context, s *identity.Subject, zone string, recs []eurodns.Record, ifMatch string) (*eurodns.Zone, error)
-	DeleteRecord(ctx context.Context, s *identity.Subject, zone string, id int64, ifMatch string) (*eurodns.Zone, error)
-	// SaveZone handles a full-zone PUT: delta computed against the current
-	// zone under lock; out-of-scope differences are refused, except for
-	// subjects whose role sets rebase (ACME clients), where they are ignored.
-	SaveZone(ctx context.Context, s *identity.Subject, zone string, z *eurodns.Zone, ifMatch string) error
-	CheckZone(ctx context.Context, s *identity.Subject, zone string, z *eurodns.Zone) (*eurodns.Zone, error)
-	Adopt(ctx context.Context, s *identity.Subject, zone string, req eurodns.AdoptRequest) error
+	// Authorize checks that zone is managed and that s may perform action on
+	// it, auditing a refusal as op, and returns the provider of the zone.
+	Authorize(ctx context.Context, s *identity.Subject, zone, action, op string) (provider.Provider, error)
+	// ReadZone reads a managed zone upstream (dns.read, a refusal audited as
+	// op) and returns it with the gate zone version. The zone is shared with
+	// the cache and must not be modified.
+	ReadZone(ctx context.Context, s *identity.Subject, zone, op string) (*dns.Zone, int64, error)
+	// Write runs the write pipeline under the zone lock: build computes the
+	// changes against the current zone, every business rule applies, then
+	// the provider writes. ifMatch is checked against the zone version. It
+	// returns the zone read back after the write (nil when that read failed)
+	// and the zone version after it. action names the write in the audit.
+	Write(ctx context.Context, s *identity.Subject, zone, ifMatch, action string, build BuildFunc) (*dns.Zone, int64, error)
+	// Adopt brings existing RRsets under the ownership of owner (a team of
+	// s; s's team by default). Adopting an RRset s's team already owns, with
+	// the same content, is a no-op needing write access only.
+	Adopt(ctx context.Context, s *identity.Subject, zone string, refs []uiapi.RRsetRef, owner string) error
 	// Reconcile compares stored ownership with upstream for one zone: marks
 	// drifted RRsets tainted, resolves pending claims, GCs expired ephemeral
 	// RRsets. Called periodically by the server.
@@ -67,6 +95,13 @@ type Engine interface {
 	// only when the cache of a zone is empty.
 	Zones(ctx context.Context, s *identity.Subject) ([]uiapi.ZoneSummary, error)
 	Inventory(ctx context.Context, s *identity.Subject, zone string) (*uiapi.ZoneInventory, error)
+	// RRset returns one RRset with its ownership, from the same cache as
+	// Inventory (upstream is read only when the cache of the zone is empty)
+	// and one ownership lookup: it serves frequent single-RRset reads (a
+	// Terraform plan). It requires dns.read or ui.read (dns.read on an
+	// unmanaged zone); not_found when the RRset is neither upstream nor
+	// owned. Writes check freshness themselves (ExpectedHash under the lock).
+	RRset(ctx context.Context, s *identity.Subject, zone string, key dns.Key) (*uiapi.RRset, error)
 
 	// PreviewAdopt evaluates foreign RRsets for adoption (fresh upstream read,
 	// no lock, no write). AdoptMany adopts all of req.RRsets or none, provided
@@ -76,8 +111,14 @@ type Engine interface {
 
 	// PlanRRsets is a dry run of desired RRset states (no lock, no write):
 	// business refusals come back as Allowed=false with Reason/Message.
-	// ApplyRRsets writes them through the SaveZone path, refusing with
-	// precondition when the zone version is not expectedZoneVersion.
+	// ApplyRRsets writes them, refusing with precondition when the zone
+	// version is not expectedZoneVersion; expectedZoneVersion <= 0 means no
+	// zone version check (REST PUT/DELETE of one RRset). The per-RRset
+	// preconditions are enforced by both, under the zone lock against a
+	// fresh upstream read for ApplyRRsets: MustNotExist on an existing RRset
+	// is foreign_rrset (409) when the gate does not own it and precondition
+	// (412) when it does; an ExpectedHash mismatch (or a missing RRset) is
+	// precondition (412).
 	PlanRRsets(ctx context.Context, s *identity.Subject, zone string, changes []uiapi.RRsetChange) (*uiapi.PlanResult, error)
 	ApplyRRsets(ctx context.Context, s *identity.Subject, zone string, changes []uiapi.RRsetChange, expectedZoneVersion int64) (*uiapi.PlanResult, error)
 }

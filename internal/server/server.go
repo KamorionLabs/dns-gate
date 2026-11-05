@@ -1,6 +1,6 @@
 // Package server is the HTTP layer of dns-gate: the EuroDNS-compatible
-// API (engine or passthrough), the gate extension endpoints, the read-only
-// UI API and the UI itself.
+// API (served by the EuroDNS facade for EuroDNS zones), the gate extension
+// endpoints, the UI API and the UI itself.
 package server
 
 import (
@@ -10,7 +10,6 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +18,7 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/authn"
 	"github.com/KamorionLabs/dns-gate/internal/config"
 	"github.com/KamorionLabs/dns-gate/internal/discovery"
+	"github.com/KamorionLabs/dns-gate/internal/eurodnsapi"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
 	"github.com/KamorionLabs/dns-gate/internal/requestid"
@@ -27,7 +27,6 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 	"github.com/KamorionLabs/dns-gate/internal/version"
 	"github.com/KamorionLabs/dns-gate/internal/zonewrite"
-	eurodns "github.com/KamorionLabs/eurodns-go"
 )
 
 // Engine is the zone engine, including the inventory used by the UI API.
@@ -46,9 +45,9 @@ type Config struct {
 	Engine      Engine
 	Audit       audit.Logger
 	AuditReader AuditReader
-	// Upstream is the round tripper towards EuroDNS (eurodns.Transport with
-	// API key auth and the shared rate limiter).
-	Upstream http.RoundTripper
+	// EuroDNS serves the EuroDNS-compatible API (internal/eurodnsapi); nil
+	// when no provider is of kind eurodns.
+	EuroDNS EuroDNSAPI
 	// UIFiles is the built web UI (web.FS()); nil disables static serving.
 	UIFiles fs.FS
 	// Policy is the layered policy (base + managed); PolicyStore keeps the
@@ -57,8 +56,8 @@ type Config struct {
 	Policy      *policy.Holder
 	PolicyStore store.PolicyStore
 	Ownership   OwnershipLister
-	// Discovery is the EuroDNS account zone listing (zones_discovery), nil
-	// when disabled: policy revisions may then not add zones.
+	// Discovery is the zone listing of the provider accounts, nil when
+	// absent: policy revisions may then not add zones.
 	Discovery ZoneDiscovery
 	// Ops and Terraform back adoption, RRset plans (MCP) and the HCL export.
 	Ops       Operations
@@ -67,6 +66,19 @@ type Config struct {
 	HTTPClient *http.Client
 	Log        *slog.Logger
 	Now        func() time.Time
+}
+
+// EuroDNSAPI is the EuroDNS-compatible API facade (internal/eurodnsapi).
+type EuroDNSAPI interface {
+	// Serves reports whether zone is served by a EuroDNS provider.
+	Serves(zone string) bool
+	// Do runs an engine-backed operation.
+	Do(ctx context.Context, s *identity.Subject, c eurodnsapi.Call) (*eurodnsapi.Reply, error)
+	// AdoptJSON serves the gate adopt extension for a EuroDNS zone.
+	AdoptJSON(ctx context.Context, s *identity.Subject, zone string, body json.RawMessage) error
+	// Proxy forwards an authorized passthrough request to the account of
+	// zone; path is the validated upstream path.
+	Proxy(w http.ResponseWriter, r *http.Request, zone, path string)
 }
 
 // ZoneDiscovery is the account zone listing (internal/discovery).
@@ -81,27 +93,21 @@ type ZoneDiscovery interface {
 
 // Server is the gate HTTP handler.
 type Server struct {
-	cfg      Config
-	table    *routes.Table
-	upstream *url.URL
-	proxy    http.Handler
-	ui       *uiAuth
-	static   http.Handler
-	pol      *policy.Engine
-	mcp      *mcpServer
-	log      *slog.Logger
-	now      func() time.Time
-	delegMu  sync.Mutex // serializes delegated policy writes in this replica
+	cfg     Config
+	table   *routes.Table
+	ui      *uiAuth
+	static  http.Handler
+	pol     *policy.Engine
+	mcp     *mcpServer
+	log     *slog.Logger
+	now     func() time.Time
+	delegMu sync.Mutex // serializes delegated policy writes in this replica
 }
 
 // New builds the server.
 func New(c Config) (*Server, error) {
-	if c.Config == nil || c.Authn == nil || c.Authz == nil || c.Engine == nil || c.Audit == nil || c.Upstream == nil {
+	if c.Config == nil || c.Authn == nil || c.Authz == nil || c.Engine == nil || c.Audit == nil {
 		return nil, errors.New("server: incomplete configuration")
-	}
-	up, err := url.Parse(c.Config.Upstream.BaseURL)
-	if err != nil {
-		return nil, err
 	}
 	if c.Log == nil {
 		c.Log = slog.Default()
@@ -119,9 +125,8 @@ func New(c Config) (*Server, error) {
 		}
 		c.Policy = h
 	}
-	s := &Server{cfg: c, upstream: up, log: c.Log, now: c.Now, pol: policy.New(c.Policy)}
+	s := &Server{cfg: c, log: c.Log, now: c.Now, pol: policy.New(c.Policy)}
 	s.table = routes.NewDynamic(s.pol.Managed)
-	s.proxy = s.newProxy()
 	if c.Config.MCP.Enabled {
 		s.mcp = s.newMCP()
 	}
@@ -239,10 +244,15 @@ func (s *Server) handleEuroDNS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.cfg.EuroDNS == nil || !s.cfg.EuroDNS.Serves(m.Zone) {
+		s.audit(r, subj, m.Operation.ID, m.Zone, "deny", "zone_not_eurodns")
+		writeError(w, http.StatusNotFound, "zone_not_eurodns", "zone "+m.Zone+" is not served by a EuroDNS provider: use /api/v1")
+		return
+	}
 	switch m.Rule.Kind {
 	case routes.Passthrough:
 		s.audit(r, subj, m.Operation.ID, m.Zone, "allow", "")
-		s.servePassthrough(w, r, m)
+		s.cfg.EuroDNS.Proxy(w, r, m.Zone, m.Path)
 	case routes.Engine:
 		s.serveEngine(w, r, subj, m)
 	default:
@@ -251,71 +261,24 @@ func (s *Server) handleEuroDNS(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveEngine(w http.ResponseWriter, r *http.Request, subj *identity.Subject, m *routes.Match) {
-	ctx := r.Context()
-	e := s.cfg.Engine
-	ifMatch := normalizeETag(r.Header.Get("If-Match"))
+	c := eurodnsapi.Call{Op: m.Operation.ID, Zone: m.Zone, Params: m.Params, IfMatch: normalizeETag(r.Header.Get("If-Match"))}
 	switch m.Operation.ID {
-	case "getDnsZone":
-		z, err := e.GetZone(ctx, subj, m.Zone)
-		if err != nil {
-			s.engineError(w, r, subj, m, err)
+	case "checkDnsZone", "saveDnsZone", "addDnsRecords":
+		if !decodeBody(w, r, &c.Body) {
 			return
 		}
-		setETag(w, z.ETag)
-		writeJSON(w, http.StatusOK, z)
-	case "checkDnsZone":
-		var z eurodns.Zone
-		if !decodeBody(w, r, &z) {
-			return
-		}
-		out, err := e.CheckZone(ctx, subj, m.Zone, &z)
-		if err != nil {
-			s.engineError(w, r, subj, m, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, out)
-	case "saveDnsZone":
-		var z eurodns.Zone
-		if !decodeBody(w, r, &z) {
-			return
-		}
-		if err := e.SaveZone(ctx, subj, m.Zone, &z, ifMatch); err != nil {
-			s.engineError(w, r, subj, m, err)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	case "addDnsRecords":
-		var recs []eurodns.Record
-		if !decodeBody(w, r, &recs) {
-			return
-		}
-		if len(recs) == 0 {
-			writeError(w, http.StatusBadRequest, "bad_request", "at least one record is required")
-			return
-		}
-		z, err := e.AddRecords(ctx, subj, m.Zone, recs, ifMatch)
-		if err != nil {
-			s.engineError(w, r, subj, m, err)
-			return
-		}
-		setETag(w, z.ETag)
-		writeJSON(w, http.StatusOK, z)
-	case "deleteDnsRecord":
-		id, err := parseInt64(m.Params["record-id"])
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "bad_request", "invalid record id")
-			return
-		}
-		z, err := e.DeleteRecord(ctx, subj, m.Zone, id, ifMatch)
-		if err != nil {
-			s.engineError(w, r, subj, m, err)
-			return
-		}
-		setETag(w, z.ETag)
-		writeJSON(w, http.StatusOK, z)
-	default:
-		writeError(w, http.StatusForbidden, "operation_denied", "operation not allowed by the gate")
 	}
+	rep, err := s.cfg.EuroDNS.Do(r.Context(), subj, c)
+	if err != nil {
+		s.engineError(w, r, subj, m, err)
+		return
+	}
+	setETag(w, rep.ETag)
+	if rep.Body == nil {
+		w.WriteHeader(rep.Status)
+		return
+	}
+	writeJSON(w, rep.Status, rep.Body)
 }
 
 func (s *Server) engineError(w http.ResponseWriter, r *http.Request, subj *identity.Subject, m *routes.Match, err error) {
@@ -324,13 +287,15 @@ func (s *Server) engineError(w http.ResponseWriter, r *http.Request, subj *ident
 		if ze.Reason == zonewrite.ReasonLocked {
 			w.Header().Set("Retry-After", "5")
 		}
+		if ze.Reason == zonewrite.ReasonUpstream {
+			s.log.Warn("upstream error", "request_id", requestid.From(r.Context()), "op", m.Operation.ID, "err", ze.Err)
+		}
 		writeJSON(w, status, errorBody{Reason: string(ze.Reason), Message: ze.Message, Details: ze.Details})
 		return
 	}
-	var ae *eurodns.APIError
-	if errors.As(err, &ae) {
-		s.log.Warn("upstream error", "request_id", requestid.From(r.Context()), "status", ae.StatusCode, "op", m.Operation.ID)
-		writeError(w, http.StatusBadGateway, string(zonewrite.ReasonUpstream), "EuroDNS returned an error")
+	var bad *eurodnsapi.BadRequestError
+	if errors.As(err, &bad) {
+		writeError(w, http.StatusBadRequest, "bad_request", bad.Message)
 		return
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -353,6 +318,8 @@ func reasonStatus(r zonewrite.Reason) int {
 		return http.StatusBadRequest
 	case zonewrite.ReasonLocked:
 		return http.StatusServiceUnavailable
+	case zonewrite.ReasonNotFound:
+		return http.StatusNotFound
 	case zonewrite.ReasonUpstream:
 		return http.StatusBadGateway
 	default:
@@ -365,11 +332,24 @@ func (s *Server) handleGateInfo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "GET only")
 		return
 	}
-	writeJSON(w, http.StatusOK, eurodns.GateInfo{
+	writeJSON(w, http.StatusOK, GateInfo{
 		Version:  version.Version,
-		Features: []string{eurodns.FeatureIfMatch, eurodns.FeatureOwnership, eurodns.FeatureAdopt, FeaturePolicyDelegation},
+		Features: []string{FeatureIfMatch, FeatureOwnership, FeatureAdopt, FeaturePolicyDelegation},
 	})
 }
+
+// GateInfo is the gate discovery document (GET /.well-known/dns-gate).
+type GateInfo struct {
+	Version  string   `json:"version"`
+	Features []string `json:"features"`
+}
+
+// Gate features advertised by GET /.well-known/dns-gate.
+const (
+	FeatureIfMatch   = "if-match"
+	FeatureOwnership = "ownership"
+	FeatureAdopt     = "adopt"
+)
 
 // GateInfoPath is the gate's discovery document, also used by clients to
 // detect a gate.
@@ -412,16 +392,16 @@ func (s *Server) handleExtension(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "forbidden", "dns.record.adopt or dns.record.write required on "+zone)
 		return
 	}
-	var req eurodns.AdoptRequest
-	if !decodeBody(w, r, &req) {
-		return
-	}
-	if len(req.RRsets) == 0 {
-		writeError(w, http.StatusBadRequest, "bad_request", "rrsets required")
+	var body json.RawMessage
+	if !decodeBody(w, r, &body) {
 		return
 	}
 	m := &routes.Match{Operation: routes.Operation{ID: "adopt"}, Zone: zone}
-	if err := s.cfg.Engine.Adopt(r.Context(), subj, zone, req); err != nil {
+	if s.cfg.EuroDNS == nil {
+		writeError(w, http.StatusNotFound, "zone_not_eurodns", "zone "+zone+" is not served by a EuroDNS provider: use /api/v1")
+		return
+	}
+	if err := s.cfg.EuroDNS.AdoptJSON(r.Context(), subj, zone, body); err != nil {
 		s.engineError(w, r, subj, m, err)
 		return
 	}

@@ -132,12 +132,14 @@ func (e *env) config(extra string) *config.Config {
 	sum := sha256.Sum256([]byte(acmeKey))
 	yaml := fmt.Sprintf(`
 listen: {address: "127.0.0.1:0"}
-upstream:
-  base_url: %[1]s
-  app_id: %[2]s
-  rate: {every: 5ms, burst: 50}
+providers:
+  - id: eurodns
+    kind: eurodns
+    eurodns:
+      base_url: %[1]s
+      app_id: %[2]s
+      rate: {every: 5ms, burst: 50}
 zones: [%[3]s]
-zones_discovery: {enabled: true}
 check_on_write: true
 reconcile_interval: 1h
 limits: {max_changes_per_request: 20}
@@ -434,9 +436,16 @@ func (e *env) scenarioTainted(t *testing.T) {
 
 func (e *env) scenarioProtected(t *testing.T) {
 	c := e.bearerClient("ci-admin")
-	err := c.Adopt(context.Background(), zone, eurodns.AdoptRequest{RRsets: []eurodns.AdoptRRset{{Host: "@", Type: "NS"}}})
-	if !eurodns.IsForbidden(err) {
-		t.Errorf("adopting apex NS: want 403, got %v", err)
+	tok, _ := e.token("ci-admin")
+	req, _ := http.NewRequest(http.MethodPost, e.gate.URL+"/.well-known/dns-gate/zones/"+zone+"/adopt", strings.NewReader(`{"rrsets":[{"host":"@","type":"NS"}]}`))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusForbidden {
+		t.Errorf("adopting apex NS: want 403, got %v %v", resp, err)
+	}
+	if resp != nil {
+		resp.Body.Close()
 	}
 	_, err = c.AddRecords(context.Background(), zone, []eurodns.Record{{Type: "MX", Host: "@", TTL: 3600, RData: "5 evil.example.net."}})
 	if err == nil {

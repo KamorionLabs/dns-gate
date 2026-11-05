@@ -2,15 +2,16 @@ package zonewrite
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
 	"github.com/KamorionLabs/dns-gate/internal/store"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
-	"github.com/KamorionLabs/eurodns-go/rrset"
 )
 
 // cached returns the cached zone, reading upstream only when the cache is
@@ -24,7 +25,11 @@ func (e *engine) cached(ctx context.Context, zone string, maxAge time.Duration) 
 		if _, ok := e.peek(zone, maxAge); ok {
 			return nil, nil
 		}
-		return e.fetch(context.WithoutCancel(ctx), zone)
+		p, err := e.provider(zone)
+		if err != nil {
+			return nil, err
+		}
+		return e.fetch(context.WithoutCancel(ctx), p, zone)
 	})
 	if err != nil {
 		return cachedZone{}, err
@@ -62,12 +67,13 @@ func (e *engine) inventory(ctx context.Context, zone string, maxAge time.Duratio
 	if err != nil {
 		return nil, c, err
 	}
-	sets := rrset.Group(zone, c.zone.Records)
 	synced := c.syncedAt
-	inv := &uiapi.ZoneInventory{Zone: zone, LastSyncedAt: &synced}
-	seen := map[rrset.Key]bool{}
-	for key, set := range sets {
-		r := uiapi.RRset{Host: key.Host, Type: key.Type, TTL: set.TTL, Values: append([]string(nil), set.Values...),
+	inv := &uiapi.ZoneInventory{Zone: zone, Provider: c.zone.Provider, LastSyncedAt: &synced}
+	seen := map[dns.Key]bool{}
+	for _, set := range c.zone.RRsets {
+		key := set.Key
+		r := uiapi.RRset{Host: key.Host, Type: key.Type, TTL: set.TTL, Values: append([]string{}, set.Values...),
+			Alias: set.Alias, ReadOnly: readOnly(key, &set), Hash: dns.ContentHash(set),
 			Status: uiapi.StatusForeign, Protected: e.cfg.Authz.IsProtected(zone, key)}
 		o, owned := owns[key]
 		if !owned {
@@ -90,7 +96,7 @@ func (e *engine) inventory(ctx context.Context, zone string, maxAge time.Duratio
 		if seen[key] {
 			continue
 		}
-		r := uiapi.RRset{Host: key.Host, Type: key.Type, Status: uiapi.StatusMissing, Protected: e.cfg.Authz.IsProtected(zone, key)}
+		r := uiapi.RRset{Host: key.Host, Type: key.Type, Values: []string{}, Status: uiapi.StatusMissing, Protected: e.cfg.Authz.IsProtected(zone, key)}
 		if o.State == store.StatePending {
 			r.Status = uiapi.StatusPending
 		}
@@ -107,7 +113,7 @@ func (e *engine) inventory(ctx context.Context, zone string, maxAge time.Duratio
 }
 
 // statusOf is the inventory status of an RRset.
-func statusOf(o store.Ownership, owned bool, set rrset.Set, present bool) string {
+func statusOf(o store.Ownership, owned bool, set dns.RRset, present bool) string {
 	switch {
 	case !owned:
 		return uiapi.StatusForeign
@@ -115,7 +121,7 @@ func statusOf(o store.Ownership, owned bool, set rrset.Set, present bool) string
 		return uiapi.StatusPending
 	case !present:
 		return uiapi.StatusMissing
-	case o.State == store.StateTainted || rrset.ContentHash(set) != o.ContentHash:
+	case o.State == store.StateTainted || dns.ContentHash(set) != o.ContentHash:
 		return uiapi.StatusTainted
 	}
 	return uiapi.StatusManaged
@@ -168,11 +174,11 @@ func (e *engine) Inventory(ctx context.Context, s *identity.Subject, zoneIn stri
 // unmanagedSummary describes a discovered zone from the cache only: listing
 // zones never reads an unmanaged zone upstream.
 func (e *engine) unmanagedSummary(zone string) uiapi.ZoneSummary {
-	sum := uiapi.ZoneSummary{Zone: zone, Unmanaged: true}
+	sum := uiapi.ZoneSummary{Zone: zone, Provider: e.providerID(zone), Unmanaged: true}
 	if c, ok := e.peek(zone, 0); ok {
 		synced := c.syncedAt
 		sum.LastSyncedAt = &synced
-		n := len(rrset.Group(zone, c.zone.Records))
+		n := len(c.zone.RRsets)
 		sum.RRsets, sum.Foreign = n, n
 	}
 	return sum
@@ -188,7 +194,7 @@ func (e *engine) Zones(ctx context.Context, s *identity.Subject) ([]uiapi.ZoneSu
 		if err != nil {
 			return nil, err
 		}
-		sum := uiapi.ZoneSummary{Zone: zone, LastSyncedAt: inv.LastSyncedAt, LastWriteAt: e.lastWrite(ctx, zone, c.writeAt)}
+		sum := uiapi.ZoneSummary{Zone: zone, Provider: inv.Provider, LastSyncedAt: inv.LastSyncedAt, LastWriteAt: e.lastWrite(ctx, zone, c.writeAt)}
 		for _, r := range inv.RRsets {
 			if r.Status != uiapi.StatusMissing {
 				sum.RRsets++
@@ -212,4 +218,56 @@ func (e *engine) Zones(ctx context.Context, s *identity.Subject) ([]uiapi.ZoneSu
 		}
 	}
 	return out, nil
+}
+
+func (e *engine) RRset(ctx context.Context, s *identity.Subject, zoneIn string, key dns.Key) (*uiapi.RRset, error) {
+	zone := normZone(zoneIn)
+	var maxAge time.Duration
+	switch {
+	case e.zones.Managed(zone):
+		if !e.cfg.Authz.Allow(s, policy.ActionDNSRead, zone) && !e.cfg.Authz.Allow(s, policy.ActionUIRead, zone) {
+			return nil, fail(ReasonForbidden, "not allowed to read zone %s", zone)
+		}
+	case e.zones.IsUnmanaged(zone):
+		if !e.cfg.Authz.Allow(s, policy.ActionDNSRead, zone) {
+			return nil, fail(ReasonForbidden, "dns.read is required to read the unmanaged zone %s", zone)
+		}
+		maxAge = e.cfg.UnmanagedTTL
+	default:
+		return nil, fail(ReasonNotFound, "zone %s is not managed by this gate", zone)
+	}
+	key = dns.Key{Host: dns.NormalizeHost(key.Host, zone), Type: strings.ToUpper(strings.TrimSpace(key.Type))}
+	c, err := e.cached(ctx, zone, maxAge)
+	if err != nil {
+		return nil, err
+	}
+	var set *dns.RRset
+	for i := range c.zone.RRsets {
+		if k := c.zone.RRsets[i].Key; k.Host == key.Host && strings.EqualFold(k.Type, key.Type) {
+			set = &c.zone.RRsets[i]
+			break
+		}
+	}
+	o, err := e.cfg.Store.Get(ctx, zone, key.Host, key.Type)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return nil, &Error{Reason: ReasonUpstream, Message: "store get failed", Err: err}
+	}
+	owned := err == nil
+	if set == nil && !owned {
+		return nil, fail(ReasonNotFound, "%s not found in %s", keyString(key), zone)
+	}
+	r := &uiapi.RRset{Host: key.Host, Type: key.Type, Values: []string{}, Status: uiapi.StatusForeign, Protected: e.cfg.Authz.IsProtected(zone, key)}
+	if set != nil {
+		r.TTL, r.Values, r.Alias = set.TTL, append([]string{}, set.Values...), set.Alias
+		r.ReadOnly, r.Hash = readOnly(set.Key, set), dns.ContentHash(*set)
+	}
+	if owned {
+		var cur dns.RRset
+		if set != nil {
+			cur = *set
+		}
+		r.Status = statusOf(*o, true, cur, set != nil)
+		fillOwnership(r, *o)
+	}
+	return r, nil
 }

@@ -352,6 +352,7 @@ func toAuditEntry(e audit.Event) uiapi.AuditEntry {
 		Decision:   e.Decision,
 		Reason:     e.Reason,
 		Changes:    e.Changes,
+		Provider:   e.Provider,
 		SnapshotID: e.SnapshotID,
 	}
 }

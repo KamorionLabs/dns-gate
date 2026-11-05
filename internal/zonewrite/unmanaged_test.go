@@ -9,6 +9,7 @@ import (
 
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/provider"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 	eurodns "github.com/KamorionLabs/eurodns-go"
 	"github.com/KamorionLabs/eurodns-go/eurodnstest"
@@ -85,12 +86,8 @@ func unmanagedEnv(t *testing.T) (*env, *mutableZones) {
 		{Type: "TXT", Host: "@", TTL: 3600, RData: "\"hello\""},
 	}})
 	zs := &mutableZones{managed: map[string]bool{zoneName: true}, discovery: map[string]bool{zoneName: true, otherZone: true, "cold.org": true}}
-	client, err := eurodns.New(eurodns.WithBaseURL(e.srv.URL), eurodns.WithAuth(eurodns.APIKeyAuth{AppID: "app", APIKey: "key"}),
-		eurodns.WithRateLimit(time.Microsecond, 1000))
-	if err != nil {
-		t.Fatal(err)
-	}
-	e.eng, err = New(Config{Client: client, Store: e.st, Authz: &noReadAuthz{}, Audit: e.audit, ZoneSet: zs,
+	var err error
+	e.eng, err = New(Config{Providers: provider.Single(e.prov), Store: e.st, Authz: &noReadAuthz{}, Audit: e.audit, ZoneSet: zs,
 		UnmanagedTTL: 10 * time.Minute, Holder: "test", LockWait: 2 * time.Second, CheckOnWrite: true, Now: e.clock.Now})
 	if err != nil {
 		t.Fatal(err)
@@ -147,9 +144,8 @@ func TestUnmanagedZoneReadOnly(t *testing.T) {
 	e.wantReason(err, ReasonForbidden)
 
 	// No write, adoption, plan or zone read through the EuroDNS API.
-	_, err = e.eng.AddRecords(ctx, alice, otherZone, []eurodns.Record{rec("A", "api", "192.0.2.1")}, "")
-	e.wantReason(err, ReasonNotFound)
-	_, err = e.eng.GetZone(ctx, alice, otherZone)
+	e.wantReason(e.add(alice, otherZone, rec("A", "api", "192.0.2.1")), ReasonNotFound)
+	_, _, err = e.eng.ReadZone(ctx, alice, otherZone, "getDnsZone")
 	e.wantReason(err, ReasonNotFound)
 	_, err = e.eng.PreviewAdopt(ctx, admin, otherZone, uiapi.AdoptSelection{Hosts: []string{"www"}})
 	e.wantReason(err, ReasonNotFound)
@@ -164,7 +160,7 @@ func TestUnmanagedZoneReadOnly(t *testing.T) {
 
 	// Once managed (policy activation), the zone accepts writes and adoption.
 	zs.manage(otherZone)
-	if _, err := e.eng.AddRecords(ctx, alice, otherZone, []eurodns.Record{rec("A", "api", "192.0.2.1")}, ""); err != nil {
+	if err := e.add(alice, otherZone, rec("A", "api", "192.0.2.1")); err != nil {
 		t.Fatal(err)
 	}
 	p, err := e.eng.PreviewAdopt(ctx, admin, otherZone, uiapi.AdoptSelection{Hosts: []string{"www"}, Types: []string{"A"}})

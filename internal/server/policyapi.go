@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/KamorionLabs/dns-gate/internal/audit"
+	"github.com/KamorionLabs/dns-gate/internal/config"
 	"github.com/KamorionLabs/dns-gate/internal/discovery"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
@@ -212,23 +213,8 @@ func (s *Server) baseLayer() uiapi.BaseLayer {
 	for _, p := range c.Protected {
 		b.Protected = append(b.Protected, uiapi.Protected{Zones: p.Zones, Hosts: p.Hosts, Types: p.Types})
 	}
-	if c.ZonesDiscovery.Enabled {
-		zd := &uiapi.ZonesDiscovery{
-			Enabled: true, Include: nonNil(c.ZonesDiscovery.Include), Exclude: nonNil(c.ZonesDiscovery.Exclude),
-			Refresh: c.ZonesDiscovery.Refresh.D().String(),
-		}
-		if s.cfg.Discovery != nil {
-			st := s.cfg.Discovery.Status()
-			zd.Loaded, zd.Count = st.Loaded, st.Count
-			if !st.LastRefreshAt.IsZero() {
-				t := st.LastRefreshAt
-				zd.LastRefreshAt = &t
-			}
-			if st.Err != nil {
-				zd.Error = "the last listing of the EuroDNS account failed"
-			}
-		}
-		b.Discovery = zd
+	if len(c.Providers) > 0 {
+		b.Discovery = s.discoveryView(c)
 	}
 	return b
 }
@@ -424,8 +410,8 @@ func (s *Server) mutation(subj *identity.Subject, sess *session, action string) 
 	return s.stepUp(subj, sess)
 }
 
-// validateZonesExist checks that the zones a document adds exist in the
-// EuroDNS account. A zone not seen yet triggers one more listing when the
+// validateZonesExist checks that the zones a document adds exist in a
+// provider account. A zone not seen yet triggers one more listing when the
 // last one is older than discovery.MinOnDemand (a domain added just before).
 func (s *Server) validateZonesExist(ctx context.Context, doc uiapi.PolicyDocument) []uiapi.ValidationError {
 	cur := s.cfg.Policy.Current()
@@ -797,4 +783,47 @@ func contains(ss []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// discoveryView describes the zone listing of every provider account.
+func (s *Server) discoveryView(c *config.Config) *uiapi.ZonesDiscovery {
+	zd := &uiapi.ZonesDiscovery{Enabled: true, Include: []string{}, Exclude: []string{}}
+	var st discovery.Status
+	if s.cfg.Discovery != nil {
+		st = s.cfg.Discovery.Status()
+		zd.Loaded, zd.Count = st.Loaded, st.Count
+		if !st.LastRefreshAt.IsZero() {
+			t := st.LastRefreshAt
+			zd.LastRefreshAt = &t
+		}
+		if st.Err != nil {
+			zd.Error = "the last listing of a provider account failed"
+		}
+	}
+	var refresh time.Duration
+	for _, p := range c.Providers {
+		zd.Include = append(zd.Include, p.Zones.Include...)
+		zd.Exclude = append(zd.Exclude, p.Zones.Exclude...)
+		if refresh == 0 || p.Zones.Refresh.D() < refresh {
+			refresh = p.Zones.Refresh.D()
+		}
+		v := uiapi.ProviderDiscovery{ID: p.ID, Kind: p.Kind, Include: nonNil(p.Zones.Include), Exclude: nonNil(p.Zones.Exclude),
+			Refresh: p.Zones.Refresh.D().String()}
+		for _, ps := range st.Providers {
+			if ps.ID != p.ID {
+				continue
+			}
+			v.Loaded, v.Count = ps.Loaded, ps.Count
+			if !ps.LastRefreshAt.IsZero() {
+				t := ps.LastRefreshAt
+				v.LastRefreshAt = &t
+			}
+			if ps.Err != nil {
+				v.Error = "the last listing of the " + p.ID + " account failed"
+			}
+		}
+		zd.Providers = append(zd.Providers, v)
+	}
+	zd.Refresh = refresh.String()
+	return zd
 }

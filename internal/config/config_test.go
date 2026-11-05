@@ -11,8 +11,10 @@ import (
 
 const base = `
 zones: [example.com]
-upstream:
-  app_id: app
+providers:
+  - id: eurodns
+    kind: eurodns
+    eurodns: {app_id: app}
 issuers:
   - name: ci
     issuer: https://token.example.net
@@ -38,7 +40,7 @@ func TestParseValid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Upstream.APIKey != "secret" || c.Listen.Address != ":8080" || *c.CheckOnWrite != true || c.Store.Type != "memory" {
+	if c.Providers[0].EuroDNS.APIKey != "secret" || c.Listen.Address != ":8080" || *c.CheckOnWrite != true || c.Store.Type != "memory" {
 		t.Fatalf("defaults not applied: %+v", c)
 	}
 	if c.Issuers[0].Category != "pipeline" || len(c.Issuers[0].Algorithms) == 0 {
@@ -69,8 +71,8 @@ func TestAPIKeyFromFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Upstream.APIKey != "from-file" {
-		t.Fatalf("got %q", c.Upstream.APIKey)
+	if c.Providers[0].EuroDNS.APIKey != "from-file" {
+		t.Fatalf("got %q", c.Providers[0].EuroDNS.APIKey)
 	}
 }
 
@@ -248,32 +250,78 @@ func TestGroupsAndPolicySection(t *testing.T) {
 	}
 }
 
-func TestZonesDiscovery(t *testing.T) {
+func TestProviders(t *testing.T) {
 	e := env(map[string]string{"EURODNS_API_KEY": "k"})
-	c, err := Parse([]byte(base+"zones_discovery: {enabled: true, exclude: [\"*.Internal.\"]}\n"), e)
+	c, err := Parse([]byte(base), e)
 	if err != nil {
 		t.Fatal(err)
 	}
-	d := c.ZonesDiscovery
-	if !d.Enabled || d.Refresh.D() != time.Hour || strings.Join(d.Include, ",") != "*" || strings.Join(d.Exclude, ",") != "*.internal" {
-		t.Fatalf("defaults: %+v", d)
+	p := c.Providers[0]
+	if p.Zones.Refresh.D() != time.Hour || strings.Join(p.Zones.Include, ",") != "*" || p.EuroDNS.BaseURL != "https://rest-api.eurodns.com" ||
+		p.EuroDNS.Rate.Burst != 5 || *p.EuroDNS.MaxRetries != 3 {
+		t.Fatalf("defaults: %+v %+v", p, p.EuroDNS)
 	}
-	// Without base zones, discovery must be enabled (zones then come from the policy).
+	// Zones may all come from the policy: the accounts are always listed.
 	noZones := strings.Replace(base, "zones: [example.com]\n", "", 1)
-	if _, err := Parse([]byte(noZones), e); err == nil {
-		t.Fatal("zones required without discovery")
-	}
-	if _, err := Parse([]byte(noZones+"zones_discovery: {enabled: true}\n"), e); err != nil {
+	if _, err := Parse([]byte(noZones), e); err != nil {
 		t.Fatal(err)
 	}
+
+	two := strings.Replace(base, "    eurodns: {app_id: app}\n", `    zones: {include: ["*.com"], exclude: ["*.Internal.COM."]}
+    eurodns: {app_id: app}
+  - id: route53-homebox
+    kind: route53
+    zones: {include: ["*.fr"]}
+    route53:
+      region: eu-west-3
+      assume_role_arn: arn:aws:iam::123456789012:role/dns-gate
+      external_id: x
+      hosted_zones: {"Homebox.FR.": Z123ABC}
+  - id: eu-2
+    kind: eurodns
+    zones: {include: ["*.net"]}
+    eurodns: {app_id: other}
+`, 1)
+	c, err = Parse([]byte(two), env(map[string]string{"EURODNS_API_KEY": "k", "EURODNS_EU_2_API_KEY": "k2", "EURODNS_EU_2_APP_ID": "app2"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Providers[0].Zones.Exclude[0] != "*.internal.com" || c.Providers[1].Route53.HostedZones["homebox.fr"] != "Z123ABC" {
+		t.Fatalf("normalization: %+v %+v", c.Providers[0].Zones, c.Providers[1].Route53)
+	}
+	if c.Providers[2].EuroDNS.APIKey != "k2" || c.Providers[2].EuroDNS.AppID != "app2" || c.Providers[0].EuroDNS.APIKey != "k" {
+		t.Fatalf("per-provider credentials: %+v %+v", c.Providers[2].EuroDNS, c.Providers[0].EuroDNS)
+	}
+	if got := strings.Join(c.ProvidersFor("homebox.fr"), ","); got != "route53-homebox" {
+		t.Fatalf("providers for homebox.fr: %s", got)
+	}
+	if len(c.ProvidersFor("a.internal.com")) != 0 {
+		t.Fatal("exclude must win over include")
+	}
+
 	for name, doc := range map[string]string{
-		"refresh too short": base + "zones_discovery: {enabled: true, refresh: 1m}\n",
-		"bad glob":          base + "zones_discovery: {enabled: true, include: [\"a?b.com\"]}\n",
-		"unknown field":     base + "zones_discovery: {enabled: true, interval: 1h}\n",
+		"no provider":       strings.Replace(base, "providers:\n  - id: eurodns\n    kind: eurodns\n    eurodns: {app_id: app}\n", "", 1),
+		"refresh too short": strings.Replace(base, "    kind: eurodns\n", "    kind: eurodns\n    zones: {refresh: 1m}\n", 1),
+		"bad glob":          strings.Replace(base, "    kind: eurodns\n", "    kind: eurodns\n    zones: {include: [\"a?b.com\"]}\n", 1),
+		"unknown field":     strings.Replace(base, "    kind: eurodns\n", "    kind: eurodns\n    zones: {interval: 1h}\n", 1),
+		"unknown kind":      strings.Replace(base, "kind: eurodns", "kind: cloudflare", 1),
+		"bad id":            strings.Replace(base, "id: eurodns", "id: EuroDNS", 1),
+		"missing block":     strings.Replace(base, "    eurodns: {app_id: app}\n", "", 1),
+		"wrong block":       strings.Replace(base, "    eurodns: {app_id: app}\n", "    eurodns: {app_id: app}\n    route53: {}\n", 1),
+		"zone not served":   strings.Replace(base, "    kind: eurodns\n", "    kind: eurodns\n    zones: {include: [\"*.fr\"]}\n", 1),
+		"duplicate id":      strings.Replace(two, "id: eu-2", "id: eurodns", 1),
+		"bad hosted zone":   strings.Replace(two, "Z123ABC", "not an id", 1),
+		"hosted zone excl":  strings.Replace(two, "Homebox.FR.", "homebox.de", 1),
+		"bad role":          strings.Replace(two, "arn:aws:iam::123456789012:role/dns-gate", "dns-gate", 1),
+		"bad region":        strings.Replace(two, "eu-west-3", "paris", 1),
+		"http base url":     strings.Replace(base, "eurodns: {app_id: app}", "eurodns: {app_id: app, base_url: \"http://api.example.net\"}", 1),
 	} {
-		if _, err := Parse([]byte(doc), e); err == nil {
+		if _, err := Parse([]byte(doc), env(map[string]string{"EURODNS_API_KEY": "k", "EURODNS_EU_2_API_KEY": "k2"})); err == nil {
 			t.Errorf("%s: expected an error", name)
 		}
+	}
+	if _, err := Parse([]byte(base), env(nil)); err == nil || !strings.Contains(err.Error(), "EURODNS_EURODNS_API_KEY") {
+		t.Fatalf("missing key: %v", err)
 	}
 }
 

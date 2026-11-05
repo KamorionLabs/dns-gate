@@ -1,6 +1,6 @@
 // Package uiapi defines the read-only JSON API consumed by the web UI
 // (and usable with bearer tokens). All routes are under /api/v1 and require
-// the ui.read action; they never call EuroDNS synchronously except to fill
+// the ui.read action; they never call a provider synchronously except to fill
 // an empty inventory cache.
 //
 //	GET /api/v1/me                         -> Me
@@ -13,6 +13,9 @@
 package uiapi
 
 import (
+	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/KamorionLabs/dns-gate/internal/dns"
@@ -65,7 +68,7 @@ type ConnectIssuer struct {
 	TenantID string `json:"tenant_id,omitempty"` // Entra only
 }
 
-// ZoneSummary is one zone: managed, or discovered in the EuroDNS account
+// ZoneSummary is one zone: managed, or discovered in a provider account
 // and not managed (Unmanaged, read-only; counts stay zero until its content
 // has been read once).
 type ZoneSummary struct {
@@ -121,6 +124,7 @@ type Actor struct {
 // ZoneInventory is the RRsets of a zone.
 type ZoneInventory struct {
 	Zone         string     `json:"zone"`
+	Provider     string     `json:"provider,omitempty"`  // id of the provider serving the zone
 	Unmanaged    bool       `json:"unmanaged,omitempty"` // discovered, not managed: read-only, no adoption
 	LastSyncedAt *time.Time `json:"last_synced_at,omitempty"`
 	RRsets       []RRset    `json:"rrsets"`
@@ -128,27 +132,54 @@ type ZoneInventory struct {
 
 // AuditEntry is one audit event as shown in the UI.
 type AuditEntry struct {
-	Time       time.Time `json:"time"`
-	RequestID  string    `json:"request_id"`
-	Actor      Actor     `json:"actor"`
-	Teams      []string  `json:"teams,omitempty"`
-	Action     string    `json:"action"`
-	Zone       string    `json:"zone,omitempty"`
-	Decision   string    `json:"decision"` // allow | deny | error
-	Reason     string    `json:"reason,omitempty"`
-	Changes    []Change  `json:"changes,omitempty"`
-	SnapshotID *int64    `json:"snapshot_id,omitempty"`
+	Time       time.Time  `json:"time"`
+	RequestID  string     `json:"request_id"`
+	Actor      Actor      `json:"actor"`
+	Teams      []string   `json:"teams,omitempty"`
+	Action     string     `json:"action"`
+	Zone       string     `json:"zone,omitempty"`
+	Decision   string     `json:"decision"` // allow | deny | error
+	Reason     string     `json:"reason,omitempty"`
+	Changes    []Change   `json:"changes,omitempty"`
+	Provider   string     `json:"provider,omitempty"` // id of the provider of the zone
+	SnapshotID SnapshotID `json:"snapshot_id,omitempty"`
+}
+
+// SnapshotID is the provider snapshot taken before a write (EuroDNS). It
+// is written as a JSON string and read from a string or, for events
+// recorded before the provider-neutral model, a number.
+type SnapshotID string
+
+// UnmarshalJSON accepts a string, a number or null.
+func (s *SnapshotID) UnmarshalJSON(b []byte) error {
+	var v any
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	switch x := v.(type) {
+	case nil:
+		*s = ""
+	case string:
+		*s = SnapshotID(x)
+	case float64:
+		*s = SnapshotID(strings.TrimSpace(string(b)))
+	default:
+		return fmt.Errorf("snapshot id: unexpected JSON %s", b)
+	}
+	return nil
 }
 
 // Change is one RRset change in an audit entry.
 type Change struct {
-	Op        string   `json:"op"` // create | update | delete | adopt | taint | expire
-	Host      string   `json:"host"`
-	Type      string   `json:"type"`
-	OldTTL    int      `json:"old_ttl,omitempty"`
-	OldValues []string `json:"old_values,omitempty"`
-	NewTTL    int      `json:"new_ttl,omitempty"`
-	NewValues []string `json:"new_values,omitempty"`
+	Op        string     `json:"op"` // create | update | delete | adopt | taint | expire
+	Host      string     `json:"host"`
+	Type      string     `json:"type"`
+	OldTTL    int        `json:"old_ttl,omitempty"`
+	OldValues []string   `json:"old_values,omitempty"`
+	OldAlias  *dns.Alias `json:"old_alias,omitempty"`
+	NewTTL    int        `json:"new_ttl,omitempty"`
+	NewValues []string   `json:"new_values,omitempty"`
+	NewAlias  *dns.Alias `json:"new_alias,omitempty"`
 }
 
 // AuditPage is a page of audit entries, newest first.
