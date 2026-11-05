@@ -790,7 +790,10 @@ Writes are **disabled by default** in the configuration. When enabled:
   radius) and returns the RRset diff and a `plan_id`.
 - The `plan_id` is bound to the **subject** that planned and to the **zone version**
   at plan time, and expires. `apply_rrset_change(plan_id)` fails if another subject
-  presents it, if the zone changed since, or if it expired.
+  presents it, if the zone changed since, or if it expired. Plans are kept in the
+  store and taken once with a conditional delete, so any replica (or Lambda
+  instance) can apply a plan made by another, never twice; `POST
+  /api/v1/zones/{zone}/plan` and `/apply` use the same plans.
 - An agent therefore cannot apply anything that was not shown first as a diff, and
   a human in the loop can review the plan before approving the apply call in the
   MCP client.
