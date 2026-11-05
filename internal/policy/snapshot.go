@@ -158,8 +158,10 @@ func compile(c *config.Config, base uiapi.PolicyDocument, managed *uiapi.PolicyD
 			}
 		}
 	}
-	for _, is := range c.Issuers {
-		s.issuers[is.Name] = is
+	for _, is := range c.AllIssuers() {
+		if !is.Self {
+			s.issuers[is.Name] = is
+		}
 	}
 	s.delegations = map[string]*config.Delegation{}
 	if c.Policy.Editable {
