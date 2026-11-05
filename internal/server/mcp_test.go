@@ -27,10 +27,8 @@ type fakeOps struct {
 	applied  [][]uiapi.RRsetChange
 	adopted  []uiapi.AdoptApply
 	conflict bool
-	// applyErrs are returned by the next ApplyRRsets calls, in order;
-	// bumpOnErr moves the zone version along, as a concurrent writer would.
+	// applyErrs are returned by the next ApplyRRsets calls, in order.
 	applyErrs []error
-	bumpOnErr bool
 	calls     []int64
 }
 
@@ -71,13 +69,10 @@ func (f *fakeOps) ApplyRRsets(ctx context.Context, s *identity.Subject, zone str
 		err := f.applyErrs[0]
 		f.applyErrs = f.applyErrs[1:]
 		if err != nil {
-			if f.bumpOnErr {
-				f.version++
-			}
 			return nil, err
 		}
 	}
-	if v != f.version {
+	if v > 0 && v != f.version {
 		return nil, &zonewrite.Error{Reason: zonewrite.ReasonPrecondition, Message: "zone changed since the plan"}
 	}
 	f.version++

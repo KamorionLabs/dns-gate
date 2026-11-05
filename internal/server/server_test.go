@@ -20,6 +20,7 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/audit"
 	"github.com/KamorionLabs/dns-gate/internal/authn"
 	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/eurodnsapi"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/mcpb"
@@ -81,6 +82,16 @@ func (f *fakeEngine) Zones(ctx context.Context, s *identity.Subject) ([]uiapi.Zo
 
 func (f *fakeEngine) Inventory(ctx context.Context, s *identity.Subject, zone string) (*uiapi.ZoneInventory, error) {
 	return &uiapi.ZoneInventory{Zone: zone, RRsets: []uiapi.RRset{{Host: "www", Type: "A", TTL: 600, Values: []string{"192.0.2.1"}, Status: uiapi.StatusManaged, Owner: "web"}}}, nil
+}
+
+func (f *fakeEngine) RRset(ctx context.Context, s *identity.Subject, zone string, key dns.Key) (*uiapi.RRset, error) {
+	inv, _ := f.Inventory(ctx, s, zone)
+	for _, rs := range inv.RRsets {
+		if rs.Host == key.Host && rs.Type == key.Type {
+			return &rs, nil
+		}
+	}
+	return nil, &zonewrite.Error{Reason: zonewrite.ReasonNotFound, Message: "no RRset " + key.String() + " in " + zone}
 }
 
 type memAudit struct {

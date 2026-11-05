@@ -13,6 +13,7 @@ import (
 
 	"github.com/KamorionLabs/dns-gate/internal/config"
 	"github.com/KamorionLabs/dns-gate/internal/dns"
+	"github.com/KamorionLabs/dns-gate/internal/provider"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 	"github.com/KamorionLabs/dns-gate/internal/zonewrite"
 )
@@ -75,7 +76,7 @@ func TestRRsetPutDelete(t *testing.T) {
 	r := e.do(t, "PUT", "/api/v1/zones/example.com/rrsets/App/cname", tok, `{"ttl":600,"values":["target.example.net."]}`, map[string]string{"If-None-Match": "*"})
 	rs := decode[uiapi.RRset](t, r)
 	c := e.lastApplied(t)
-	if r.StatusCode != 200 || !c.MustNotExist || c.ExpectedHash != "" || c.Host != "app" || c.Type != "CNAME" || c.TTL != 600 || e.ops.calls[0] != 3 {
+	if r.StatusCode != 200 || !c.MustNotExist || c.ExpectedHash != "" || c.Host != "app" || c.Type != "CNAME" || c.TTL != 600 || e.ops.calls[0] != 0 {
 		t.Fatalf("create: %d %+v %v", r.StatusCode, c, e.ops.calls)
 	}
 	if rs.Host != "app" || rs.Hash == "" || r.Header.Get("ETag") != `"`+rs.Hash+`"` {
@@ -159,29 +160,29 @@ func TestRRsetErrorMapping(t *testing.T) {
 			t.Error("zone_locked without Retry-After")
 		}
 	}
+	e.ops.applyErrs = []error{&zonewrite.Error{Reason: zonewrite.ReasonInvalid, Message: "single label",
+		Err: &provider.InvalidError{Key: dns.Key{Host: "app", Type: "CNAME"}, Message: "single label", Code: "relative_target"}}}
+	if r := e.do(t, "PUT", "/api/v1/zones/example.com/rrsets/www/A", tok, `{"ttl":600,"values":["192.0.2.1"]}`, nil); r.StatusCode != 400 || reason(t, r) != "relative_target" {
+		t.Errorf("relative target: %d", r.StatusCode)
+	}
 	e.ops.applyErrs = []error{errors.New("boom")}
 	if r := e.do(t, "PUT", "/api/v1/zones/example.com/rrsets/www/A", tok, `{"ttl":600,"values":["192.0.2.1"]}`, nil); r.StatusCode != 500 {
 		t.Errorf("internal error: %d", r.StatusCode)
 	}
 }
 
-func TestRRsetPutRetriesOnZoneVersionRace(t *testing.T) {
+func TestRRsetPutWithoutZoneVersion(t *testing.T) {
 	e := newEnv(t)
 	tok := e.token("writer")
 	e.ops.version = 10
-	e.ops.applyErrs = []error{&zonewrite.Error{Reason: zonewrite.ReasonPrecondition, Message: "zone changed"}}
-	e.ops.bumpOnErr = true
-	r := e.do(t, "PUT", "/api/v1/zones/example.com/rrsets/www/A", tok, `{"ttl":600,"values":["192.0.2.1"]}`, nil)
-	if r.StatusCode != 200 || len(e.ops.calls) != 2 || e.ops.calls[0] != 10 || e.ops.calls[1] != 11 {
-		t.Fatalf("retry: %d %v", r.StatusCode, e.ops.calls)
-	}
-
-	e.ops.calls = nil
-	e.ops.bumpOnErr = false
 	e.ops.applyErrs = []error{&zonewrite.Error{Reason: zonewrite.ReasonPrecondition, Message: "hash mismatch"}}
-	r = e.do(t, "PUT", "/api/v1/zones/example.com/rrsets/www/A", tok, `{"ttl":600,"values":["192.0.2.1"]}`, map[string]string{"If-Match": `"old"`})
+	r := e.do(t, "PUT", "/api/v1/zones/example.com/rrsets/www/A", tok, `{"ttl":600,"values":["192.0.2.1"]}`, map[string]string{"If-Match": `"old"`})
 	if r.StatusCode != 412 || len(e.ops.calls) != 1 {
-		t.Fatalf("hash precondition must not be retried: %d %v", r.StatusCode, e.ops.calls)
+		t.Fatalf("a precondition failure must not be retried: %d %v", r.StatusCode, e.ops.calls)
+	}
+	r = e.do(t, "DELETE", "/api/v1/zones/example.com/rrsets/www/A", tok, "", nil)
+	if r.StatusCode != 204 || len(e.ops.calls) != 2 || e.ops.calls[1] != 0 {
+		t.Fatalf("single RRset writes carry no zone version: %d %v", r.StatusCode, e.ops.calls)
 	}
 }
 
@@ -211,7 +212,7 @@ func TestRESTPlanApply(t *testing.T) {
 	if r.StatusCode != 200 || res.PlanID != p.PlanID || !e.lastApplied(t).MustNotExist {
 		t.Fatalf("apply: %d %+v", r.StatusCode, res)
 	}
-	if r := apply(tok, "example.com", p.PlanID); r.StatusCode != 404 || reason(t, r) != "not_found" {
+	if r := apply(tok, "example.com", p.PlanID); r.StatusCode != 404 || reason(t, r) != "plan_not_found" {
 		t.Fatalf("reused plan: %d", r.StatusCode)
 	}
 

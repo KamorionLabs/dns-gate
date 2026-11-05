@@ -504,8 +504,9 @@ func (m *mcpServer) addWriteTools(srv *mcp.Server) {
 		}
 		p, err := m.s.takePlan(ctx, in.PlanID, subj)
 		if err != nil {
-			m.audit(ctx, req, subj, "apply_rrset_change", "", "deny", err.Error(), map[string]any{"plan_id": in.PlanID})
-			return nil, uiapi.PlanResult{}, err
+			_, reason := planErrorStatus(err)
+			m.audit(ctx, req, subj, "apply_rrset_change", "", "deny", reason, map[string]any{"plan_id": in.PlanID})
+			return nil, uiapi.PlanResult{}, fmt.Errorf("%s: %w", reason, err)
 		}
 		res, err := m.s.cfg.Ops.ApplyRRsets(ctx, subj, p.Zone, p.Changes, p.ZoneVersion)
 		if err != nil {

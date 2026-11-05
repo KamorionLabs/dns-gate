@@ -16,6 +16,7 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/provider"
 	"github.com/KamorionLabs/dns-gate/internal/requestid"
 	"github.com/KamorionLabs/dns-gate/internal/store"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
@@ -30,9 +31,11 @@ import (
 //	POST   /api/v1/zones/{zone}/plan  planRequest  -> uiapi.PlanResult with plan_id
 //	POST   /api/v1/zones/{zone}/apply applyRequest -> uiapi.PlanResult
 //
-// PUT honours If-None-Match: * (create only, MustNotExist) and If-Match:
-// "<hash>" (ExpectedHash), DELETE If-Match; both are enforced by the engine
-// under the zone lock.
+// GET reads the inventory cache of the engine (no provider call once the
+// zone is cached). PUT honours If-None-Match: * (create only, MustNotExist)
+// and If-Match: "<hash>" (ExpectedHash), DELETE If-Match; both are enforced
+// by the engine under the zone lock against a fresh provider read, without
+// any zone version check.
 
 // FeatureRRsetAPI is advertised by GET /.well-known/dns-gate when the RRset
 // REST API is served.
@@ -40,10 +43,6 @@ const FeatureRRsetAPI = "rrset-api"
 
 // FeaturePlans is advertised when REST plan/apply is served.
 const FeaturePlans = "plans"
-
-// maxVersionAttempts bounds the retries of a single RRset write when the
-// zone version moved between reading it and the write (another writer).
-const maxVersionAttempts = 3
 
 const maxPlanChanges = 100
 
@@ -109,7 +108,7 @@ func (s *Server) handleRRset(w http.ResponseWriter, r *http.Request, subj *ident
 		writeError(w, http.StatusNotFound, "not_found", "zone not managed by the gate")
 		return
 	}
-	if s.cfg.Ops == nil || s.cfg.Versions == nil {
+	if s.cfg.Ops == nil {
 		writeError(w, http.StatusNotImplemented, "not_implemented", "RRset writes are not available")
 		return
 	}
@@ -153,7 +152,7 @@ func (s *Server) handleRRset(w http.ResponseWriter, r *http.Request, subj *ident
 		}
 		change.TTL, change.Values, change.Alias = body.TTL, body.Values, body.Alias
 	}
-	if _, err := s.applyChange(r.Context(), subj, zone, change); err != nil {
+	if _, err := s.cfg.Ops.ApplyRRsets(r.Context(), subj, zone, []uiapi.RRsetChange{change}, 0); err != nil {
 		s.apiError(w, r, action, zone, err)
 		return
 	}
@@ -187,31 +186,11 @@ func preconditions(r *http.Request, c *uiapi.RRsetChange) string {
 	return ""
 }
 
-// applyChange writes one RRset change at the current zone version, again
-// when another write moved the version in between.
-func (s *Server) applyChange(ctx context.Context, subj *identity.Subject, zone string, c uiapi.RRsetChange) (*uiapi.PlanResult, error) {
-	for attempt := 1; ; attempt++ {
-		v, err := s.cfg.Versions.ZoneVersion(ctx, zone)
-		if err != nil {
-			return nil, &zonewrite.Error{Reason: zonewrite.ReasonUpstream, Message: "store zone version failed", Err: err}
-		}
-		res, err := s.cfg.Ops.ApplyRRsets(ctx, subj, zone, []uiapi.RRsetChange{c}, v)
-		if ze, ok := zonewrite.AsError(err); ok && ze.Reason == zonewrite.ReasonPrecondition && attempt < maxVersionAttempts {
-			if now, verr := s.cfg.Versions.ZoneVersion(ctx, zone); verr == nil && now != v {
-				continue
-			}
-		}
-		return res, err
-	}
-}
-
-// writtenRRset returns the RRset after a write, from the inventory, or as
-// requested when the inventory cannot be read by the subject.
+// writtenRRset returns the RRset after a write, from the engine cache, or
+// as requested when the subject cannot read it.
 func (s *Server) writtenRRset(ctx context.Context, subj *identity.Subject, zone string, key dns.Key, c uiapi.RRsetChange) uiapi.RRset {
-	if inv, err := s.cfg.Engine.Inventory(ctx, subj, zone); err == nil {
-		if rs, ok := findRRset(inv, key); ok {
-			return rs
-		}
+	if rs, err := s.cfg.Engine.RRset(ctx, subj, zone, key); err == nil {
+		return withHash(*rs)
 	}
 	rs := uiapi.RRset{Host: key.Host, Type: key.Type, TTL: c.TTL, Values: c.Values, Alias: c.Alias, Status: uiapi.StatusManaged}
 	if rs.Values == nil {
@@ -226,16 +205,12 @@ func (s *Server) getRRset(w http.ResponseWriter, r *http.Request, subj *identity
 		writeError(w, http.StatusForbidden, "forbidden", "ui.read or dns.read not granted on "+zone)
 		return
 	}
-	inv, err := s.cfg.Engine.Inventory(r.Context(), subj, zone)
+	got, err := s.cfg.Engine.RRset(r.Context(), subj, zone, key)
 	if err != nil {
 		s.inventoryError(w, zone, err)
 		return
 	}
-	rs, ok := findRRset(inv, key)
-	if !ok {
-		writeError(w, http.StatusNotFound, "not_found", "no RRset "+key.String()+" in "+zone)
-		return
-	}
+	rs := withHash(*got)
 	setETag(w, rs.Hash)
 	writeJSON(w, http.StatusOK, rs)
 }
@@ -261,19 +236,15 @@ func (s *Server) inventoryError(w http.ResponseWriter, zone string, err error) {
 	writeError(w, http.StatusBadGateway, "upstream", "inventory unavailable")
 }
 
-func findRRset(inv *uiapi.ZoneInventory, key dns.Key) (uiapi.RRset, bool) {
-	for _, rs := range inv.RRsets {
-		if rs.Host == key.Host && strings.EqualFold(rs.Type, key.Type) {
-			if rs.Values == nil {
-				rs.Values = []string{}
-			}
-			if rs.Hash == "" {
-				rs.Hash = rrsetHash(rs)
-			}
-			return rs, true
-		}
+// withHash fills the values and content hash the engine may leave empty.
+func withHash(rs uiapi.RRset) uiapi.RRset {
+	if rs.Values == nil {
+		rs.Values = []string{}
 	}
-	return uiapi.RRset{}, false
+	if rs.Hash == "" {
+		rs.Hash = rrsetHash(rs)
+	}
+	return rs
 }
 
 func rrsetHash(rs uiapi.RRset) string {
@@ -389,14 +360,21 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request, subj *ident
 	writeJSON(w, http.StatusOK, res)
 }
 
+// Reasons of a refused apply: the plan is unknown, already applied or made
+// for another zone (404), or expired (410). Both mean planning again.
+const (
+	reasonPlanNotFound = "plan_not_found"
+	reasonPlanExpired  = "plan_expired"
+)
+
 func planErrorStatus(err error) (int, string) {
 	switch {
 	case errors.Is(err, errPlanOwner):
 		return http.StatusForbidden, "forbidden"
 	case errors.Is(err, errPlanExpired):
-		return http.StatusGone, "plan_expired"
+		return http.StatusGone, reasonPlanExpired
 	case errors.Is(err, errPlanUnknown):
-		return http.StatusNotFound, "not_found"
+		return http.StatusNotFound, reasonPlanNotFound
 	default:
 		return http.StatusServiceUnavailable, "store_unavailable"
 	}
@@ -454,6 +432,10 @@ func (s *Server) apiError(w http.ResponseWriter, r *http.Request, action, zone s
 			status = http.StatusNotFound
 		case zonewrite.ReasonInvalid:
 			reason = "invalid"
+			var ie *provider.InvalidError
+			if errors.As(err, &ie) && ie.Code != "" {
+				reason = ie.Code
+			}
 		}
 		writeJSON(w, status, errorBody{Reason: reason, Message: ze.Message, Details: ze.Details})
 		return
