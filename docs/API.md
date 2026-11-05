@@ -57,7 +57,11 @@ Hosts are relative to the zone, `@` is the apex, `*` is allowed as the first lab
 
 Alias RRsets (Route53) have `"alias": {"target", "hosted_zone_id",
 "evaluate_target_health"}` and no values. `read_only` explains why the gate never
-writes an RRset (`server_managed`, `routing_policy`…).
+writes an RRset (`server_managed`, `routing_policy`, `relative_target`…).
+
+The single-RRset read is served from the gate's inventory cache (refreshed by
+every write and every reconcile), not from the provider: a Terraform plan reading
+hundreds of RRsets costs no provider request. Writes never rely on it.
 
 ## ETags and preconditions
 
@@ -65,12 +69,15 @@ writes an RRset (`server_managed`, `routing_policy`…).
   (TTL and values, or alias). It is also the `hash` field of every RRset.
 - `GET …/rrsets` returns `ETag: "v<n>"`, the gate version of the zone, bumped by every
   write through the gate.
-- `PUT` with `If-None-Match: *` creates only: `412 precondition` if the RRset exists.
+- `PUT` with `If-None-Match: *` creates only: `409 foreign_rrset` if an RRset
+  created outside the gate exists, `412 precondition` if the gate owns one.
 - `PUT` or `DELETE` with `If-Match: "<hash>"` acts only if the RRset still has that
   content: `412 precondition` otherwise. Only one hash, no `*`.
 
 The engine checks the preconditions under the zone lock, against the zone read
-from the provider, so two writers never overwrite each other silently.
+from the provider, so two writers never overwrite each other silently. A single
+RRset write carries no zone version: a write to another RRset of the zone in
+between does not refuse it.
 
 ## Writing one RRset
 
@@ -96,6 +103,12 @@ curl -sS -i "${auth[@]}" -X DELETE "$GATE/api/v1/zones/example.com/rrsets/app/CN
 
 The body is the full desired state: `ttl` and `values`, or `alias`. The answer is
 the RRset as written, with its new `ETag`.
+
+Values are in zone file presentation format. TXT values are the text itself,
+unquoted, at any length (`"v=spf1 include:_spf.example.net -all"` in JSON): the gate
+or the provider splits them in 255-byte strings, and they read back as sent.
+Targets without a trailing dot are absolute (`site.example.net` is
+`site.example.net.`); a single-label target is refused with `400 relative_target`.
 
 ## Plan, then apply
 
@@ -127,7 +140,9 @@ curl -sS "${auth[@]}" -X POST "$GATE/api/v1/zones/example.com/apply" \
 A plan is stored by the gate (shared by every instance), bound to its author, the
 zone and the zone version, and valid once for `mcp.plan_ttl` (10 minutes by
 default). The apply writes exactly what was planned, or fails with
-`412 precondition` if the zone changed since the plan: plan again. The MCP tools
+`412 precondition` if the zone changed since the plan, `410 plan_expired`, or
+`404 plan_not_found` (unknown, already applied, or planned for another zone): plan
+again. The MCP tools
 `plan_rrset_change` and `apply_rrset_change` use the same plans.
 
 ## Errors
@@ -140,10 +155,10 @@ Errors are JSON, with a stable `reason` for programs:
 
 | Status | Reasons |
 |---|---|
-| 400 | `invalid` (request or provider validation), `bad_request` |
+| 400 | `invalid` (request or provider validation), `relative_target` (single-label target), `bad_request` |
 | 401 | `unauthenticated` |
-| 403 | `forbidden` (RBAC, protected record), `not_owner` (another team), `too_many_changes`, `reauth_required`, `csrf` |
-| 404 | `not_found` (zone not managed, RRset or plan unknown) |
+| 403 | `forbidden` (RBAC, protected record, plan of another caller), `not_owner` (another team), `too_many_changes`, `reauth_required`, `csrf`, `session_required` |
+| 404 | `not_found` (zone not managed, RRset unknown), `plan_not_found`, `zone_not_eurodns` (EuroDNS-compatible API on a zone of another provider) |
 | 409 | `foreign_rrset` (created outside the gate: adopt it first), `tainted` (changed outside the gate), `adopt_conflict` |
 | 410 | `plan_expired` |
 | 412 | `precondition` (If-Match, If-None-Match, `expected_hash`, `must_not_exist`, zone changed since the plan) |
@@ -156,6 +171,10 @@ The full list is in the `Error` schema of the OpenAPI document.
 
 - `GET /api/v1/audit` — audit log, newest first, filtered to the zones the caller
   can read.
+- `POST /api/v1/tokens` — a gate-issued bearer token for the signed-in UI user
+  (session cookie and CSRF header only), the *Get an API token* action of the
+  Connect page ([IDENTITY-CENTER.md](IDENTITY-CENTER.md)); its keys are at
+  `/.well-known/jwks.json`.
 - `POST /api/v1/zones/{zone}/adopt/preview` and `/adopt` — take over RRsets created
   outside the gate ([ONBOARDING.md](ONBOARDING.md)).
 - `GET /api/v1/zones/{zone}/terraform` — managed RRsets as `dnsgate_record_set`

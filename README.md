@@ -1,7 +1,8 @@
 # dns-gate
 
 A security gateway in front of DNS provider APIs: [EuroDNS](https://www.eurodns.com)
-today, AWS Route53 next, several accounts of each in one gate.
+and [Amazon Route 53](docs/providers/route53.md), several accounts of each in one
+gate. Clients see one provider-neutral API whatever the provider of a zone.
 
 **How it works, with diagrams: <https://kamorionlabs.github.io/dns-gate/>**
 
@@ -19,18 +20,23 @@ request:
 - **the upstream rate limit** (EuroDNS: 10 requests per 10 seconds per IP, with
   progressive bans) for all clients combined;
 - a full **audit trail**, browsable in a **web UI** (zone inventory with ownership
-  status, filterable history with diffs, what the signed-in user may do, and a
-  Connect page with ready-to-paste setups for Claude Code, Claude Desktop,
-  Terraform and the API);
+  status and provider, filterable history with diffs, what the signed-in user may
+  do, DNS changes staged then applied as a reviewed plan, and a Connect page with
+  ready-to-paste setups for Claude Code, Claude Desktop, Terraform and the API, and
+  an API token for the signed-in user);
 - an **editable policy** from the UI for designated people: a managed layer of
   revisions on top of the git-managed base file, with approval by another approver,
   atomic activation, rollback, diff and impact analysis. Who may edit or approve is
   only ever decided by the base file, and human access uses Entra ID SSO with app
   roles (`Gate.Reader`, `Gate.Operator`, `Gate.PolicyAdmin`) assigned to groups.
 
-Every zone has a provider-neutral RRset API under `/api/v1`. For EuroDNS zones the
-EuroDNS contract stays available too: an existing EuroDNS client works through the
-gate by changing its base URL and credentials.
+Every zone has a provider-neutral RRset API under `/api/v1` (read, `PUT`/`DELETE` with
+content-hash preconditions, plan/apply), used by the
+[dnsgate Terraform provider](https://github.com/KamorionLabs/terraform-provider-dnsgate),
+the UI and the MCP server — see the [API guide](docs/API.md) and the
+[API reference](https://kamorionlabs.github.io/dns-gate/api.html). For EuroDNS zones
+the EuroDNS contract stays available too: an existing EuroDNS client works through
+the gate by changing its base URL and credentials.
 
 > Status: **beta**. In production since November 2026 for one organization: 14 zones,
 > OpenTofu pipelines through the Terraform provider, the web UI and the MCP server.
@@ -60,7 +66,8 @@ Also included:
 |---|---|
 | [eurodns-go](https://github.com/KamorionLabs/eurodns-go) | Go client, RRset helpers, zone delta, fake server. Used by the gate and the provider. |
 | **dns-gate** | This gateway, container image, Helm chart. |
-| [terraform-provider-eurodns](https://github.com/KamorionLabs/terraform-provider-eurodns) | One Terraform/OpenTofu provider, direct to EuroDNS or through the gate. |
+| [terraform-provider-dnsgate](https://github.com/KamorionLabs/terraform-provider-dnsgate) | Terraform/OpenTofu provider of the gate API (`dnsgate_record_set`, delegated roles and bindings), for every provider behind the gate. |
+| [terraform-provider-eurodns](https://github.com/KamorionLabs/terraform-provider-eurodns) | Terraform/OpenTofu provider of the EuroDNS API, direct to EuroDNS or through the gate's EuroDNS-compatible API. |
 
 ## How it works
 
@@ -68,9 +75,9 @@ Also included:
 flowchart LR
   subgraph callers["Callers, each with its own identity"]
     direction TB
-    tf["OpenTofu / Terraform<br/>provider in gate mode"]
+    tf["OpenTofu / Terraform<br/>dnsgate provider"]
     ci["CI pipelines<br/>OIDC token"]
-    people["People<br/>web UI, Entra ID SSO"]
+    people["People<br/>web UI, OIDC or SAML SSO"]
     agents["AI assistants<br/>MCP at /mcp"]
     legacy["Existing EuroDNS clients<br/>scoped virtual key"]
   end
@@ -139,6 +146,12 @@ is shared by every service connection of the organization, so the gate only trus
 bound to the exact subjects of service connections dedicated to the gate — see
 [docs/CONFIG.md](docs/CONFIG.md#azure-devops-oidc).
 
+People sign in to the UI with OIDC (Entra ID or any OIDC provider) or SAML 2.0, for
+example AWS IAM Identity Center with its groups. When the gate is its own issuer, a
+signed-in user gets a short-lived gate token for curl or Terraform from the Connect
+page, and Claude Desktop signs in through the gate's OAuth endpoints — see
+[docs/IDENTITY-CENTER.md](docs/IDENTITY-CENTER.md).
+
 Existing EuroDNS clients (ACME) can use scoped virtual keys instead. Details in
 [docs/DESIGN.md](docs/DESIGN.md#9-authentication).
 
@@ -153,7 +166,12 @@ go run ./cmd/dns-gate --config examples/config.yaml
 Then point a client at `http://localhost:8080` with a token from one of the issuers
 declared in the config. Configuration reference: [docs/CONFIG.md](docs/CONFIG.md).
 
-Kubernetes: Helm chart in `charts/dns-gate`. AWS Lambda (low volume, Route 53):
+A Route 53 account is one more entry in `providers` (`kind: route53`, AWS credentials
+from the default chain, optionally an assumed role): see
+[docs/providers/route53.md](docs/providers/route53.md).
+
+Kubernetes: Helm chart in `charts/dns-gate`. AWS Lambda behind API Gateway (low
+volume, Route 53, DynamoDB store, configuration from S3 or SSM):
 [docs/DEPLOY-LAMBDA.md](docs/DEPLOY-LAMBDA.md).
 
 ## Documentation
@@ -161,12 +179,14 @@ Kubernetes: Helm chart in `charts/dns-gate`. AWS Lambda (low volume, Route 53):
 - [API guide](docs/API.md) and [API reference](https://kamorionlabs.github.io/dns-gate/api.html) ([OpenAPI](api/dns-gate.openapi.yaml))
 - [Design](docs/DESIGN.md)
 - [Configuration reference](docs/CONFIG.md)
+- [Route 53 provider](docs/providers/route53.md)
+- [SAML login with AWS IAM Identity Center, gate tokens](docs/IDENTITY-CENTER.md)
 - [Migrating a 0.x configuration to providers](docs/MIGRATION-0.x.md)
 - [Threat model](docs/THREAT-MODEL.md)
 - [ACME / certificates](docs/ACME.md)
 - [Onboarding existing zones](docs/ONBOARDING.md)
 - [Deploying on AWS Lambda](docs/DEPLOY-LAMBDA.md)
-- [Roadmap and points to validate](docs/ROADMAP.md)
+- [Roadmap and points to validate: GitHub issues](https://github.com/KamorionLabs/dns-gate/issues)
 
 ## License
 

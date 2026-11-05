@@ -44,9 +44,9 @@ front of EuroDNS** (see [below](#why-not-in-front-of-eurodns)).
 | Work | Container (`Run`) | Lambda |
 |---|---|---|
 | Policy reload (active managed revision) | every 10 s | before a request when the last check is older than 10 s; every maintenance pass |
-| Zone discovery (`zones_discovery`) | every `refresh`, 5 min after a failure | before a request and in the maintenance pass, when older than `refresh` (5 min after a failure) |
+| Zone discovery (`providers[].zones`) | each provider every `refresh`, 5 min after a failure | before a request and in the maintenance pass, for the providers listed longer than `refresh` ago (5 min after a failure) |
 | Reconcile of the managed zones | every `reconcile_interval` | every maintenance pass (5 min) |
-| Expired MCP plans | every 10 min | every maintenance pass |
+| Expired RRset plans (MCP and REST) | every 15 min (DynamoDB: the table TTL) | every maintenance pass (DynamoDB: the table TTL) |
 
 The maintenance pass runs every step even when one fails and returns the joined errors:
 the invocation then fails, which shows in the `Errors` metric and the logs. The next
@@ -86,6 +86,9 @@ Configuration notes for Lambda:
 
 - `store: {type: dynamodb, dynamodb: {table: …}}`; the region comes from the function
   environment when `store.dynamodb.region` is empty.
+- `providers: [{id: route53, kind: route53}]`: the Route 53 provider uses the function
+  role, or a role of another account with `route53.assume_role_arn`; see
+  [providers/route53.md](providers/route53.md) for the least-privilege policy.
 - `listen.address` is ignored. Leave `listen.trusted_proxies` empty: the client address
   given to the gate is the `sourceIp` of the API Gateway event, not `X-Forwarded-For`.
 - `lock.wait` at most 20 s: API Gateway HTTP API ends an integration after 30 s.
@@ -101,7 +104,8 @@ IAM permissions of the function role:
   `TransactWriteItems`;
 - `secretsmanager:GetSecretValue` on the secret, `s3:GetObject` on the configuration
   object or `ssm:GetParameter` on the parameter (plus `kms:Decrypt` for a customer key);
-- the provider permissions (Route 53: read and change the managed hosted zones);
+- the provider permissions (Route 53: read and change the managed hosted zones, see
+  [providers/route53.md](providers/route53.md#iam));
 - CloudWatch Logs (`AWSLambdaBasicExecutionRole`).
 
 ## Cold start and concurrency

@@ -1,6 +1,6 @@
 # Migrating a 0.x configuration to providers
 
-dns-gate now fronts several DNS accounts (EuroDNS today, Route53 next). The
+dns-gate now fronts several DNS accounts (EuroDNS and Route53). The
 `upstream` and `zones_discovery` sections are replaced by a `providers` list. There is
 no compatibility shim: a file still holding `upstream` or `zones_discovery` is refused
 at startup (`field upstream not found`). Ownership entries, zone versions, locks and

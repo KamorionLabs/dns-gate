@@ -1,8 +1,8 @@
 # dns-gate — Design
 
 Status: beta. The design below has run in production against the live EuroDNS API
-since November 2026; the points of the API still worth an explicit test are listed in
-[ROADMAP.md](ROADMAP.md#open-questions-on-the-eurodns-api).
+since November 2026; the roadmap and the points of the provider APIs still worth an
+explicit test are tracked in [GitHub issues](https://github.com/KamorionLabs/dns-gate/issues).
 
 ## 1. Problem
 
@@ -44,7 +44,8 @@ Non-goals (v0.x):
 - Re-implementing or extending the EuroDNS API beyond a few headers and a
   reserved `/.well-known/dns-gate` prefix.
 - Domain lifecycle (registration, transfers, contacts, billing): denied by default.
-- Multi-registrar support (the internal interfaces leave room for it, see ROADMAP).
+- Providers other than EuroDNS and Route53 (the provider contract of section 4.1
+  leaves room for them; requests are tracked in [GitHub issues](https://github.com/KamorionLabs/dns-gate/issues)).
 
 ## 3. Three layers of protection
 
@@ -103,7 +104,8 @@ Repositories:
 |---|---|
 | `KamorionLabs/eurodns-go` | Go client (`eurodns`), RRset helpers (`rrset`), zone delta (`zonediff`), fake server (`eurodnstest`). Shared by the gate and the provider. |
 | `KamorionLabs/dns-gate` | The gate (this repository), Helm chart, container image. |
-| `KamorionLabs/terraform-provider-eurodns` | One Terraform/OpenTofu provider with two modes: direct to EuroDNS, or through a gate. |
+| `KamorionLabs/terraform-provider-dnsgate` | Terraform/OpenTofu provider of the gate API (`dnsgate_record_set`, delegated roles and bindings), for every provider behind the gate. |
+| `KamorionLabs/terraform-provider-eurodns` | Terraform/OpenTofu provider of the EuroDNS API: direct to EuroDNS, or through the gate's EuroDNS-compatible API. |
 
 Main packages of the gate:
 
@@ -116,10 +118,10 @@ Main packages of the gate:
 | `internal/policy` | RBAC engine implementing `Authorizer`. |
 | `internal/routes` | Route table generated from `api/eurodns.openapi.json`, plus the hand-written operation → action mapping. |
 | `internal/zonewrite` | `Engine`: every DNS zone read/write on behalf of a subject on the neutral model, provider resolved per zone, ownership enforcement, reconcile. |
-| `internal/store` | `Store`: ownership entries, zone versions, zone locks (memory, DynamoDB). |
+| `internal/store` | `Store`: ownership entries, zone versions, zone locks, persisted RRset plans (memory, SQLite, Postgres, DynamoDB). |
 | `internal/audit` | Structured audit events (stdout and store). |
 | `internal/discovery` | Listing of the zones of every provider account, filtered and cached in memory; resolves the provider of a zone. |
-| `internal/uiapi` | JSON API for the web UI (inventory, audit, policy revisions, adoption, Terraform export). |
+| `internal/uiapi` | JSON types of the `/api/v1` API (inventory, RRsets, plans, audit, policy revisions, adoption, Terraform export). |
 | MCP server | `/mcp` endpoint for LLM agents (section 17). |
 
 ### 4.1 Providers
@@ -156,6 +158,19 @@ meaning. Writes are a full-zone save of the current zone with the changes applie
 (`zonediff.Apply`), forwards and unknown fields kept byte for byte. Desired targets of
 several labels without an ending dot are written absolute, like Route53 and the
 dnsgate Terraform provider read them; a single label is refused as ambiguous.
+
+**Route53 adapter.** One AWS client per account (default credential chain,
+optionally an assumed role); see [providers/route53.md](providers/route53.md).
+
+**Not planned.** Two families of existing provider code were considered as
+backends and are not used:
+
+- lego DNS providers only implement the ACME TXT `Present`/`CleanUp` pair, in
+  internal packages: no reads, no other record types. lego stays a client of the
+  gate, through its `httpreq` provider ([ACME.md](ACME.md)).
+- DNSControl providers are not a supported library: they pull heavy dependencies,
+  and they compute their own opaque corrections for a whole zone, which cannot be
+  checked change by change against ownership before they run.
 
 ## 5. Request pipeline
 
@@ -342,11 +357,17 @@ Notes:
 per-zone lease lock. It also holds the inventory cache, the audit events used by the UI, and
 the managed policy revisions with the pointer to the active one (section 15).
 
+It also persists the RRset plans of MCP and of the REST API (section 17.3), taken
+once.
+
 - **Memory**: single replica and tests.
+- **SQLite**: single replica with a persistent volume.
+- **Postgres**: several replicas.
 - **DynamoDB**: single-table design, conditional writes for entry versions, zone
   version counter and lock lease (holder + expiry). Credentials from the default AWS
-  chain (EKS Pod Identity, IRSA, environment). Point-in-time recovery recommended.
-- Postgres: possible later behind the same interface.
+  chain (EKS Pod Identity, IRSA, Lambda role, environment). Point-in-time recovery
+  recommended. Expired plans are deleted by the table TTL (attribute `ttl`), the SQL
+  stores purge them every 15 minutes (or in each Lambda maintenance pass): no Scan.
 
 The ETag returned on `GET /dns-zones/{d}` is `"v<zone version>"`. Every gate write
 bumps it. Writes made outside the gate (console) do not bump it, but are detected
@@ -460,7 +481,7 @@ Kept minimal and invisible to plain EuroDNS clients:
 - v0.1 runs a single replica: an IaC call tolerates a short unavailability, and the
   EuroDNS console remains the break-glass path. With the DynamoDB store, locks and
   zone versions already work across replicas; a shared rate limiter is the remaining
-  piece for multi-replica (see ROADMAP).
+  piece for multi-replica ([GitHub issues](https://github.com/KamorionLabs/dns-gate/issues)).
 
 ## 12. Policy (overview)
 
@@ -514,8 +535,9 @@ Events go to two places:
 ## 14. Web UI
 
 A web interface for operators and teams. It answers "what is in this zone, who owns
-it, who changed it and when", and lets designated people edit the managed policy
-layer (section 15). It never performs DNS writes.
+it, who changed it and when", lets people with write rights stage RRset changes and
+apply them through a reviewed plan, and lets designated people edit the managed
+policy layer (section 15).
 
 ### 14.1 Views
 
@@ -542,22 +564,36 @@ layer (section 15). It never performs DNS writes.
 - **Audit log**: filterable by zone, host, type, subject, actor category, decision,
   time range; each entry shows the RRset diff (old → new TTL and values), the
   reason of a denial and the snapshot id taken before the write.
+- **DNS writes**: in a zone, the record sets the user may change (computed from
+  `/api/v1/me`) offer edit and delete, and a form adds new ones. Changes are staged
+  in the browser, then sent as one `POST /api/v1/zones/{zone}/plan` whose result
+  (diff, refusal reasons) is shown for review; *Apply* sends `POST
+  /api/v1/zones/{zone}/apply` with the `plan_id`. Each staged change carries the
+  hash of the RRset as displayed (`expected_hash`, or `must_not_exist` for a new
+  one), so a record changed since is refused instead of overwritten.
+- **Connect**: ready-to-paste setups for Claude Code, Claude Desktop, Terraform
+  (`dnsgate` provider) and the API, and *Get an API token* (section 9.4).
 
 ### 14.2 API
 
-The UI is a static single-page application served by the gate, backed by a
-read-only JSON API under `/api/v1` (contract in `internal/uiapi`):
+The UI is a static single-page application served by the gate, backed by the JSON
+API under `/api/v1` (contract in `internal/uiapi`, reference in
+[`api/dns-gate.openapi.yaml`](../api/dns-gate.openapi.yaml), guide in
+[API.md](API.md)):
 
 | Route | Returns |
 |---|---|
-| `GET /api/v1/me` | logged-in subject, category, roles, teams |
+| `GET /api/v1/me` | logged-in subject, category, roles, teams, permissions |
 | `GET /api/v1/zones` | zone summaries |
 | `GET /api/v1/zones/{zone}/rrsets` | zone inventory |
 | `GET /api/v1/audit?zone=&host=&type=&subject=&category=&decision=&since=&until=&limit=&cursor=` | audit page, newest first, cursor pagination |
+| `POST /api/v1/zones/{zone}/plan`, `/apply` | RRset plan, then its application |
+| `POST /api/v1/tokens` | gate-issued token of the session (9.4) |
 
-The same API accepts bearer tokens, for scripts. Every route requires the
-`ui.read` action; zone-level routes also require the zone to be readable by the
-subject.
+The same API accepts bearer tokens, for scripts and the Terraform provider, with
+`GET`/`PUT`/`DELETE /api/v1/zones/{zone}/rrsets/{host}/{type}` for single RRsets.
+Read routes require `ui.read` (or `dns.read`) on the zone; writes go through the
+engine like any other write (RBAC, ownership, lock, audit).
 
 ### 14.3 Data path
 
@@ -580,10 +616,13 @@ view is.
   lifetime, no token stored in the browser's JavaScript-accessible storage.
 - Strict Content Security Policy (no inline script, `default-src 'self'`,
   `frame-ancestors 'none'`).
-- The inventory and audit API is read-only. The only mutations reachable from the
-  browser are policy revisions (section 15), protected by CSRF tokens, same-origin
-  checks and step-up authentication. DNS writes are never possible with a browser
-  session.
+- The mutations reachable from the browser are DNS writes through plan/apply, gate
+  tokens and policy revisions (section 15). Every one requires the CSRF token and a
+  same-origin `Origin`; DNS applies, single-RRset writes and policy changes also
+  require step-up authentication (a login more recent than `policy.edit_max_age`,
+  and the `policy.require_amr` methods), otherwise `403 reauth_required` and the UI
+  sends the user through `/auth/login?reauth=1`. The plan itself is a dry run and
+  needs no step-up.
 
 ## 15. Editable policy
 

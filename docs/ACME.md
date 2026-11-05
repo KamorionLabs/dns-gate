@@ -63,7 +63,7 @@ roles:
 |---|---|
 | **Caddy** (`EuroDNS/libdns-eurodns`) | Works: `api_url` is configurable. Use a virtual key (`app_id` = key id, `api_key` = secret). Note: libdns-eurodns `SetRecords` PUTs a zone containing only the given records; through the gate the deletion of everything else is refused (or ignored with rebase) instead of wiping the zone. |
 | **lego** (and Traefik, which embeds it) | EuroDNS provider since v4.33, but no documented base URL override. Needs a small upstream change (e.g. `EURODNS_API_URL`). Then: virtual key + rebase role. |
-| **cert-manager** | No EuroDNS support. Planned: `cert-manager-webhook-eurodns`, a webhook solver calling the gate with an OIDC token (see ROADMAP). |
+| **cert-manager** | No EuroDNS support. Planned: `cert-manager-webhook-eurodns`, a webhook solver calling the gate with an OIDC token ([GitHub issues](https://github.com/KamorionLabs/dns-gate/issues)). |
 | Other ACME clients | Any client able to call the EuroDNS API with a custom base URL. |
 
 Virtual keys are the weakest credential the gate accepts: restrict them to the
