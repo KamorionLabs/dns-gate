@@ -15,6 +15,8 @@ Secrets never live in the YAML file. Each one is read from an environment variab
 | `DNS_GATE_POSTGRES_DSN` | Postgres connection string | with `store.type: postgres` |
 | `DNS_GATE_SESSION_KEY` | 32-byte key (hex or base64) encrypting UI cookies | with `ui.enabled` |
 | `DNS_GATE_UI_CLIENT_SECRET` | OIDC client secret of the UI | no (public client with PKCE) |
+| `DNS_GATE_SAML_SP_KEY`, `DNS_GATE_SAML_SP_CERT` | PEM key (RSA or ECDSA) and certificate of the SAML service provider, signing the AuthnRequests | no (unsigned requests) |
+| `DNS_GATE_TOKEN_SIGNING_KEY` | PEM key (EC P-256 or Ed25519) signing [gate-issued tokens](#gate-issued-tokens) | with an issuer `self: true` |
 
 `<ID>` is the provider id in upper case, every character other than a letter or a digit replaced by `_` (`eu-2` gives `EURODNS_EU_2_API_KEY`); the unprefixed variables serve every EuroDNS provider without its own. Route53 providers use the default AWS credential chain (IRSA, Pod Identity, instance role, environment), optionally assuming a role.
 
@@ -22,7 +24,7 @@ Secrets never live in the YAML file. Each one is read from an environment variab
 
 Other environment variables: `POD_NAME` (lock holder id, defaults to the hostname) and `DNS_GATE_REPLICAS` (only used to warn when a single-replica store runs with several replicas).
 
-Generate a session key with `openssl rand -hex 32`.
+Generate a session key with `openssl rand -hex 32`, a token signing key with `openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256` (or `-algorithm ed25519`).
 
 ## Top level
 
@@ -118,12 +120,40 @@ Trusted OIDC token issuers, for bearer tokens (`Authorization: Bearer <JWT>`) an
 | `category_claim`, `category_map` | | Derive the category from a claim value, e.g. `idtyp` with `{app: pipeline, user: human}`; unmapped values fall back to `category`. |
 | `algorithms` | all asymmetric | Allowed `alg`; HMAC algorithms are refused. |
 | `clock_skew` | `60s` | Leeway on `exp`, `nbf`, `iat` (maximum `5m`). |
+| `self` | `false` | This issuer is the gate itself, see [Gate-issued tokens](#gate-issued-tokens). |
+| `token_ttl` | `1h` | Lifetime of gate-issued tokens (`self: true` only, 1m to 24h). |
 
 Tokens must carry `exp` and the subject claim(s). Keys are cached and refetched on an unknown `kid` (at most every 30 s).
 
 Claim matching (`bound_claims`, `bindings[].subjects[].claims`): a string claim must match one of the globs; an array claim (Entra `roles`, `groups`) matches when **it contains** a value matching one of the globs. Booleans and numbers are compared as text; other types never match.
 
 Examples: AWS IAM outbound identity federation (`sts:GetWebIdentityToken`, the issuer URL is given by `aws iam get-outbound-web-identity-federation-info`, `sub` is the role ARN), GitHub Actions (`https://token.actions.githubusercontent.com`), Kubernetes projected service account tokens (cluster OIDC issuer, custom audience), any corporate IdP.
+
+### Gate-issued tokens
+
+Humans signed in to the UI with [SAML](#saml-login) have no access token of their own for the API, the MCP endpoint or Terraform. The gate then issues its own: declare one issuer with `self: true`.
+
+```yaml
+issuers:
+  - name: gate
+    self: true
+    issuer: https://dns.example.com   # public origin of the gate, no path
+    # audiences: [https://dns.example.com]   (default: the issuer URL)
+    # token_ttl: 1h
+```
+
+- The signing key comes from `DNS_GATE_TOKEN_SIGNING_KEY` (or `_FILE`): EC P-256 (`ES256`) or Ed25519 (`EdDSA`), PEM (SEC 1 or PKCS #8). Every instance of the gate (replicas, Lambda) uses the same key. The public key is published at `GET /.well-known/jwks.json` (`kid` = RFC 7638 thumbprint). Changing the key invalidates the tokens in circulation, which last `token_ttl` at most.
+- A token has `iss` = `issuer`, `aud` = the first audience, `exp` = `token_ttl` from issuance but never after the end of the session it comes from, a `jti`, and the claims of that session: `sub`, the mapped claims (`email`, `name`, `groups`...), `auth_time` and `amr`, plus `gate_iss` (the issuer of the session, e.g. `identity-center`) and `gate_cat` (`human`).
+- The gate verifies its tokens with its own key (no JWKS fetch) and **binds them as the issuer of the session** (`gate_iss`): the subject is `identity-center:alice@example.com`, the bindings and groups of `identity-center` apply, with that issuer's `bound_claims`, `team_claim` and `name_claim`. The `gate` issuer itself is never named in bindings or groups (refused at load). Since roles are recomputed at every request, a binding removed takes effect on the next request of a token.
+- Step-up (`policy.edit_max_age`, `policy.require_amr`) uses the `auth_time` and `amr` of the session, so a token obtained right after a re-authentication can mutate the policy, as the session itself.
+- Every issuance is audited (`token.issue`, with `jti`, expiry, `via`: `api`, `authorization_code` or `refresh_token`, and `client_id`).
+
+Tokens are obtained:
+
+- by a signed-in browser session: `POST /api/v1/tokens` (session cookie, `X-Gate-CSRF` header and same-origin `Origin`, as every UI mutation) answers `{"access_token", "token_type": "Bearer", "expires_in", "expires_at", "issuer"}`. Bearer tokens and virtual keys cannot get one (`403 session_required`): a token never extends itself;
+- by the [Claude Desktop extension](#claude-desktop-extension) and other native clients, through the gate authorization server: `GET /.well-known/openid-configuration` (also `/.well-known/oauth-authorization-server`) describes `/oauth/authorize` and `/oauth/token`. Only the public client `dns-gate-relay` with a loopback redirect `http://localhost:<port>` or `http://127.0.0.1:<port>` (no path) is accepted, with PKCE S256 required. `/oauth/authorize` sends a user without session through the UI login (SAML or OIDC), then shows a consent page ("Allow" posts back with the CSRF token and the origin checked). The authorization code (2 minutes) and the refresh token (until the end of the session) are sealed with the session key: nothing is stored, any instance redeems them. A code is not single-use within its 2 minutes, but it is useless without the PKCE verifier that only the client holds. The refresh grant re-checks the bindings of the subject before signing a new token.
+
+The authorization server also works with an OIDC UI login, but the Claude Desktop extension keeps signing in with the OIDC issuer in that case.
 
 ### Entra ID
 
@@ -543,6 +573,8 @@ The helper must print `{"Authorization":"Bearer <token>"}`. With another issuer,
 
 For Claude Desktop, the Connect page offers a **Claude Desktop extension**: the user downloads it, double-clicks it (or drags it into Claude Desktop, Settings, Extensions) and clicks Install. No terminal, Azure CLI, `jq` or Node.js is needed: the extension runs on the Node.js runtime shipped with Claude Desktop.
 
+With a [SAML UI login](#saml-login), the extension signs in at the gate itself: the bundle carries the [gate issuer](#gate-issued-tokens) URL and the client id `dns-gate-relay`, the relay is unchanged (OIDC discovery on the gate, authorization code with PKCE on a loopback redirect, refresh token), and the browser goes through the SAML login and a consent page. The extension is then offered only when an issuer with `self: true` is configured. Nothing has to be registered at the identity provider for it.
+
 The file comes from `GET /api/v1/connect/claude-desktop.mcpb` (same authentication as `/api/v1/connect`), offered when `mcp.enabled` and the UI login are both on; `/api/v1/connect` then returns its URL in `claude_desktop_extension_url` (empty otherwise, and the download answers `404`). It is an [MCP Bundle](https://github.com/modelcontextprotocol/mcpb) (manifest `0.3`, `dns-gate-<host>.mcpb`) generated on the fly with the MCP URL, the UI issuer, `ui.client_id` and the token scope (from `ui.cli_scope`, see Entra ID below) baked in. It holds no secret and is the same for every user of the gate.
 
 Its local server, `internal/mcpb/relay.js` (one file, Node.js 18 or later, no dependency), forwards every MCP message to `/mcp` over Streamable HTTP (JSON and SSE answers, `Mcp-Session-Id`, messages the gate sends on its own) with the user's access token:
@@ -595,9 +627,10 @@ Read-only web UI under `/ui/` and its JSON API under `/api/v1` (action `ui.read`
 | Field | Default | Description |
 |---|---|---|
 | `ui.enabled` | `false` | Enables `/ui/`, `/auth/*` and session cookies. |
-| `ui.issuer` | (required) | Name of a configured issuer used for the login. |
-| `ui.client_id` | (required) | OIDC client id registered at the IdP. |
-| `ui.redirect_url` | (required) | `https://<gate>/auth/callback`, registered at the IdP. |
+| `ui.issuer` | (required for OIDC) | Name of a configured issuer used for the login. |
+| `ui.client_id` | (required for OIDC) | OIDC client id registered at the IdP. |
+| `ui.redirect_url` | (required for OIDC) | `https://<gate>/auth/callback`, registered at the IdP. |
+| `ui.saml` | | SAML 2.0 login instead of OIDC, see [SAML login](#saml-login). |
 | `ui.scopes` | `openid profile email` | Must include `openid`; add the scope that carries the claims used in bindings (for example `groups`). |
 | `ui.session_ttl` | `8h` | Session lifetime (1m to 24h). |
 | `ui.cli_scope` | `api://<client_id>/.default` with an Entra v2 issuer, else empty | OAuth scope a command-line tool requests to get a token for the gate, shown on the Connect page (`az account get-access-token --scope ...`, Terraform `azure_identity.scope`). One scope of letters, digits and `. _ ~ : / % -`, so it can be pasted into shell commands as is. Set it when the Application ID URI of the gate is not `api://<client_id>`. |
@@ -610,6 +643,59 @@ With [zone discovery](#zone-discovery), the zones view also lists the unmanaged 
 
 Audit events of zones the user cannot read are filtered out; events without a zone (authentication failures) are shown only to users who can read every managed zone.
 
+### SAML login
+
+`ui.saml` replaces the OIDC login with SAML 2.0 (HTTP-Redirect or HTTP-POST request, HTTP-POST response); `ui.issuer`, `ui.client_id` and `ui.redirect_url` must then be empty. Setup with AWS IAM Identity Center: [IDENTITY-CENTER.md](IDENTITY-CENTER.md).
+
+```yaml
+ui:
+  enabled: true
+  saml:
+    issuer: identity-center             # name used in bindings and groups
+    entity_id: dns-gate                 # SP entity id = audience of the assertions
+    acs_url: https://dns.example.com/auth/saml/acs
+    idp_metadata_url: https://portal.sso.eu-west-3.amazonaws.com/saml/metadata/<id>
+    # idp_metadata: |                   # or the metadata XML inline
+    name_id_format: email
+    attributes: {email: email, name: name, groups: groups}
+    groups_from_identity_store:
+      identity_store_id: d-1234567890
+      region: eu-west-3
+      assume_role_arn: arn:aws:iam::111111111111:role/dns-gate-identity-store
+bindings:
+  - role: dns-admin
+    team: platform
+    subjects:
+      - issuer: identity-center
+        claims: {groups: [DNS-Admins]}
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `ui.saml.issuer` | (required) | Name under which SAML users are bound (`<issuer>:<NameID>` in the audit log). Not the name of a token issuer. |
+| `ui.saml.entity_id` | (required) | SP entity id, which the IdP puts in the assertion audience. |
+| `ui.saml.acs_url` | (required) | `https://<gate>/auth/saml/acs`; its origin is the origin of the UI (CSRF checks, cookies). |
+| `ui.saml.idp_metadata_url`, `ui.saml.idp_metadata` | (one required) | IdP metadata, fetched over HTTPS (cached per instance for 24 h, the previous copy kept when a refresh fails) or inline XML. It gives the IdP entity id, its signing certificates and its single sign-on URL. |
+| `ui.saml.name_id_format` | `unspecified` | `unspecified`, `email`, `persistent` or `transient`, requested in the AuthnRequest. The NameID is the subject id (`sub`): avoid `transient`, whose value changes at each login. |
+| `ui.saml.attributes` | `{email: email, name: name, groups: groups}` | Claim to SAML attribute (`Name` or `FriendlyName`) mapping; the given entries are added to the defaults. A single value becomes a string claim, several a list; `groups` is always a list. An `amr` entry feeds the authentication methods instead of a claim. Unmapped attributes are dropped. |
+| `ui.saml.team_claim` | | As `issuers[].team_claim`. |
+| `ui.saml.groups_from_identity_store.identity_store_id` | | Identity store (`d-xxxxxxxxxx`) whose groups are looked up at login. |
+| `...region` | (required) | Region of the IAM Identity Center instance. |
+| `...assume_role_arn` | | Role assumed for the lookup (the identity store lives in the management or delegated administrator account); the gate's own credentials otherwise. |
+| `...user_attribute` | `userName` | `userName` or `email`: identity store attribute matched with the value of `user_claim`. |
+| `...user_claim` | `sub` | Claim holding that value (the NameID by default). |
+| `...cache_ttl` | `5m` | Per-instance cache of the groups of a user and of group names (at most `1h`). |
+
+The display name of every group the user belongs to (`identitystore:GetUserId`, `ListGroupMembershipsForMember`, `DescribeGroup`) is added to the `groups` claim, together with the `groups` attribute of the assertion if the IdP sends one. A user missing from the identity store just gets no extra group; any other lookup error fails the login (`502 groups_unavailable`). Groups are resolved at login and kept in the session: a membership change applies at the next login.
+
+Validation of the response posted to `/auth/saml/acs`: XML signature of the response or of the assertion with a certificate of the IdP metadata (unsigned responses refused, encrypted assertions decrypted with the SP key when configured), response `Destination` and assertion `Recipient` equal to `acs_url`, `InResponseTo` equal to the id of the AuthnRequest kept in the sealed login cookie, `RelayState` equal to the random state of that cookie, issuer equal to the IdP entity id, every `AudienceRestriction` equal to `entity_id` (at least one required), `IssueInstant` at most 90 s old, `NotBefore`/`NotOnOrAfter` with 3 minutes of clock skew, a bearer `SubjectConfirmation` and a non-empty NameID. The session then follows the OIDC rules: `sub` = NameID, mapped claims, `auth_time` = `AuthnInstant`, `amr` = the `AuthnContextClassRef` (and the `amr` attribute if mapped), lifetime `ui.session_ttl` capped by `SessionNotOnOrAfter`.
+
+- The login state cookie must come back on the cross-site POST of the IdP: it is `SameSite=None; Secure` when `acs_url` is HTTPS (plain HTTP only works with an IdP on the same site, for tests). A response posted without it is refused (`400 login_state`), except an unsolicited one (no `InResponseTo`, an IdP-initiated login from a portal), which is answered with a redirect to `/auth/login` so that a proper SP-initiated login starts.
+- Replay: the gate keeps no record of the assertions it consumed (it runs stateless, also on Lambda). A response is only accepted with the login cookie of the browser that started that very login, which is cleared on first use, and within 90 s of its issuance. Someone who captured both the cookie and the response within those 90 s could replay them; TLS and the `HttpOnly` cookie make that a browser or proxy compromise.
+- Step-up: `/auth/login?reauth=1` sends `ForceAuthn="true"`. The `AuthnInstant` returned by the IdP is what counts for `policy.edit_max_age`: an IdP that ignores `ForceAuthn` and returns an older instant keeps the user out of policy mutations until they sign in again at the IdP. Identity Center reports `urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport`-style context classes rather than `mfa`: set `policy.require_amr` only to values the IdP actually sends.
+- With `DNS_GATE_SAML_SP_KEY` and `DNS_GATE_SAML_SP_CERT`, requests are signed (RSA-SHA256 or ECDSA-SHA256) and the metadata lists the certificate; without them, requests are unsigned, which Identity Center accepts.
+- `GET /auth/saml/metadata` serves the SP metadata (entity id, ACS URL, NameID format, certificate) to import at the IdP.
+
 ## Endpoints
 
 | Path | Description |
@@ -621,7 +707,11 @@ Audit events of zones the user cannot read are filtered out; events without a zo
 | `GET /api/v1/connect/claude-desktop.mcpb` | Claude Desktop extension of the gate (`ui.read`), when MCP and the UI login are enabled, see [Claude Desktop extension](#claude-desktop-extension). |
 | `/api/v1/policy`, `/api/v1/policy/revisions[/{id}[/approve\|reject\|activate\|rollback\|export]]`, `/api/v1/policy/explain`, `/api/v1/policy/who-can`, `/api/v1/policy/virtual-keys/generate` | Policy API, see `internal/uiapi/policy.go`. |
 | `/api/v1/policy/delegated[/roles\|bindings/{name}]` | [Delegation API](#delegation-api) (`GET`, `PUT`, `DELETE`). |
-| `/auth/login`, `/auth/callback`, `/auth/logout` | UI login. |
+| `/auth/login`, `/auth/callback`, `/auth/logout` | UI login (`/auth/callback` with OIDC only). |
+| `POST /auth/saml/acs`, `GET /auth/saml/metadata` | SAML assertion consumer service and SP metadata, with `ui.saml`. |
+| `POST /api/v1/tokens` | Gate token for the UI session, see [Gate-issued tokens](#gate-issued-tokens). |
+| `GET /.well-known/jwks.json` | Public key of the gate issuer. |
+| `GET /.well-known/openid-configuration`, `/.well-known/oauth-authorization-server`, `/oauth/authorize`, `POST /oauth/token` | Gate authorization server for native clients (Claude Desktop extension), with a gate issuer and the UI login. |
 | `/healthz`, `/readyz` | Probes. |
 
 `GET` on a zone returns an `ETag`; send it back in `If-Match` on writes to get `412 precondition` instead of overwriting a concurrent change. Errors are JSON `{"reason": "...", "message": "..."}`: `forbidden`, `not_owner`, `too_many_changes` (403), `not_found`, `zone_not_eurodns` (404), `foreign_rrset`, `tainted` (409), `precondition` (412), `invalid_zone` (400), `zone_locked` (503, `Retry-After`), `upstream` (502).

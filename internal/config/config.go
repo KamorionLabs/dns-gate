@@ -200,6 +200,8 @@ type UI struct {
 	// gate (shown on the Connect page). Default for an Entra v2 issuer:
 	// api://<client_id>/.default.
 	CLIScope string `yaml:"cli_scope"`
+	// SAML replaces the OIDC login with a SAML 2.0 login.
+	SAML *UISAML `yaml:"saml"`
 
 	ClientSecret string `yaml:"-"` // DNS_GATE_UI_CLIENT_SECRET(_FILE), optional (public client)
 	SessionKey   []byte `yaml:"-"` // DNS_GATE_SESSION_KEY(_FILE), 32 bytes, hex or base64
@@ -280,6 +282,18 @@ type Issuer struct {
 	CategoryMap   map[string]string `yaml:"category_map"`
 	Algorithms    []string          `yaml:"algorithms"`
 	ClockSkew     Duration          `yaml:"clock_skew"`
+
+	// Self makes this issuer the gate itself: the gate signs tokens for
+	// signed-in users (POST /api/v1/tokens, the Claude Desktop extension)
+	// with the key of DNS_GATE_TOKEN_SIGNING_KEY. Issuer is the public
+	// origin of the gate; the tokens are bound as the issuer of the session
+	// they come from, so this issuer is never named in bindings.
+	Self bool `yaml:"self"`
+	// TokenTTL is the lifetime of gate-issued tokens (default 1h).
+	TokenTTL   Duration `yaml:"token_ttl"`
+	SigningKey []byte   `yaml:"-"`
+	// SAML marks the subject issuer of the SAML login (AllIssuers).
+	SAML bool `yaml:"-"`
 }
 
 // VirtualKey is a gate-issued key for clients that only speak the EuroDNS
@@ -476,7 +490,7 @@ func (c *Config) applyEnv(getenv func(string) string) error {
 			return fmt.Errorf("config: DNS_GATE_SESSION_KEY: %w", err)
 		}
 	}
-	return nil
+	return c.applySAMLEnv(read)
 }
 
 func (c *Config) defaults() {
@@ -582,6 +596,7 @@ func (c *Config) defaults() {
 	for i := range c.Zones {
 		c.Zones[i] = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(c.Zones[i])), ".")
 	}
+	c.samlDefaults()
 	for i := range c.Issuers {
 		if len(c.Issuers[i].Algorithms) == 0 {
 			c.Issuers[i].Algorithms = DefaultAlgorithms
@@ -670,6 +685,7 @@ func (c *Config) Validate() error {
 	}
 
 	issuers := map[string]bool{}
+	selfName := ""
 	for i, is := range c.Issuers {
 		at := fmt.Sprintf("issuers[%d]", i)
 		if !nameRe.MatchString(is.Name) {
@@ -700,6 +716,17 @@ func (c *Config) Validate() error {
 		if err := validateEntra(is); err != nil {
 			add("%s: %v", at, err)
 		}
+		if is.Self {
+			if selfName != "" {
+				add("%s.self: only one gate issuer is allowed", at)
+			}
+			selfName = is.Name
+			for _, e := range validateSelfIssuer(at, is) {
+				add("%s", e)
+			}
+		} else if is.TokenTTL != 0 {
+			add("%s.token_ttl: only for the gate issuer (self: true)", at)
+		}
 		if is.SubjectClaim != "" && is.SubjectTemplate != "" {
 			add("%s: subject_claim and subject_template are exclusive", at)
 		}
@@ -723,6 +750,13 @@ func (c *Config) Validate() error {
 			add("%s.clock_skew: must be between 0 and 5m", at)
 		}
 	}
+	if c.UI.SAML != nil {
+		for _, e := range validateSAML(c, issuers) {
+			add("%s", e)
+		}
+		issuers[c.UI.SAML.Issuer] = true
+	}
+	delete(issuers, selfName)
 
 	for name, r := range c.Roles {
 		at := "roles." + name
@@ -899,7 +933,14 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	if c.UI.Enabled {
+	if c.UI.Enabled && c.UI.SAML != nil {
+		if len(c.UI.SessionKey) != 32 {
+			add("ui: session key missing or not 32 bytes (DNS_GATE_SESSION_KEY or DNS_GATE_SESSION_KEY_FILE)")
+		}
+		if c.UI.SessionTTL.D() < time.Minute || c.UI.SessionTTL.D() > 24*time.Hour {
+			add("ui.session_ttl: must be between 1m and 24h")
+		}
+	} else if c.UI.Enabled {
 		if !issuers[c.UI.Issuer] {
 			add("ui.issuer: unknown issuer %q", c.UI.Issuer)
 		}

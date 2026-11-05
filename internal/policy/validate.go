@@ -39,8 +39,8 @@ func (v *verrs) add(path, format string, a ...any) {
 func ValidateManaged(c *config.Config, base uiapi.PolicyDocument, d uiapi.PolicyDocument) []uiapi.ValidationError {
 	var v verrs
 	issuers := map[string]bool{}
-	for _, is := range c.Issuers {
-		issuers[is.Name] = true
+	for _, is := range c.AllIssuers() {
+		issuers[is.Name] = !is.Self
 	}
 	if !c.Policy.Editable {
 		v.add("", "the managed policy is disabled (policy.editable is false)")

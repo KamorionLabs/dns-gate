@@ -43,9 +43,10 @@ func unauthorized(msg string) *Error {
 var credentialHeaders = []string{"Authorization", "X-App-Id", "X-Api-Key", "Cookie"}
 
 type issuer struct {
-	cfg  config.Issuer
-	keys *keySet
-	algs []jose.SignatureAlgorithm
+	cfg    config.Issuer
+	keys   *keySet
+	static *jose.JSONWebKey
+	algs   []jose.SignatureAlgorithm
 }
 
 // Authenticator verifies credentials and builds subjects. Groups,
@@ -55,6 +56,7 @@ type Authenticator struct {
 	byName  map[string]*issuer
 	policy  *policy.Holder
 	trusted []netip.Prefix
+	self    *TokenIssuer
 	now     func() time.Time
 }
 
@@ -75,10 +77,23 @@ func New(c *config.Config, client *http.Client, h *policy.Holder) (*Authenticato
 		policy: h,
 		now:    time.Now,
 	}
-	for _, ic := range c.Issuers {
-		is := &issuer{cfg: ic, keys: newKeySet(ic.Issuer, ic.JWKSURL, client)}
+	for _, ic := range c.AllIssuers() {
+		is := &issuer{cfg: ic}
+		if ic.SAML {
+			a.byName[ic.Name] = is
+			continue
+		}
 		for _, alg := range ic.Algorithms {
 			is.algs = append(is.algs, jose.SignatureAlgorithm(alg))
+		}
+		if ic.Self {
+			t, err := newTokenIssuer(ic)
+			if err != nil {
+				return nil, fmt.Errorf("issuer %s: %w", ic.Name, err)
+			}
+			a.self, is.static = t, &t.public
+		} else {
+			is.keys = newKeySet(ic.Issuer, ic.JWKSURL, client)
 		}
 		a.byURL[strings.TrimSuffix(ic.Issuer, "/")] = is
 		a.byName[ic.Name] = is
@@ -97,7 +112,9 @@ func New(c *config.Config, client *http.Client, h *policy.Holder) (*Authenticato
 func (a *Authenticator) SetClock(now func() time.Time) {
 	a.now = now
 	for _, is := range a.byName {
-		is.keys.now = now
+		if is.keys != nil {
+			is.keys.now = now
+		}
 	}
 }
 
@@ -164,6 +181,9 @@ func (a *Authenticator) authenticateToken(ctx context.Context, raw string) (*ide
 	if err != nil {
 		return nil, err
 	}
+	if is.cfg.Self {
+		return a.bindGateToken(claims)
+	}
 	for name, patterns := range is.cfg.BoundClaims {
 		if !claimMatches(claims[name], patterns) {
 			return nil, &Error{Status: http.StatusForbidden, Reason: "bound_claims", Message: "token claims not allowed for this issuer"}
@@ -176,7 +196,7 @@ func (a *Authenticator) authenticateToken(ctx context.Context, raw string) (*ide
 // and returns its claims. Used by the UI login for ID tokens.
 func (a *Authenticator) VerifyToken(ctx context.Context, issuerName, raw string, audiences []string) (map[string]any, error) {
 	is := a.byName[issuerName]
-	if is == nil {
+	if is == nil || is.cfg.SAML {
 		return nil, unauthorized("unknown issuer")
 	}
 	return a.verify(ctx, is, raw, audiences)
@@ -190,8 +210,13 @@ func (a *Authenticator) verify(ctx context.Context, is *issuer, raw string, audi
 	if len(tok.Headers) != 1 {
 		return nil, unauthorized("malformed token")
 	}
-	key, err := is.keys.key(ctx, tok.Headers[0].KeyID)
-	if err != nil {
+	key := is.static
+	if key == nil {
+		key, err = is.keys.key(ctx, tok.Headers[0].KeyID)
+		if err != nil {
+			return nil, unauthorized("signing key not found")
+		}
+	} else if tok.Headers[0].KeyID != key.KeyID {
 		return nil, unauthorized("signing key not found")
 	}
 	var std jwt.Claims

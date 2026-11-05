@@ -197,7 +197,10 @@ func (s *Server) baseLayer() uiapi.BaseLayer {
 	if len(c.Policy.Delegations) > 0 {
 		b.Delegations = policy.DelegationViews(c)
 	}
-	for _, is := range c.Issuers {
+	for _, is := range c.AllIssuers() {
+		if is.Self {
+			continue
+		}
 		ui := uiapi.Issuer{Name: is.Name, Issuer: is.Issuer, Audiences: is.Audiences, SubjectClaim: is.SubjectClaim, Category: is.Category, CategoryClaim: is.CategoryClaim}
 		if is.SubjectTemplate != "" {
 			ui.SubjectClaim = is.SubjectTemplate
