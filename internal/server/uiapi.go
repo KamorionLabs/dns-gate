@@ -55,6 +55,9 @@ func (s *Server) uiSubject(r *http.Request) (*identity.Subject, *session, *authn
 }
 
 func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
+	if p := r.URL.Path; len(p) > len("/api/v1/") && strings.HasSuffix(p, "/") && !strings.HasSuffix(p, "//") {
+		r.URL.Path = strings.TrimSuffix(p, "/")
+	}
 	pattern, params, status := matchAPIRoute(r.Method, r.URL.Path)
 	switch status {
 	case http.StatusNotFound:

@@ -120,12 +120,18 @@ func TestRoutesDispatched(t *testing.T) {
 			t.Errorf("%s %s not dispatched: %d %+v", rt.Method, rt.Pattern, r.StatusCode, b)
 		}
 	}
+	for _, path := range []string{"/api/v1/policy/delegated/", "/api/v1/zones/"} {
+		if r := e.do(t, http.MethodGet, path, tok, "", nil); r.StatusCode == http.StatusNotFound || r.StatusCode == http.StatusMethodNotAllowed {
+			t.Errorf("GET %s with a trailing slash: %d", path, r.StatusCode)
+		}
+	}
 	for _, tc := range []struct{ method, path string }{
 		{"GET", "/api/v1/nope"},
 		{"GET", "/api/v1/zones/example.com"},
 		{"GET", "/api/v1/zones/example.com/rrsets/www"},
 		{"PATCH", "/api/v1/zones/example.com/rrsets/www/A"},
 		{"POST", "/api/v1/zones"},
+		{"GET", "/api/v1/zones/example.com/rrsets/www//"},
 	} {
 		r := e.do(t, tc.method, tc.path, tok, "", nil)
 		if r.StatusCode != http.StatusNotFound && r.StatusCode != http.StatusMethodNotAllowed {
