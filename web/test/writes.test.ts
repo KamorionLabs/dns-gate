@@ -10,6 +10,7 @@ import {
   parseValue,
   serializeValue,
   txtValue,
+  txtWire,
   unquote,
   validateValue,
   type RecordDraft,
@@ -31,14 +32,24 @@ test('each type turns its fields into a zone-file value and back', () => {
   assert.equal(serializeValue('MX', { priority: '10', server: 'mx1.example.net.' }), '10 mx1.example.net.');
   assert.equal(serializeValue('SRV', { priority: '10', weight: '5', port: '5060', target: 'sip.example.net' }), '10 5 5060 sip.example.net.');
   assert.equal(serializeValue('CAA', { flags: '0', tag: 'issue', value: 'letsencrypt.org' }), '0 issue "letsencrypt.org"');
-  assert.equal(serializeValue('TXT', { text: 'v=spf1 -all' }), '"v=spf1 -all"');
+  assert.equal(serializeValue('TXT', { text: 'v=spf1 -all' }), 'v=spf1 -all');
   assert.deepEqual(parseValue('MX', '20 mx2.example.com.'), { priority: '20', server: 'mx2.example.com.' });
   assert.deepEqual(parseValue('CAA', '0 issuewild "amazon.com"'), { flags: '0', tag: 'issuewild', value: 'amazon.com' });
   assert.deepEqual(parseValue('SRV', '1 2 443 svc.example.net.'), { priority: '1', weight: '2', port: '443', target: 'svc.example.net.' });
   assert.deepEqual(parseValue('TXT', '"part one " "part two"'), { text: 'part one part two' });
 });
 
-test('TXT values are quoted, escaped and split in 255-character strings', () => {
+test('TXT values are sent unquoted at any length and read back from either form', () => {
+  const long = 'v=DKIM1; k=rsa; p=' + 'A'.repeat(400);
+  assert.equal(serializeValue('TXT', { text: long }), long);
+  assert.equal(parseValue('TXT', serializeValue('TXT', { text: long })).text, long);
+  assert.equal(parseValue('TXT', txtValue(long)).text, long);
+  assert.equal(txtWire('say "hi"'), 'say "hi"');
+  assert.equal(txtWire('"quoted"'), '"\\"quoted\\""');
+  assert.equal(parseValue('TXT', txtWire('"quoted"')).text, '"quoted"');
+});
+
+test('TXT values in presentation format are quoted, escaped and split in 255-character strings', () => {
   assert.equal(txtValue('say "hi"'), '"say \\"hi\\""');
   assert.deepEqual(unquote(txtValue('say "hi" \\o/')), ['say "hi" \\o/']);
   const long = 'x'.repeat(300);

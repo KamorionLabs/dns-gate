@@ -122,6 +122,17 @@ export function txtValue(text: string): string {
   return (chunks.length ? chunks : ['']).map(quote).join(' ');
 }
 
+/**
+ * The TXT value sent to the gate: the text itself, unquoted and at any
+ * length, the canonical form of the Route53 adapter that EuroDNS stores as
+ * sent, so that it reads back unchanged on both. A text that starts and ends
+ * with a double quote would read as quoted strings: it is sent in
+ * presentation format instead.
+ */
+export function txtWire(text: string): string {
+  return text.length >= 2 && text.startsWith('"') && text.endsWith('"') ? txtValue(text) : text;
+}
+
 /** Absolute name with its trailing dot: "app.example.net" → "app.example.net.". */
 export const absolute = (name: string) => {
   const n = name.trim().toLowerCase();
@@ -162,7 +173,7 @@ export function serializeValue(type: RecordType, f: ValueFields): string {
     case 'CNAME':
       return absolute(v('target'));
     case 'TXT':
-      return txtValue(f.text ?? '');
+      return txtWire(f.text ?? '');
     case 'MX':
       return `${v('priority')} ${absolute(v('server'))}`;
     case 'SRV':

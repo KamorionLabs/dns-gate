@@ -622,3 +622,24 @@ func TestSDKRetriesThrottlingAndMapsConflicts(t *testing.T) {
 		t.Fatalf("conflict: %v", err)
 	}
 }
+
+// TXT values as the web console sends them (the text, unquoted, at any
+// length) are the canonical form: written chunked, read back unchanged.
+func TestTXTConsoleValuesRoundTrip(t *testing.T) {
+	p, _ := newTestProvider(t)
+	values := []string{"v=spf1 include:_spf.example.net -all", "v=DKIM1; k=rsa; p=" + strings.Repeat("A", 400), `say "hi"`}
+	for i, v := range values {
+		key := dns.Key{Host: fmt.Sprintf("txt%d", i), Type: "TXT"}
+		in := dns.RRset{Key: key, TTL: 300, Values: []string{v}}
+		n, err := p.Normalize("example.com", in)
+		if err != nil || !sameContent(n, in) {
+			t.Fatalf("%q normalized to %+v (%v)", v, n.Values, err)
+		}
+		if err := apply(t, p, dns.Change{Op: dns.OpCreate, Key: key, New: &n}); err != nil {
+			t.Fatal(err)
+		}
+		if got, _ := readSet(t, p, key); !sameContent(got, in) {
+			t.Fatalf("%q read back as %q", v, got.Values)
+		}
+	}
+}
