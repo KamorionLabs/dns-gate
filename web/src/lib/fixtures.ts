@@ -106,6 +106,8 @@ const connect: Connect = {
   client_id: UI_CLIENT_ID,
   cli_scope: `api://${UI_CLIENT_ID}/.default`,
   claude_desktop_extension_url: mcpMode === 'off' ? '' : GATE + '/api/v1/connect/claude-desktop.mcpb',
+  // ?tokens=off: no gate issuer, no "Get an API token"
+  tokens_url: new URLSearchParams(window.location.search).get('tokens') === 'off' ? undefined : GATE + '/api/v1/tokens',
 };
 
 const foreign = (host: string, type: string, ttl: number, values: string[], prot = false): RRset => ({
@@ -1505,6 +1507,12 @@ export const fixtureBackend = {
   adoptPreview: async (zone: string, sel: AdoptSelection) => delay(adoptPreview(zone, sel), 450),
   adopt: async (zone: string, req: AdoptApply) => delay(adoptApply(zone, req), 500),
   terraform: async (zone: string, q: TerraformQuery) => delay(terraform(zone, q), 200),
+  issueToken: async () => {
+    const b64 = (o: object) => btoa(JSON.stringify(o)).replace(/=+$/, '').replaceAll('+', '-').replaceAll('/', '_');
+    const exp = Math.floor(Date.now() / 1000) + 3600;
+    const token = `${b64({ alg: 'ES256', kid: 'demo' })}.${b64({ iss: GATE, sub: me.subject, exp })}.${randomToken(43)}`;
+    return delay({ access_token: token, token_type: 'Bearer', expires_in: 3600, expires_at: new Date(exp * 1000).toISOString(), issuer: GATE }, 400);
+  },
   plan: async (zone: string, changes: RRsetChange[]) => delay(planChanges(zone, changes), 600),
   apply: async (zone: string, planId: string) => delay(applyPlan(zone, planId), 900),
   generateKey: async (): Promise<GeneratedKey> => {

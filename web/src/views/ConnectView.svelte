@@ -1,6 +1,7 @@
 <script lang="ts">
   import { api } from '../lib/api';
-  import type { Connect, Me, ZoneSummary } from '../lib/types';
+  import type { Connect, IssuedToken, Me, ZoneSummary } from '../lib/types';
+  import TokenAction from '../components/TokenAction.svelte';
   import { canWriteZone } from '../lib/rights';
   import { router } from '../lib/router.svelte';
   import {
@@ -10,6 +11,7 @@
     curlCommand,
     desktopConfig,
     loginCommand,
+    TOKEN_ENV,
     terraformProvider,
     tokenCommand,
   } from '../lib/connect';
@@ -22,6 +24,8 @@
 
   // The examples use a zone the user can write in, when there is one.
   let zones = $state<ZoneSummary[]>([]);
+  // A token issued here stays shown while the page is open, across tabs.
+  let token = $state<IssuedToken | null>(null);
   let me = $state<Me | null>(null);
 
   $effect(() => {
@@ -68,6 +72,10 @@
       </button>
     {/each}
   </div>
+
+  {#if info.tokens_url && (tab === 'terraform' || tab === 'api')}
+    <TokenAction {info} zone={exampleZone} bind:token />
+  {/if}
 
   <section class="panel" role="tabpanel">
     {#if tab === 'claude-code' || tab === 'desktop'}
@@ -127,7 +135,8 @@
       <p class="lead">The <span class="mono">KamorionLabs/dnsgate</span> provider talks to the gate, whatever the DNS provider behind a zone: the gate holds the provider credentials, Terraform only proves who runs it.</p>
       <HclBlock hcl={terraformProvider(info, exampleZone)} filename="main.tf" />
       <p class="hint">
-        Terraform signs in with a token of the gate's issuer{#if entra} (locally, your <span class="mono">az login</span>: <span class="mono">{tokenCommand(info)}</span>){/if}; the provider documentation lists the supported sign-in methods.
+        {#if info.tokens_url}Terraform reads its token from <span class="mono">{TOKEN_ENV}</span>: get one with <strong>Get an API token</strong> above (valid up to one hour).
+        {:else}Terraform signs in with a token of the gate's issuer{#if entra} (locally, your <span class="mono">az login</span>: <span class="mono">{tokenCommand(info)}</span>){/if}; the provider documentation lists the supported sign-in methods.{/if}
         To move records the gate already holds into a stack, open a zone and use Export Terraform.
       </p>
     {:else if tab === 'api'}

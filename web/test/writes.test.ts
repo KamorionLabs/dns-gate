@@ -301,3 +301,25 @@ test('the Connect snippets use the dnsgate provider and the neutral REST API', a
   assert.match(sh, /curl -X POST .* \\\n  -d '\{"changes":\[\{"host":"www","type":"CNAME","ttl":300,"values":\["app.example.net."\]\}\]\}' \\\n  \$GATE\/api\/v1\/zones\/edge.example.org\/plan/);
   assert.match(sh, /-d '\{"plan_id":"<plan_id>"\}' \$GATE\/api\/v1\/zones\/edge.example.org\/apply/);
 });
+
+test('a token from the console comes with ready-to-paste Terraform and curl lines', async () => {
+  const { tokenSnippets, tokenLine } = await import('../src/lib/connect.ts');
+  const c = { base_url: 'https://gate.example', mcp: { enabled: false, url: '', allow_writes: false }, claude_desktop_extension_url: '', tokens_url: 'https://gate.example/api/v1/tokens', issuer: { url: '', kind: 'saml' as const } };
+  const s = tokenSnippets(c, 'eyJ.abc.def', 'edge.example.org');
+  assert.equal(s.terraform, "export DNSGATE_TOKEN='eyJ.abc.def'\nterraform plan\n");
+  assert.equal(s.curl, 'curl -H "Authorization: Bearer eyJ.abc.def" \\\n  https://gate.example/api/v1/zones/edge.example.org/rrsets\n');
+  assert.match(tokenLine(c), /Get an API token/);
+  assert.match(tokenLine({ ...c, issuer: { url: '', kind: 'entra' as const, tenant_id: 't' } }), /^TOKEN=\$\(az account get-access-token/);
+});
+
+test('the token is asked with the CSRF header and a session_required refusal is typed', async () => {
+  const { issueToken } = await import('../src/lib/http.ts');
+  const tok = { access_token: 'eyJ.x.y', token_type: 'Bearer', expires_in: 3600, expires_at: '2026-11-05T12:00:00Z', issuer: 'https://gate.example' };
+  const m = mockFetch([{ status: 200, body: tok }, { status: 403, body: { reason: 'session_required', message: 'gate tokens are issued to UI sessions only' } }]);
+  const req = createRequest({ fetch: m.fn, csrf: () => 'tok', onUnauthenticated: () => {}, onReauth: () => {} });
+  assert.deepEqual(await issueToken(req), tok);
+  assert.equal(m.calls[0]!.url, '/api/v1/tokens');
+  assert.equal(m.calls[0]!.init.method, 'POST');
+  assert.equal((m.calls[0]!.init.headers as Record<string, string>)['X-Gate-CSRF'], 'tok');
+  await assert.rejects(issueToken(req), (e: unknown) => e instanceof ApiError && e.status === 403 && e.reason === 'session_required');
+});

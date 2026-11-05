@@ -75,7 +75,7 @@ export function curlCommand(c: Connect, zone = 'example.com'): string {
   const json = '-H "Content-Type: application/json"';
   const change = JSON.stringify({ changes: [{ host: 'www', type: 'CNAME', ttl: 300, values: ['app.example.net.'] }] });
   return [
-    `TOKEN=$(${tokenCommand(c)})`,
+    tokenLine(c),
     `GATE=${c.base_url}`,
     '',
     '# Who am I: roles, teams and permissions',
@@ -94,4 +94,21 @@ export function curlCommand(c: Connect, zone = 'example.com'): string {
     `curl -X POST ${auth} ${json} -d '{"plan_id":"<plan_id>"}' ${z}/apply`,
     '',
   ].join('\n');
+}
+
+/** Environment variable the dnsgate Terraform provider reads its token from. */
+export const TOKEN_ENV = 'DNSGATE_TOKEN';
+
+/** Where a script gets its token: the Azure CLI with Entra, the console's "Get an API token" otherwise. */
+export function tokenLine(c: Connect): string {
+  if (!entra(c) && c.tokens_url) return `TOKEN='<paste the token from "Get an API token">'`;
+  return `TOKEN=$(${tokenCommand(c)})`;
+}
+
+/** Ready-to-paste uses of a token the console just issued. */
+export function tokenSnippets(c: Connect, token: string, zone = 'example.com'): { terraform: string; curl: string } {
+  return {
+    terraform: [`export ${TOKEN_ENV}=${shq(token)}`, 'terraform plan', ''].join('\n'),
+    curl: [`curl -H "Authorization: Bearer ${token}" \\`, `  ${c.base_url}/api/v1/zones/${zone}/rrsets`, ''].join('\n'),
+  };
 }

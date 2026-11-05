@@ -1,6 +1,6 @@
 // JSON client of /api/v1, independent of the browser globals so it can be
 // tested with a mock fetch.
-import type { PlanResult, RRsetChange, ValidationError } from './types';
+import type { IssuedToken, PlanResult, RRsetChange, ValidationError } from './types';
 
 export class ApiError extends Error {
   readonly status: number;
@@ -67,6 +67,9 @@ export function createRequest(deps: HttpDeps): Request {
     return (text ? await res.text() : await res.json()) as T;
   };
 }
+
+/** A gate token for the signed-in browser session (403 session_required for a bearer caller). */
+export const issueToken = (request: Request) => request<IssuedToken>('POST', '/api/v1/tokens', {});
 
 const zonePath = (zone: string) => '/api/v1/zones/' + encodeURIComponent(zone);
 

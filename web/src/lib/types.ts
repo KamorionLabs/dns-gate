@@ -34,11 +34,23 @@ export interface GateInfo {
 export interface Connect {
   base_url: string;
   mcp: { enabled: boolean; url: string; allow_writes: boolean };
-  issuer?: { url: string; kind: 'entra' | 'oidc'; tenant_id?: string };
+  /** UI login issuer; for SAML, url is the gate issuer, if any. */
+  issuer?: { url: string; kind: 'entra' | 'oidc' | 'saml'; tenant_id?: string };
   client_id?: string;
   cli_scope?: string;
   /** Download of the Claude Desktop extension; empty without MCP or UI login. */
   claude_desktop_extension_url: string;
+  /** POST here (session, CSRF) for a gate token; absent without a gate issuer. */
+  tokens_url?: string;
+}
+
+/** POST /api/v1/tokens: a gate-issued token of the UI session, for curl and Terraform. */
+export interface IssuedToken {
+  access_token: string;
+  token_type: string;
+  expires_in: number;
+  expires_at: string;
+  issuer: string;
 }
 
 /** DNS provider of a zone, as the gate names it ("eurodns", "route53"). */

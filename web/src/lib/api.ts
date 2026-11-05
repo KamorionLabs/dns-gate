@@ -1,4 +1,4 @@
-import { ApiError, createRequest, dnsWrites } from './http';
+import { ApiError, createRequest, dnsWrites, issueToken } from './http';
 import type {
   AdoptApply,
   AdoptPreview,
@@ -12,6 +12,7 @@ import type {
   ExplainRequest,
   ExplainResponse,
   GeneratedKey,
+  IssuedToken,
   Me,
   PlanResult,
   ProposeRequest,
@@ -49,6 +50,7 @@ export interface Backend {
   terraform(zone: string, q: TerraformQuery): Promise<string>;
   plan(zone: string, changes: RRsetChange[]): Promise<PlanResult>;
   apply(zone: string, planId: string): Promise<PlanResult>;
+  issueToken(): Promise<IssuedToken>;
 }
 
 export function loginURL(reauth = false): string {
@@ -128,6 +130,7 @@ const http: Backend = {
     ),
   plan: writes.plan,
   apply: writes.apply,
+  issueToken: () => issueToken(request),
 };
 
 export const usingFixtures = import.meta.env.VITE_FIXTURES === '1';
