@@ -74,6 +74,7 @@ func TestEndToEnd(t *testing.T) {
 	t.Run("11_mcp", e.scenarioMCP)
 	t.Run("12_zone_discovery_and_team_from", e.scenarioDiscoveryTeamFrom)
 	t.Run("13_policy_delegation", e.scenarioDelegation)
+	t.Run("14_dnsgate_provider", e.scenarioDNSGateProvider)
 }
 
 func setup(t *testing.T) *env {
