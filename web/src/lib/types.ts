@@ -1,4 +1,4 @@
-// Mirrors internal/uiapi/types.go (the read-only JSON contract of /api/v1).
+// Mirrors internal/uiapi/types.go (the JSON contract of /api/v1).
 
 export type Category = 'human' | 'pipeline' | 'key' | 'system';
 export type Status = 'managed' | 'tainted' | 'pending' | 'foreign' | 'missing';
@@ -41,8 +41,12 @@ export interface Connect {
   claude_desktop_extension_url: string;
 }
 
+/** DNS provider of a zone, as the gate names it ("eurodns", "route53"). */
+export type Provider = string;
+
 export interface ZoneSummary {
   zone: string;
+  provider?: Provider;
   rrsets: number;
   managed: number;
   tainted: number;
@@ -50,7 +54,7 @@ export interface ZoneSummary {
   foreign: number;
   last_synced_at?: string;
   last_write_at?: string;
-  /** Zone found in the EuroDNS account but not managed by the gate: read-only, counts are 0 until it was read once. */
+  /** Zone found at the DNS provider but not managed by the gate: read-only, counts are 0 until it was read once. */
   unmanaged?: boolean;
 }
 
@@ -60,11 +64,25 @@ export interface Actor {
   category: Category;
 }
 
+/** Provider alias target (Route53 alias records): an RRset with an alias has no values. */
+export interface Alias {
+  target: string;
+  hosted_zone_id: string;
+  evaluate_target_health: boolean;
+}
+
+/** Why the gate never writes an RRset: server_managed, routing_policy, locked, or another provider reason. */
+export type ReadOnlyReason = 'server_managed' | 'routing_policy' | 'locked' | (string & {});
+
 export interface RRset {
   host: string;
   type: string;
   ttl: number;
   values: string[];
+  alias?: Alias;
+  read_only?: ReadOnlyReason;
+  /** Content hash (TTL and values), the precondition of a change. */
+  hash?: string;
   status: Status;
   protected: boolean;
   owner?: string;
@@ -79,6 +97,7 @@ export interface RRset {
 
 export interface ZoneInventory {
   zone: string;
+  provider?: Provider;
   last_synced_at?: string;
   rrsets: RRset[];
   /** Discovered but not managed: every RRset is foreign, no write nor adoption. */
@@ -124,6 +143,55 @@ export interface AuditQuery {
   until?: string;
   limit?: number;
   cursor?: string;
+}
+
+// DNS writes (POST /api/v1/zones/{zone}/plan and /apply)
+
+/** Desired state of one RRset: values (or alias), or delete. */
+export interface RRsetChange {
+  host: string;
+  type: string;
+  ttl?: number;
+  values?: string[];
+  alias?: Alias;
+  delete?: boolean;
+  /** The RRset must still have this content hash upstream. */
+  expected_hash?: string;
+  /** The RRset must not exist yet. */
+  must_not_exist?: boolean;
+}
+
+/** One side of a planned change, when the gate sends it as an object. */
+export interface PlanSide {
+  ttl?: number;
+  values?: string[];
+  alias?: Alias;
+}
+
+/** A change of a plan: the journal shape, or old/new objects; reason when this change alone is refused. */
+export interface PlanChange {
+  op: ChangeOp;
+  host: string;
+  type: string;
+  old_ttl?: number;
+  old_values?: string[];
+  new_ttl?: number;
+  new_values?: string[];
+  old?: PlanSide | null;
+  new?: PlanSide | null;
+  reason?: string;
+  message?: string;
+}
+
+export interface PlanResult {
+  zone: string;
+  allowed: boolean;
+  reason?: string;
+  message?: string;
+  changes: PlanChange[];
+  zone_version?: number;
+  plan_id?: string;
+  request_id?: string;
 }
 
 // Policy (internal/uiapi/policy.go)

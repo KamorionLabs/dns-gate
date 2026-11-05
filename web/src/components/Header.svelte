@@ -47,7 +47,7 @@
   <div class="inner">
     <a class="mark" href={href('/')}>
       <Seal status="managed" size={18} />
-      <span class="word">eurodns<span class="dim">-gate</span></span>
+      <span class="word">dns<span class="dim">-gate</span></span>
     </a>
 
     <nav aria-label="Sections">

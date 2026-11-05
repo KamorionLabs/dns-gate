@@ -199,7 +199,7 @@
 
         <section id="sec-keys">
           <h2 class="sec">Virtual keys <span class="count num">{L.k.length}</span></h2>
-          <p class="hint">For clients that only speak the EuroDNS API. Only a hash of each key is stored.</p>
+          <p class="hint">For clients that cannot get an OIDC token, such as EuroDNS API clients. Only a hash of each key is stored.</p>
           <DocItems kind="keys" keys={L.k} />
         </section>
 

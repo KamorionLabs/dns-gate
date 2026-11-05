@@ -42,42 +42,56 @@ export function desktopConfig(c: Connect): string {
   return JSON.stringify({ mcpServers: { 'dns-gate': server } }, null, 2) + '\n';
 }
 
-export function terraformProvider(c: Connect): string {
-  const auth = entra(c)
-    ? [
-        '    auth {',
-        '      # Workstation and Azure-hosted runners: Azure CLI login, managed or workload identity.',
-        '      azure_identity {',
-        `        scope     = "${scope(c)}"`,
-        `        tenant_id = "${tenant(c)}"`,
-        '      }',
-        '',
-        '      # In an Azure DevOps pipeline, the OIDC token of a service connection takes',
-        '      # precedence inside the job; azure_identity still applies locally.',
-        '      # azure_devops { service_connection_id = "00000000-0000-0000-0000-000000000000" }',
-        '    }',
-      ]
-    : ['    auth {', `      token_command = ["sh", "-c", "${TOKEN_COMMAND_PLACEHOLDER}"]`, '    }'];
+/** Provider block and one record set of the dnsgate Terraform provider. */
+export function terraformProvider(c: Connect, zone = 'example.com'): string {
   return [
     'terraform {',
     '  required_providers {',
-    '    eurodns = {',
-    '      source = "kamorionlabs/eurodns"',
+    '    dnsgate = {',
+    '      source = "KamorionLabs/dnsgate"',
     '    }',
     '  }',
     '}',
     '',
-    'provider "eurodns" {',
-    '  gate {',
-    `    url = "${c.base_url}"`,
+    'provider "dnsgate" {',
+    `  endpoint = "${c.base_url}"`,
+    '}',
     '',
-    ...auth,
-    '  }',
+    'resource "dnsgate_record_set" "www" {',
+    `  zone   = "${zone}"`,
+    '  name   = "www"',
+    '  type   = "CNAME"',
+    '  ttl    = 300',
+    '  values = ["app.example.net."]',
     '}',
     '',
   ].join('\n');
 }
 
-export function curlCommand(c: Connect): string {
-  return [`TOKEN=$(${tokenCommand(c)})`, `curl -H "Authorization: Bearer $TOKEN" ${c.base_url}/api/v1/me`, ''].join('\n');
+/** curl examples of the REST API: who am I, the record sets of a zone, a plan then its apply. */
+export function curlCommand(c: Connect, zone = 'example.com'): string {
+  const z = `$GATE/api/v1/zones/${zone}`;
+  const auth = '-H "Authorization: Bearer $TOKEN"';
+  const json = '-H "Content-Type: application/json"';
+  const change = JSON.stringify({ changes: [{ host: 'www', type: 'CNAME', ttl: 300, values: ['app.example.net.'] }] });
+  return [
+    `TOKEN=$(${tokenCommand(c)})`,
+    `GATE=${c.base_url}`,
+    '',
+    '# Who am I: roles, teams and permissions',
+    `curl ${auth} $GATE/api/v1/me`,
+    '',
+    '# Zones, then the record sets of one zone (with their owner and hash)',
+    `curl ${auth} $GATE/api/v1/zones`,
+    `curl ${auth} ${z}/rrsets`,
+    '',
+    '# Plan a change: the gate answers with the diff, its decision and a plan_id',
+    `curl -X POST ${auth} ${json} \\`,
+    `  -d '${change}' \\`,
+    `  ${z}/plan`,
+    '',
+    '# Apply exactly that plan',
+    `curl -X POST ${auth} ${json} -d '{"plan_id":"<plan_id>"}' ${z}/apply`,
+    '',
+  ].join('\n');
 }

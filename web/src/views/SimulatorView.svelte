@@ -141,7 +141,7 @@
         {:else}
           <div class="placeholder">
             <Icon name="flask" size={22} />
-            <p>Describe a token and a request. The gate evaluates them with the same code as live traffic, without calling EuroDNS.</p>
+            <p>Describe a token and a request. The gate evaluates them with the same code as live traffic, without calling the DNS provider.</p>
           </div>
         {/if}
       </div>
