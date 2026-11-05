@@ -1,7 +1,9 @@
 //go:build e2e
 
 // Package e2e runs Terraform (and OpenTofu when available) with the real
-// provider against a real gate in front of the EuroDNS fake.
+// providers (eurodns from E2E_PROVIDER_SRC, dnsgate from
+// E2E_DNSGATE_PROVIDER_SRC, sibling directories by default) against a real
+// gate in front of the EuroDNS fake.
 //
 //	go test -tags e2e ./e2e/...
 package e2e

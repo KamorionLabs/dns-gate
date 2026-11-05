@@ -15,8 +15,8 @@ generate: spec
 test:
 	go test -race ./...
 
-# End-to-end: builds ../terraform-provider-eurodns and drives it with Terraform
-# through a real gate in front of the EuroDNS fake.
+# End-to-end: builds ../terraform-provider-eurodns and ../terraform-provider-dnsgate
+# and drives them with Terraform through a real gate in front of the EuroDNS fake.
 e2e:
 	go test -tags e2e -count=1 -v ./e2e/...
 
