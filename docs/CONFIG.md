@@ -10,11 +10,13 @@ Secrets never live in the YAML file. Each one is read from an environment variab
 
 | Variable | Used for | Required |
 |---|---|---|
-| `EURODNS_API_KEY` | EuroDNS `X-API-KEY` | yes |
-| `EURODNS_APP_ID` | EuroDNS `X-APP-ID`, overrides `upstream.app_id` | if `upstream.app_id` is empty |
+| `EURODNS_<ID>_API_KEY`, else `EURODNS_API_KEY` | EuroDNS `X-API-KEY` of the provider `<ID>` | with a `eurodns` provider |
+| `EURODNS_<ID>_APP_ID`, else `EURODNS_APP_ID` | EuroDNS `X-APP-ID`, overrides `eurodns.app_id` | if `eurodns.app_id` is empty |
 | `DNS_GATE_POSTGRES_DSN` | Postgres connection string | with `store.type: postgres` |
 | `DNS_GATE_SESSION_KEY` | 32-byte key (hex or base64) encrypting UI cookies | with `ui.enabled` |
 | `DNS_GATE_UI_CLIENT_SECRET` | OIDC client secret of the UI | no (public client with PKCE) |
+
+`<ID>` is the provider id in upper case, every character other than a letter or a digit replaced by `_` (`eu-2` gives `EURODNS_EU_2_API_KEY`); the unprefixed variables serve every EuroDNS provider without its own. Route53 providers use the default AWS credential chain (IRSA, Pod Identity, instance role, environment), optionally assuming a role.
 
 Other environment variables: `POD_NAME` (lock holder id, defaults to the hostname) and `DNS_GATE_REPLICAS` (only used to warn when a single-replica store runs with several replicas).
 
@@ -26,42 +28,62 @@ Generate a session key with `openssl rand -hex 32`.
 |---|---|---|
 | `listen.address` | `:8080` | HTTP listen address. TLS is terminated in front of the gate. |
 | `listen.trusted_proxies` | `[]` | CIDRs of reverse proxies allowed to set `X-Forwarded-For`. The rightmost untrusted hop is the client address (used by `virtual_keys[].allowed_cidrs`). |
-| `upstream.base_url` | `https://rest-api.eurodns.com` | EuroDNS API. HTTPS is required (loopback excepted, for tests). |
-| `upstream.app_id` | | EuroDNS application id. |
-| `upstream.rate.every`, `upstream.rate.burst` | `1.1s`, `5` | Client-side limiter shared by every upstream call. EuroDNS allows 10 requests per 10 seconds per IP and bans progressively: keep the default unless EuroDNS raised your quota. |
-| `upstream.max_retries` | `3` | Retries on 429, 5xx and network errors (idempotent requests). |
-| `zones` | (required without `zones_discovery`) | Managed zones of the base layer. Zones listed by the active [managed policy](#managed-policy-editing-from-the-ui) revision are added to them. Requests for any other zone are refused before authorization (zones found by [zone discovery](#zone-discovery) are readable only). |
-| `zones_discovery.*` | disabled | Lists the zones of the EuroDNS account, see [Zone discovery](#zone-discovery). |
-| `check_on_write` | `true` | Validate every zone with EuroDNS `check` before saving it. |
+| `providers` | (required) | The DNS accounts the gate fronts, see [Providers](#providers). |
+| `zones` | `[]` | Managed zones of the base layer. Zones listed by the active [managed policy](#managed-policy-editing-from-the-ui) revision are added to them. Requests for any other zone are refused before authorization (zones found by [zone discovery](#zone-discovery) are readable only). Each zone must be selected by a provider. |
+| `check_on_write` | `true` | Run the provider dry run (EuroDNS `check`) before every write; providers without one (Route53) are not affected. |
 | `reconcile_interval` | `15m` | Drift detection period per zone (minimum `1m`). |
 | `limits.max_body_bytes` | `1048576` | Request body limit. |
 | `limits.max_changes_per_request` | `20` | Default blast-radius limit (RRset changes per request). |
 | `lock.ttl`, `lock.wait` | `60s`, `30s` | Per-zone write lease and how long a request waits for it (then `503 zone_locked`). |
 
-## Zone discovery
+## Providers
 
-Without discovery the gate only knows `zones`. With it, the gate lists the domains of the EuroDNS account, shows those it does not manage as **unmanaged** (in the UI and in the MCP `list_zones` tool) and lets policy administrators bring them under management from the UI, through a [managed policy](#managed-policy-editing-from-the-ui) revision, without a configuration change.
+A provider is one DNS account: a EuroDNS account or an AWS account for Route53. The gate alone holds its credentials. Each zone is served by exactly one provider: the one whose `zones` filter selects it, or, when the filters of several providers select it, the only one of them whose account lists it. A zone listed by two providers that both select it is served by neither (an error is logged): exclude it from all but one. Ownership, locks and audit stay keyed by zone name.
 
 | Field | Default | Description |
 |---|---|---|
-| `zones_discovery.enabled` | `false` | List the account domains (`POST /domains/search`, `searchDomains`). |
-| `zones_discovery.include` | `["*"]` | Zone globs (`*` wildcards) a discovered zone must match. |
-| `zones_discovery.exclude` | `[]` | Zone globs removed from the list; they win over `include`. |
-| `zones_discovery.refresh` | `1h` | Listing period (minimum `5m`). A failed listing is retried after 5 minutes and the previous list is kept. |
+| `providers[].id` | (required) | Unique lowercase identifier, shown in the UI, the audit (`provider`) and zone summaries. |
+| `providers[].kind` | (required) | `eurodns` or `route53`. |
+| `providers[].zones.include` | `["*"]` | Zone globs (`*` wildcards) the provider serves. |
+| `providers[].zones.exclude` | `[]` | Zone globs removed; they win over `include`. |
+| `providers[].zones.refresh` | `1h` | Account listing period (minimum `5m`), see [Zone discovery](#zone-discovery). |
+| `providers[].eurodns.base_url` | `https://rest-api.eurodns.com` | EuroDNS API. HTTPS is required (loopback excepted, for tests). |
+| `providers[].eurodns.app_id` | | EuroDNS application id (or the variables of [Secrets](#secrets)). |
+| `providers[].eurodns.rate.every`, `.burst` | `1.1s`, `5` | Client-side limiter shared by every call to this account (reads, writes, checks, listing, passthrough). EuroDNS allows 10 requests per 10 seconds per IP and bans progressively: keep the default unless EuroDNS raised your quota. |
+| `providers[].eurodns.max_retries` | `3` | Retries on 429, 5xx and network errors (idempotent requests). |
+| `providers[].route53.region` | SDK default | AWS region of the API calls. |
+| `providers[].route53.assume_role_arn` | | IAM role assumed in the account holding the hosted zones. |
+| `providers[].route53.external_id` | | External id of the assumed role (requires `assume_role_arn`). |
+| `providers[].route53.hosted_zones` | `{}` | Zone name to hosted zone id, to pin a name with several hosted zones or skip the listing of the account. |
+| `providers[].route53.include_private` | `false` | Serve private hosted zones too. |
 
 ```yaml
-zones: [example.com]
-zones_discovery:
-  enabled: true
-  include: ["*"]
-  exclude: ["*.internal.example", "legacy-*.example"]
-  refresh: 1h
+providers:
+  - id: eurodns
+    kind: eurodns
+    zones: {include: ["*"], exclude: ["*.example.net"]}
+    eurodns: {app_id: acme-gate}
+  - id: route53-prod
+    kind: route53
+    zones: {include: ["*.example.net"]}
+    route53:
+      region: eu-west-3
+      assume_role_arn: arn:aws:iam::123456789012:role/dns-gate
+      hosted_zones: {"example.net": Z0123456789ABC}
 ```
 
-- **Upstream load**: a listing costs one request per 100 domains, through the shared rate-limited transport, once per `refresh` and per replica (the list is held in memory). When a policy proposal names a zone not seen yet, the gate lists the account once more, at most once a minute, so that a domain added just before is found.
+What a provider can write is reported by the gate and enforced by the engine: alias RRsets only where the provider supports them (Route53), accepted TTLs (EuroDNS: a fixed list), read-only RRsets (`read_only` in the inventory: SOA and locked records at EuroDNS, `relative_target` for a EuroDNS RRset holding a target without ending dot, routing policies at Route53), which are never written nor adopted. The [EuroDNS-compatible API](#endpoints) only serves zones of a `eurodns` provider; the RRset API under `/api/v1` serves every zone.
+
+Desired targets (CNAME, MX, NS, SRV, PTR) are read the same way for every provider: a name of several labels is absolute (`target.example.net` is written `target.example.net.`), a single label is refused as ambiguous. Values already stored are never rewritten.
+
+### Zone discovery
+
+The gate lists every provider account each `zones.refresh`, keeps the zones its `zones` filter selects, shows those it does not manage as **unmanaged** (in the UI and in the MCP `list_zones` tool) and lets policy administrators bring them under management from the UI, through a [managed policy](#managed-policy-editing-from-the-ui) revision, without a configuration change. The lists also tell which provider serves a zone selected by several filters.
+
+- **Upstream load**: a EuroDNS listing costs one request per 100 domains (`POST /domains/search`), through the shared rate-limited transport, once per `refresh` and per replica (the lists are held in memory). When a policy proposal names a zone not seen yet, the gate lists the accounts once more, at most once a minute, so that a domain added just before is found. A failed listing is retried after 5 minutes and the previous list is kept.
 - **Unmanaged zones are read-only.** Their RRsets are readable with `dns.read` on the zone (UI and MCP; the UI also requires `ui.read`), evaluated by RBAC as usual: the zone globs of the role rules apply, so `zones: ["*"]` in a read role covers every discovered zone. They are never writable nor adoptable, the EuroDNS-compatible API (`/dns-zones/...`), the Terraform export and adoption refuse them, and reconcile does not run on them. Their content is read on demand, when someone opens the zone, and reused for `reconcile_interval`; listing zones never reads them.
-- **Bringing a zone under management**: add it to the `zones` list of the managed policy (the UI offers "Manage this zone" to policy administrators), then approve and activate as any revision. It must match `policy.bounds.zones` and be in the discovered list (after `include` and `exclude`). Once active, the zone behaves as a base zone: writes within the roles, adoption, reconcile. `include`/`exclude` therefore also bound what can be managed from the UI.
-- The listing uses the EuroDNS key of the gate: its EuroDNS user must be allowed to search domains. Domains whose DNS is not hosted at EuroDNS are listed too; reading them fails upstream.
+- **Bringing a zone under management**: add it to the `zones` list of the managed policy (the UI offers "Manage this zone" to policy administrators), then approve and activate as any revision. It must match `policy.bounds.zones` and be in a discovered list. Once active, the zone behaves as a base zone: writes within the roles, adoption, reconcile. The `zones` filters of the providers therefore also bound what can be managed from the UI.
+- The EuroDNS listing uses the key of the provider: its EuroDNS user must be allowed to search domains. Domains whose DNS is not hosted at EuroDNS are listed too: exclude them, reading them fails upstream.
 
 ## Store
 
@@ -467,7 +489,7 @@ The limits are checked when an object is written and again on every later revisi
 
 Adoption brings RRsets created outside the gate (foreign) under the ownership of a team, so that the gate can then manage them. It requires `dns.record.adopt` on each RRset and never applies to protected or server-managed (SOA, locked) records.
 
-1. `POST /api/v1/zones/{zone}/adopt/preview` with a selection (`rrsets`, or `hosts` globs and `types`, plus an optional `owner` team): returns the candidates, whether each is adoptable (or why not: `protected`, `server_managed`, `owned_by_other_team`, `already_owned`, `forbidden`, `relative_target`) and a `preview_token` bound to the exact upstream content.
+1. `POST /api/v1/zones/{zone}/adopt/preview` with a selection (`rrsets`, or `hosts` globs and `types`, plus an optional `owner` team): returns the candidates, whether each is adoptable (or why not: `protected`, `owned_by_other_team`, `already_owned`, `forbidden`, `not_found`, the read-only reason of the RRset such as `server_managed` or `relative_target`, or `invalid` when the provider would refuse its content) and a `preview_token` bound to the exact upstream content.
 2. `POST /api/v1/zones/{zone}/adopt` with the chosen `rrsets`, the `preview_token` and a mandatory `comment`. All or nothing: if any RRset changed since the preview or is no longer adoptable, nothing is adopted and the answer is `409 adopt_conflict`.
 
 Both are mutations for CSRF (cookie sessions) and the apply requires the same recent authentication as policy changes for humans.
@@ -590,9 +612,9 @@ Audit events of zones the user cannot read are filtered out; events without a zo
 
 | Path | Description |
 |---|---|
-| EuroDNS API paths | Opened operations: `getDnsZone`, `saveDnsZone`, `checkDnsZone`, `addDnsRecords`, `deleteDnsRecord` (zone engine), `listDnsZoneSnapshots`, `getSnapShot`, `getDnssecStatus`, `getDomain` (proxied). Every other operation returns `403 operation_denied`. Query strings, encoded separators and dot segments are refused. |
+| EuroDNS API paths | Opened operations, for zones of a `eurodns` provider only (`404 zone_not_eurodns` otherwise): `getDnsZone`, `saveDnsZone`, `checkDnsZone`, `addDnsRecords`, `deleteDnsRecord` (zone engine), `listDnsZoneSnapshots`, `getSnapShot`, `getDnssecStatus`, `getDomain` (proxied to the account of the zone). Every other operation returns `403 operation_denied`. Query strings, encoded separators and dot segments are refused. |
 | `GET /.well-known/dns-gate` | Version and features (`if-match`, `ownership`, `adopt`, `policy-delegation`), unauthenticated. |
-| `POST /.well-known/dns-gate/zones/{zone}/adopt` | Adopt RRsets (used by the Terraform provider on import). Foreign RRsets need `dns.record.adopt`; RRsets already owned by one of the caller's teams are a no-op and only need `dns.record.write` on the zone. |
+| `POST /.well-known/dns-gate/zones/{zone}/adopt` | Adopt RRsets of a EuroDNS zone (used by the eurodns Terraform provider on import). Foreign RRsets need `dns.record.adopt`; RRsets already owned by one of the caller's teams are a no-op and only need `dns.record.write` on the zone. |
 | `/api/v1/me`, `/api/v1/connect`, `/api/v1/zones`, `/api/v1/zones/{zone}/rrsets`, `/api/v1/audit` | UI API (`ui.read`; `/zones` lists managed zones then unmanaged ones (`"unmanaged": true`), whose `rrsets` need `dns.read`; `/me` for any bound subject, with its groups and effective permissions; `/connect` returns the public URL, the MCP state, the login issuer and `ui.cli_scope` for the Connect page). |
 | `GET /api/v1/connect/claude-desktop.mcpb` | Claude Desktop extension of the gate (`ui.read`), when MCP and the UI login are enabled, see [Claude Desktop extension](#claude-desktop-extension). |
 | `/api/v1/policy`, `/api/v1/policy/revisions[/{id}[/approve\|reject\|activate\|rollback\|export]]`, `/api/v1/policy/explain`, `/api/v1/policy/who-can`, `/api/v1/policy/virtual-keys/generate` | Policy API, see `internal/uiapi/policy.go`. |
@@ -600,4 +622,4 @@ Audit events of zones the user cannot read are filtered out; events without a zo
 | `/auth/login`, `/auth/callback`, `/auth/logout` | UI login. |
 | `/healthz`, `/readyz` | Probes. |
 
-`GET` on a zone returns an `ETag`; send it back in `If-Match` on writes to get `412 precondition` instead of overwriting a concurrent change. Errors are JSON `{"reason": "...", "message": "..."}`: `forbidden`, `not_owner`, `too_many_changes` (403), `foreign_rrset`, `tainted` (409), `precondition` (412), `invalid_zone` (400), `zone_locked` (503, `Retry-After`), `upstream` (502).
+`GET` on a zone returns an `ETag`; send it back in `If-Match` on writes to get `412 precondition` instead of overwriting a concurrent change. Errors are JSON `{"reason": "...", "message": "..."}`: `forbidden`, `not_owner`, `too_many_changes` (403), `not_found`, `zone_not_eurodns` (404), `foreign_rrset`, `tainted` (409), `precondition` (412), `invalid_zone` (400), `zone_locked` (503, `Retry-After`), `upstream` (502).
