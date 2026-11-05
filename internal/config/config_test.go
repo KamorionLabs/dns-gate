@@ -269,14 +269,14 @@ func TestProviders(t *testing.T) {
 
 	two := strings.Replace(base, "    eurodns: {app_id: app}\n", `    zones: {include: ["*.com"], exclude: ["*.Internal.COM."]}
     eurodns: {app_id: app}
-  - id: route53-homebox
+  - id: route53-main
     kind: route53
     zones: {include: ["*.fr"]}
     route53:
       region: eu-west-3
       assume_role_arn: arn:aws:iam::123456789012:role/dns-gate
       external_id: x
-      hosted_zones: {"Homebox.FR.": Z123ABC}
+      hosted_zones: {"Example.FR.": Z123ABC}
   - id: eu-2
     kind: eurodns
     zones: {include: ["*.net"]}
@@ -286,14 +286,14 @@ func TestProviders(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.Providers[0].Zones.Exclude[0] != "*.internal.com" || c.Providers[1].Route53.HostedZones["homebox.fr"] != "Z123ABC" {
+	if c.Providers[0].Zones.Exclude[0] != "*.internal.com" || c.Providers[1].Route53.HostedZones["example.fr"] != "Z123ABC" {
 		t.Fatalf("normalization: %+v %+v", c.Providers[0].Zones, c.Providers[1].Route53)
 	}
 	if c.Providers[2].EuroDNS.APIKey != "k2" || c.Providers[2].EuroDNS.AppID != "app2" || c.Providers[0].EuroDNS.APIKey != "k" {
 		t.Fatalf("per-provider credentials: %+v %+v", c.Providers[2].EuroDNS, c.Providers[0].EuroDNS)
 	}
-	if got := strings.Join(c.ProvidersFor("homebox.fr"), ","); got != "route53-homebox" {
-		t.Fatalf("providers for homebox.fr: %s", got)
+	if got := strings.Join(c.ProvidersFor("example.fr"), ","); got != "route53-main" {
+		t.Fatalf("providers for example.fr: %s", got)
 	}
 	if len(c.ProvidersFor("a.internal.com")) != 0 {
 		t.Fatal("exclude must win over include")
@@ -311,7 +311,7 @@ func TestProviders(t *testing.T) {
 		"zone not served":   strings.Replace(base, "    kind: eurodns\n", "    kind: eurodns\n    zones: {include: [\"*.fr\"]}\n", 1),
 		"duplicate id":      strings.Replace(two, "id: eu-2", "id: eurodns", 1),
 		"bad hosted zone":   strings.Replace(two, "Z123ABC", "not an id", 1),
-		"hosted zone excl":  strings.Replace(two, "Homebox.FR.", "homebox.de", 1),
+		"hosted zone excl":  strings.Replace(two, "Example.FR.", "example.de", 1),
 		"bad role":          strings.Replace(two, "arn:aws:iam::123456789012:role/dns-gate", "dns-gate", 1),
 		"bad region":        strings.Replace(two, "eu-west-3", "paris", 1),
 		"http base url":     strings.Replace(base, "eurodns: {app_id: app}", "eurodns: {app_id: app, base_url: \"http://api.example.net\"}", 1),
