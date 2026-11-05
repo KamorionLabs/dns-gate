@@ -150,7 +150,8 @@ go run ./cmd/dns-gate --config examples/config.yaml
 Then point a client at `http://localhost:8080` with a token from one of the issuers
 declared in the config. Configuration reference: [docs/CONFIG.md](docs/CONFIG.md).
 
-Kubernetes: Helm chart in `charts/dns-gate`.
+Kubernetes: Helm chart in `charts/dns-gate`. AWS Lambda (low volume, Route 53):
+[docs/DEPLOY-LAMBDA.md](docs/DEPLOY-LAMBDA.md).
 
 ## Documentation
 
@@ -159,6 +160,7 @@ Kubernetes: Helm chart in `charts/dns-gate`.
 - [Threat model](docs/THREAT-MODEL.md)
 - [ACME / certificates](docs/ACME.md)
 - [Onboarding existing zones](docs/ONBOARDING.md)
+- [Deploying on AWS Lambda](docs/DEPLOY-LAMBDA.md)
 - [Roadmap and points to validate](docs/ROADMAP.md)
 
 ## License
