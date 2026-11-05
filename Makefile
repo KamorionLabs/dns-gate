@@ -4,7 +4,7 @@
 # the route table.
 spec:
 	mkdir -p api
-	curl -fsSL https://docapi.eurodns.com/openapi.json -o api/openapi.json
+	curl -fsSL https://docapi.eurodns.com/openapi.json -o api/eurodns.openapi.json
 
 generate: spec
 	go generate ./internal/routes

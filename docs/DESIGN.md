@@ -110,7 +110,7 @@ Main packages of the gate:
 |---|---|
 | `internal/identity` | `Subject` (issuer, id, claims, roles, teams). |
 | `internal/policy` | RBAC engine implementing `Authorizer`. |
-| `internal/routes` | Route table generated from `api/openapi.json`, plus the hand-written operation → action mapping. |
+| `internal/routes` | Route table generated from `api/eurodns.openapi.json`, plus the hand-written operation → action mapping. |
 | `internal/zonewrite` | `Engine`: every DNS zone read/write on behalf of a subject, ownership enforcement, reconcile. |
 | `internal/store` | `Store`: ownership entries, zone versions, zone locks (memory, DynamoDB). |
 | `internal/audit` | Structured audit events (stdout and store). |
@@ -145,10 +145,16 @@ forwarded upstream; the upstream credentials are injected by the shared transpor
 
 ### 5.1 Route table
 
-`api/openapi.json` is vendored. A `go generate` step produces the list of
+`api/eurodns.openapi.json` is the EuroDNS document, fetched by `make spec` (it is not
+redistributed). A `go generate` step produces the list of
 `(method, path template, operationId)`. A hand-written table maps each
 operationId to an action and a handler kind. Any operation absent from the mapping
 is denied, so a new EuroDNS endpoint is never exposed by accident.
+
+The gate's own API (`/.well-known/dns-gate`, `/api/v1`) is described by
+`api/dns-gate.openapi.yaml` (OpenAPI 3.1, rendered on the project site); a test
+fails when a route served under `/api/v1` is missing from it or the other way round.
+Guide: [API.md](API.md).
 
 | operationId | Action | Handler |
 |---|---|---|

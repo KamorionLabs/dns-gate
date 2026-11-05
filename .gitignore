@@ -8,4 +8,4 @@ web/dist/*
 !web/dist/index.html
 .env
 *.local.yaml
-api/openapi.json
+api/eurodns.openapi.json

@@ -1,10 +1,10 @@
 // Package routes maps EuroDNS API requests to operations and gate actions.
-// The operation table is generated from api/openapi.json; every operation is
+// The operation table is generated from api/eurodns.openapi.json; every operation is
 // denied unless explicitly mapped below, so new upstream endpoints stay
 // closed until reviewed.
 package routes
 
-//go:generate go run ./gen -spec ../../api/openapi.json -out zz_generated.go
+//go:generate go run ./gen -spec ../../api/eurodns.openapi.json -out zz_generated.go
 
 import (
 	"errors"
