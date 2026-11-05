@@ -9,7 +9,8 @@ teams, staged together, reviewed as a plan with its diff, then applied), the
 journal of every write,
 refusal and reconciliation (reads hidden by default), a Connect page (Claude
 Desktop with its extension download, Claude Code, Terraform and API setups filled
-in for the gate),
+in for the gate, and "Get an API token" for curl and Terraform when the gate issues
+tokens),
 and the policy: the read-only base layer, the managed layer with its reviewed revisions
 (draft, impact, diff, approval, activation, rollback) and a decision simulator.
 
