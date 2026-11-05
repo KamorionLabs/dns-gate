@@ -114,7 +114,7 @@ Main packages of the gate:
 | `internal/provider` | Provider contract (`Provider`, `Checker`, `Snapshotter`, `Resolver`, capabilities, errors); `provider/eurodns` and `provider/route53` adapters. |
 | `internal/eurodnsapi` | EuroDNS-compatible API facade (full-zone PUT, record ids, forwards, passthrough) over the neutral engine, for EuroDNS zones only. |
 | `internal/policy` | RBAC engine implementing `Authorizer`. |
-| `internal/routes` | Route table generated from `api/openapi.json`, plus the hand-written operation → action mapping. |
+| `internal/routes` | Route table generated from `api/eurodns.openapi.json`, plus the hand-written operation → action mapping. |
 | `internal/zonewrite` | `Engine`: every DNS zone read/write on behalf of a subject on the neutral model, provider resolved per zone, ownership enforcement, reconcile. |
 | `internal/store` | `Store`: ownership entries, zone versions, zone locks (memory, DynamoDB). |
 | `internal/audit` | Structured audit events (stdout and store). |
@@ -184,10 +184,16 @@ forwarded upstream; the upstream credentials are injected by the shared transpor
 
 ### 5.1 Route table
 
-`api/openapi.json` is vendored. A `go generate` step produces the list of
+`api/eurodns.openapi.json` is the EuroDNS document, fetched by `make spec` (it is not
+redistributed). A `go generate` step produces the list of
 `(method, path template, operationId)`. A hand-written table maps each
 operationId to an action and a handler kind. Any operation absent from the mapping
 is denied, so a new EuroDNS endpoint is never exposed by accident.
+
+The gate's own API (`/.well-known/dns-gate`, `/api/v1`) is described by
+`api/dns-gate.openapi.yaml` (OpenAPI 3.1, rendered on the project site); a test
+fails when a route served under `/api/v1` is missing from it or the other way round.
+Guide: [API.md](API.md).
 
 | operationId | Action | Handler |
 |---|---|---|
@@ -777,7 +783,7 @@ step-by-step guide is [ONBOARDING.md](ONBOARDING.md).
 |---|---|---|
 | `POST /api/v1/zones/{zone}/adopt/preview` | `dns.record.adopt` | dry run on a selection (explicit RRsets and/or host globs + types), for an owner team |
 | `POST /api/v1/zones/{zone}/adopt` | `dns.record.adopt` | apply the adoptable candidates of a preview |
-| `GET /api/v1/zones/{zone}/terraform?team=&hosts=&types=` | `ui.read` | Terraform HCL for the RRsets owned by a team |
+| `GET /api/v1/zones/{zone}/terraform?team=&hosts=&types=&provider=` | `ui.read` | Terraform HCL for the RRsets owned by a team |
 
 - **Preview** lists every selected RRset with its TTL, values, current status and
   whether it is adoptable. Reasons for refusal: `protected`, `server_managed` (SOA,
@@ -795,7 +801,9 @@ step-by-step guide is [ONBOARDING.md](ONBOARDING.md).
 
 ### 16.2 Terraform export
 
-The export returns HCL for the team's RRsets: one `eurodns_record_set` per RRset and
+The export returns HCL for the team's RRsets: one `dnsgate_record_set` per RRset
+(provider `KamorionLabs/dnsgate`, any DNS provider behind the gate, alias RRsets as an
+`alias` block; `provider=eurodns` exports `eurodns_record_set` instead) and
 one `import` block (Terraform and OpenTofu 1.5+) with the import id
 `<zone>/<host>/<type>`. Applied as is, the **first plan must show only imports and
 no changes**; any diff means the export and the zone disagree and must be
@@ -853,7 +861,10 @@ Writes are **disabled by default** in the configuration. When enabled:
   radius) and returns the RRset diff and a `plan_id`.
 - The `plan_id` is bound to the **subject** that planned and to the **zone version**
   at plan time, and expires. `apply_rrset_change(plan_id)` fails if another subject
-  presents it, if the zone changed since, or if it expired.
+  presents it, if the zone changed since, or if it expired. Plans are kept in the
+  store and taken once with a conditional delete, so any replica (or Lambda
+  instance) can apply a plan made by another, never twice; `POST
+  /api/v1/zones/{zone}/plan` and `/apply` use the same plans.
 - An agent therefore cannot apply anything that was not shown first as a diff, and
   a human in the loop can review the plan before approving the apply call in the
   MCP client.

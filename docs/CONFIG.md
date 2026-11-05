@@ -526,7 +526,7 @@ Adoption brings RRsets created outside the gate (foreign) under the ownership of
 
 Both are mutations for CSRF (cookie sessions) and the apply requires the same recent authentication as policy changes for humans.
 
-`GET /api/v1/zones/{zone}/terraform?team=&hosts=&types=` (`ui.read`) downloads the **managed** RRsets of a zone as Terraform/OpenTofu configuration for the `kamorionlabs/eurodns` provider: one `eurodns_record_set` per RRset plus `import` blocks, so a team can move what it adopted into its own stack. `hosts` (host globs) and `types` accept comma-separated values or repeated parameters; `rrsets=www/A,@/MX` exports exactly that selection (for example what was just adopted) and takes precedence over `hosts` and `types`.
+`GET /api/v1/zones/{zone}/terraform?team=&hosts=&types=&provider=` (`ui.read`) downloads the **managed** RRsets of a zone as Terraform/OpenTofu configuration: one resource per RRset plus `import` blocks (id `<zone>/<host>/<type>`), so a team can move what it adopted into its own stack. By default the resources are `dnsgate_record_set` of the `KamorionLabs/dnsgate` provider, which talks to the gate REST API and works for every DNS provider behind the gate (attributes `zone`, `name`, `type`, `ttl`, `values`, or an `alias` block `{name, zone_id, evaluate_target_health}`); `provider=eurodns` exports `eurodns_record_set` of the `kamorionlabs/eurodns` provider instead (EuroDNS-compatible API, alias RRsets skipped). `hosts` (host globs) and `types` accept comma-separated values or repeated parameters; `rrsets=www/A,@/MX` exports exactly that selection (for example what was just adopted) and takes precedence over `hosts` and `types`.
 
 ## MCP
 
@@ -536,7 +536,7 @@ Both are mutations for CSRF (cookie sessions) and the apply requires the same re
 |---|---|---|
 | `mcp.enabled` | `false` | Serves `/mcp` and `/.well-known/oauth-protected-resource`. |
 | `mcp.allow_writes` | `false` | Adds the write tools (plan/apply, adoption). Without it, the server is read-only. |
-| `mcp.plan_ttl` | `10m` | Lifetime of a plan returned by `plan_rrset_change` (1m to 1h). |
+| `mcp.plan_ttl` | `10m` | Lifetime of a plan returned by `plan_rrset_change` or `POST /api/v1/zones/{zone}/plan` (1m to 1h). |
 | `mcp.requests_per_minute` | `120` | Rate limit per subject (`429` beyond). |
 | `mcp.public_url` | UI origin, else the request host | Public base URL of the gate, advertised in the protected resource metadata and shown on the Connect page. |
 
@@ -555,7 +555,7 @@ Tools:
 | `apply_rrset_change` | write | Applies a plan exactly as planned; refused when expired, used, owned by another caller, or when the zone changed since (`precondition`). |
 | `adopt_preview`, `adopt_apply` | dry run, write | Adoption as above. |
 
-There is no policy tool: policy changes stay with humans in the UI, with step-up. Plans live in the memory of the replica that created them: with several replicas, route `/mcp` to a single replica or accept that a plan must be applied where it was made.
+There is no policy tool: policy changes stay with humans in the UI, with step-up. Plans are kept in the store, shared by every replica, and taken once: a plan made on one replica can be applied on another. The same plans back `POST /api/v1/zones/{zone}/plan` and `/apply` ([API.md](API.md)). Expired plans are purged every 15 minutes by the gate (SQL stores) or by the DynamoDB TTL.
 
 ### Connecting an assistant
 

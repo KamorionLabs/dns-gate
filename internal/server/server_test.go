@@ -80,7 +80,7 @@ func (f *fakeEngine) Zones(ctx context.Context, s *identity.Subject) ([]uiapi.Zo
 }
 
 func (f *fakeEngine) Inventory(ctx context.Context, s *identity.Subject, zone string) (*uiapi.ZoneInventory, error) {
-	return &uiapi.ZoneInventory{Zone: zone, RRsets: []uiapi.RRset{{Host: "www", Type: "A", Status: uiapi.StatusManaged, Owner: "web"}}}, nil
+	return &uiapi.ZoneInventory{Zone: zone, RRsets: []uiapi.RRset{{Host: "www", Type: "A", TTL: 600, Values: []string{"192.0.2.1"}, Status: uiapi.StatusManaged, Owner: "web"}}}, nil
 }
 
 type memAudit struct {
@@ -186,7 +186,7 @@ func newEnvDisc(t *testing.T, tweak func(*config.Config), disc ZoneDiscovery) *e
 	s, err := New(Config{
 		Config: cfg, Authn: an, Authz: policy.New(h), Engine: e.engine, Audit: e.audit, AuditReader: e.audit,
 		Policy: h, PolicyStore: e.store, Ownership: e.store, Now: func() time.Time { return e.clock() },
-		Ops: e.ops, Terraform: e.ops.terraform, Discovery: disc,
+		Ops: e.ops, Terraform: e.ops.terraform, Discovery: disc, Versions: e.ops,
 		EuroDNS: e.facade, HTTPClient: e.idp.Client(),
 		UIFiles: fstest.MapFS{"index.html": {Data: []byte("<html>ui</html>")}, "assets/app.js": {Data: []byte("js")}},
 	})

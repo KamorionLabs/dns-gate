@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// PlanGCInterval is how often Run deletes the expired MCP plans.
-const PlanGCInterval = 10 * time.Minute
+// PlanGCInterval is how often Run deletes the expired RRset plans.
+const PlanGCInterval = 15 * time.Minute
 
 // Maintenance runs one pass of the background work, for runtimes without
 // long-lived goroutines (AWS Lambda, called by a schedule): policy refresh,

@@ -63,6 +63,12 @@ type Config struct {
 	// Ops and Terraform back adoption, RRset plans (MCP) and the HCL export.
 	Ops       Operations
 	Terraform TerraformRenderer
+	// Plans persists the RRset plans of MCP and of the REST API, shared by
+	// every gate instance; an in-process store when nil (one replica).
+	Plans store.PlanStore
+	// Versions reads zone versions: ETag of the REST inventory, disabled
+	// when nil.
+	Versions ZoneVersions
 	// HTTPClient is used for the UI OIDC login (discovery, token exchange)
 	// and the SAML IdP metadata.
 	HTTPClient *http.Client
@@ -84,6 +90,11 @@ type EuroDNSAPI interface {
 	// Proxy forwards an authorized passthrough request to the account of
 	// zone; path is the validated upstream path.
 	Proxy(w http.ResponseWriter, r *http.Request, zone, path string)
+}
+
+// ZoneVersions reads the gate version of a zone (store.Store).
+type ZoneVersions interface {
+	ZoneVersion(ctx context.Context, zone string) (int64, error)
 }
 
 // ZoneDiscovery is the account zone listing (internal/discovery).
@@ -122,6 +133,9 @@ func New(c Config) (*Server, error) {
 	}
 	if c.HTTPClient == nil {
 		c.HTTPClient = &http.Client{Timeout: 15 * time.Second}
+	}
+	if c.Plans == nil {
+		c.Plans = store.NewMemory()
 	}
 	if c.Policy == nil {
 		h, err := policy.NewHolder(c.Config)
@@ -366,10 +380,11 @@ func (s *Server) handleGateInfo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "GET only")
 		return
 	}
-	writeJSON(w, http.StatusOK, GateInfo{
-		Version:  version.Version,
-		Features: []string{FeatureIfMatch, FeatureOwnership, FeatureAdopt, FeaturePolicyDelegation},
-	})
+	features := []string{FeatureIfMatch, FeatureOwnership, FeatureAdopt, FeaturePolicyDelegation}
+	if s.cfg.Ops != nil {
+		features = append(features, FeaturePlans, FeatureRRsetAPI)
+	}
+	writeJSON(w, http.StatusOK, GateInfo{Version: version.Version, Features: features})
 }
 
 // GateInfo is the gate discovery document (GET /.well-known/dns-gate).

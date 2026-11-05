@@ -8,18 +8,12 @@ import (
 	"testing"
 
 	"github.com/KamorionLabs/dns-gate/internal/dns"
-	eurodnsprov "github.com/KamorionLabs/dns-gate/internal/provider/eurodns"
-	eurodns "github.com/KamorionLabs/eurodns-go"
 )
 
 var update = flag.Bool("update", false, "rewrite golden files")
 
-func sets(recs ...eurodns.Record) []dns.RRset {
-	return eurodnsprov.FromNative("eurodns", "example.com", &eurodns.Zone{Records: recs}).RRsets
-}
-
-func r(typ, host string, ttl int, rdata string) eurodns.Record {
-	return eurodns.Record{Type: typ, Host: host, TTL: ttl, RData: rdata}
+func set(typ, host string, ttl int, values ...string) dns.RRset {
+	return dns.RRset{Key: dns.Key{Host: host, Type: typ}, TTL: ttl, Values: values}
 }
 
 func golden(t *testing.T, name, got string) {
@@ -39,44 +33,60 @@ func golden(t *testing.T, name, got string) {
 	}
 }
 
+func zoneSets() []dns.RRset {
+	soa := set("SOA", "@", 86400, "ns1.example.net. hostmaster.example.com. 1 2 3 4 5")
+	ns := set("NS", "@", 86400, "ns1.example.net.")
+	ns.ReadOnly = "server_managed"
+	return []dns.RRset{
+		soa, ns,
+		set("A", "@", 3600, "192.0.2.10"),
+		set("MX", "@", 3600, "20 mx2.example.net.", "10 mx1.example.net."),
+		set("A", "www", 600, "192.0.2.2", "192.0.2.1"),
+		set("CNAME", "*.app", 3600, "app.example.net."),
+		set("TXT", "_acme-challenge.www", 600, "token"),
+		set("TXT", "@", 3600, `"v=spf1 include:_spf.example.net -all"`),
+		set("TXT", "tpl", 3600, `${var.x} and %{if} \ "q"`),
+		set("A", "3d", 3600, "192.0.2.3"),
+		set("A", "a.b", 3600, "192.0.2.4"),
+		set("A", "a-b", 3600, "192.0.2.5"),
+		set("AAAA", "multi", 3600, "2001:db8::1", "2001:db8::2", "2001:db8::3", "2001:db8::4", "2001:db8::5"),
+		{Key: dns.Key{Host: "cdn", Type: "AAAA"}, Alias: &dns.Alias{Target: "d1.cloudfront.net.", HostedZoneID: "Z2FDTNDATAQYW2"}},
+		{Key: dns.Key{Host: "lb", Type: "A"}, TTL: 60, Alias: &dns.Alias{Target: "lb-1.eu-west-3.elb.amazonaws.com.", HostedZoneID: "Z3Q77PNBQS71R4", EvaluateTargetHealth: true}},
+		set("TXT", "empty", 3600),
+	}
+}
+
 func TestRenderZone(t *testing.T) {
-	locked := true
-	in := sets(
-		eurodns.Record{Type: "SOA", Host: "@", TTL: 86400, RData: "ns1.example.net. hostmaster.example.com. 1 2 3 4 5", Locked: &locked},
-		eurodns.Record{Type: "NS", Host: "@", TTL: 86400, RData: "ns1.example.net.", Locked: &locked},
-		r("A", "@", 3600, "192.0.2.10"),
-		r("MX", "@", 3600, "20 mx2.example.net."),
-		r("MX", "@", 3600, "10 mx1.example.net."),
-		r("A", "www", 600, "192.0.2.2"),
-		r("A", "www", 600, "192.0.2.1"),
-		r("CNAME", "*.app", 3600, "app.example.net."),
-		r("TXT", "_acme-challenge.www", 600, "token"),
-		r("TXT", "@", 3600, `"v=spf1 include:_spf.example.net -all"`),
-		r("TXT", "tpl", 3600, `${var.x} and %{if} \ "q"`),
-		r("A", "3d", 3600, "192.0.2.3"),
-		r("A", "a.b", 3600, "192.0.2.4"),
-		r("A", "a-b", 3600, "192.0.2.5"),
-		r("AAAA", "multi", 3600, "2001:db8::1"),
-		r("AAAA", "multi", 3600, "2001:db8::2"),
-		r("AAAA", "multi", 3600, "2001:db8::3"),
-		r("AAAA", "multi", 3600, "2001:db8::4"),
-		r("AAAA", "multi", 3600, "2001:db8::5"),
-	)
-	golden(t, "zone", Render("Example.com.", in, Options{Header: []string{"Team: web", "Review before applying."}}))
+	golden(t, "zone", Render("Example.com.", zoneSets(), Options{Header: []string{"Team: web", "Review before applying."}}))
+}
+
+func TestRenderZoneEuroDNS(t *testing.T) {
+	out := Render("example.com", zoneSets(), Options{Provider: ProviderEuroDNS})
+	if strings.Contains(out, "alias") || strings.Contains(out, "cloudfront") {
+		t.Fatalf("alias RRsets exported for the eurodns provider:\n%s", out)
+	}
+	golden(t, "zone_eurodns", out)
 }
 
 func TestRenderNoImportsAndPrefix(t *testing.T) {
-	golden(t, "noimport", Render("example.com", sets(r("A", "www", 3600, "192.0.2.1")), Options{SkipImports: true, ResourcePrefix: "web_"}))
+	golden(t, "noimport", Render("example.com", []dns.RRset{set("A", "www", 3600, "192.0.2.1")}, Options{SkipImports: true, ResourcePrefix: "web_"}))
+}
+
+func TestParseProvider(t *testing.T) {
+	for in, want := range map[string]Provider{"": ProviderDNSGate, "dnsgate": ProviderDNSGate, "EuroDNS": ProviderEuroDNS} {
+		if got, ok := ParseProvider(in); !ok || got != want {
+			t.Errorf("ParseProvider(%q) = %q %v", in, got, ok)
+		}
+	}
+	if _, ok := ParseProvider("route53"); ok {
+		t.Error("unknown provider accepted")
+	}
 }
 
 func TestResourceNamesUniqueAndValid(t *testing.T) {
-	in := []dns.RRset{
-		{Key: dns.Key{Host: "a.b", Type: "A"}, TTL: 3600, Values: []string{"192.0.2.1"}},
-		{Key: dns.Key{Host: "a_b", Type: "A"}, TTL: 3600, Values: []string{"192.0.2.2"}},
-		{Key: dns.Key{Host: "a..b", Type: "A"}, TTL: 3600, Values: []string{"192.0.2.3"}},
-	}
+	in := []dns.RRset{set("A", "a.b", 3600, "192.0.2.1"), set("A", "a_b", 3600, "192.0.2.2"), set("A", "a..b", 3600, "192.0.2.3")}
 	out := Render("example.com", in, Options{})
-	for _, want := range []string{`"a_b_a" {`, `"a_b_a_2" {`, `"a_b_a_3" {`, "to = eurodns_record_set.a_b_a_3"} {
+	for _, want := range []string{`"a_b_a" {`, `"a_b_a_2" {`, `"a_b_a_3" {`, "to = dnsgate_record_set.a_b_a_3"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("missing %q in\n%s", want, out)
 		}

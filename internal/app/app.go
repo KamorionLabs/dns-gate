@@ -19,6 +19,7 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/policy"
 	"github.com/KamorionLabs/dns-gate/internal/provider"
 	eurodnsprov "github.com/KamorionLabs/dns-gate/internal/provider/eurodns"
+	route53prov "github.com/KamorionLabs/dns-gate/internal/provider/route53"
 	"github.com/KamorionLabs/dns-gate/internal/server"
 	"github.com/KamorionLabs/dns-gate/internal/store"
 	"github.com/KamorionLabs/dns-gate/internal/version"
@@ -50,8 +51,8 @@ type App struct {
 	opts      Options
 	log       *slog.Logger
 
-	// PlanGC deletes the expired MCP plans; Run and Maintenance call it
-	// when set.
+	// PlanGC deletes the expired RRset plans of MCP and of the REST API;
+	// Run and Maintenance call it when set. New sets it to GCPlans.
 	PlanGC func(context.Context) error
 }
 
@@ -134,6 +135,8 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		Ownership:   st,
 		Ops:         eng,
 		Terraform:   server.InventoryTerraform(eng),
+		Plans:       st,
+		Versions:    st,
 		UIFiles:     web.FS(),
 		Discovery:   disc,
 		Log:         log,
@@ -145,7 +148,18 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 	if err != nil {
 		return nil, err
 	}
-	return &App{Config: cfg, Store: st, Engine: eng, Policy: holder, Discovery: disc, authz: authz, handler: srv.Handler(), opts: opts, log: log}, nil
+	a := &App{Config: cfg, Store: st, Engine: eng, Policy: holder, Discovery: disc, authz: authz, handler: srv.Handler(), opts: opts, log: log}
+	a.PlanGC = a.GCPlans
+	return a, nil
+}
+
+// GCPlans purges the expired RRset plans of the store.
+func (a *App) GCPlans(ctx context.Context) error {
+	n, err := a.Store.GCPlans(ctx, time.Now())
+	if n > 0 {
+		a.log.Info("plan gc", "removed", n)
+	}
+	return err
 }
 
 // Handler is the HTTP handler of the gate.
@@ -177,7 +191,14 @@ func newProvider(ctx context.Context, pc config.Provider) (provider.Provider, er
 			UserAgent: "dns-gate/" + version.Version,
 		})
 	case config.KindRoute53:
-		return nil, fmt.Errorf("provider %s: kind route53 is not available in this build", pc.ID)
+		r := pc.Route53
+		if r == nil {
+			r = &config.Route53Config{}
+		}
+		return route53prov.New(ctx, pc.ID, route53prov.Config{
+			Region: r.Region, AssumeRoleARN: r.AssumeRoleARN, ExternalID: r.ExternalID,
+			HostedZones: r.HostedZones, IncludePrivate: r.IncludePrivate,
+		})
 	}
 	return nil, fmt.Errorf("provider %s: unknown kind %q", pc.ID, pc.Kind)
 }

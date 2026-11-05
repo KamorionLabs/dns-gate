@@ -67,7 +67,7 @@ func (e *env) scenarioBulkAdopt(t *testing.T) {
 		t.Fatalf("adopt result: %+v", res)
 	}
 
-	hcl := e.getText(t, "ci-admin", base+"/terraform?rrsets=shop/A,blog/CNAME")
+	hcl := e.getText(t, "ci-admin", base+"/terraform?provider=eurodns&rrsets=shop/A,blog/CNAME")
 	if strings.Count(hcl, `resource "eurodns_record_set"`) != 2 || strings.Count(hcl, "import {") != 2 {
 		t.Fatalf("export:\n%s", hcl)
 	}

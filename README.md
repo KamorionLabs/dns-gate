@@ -158,6 +158,7 @@ Kubernetes: Helm chart in `charts/dns-gate`. AWS Lambda (low volume, Route 53):
 
 ## Documentation
 
+- [API guide](docs/API.md) and [API reference](https://kamorionlabs.github.io/dns-gate/api.html) ([OpenAPI](api/dns-gate.openapi.yaml))
 - [Design](docs/DESIGN.md)
 - [Configuration reference](docs/CONFIG.md)
 - [Migrating a 0.x configuration to providers](docs/MIGRATION-0.x.md)
