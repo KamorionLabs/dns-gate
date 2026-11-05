@@ -99,7 +99,7 @@
     {:else if settled}
       <h2 id="health-title">All good</h2>
       <p>
-        Every managed record set matches EuroDNS{journalHidden ? '' : ', and nothing was refused or failed in the last 24 hours'}.
+        Every managed record set matches the DNS provider{journalHidden ? '' : ', and nothing was refused or failed in the last 24 hours'}.
         {#if oldestSync}Oldest zone sync: {relative(oldestSync, clock.now)}.{/if}
       </p>
     {:else}

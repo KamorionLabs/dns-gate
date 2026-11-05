@@ -17,6 +17,8 @@
   import Icon from './Icon.svelte';
   import { teamFromText, teamLabel } from '../lib/team';
   import HclBlock from './HclBlock.svelte';
+  import { readOnlyLabel } from '../lib/rights';
+  import type { StagedKind } from '../lib/staging';
 
   let {
     zone,
@@ -26,6 +28,11 @@
     canAdopt = false,
     adoptHint = '',
     onadopt,
+    writable = false,
+    readOnlyWhy = '',
+    stagedKind,
+    onedit,
+    ondelete,
   }: {
     zone: string;
     rr: RRset;
@@ -34,7 +41,13 @@
     canAdopt?: boolean;
     adoptHint?: string;
     onadopt?: () => void;
+    writable?: boolean;
+    readOnlyWhy?: string;
+    stagedKind?: StagedKind;
+    onedit?: () => void;
+    ondelete?: () => void;
   } = $props();
+  const roTag = $derived(readOnlyLabel(rr));
   const owned = $derived(rr.status !== 'foreign');
 
   let dialog: HTMLDialogElement;
@@ -106,6 +119,8 @@
           <StatusBadge status={rr.status} />
           {#if rr.protected}<span class="flag" title="Protected by the base policy: no role can change it through the gate, even after adoption."><Icon name="lock" size={12} /> Protected</span>{/if}
           {#if rr.adopted}<span class="flag">Adopted</span>{/if}
+          {#if roTag}<span class="flag">{roTag}</span>{/if}
+          {#if rr.alias}<span class="flag">Alias</span>{/if}
         </div>
       </div>
       <button class="btn quiet icon close" type="button" aria-label="Close" onclick={onclose}><Icon name="x" /></button>
@@ -114,7 +129,22 @@
     <div class="scroll">
       <p class="help {rr.status}">{statusHelp[rr.status]}</p>
 
-      {#if !owned && !unmanaged && onadopt}
+      {#if stagedKind}
+        <div class="change staged">
+          <p><b>{stagedKind === 'delete' ? 'Staged for deletion.' : 'A change of this record set is staged.'}</b> It is written after you review and apply the zone's changes.</p>
+          {#if stagedKind !== 'delete' && onedit}<button class="btn" type="button" onclick={onedit}>Edit the change</button>{/if}
+        </div>
+      {:else if writable && (onedit || ondelete)}
+        <div class="change">
+          {#if onedit}<button class="btn primary" type="button" onclick={onedit}>Edit…</button>{/if}
+          {#if ondelete}<button class="btn danger" type="button" onclick={ondelete}><Icon name="trash" size={14} />Delete</button>{/if}
+          <p class="dim small">Changes are staged first, then reviewed and applied together.</p>
+        </div>
+      {:else if readOnlyWhy && !unmanaged && (owned || rr.read_only || rr.alias)}
+        <p class="ro-why"><Icon name="lock" size={13} /> {readOnlyWhy}</p>
+      {/if}
+
+      {#if !owned && !unmanaged && onadopt && !rr.read_only}
         <div class="adopt">
           {#if rr.protected}
             <p class="dim"><Icon name="lock" size={12} /> Protected by the base policy: it cannot be adopted.</p>
@@ -127,12 +157,22 @@
         </div>
       {/if}
 
-      <section>
-        <h3 class="eyebrow">Values</h3>
-        <ul class="values">
-          {#each rr.values as v (v)}<li><CopyText text={v} label="value" /></li>{/each}
-        </ul>
-      </section>
+      {#if rr.alias}
+        <section>
+          <h3 class="eyebrow">Alias target</h3>
+          <ul class="values">
+            <li><CopyText text={rr.alias.target} label="alias target" /></li>
+          </ul>
+          <p class="dim small">Hosted zone <span class="mono">{rr.alias.hosted_zone_id}</span> · target health {rr.alias.evaluate_target_health ? 'evaluated' : 'not evaluated'}</p>
+        </section>
+      {:else}
+        <section>
+          <h3 class="eyebrow">Values</h3>
+          <ul class="values">
+            {#each rr.values as v (v)}<li><CopyText text={v} label="value" /></li>{/each}
+          </ul>
+        </section>
+      {/if}
 
       <section class="facts">
         <div><span class="eyebrow">TTL</span><span class="mono num">{fmtTTL(rr.ttl)} <span class="dim">({rr.ttl}s)</span></span></div>
@@ -241,6 +281,45 @@
 </dialog>
 
 <style>
+  .change {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--s2);
+  }
+  .change p {
+    flex: 1 1 100%;
+  }
+  .change.staged {
+    padding: var(--s3);
+    border-radius: var(--r-md);
+    background: var(--brass-wash);
+    color: var(--ink-2);
+  }
+  .change .btn.primary {
+    background: var(--seal-ink);
+    color: var(--sheet);
+    border-color: transparent;
+  }
+  .btn.danger {
+    color: var(--wax);
+  }
+  .btn.danger:hover {
+    border-color: color-mix(in srgb, var(--wax) 40%, transparent);
+  }
+  .ro-why {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    padding: var(--s2) var(--s3);
+    border-radius: var(--r-md);
+    background: var(--well);
+    color: var(--ink-2);
+  }
+  .ro-why :global(svg) {
+    flex: none;
+    margin-top: 3px;
+  }
   .drawer {
     margin: 0 0 0 auto;
     padding: 0;
