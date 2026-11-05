@@ -177,7 +177,7 @@ func newEnvDisc(t *testing.T, tweak func(*config.Config), disc ZoneDiscovery) *e
 	s, err := New(Config{
 		Config: cfg, Authn: an, Authz: policy.New(h), Engine: e.engine, Audit: e.audit, AuditReader: e.audit,
 		Policy: h, PolicyStore: e.store, Ownership: e.store, Now: func() time.Time { return e.clock() },
-		Ops: e.ops, Terraform: e.ops.terraform, Discovery: disc,
+		Ops: e.ops, Terraform: e.ops.terraform, Discovery: disc, Versions: e.ops,
 		Upstream: keyTransport{}, HTTPClient: e.idp.Client(),
 		UIFiles: fstest.MapFS{"index.html": {Data: []byte("<html>ui</html>")}, "assets/app.js": {Data: []byte("js")}},
 	})

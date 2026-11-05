@@ -2,9 +2,6 @@ package server
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -43,14 +40,12 @@ type mcpServer struct {
 	s       *Server
 	handler http.Handler
 	refs    sync.Map // ref -> *identity.Subject
-	plans   *planStore
 	limiter *subjectLimiter
 }
 
 func (s *Server) newMCP() *mcpServer {
 	m := &mcpServer{
 		s:       s,
-		plans:   newPlanStore(s.cfg.Config.MCP.PlanTTL.D(), s.now),
 		limiter: newSubjectLimiter(s.cfg.Config.MCP.RequestsPerMinute, s.now),
 	}
 	srv := mcp.NewServer(&mcp.Implementation{Name: "dns-gate", Version: version.Version}, &mcp.ServerOptions{
@@ -490,7 +485,10 @@ func (m *mcpServer) addWriteTools(srv *mcp.Server) {
 			return nil, uiapi.PlanResult{}, toolError(err)
 		}
 		if plan.Allowed {
-			plan.PlanID = m.plans.put(subj.String(), zone, in.Changes, plan.ZoneVersion)
+			if plan.PlanID, err = m.s.savePlan(ctx, subj, zone, in.Changes, plan.ZoneVersion); err != nil {
+				m.s.log.Error("save plan", "zone", zone, "err", err)
+				return nil, uiapi.PlanResult{}, errors.New("plan storage unavailable")
+			}
 		}
 		m.audit(ctx, req, subj, "plan_rrset_change", zone, "allow", plan.Reason, map[string]any{"plan_id": plan.PlanID, "allowed": plan.Allowed})
 		return nil, *plan, nil
@@ -505,17 +503,17 @@ func (m *mcpServer) addWriteTools(srv *mcp.Server) {
 		if err != nil {
 			return nil, uiapi.PlanResult{}, err
 		}
-		p, err := m.plans.take(in.PlanID, subj.String())
+		p, err := m.s.takePlan(ctx, in.PlanID, subj)
 		if err != nil {
 			m.audit(ctx, req, subj, "apply_rrset_change", "", "deny", err.Error(), map[string]any{"plan_id": in.PlanID})
 			return nil, uiapi.PlanResult{}, err
 		}
-		res, err := m.s.cfg.Ops.ApplyRRsets(ctx, subj, p.zone, p.changes, p.version)
+		res, err := m.s.cfg.Ops.ApplyRRsets(ctx, subj, p.Zone, p.Changes, p.ZoneVersion)
 		if err != nil {
-			m.audit(ctx, req, subj, "apply_rrset_change", p.zone, "error", reasonOf(err), map[string]any{"plan_id": in.PlanID})
+			m.audit(ctx, req, subj, "apply_rrset_change", p.Zone, "error", reasonOf(err), map[string]any{"plan_id": in.PlanID})
 			return nil, uiapi.PlanResult{}, toolError(err)
 		}
-		m.audit(ctx, req, subj, "apply_rrset_change", p.zone, "allow", "", map[string]any{"plan_id": in.PlanID})
+		m.audit(ctx, req, subj, "apply_rrset_change", p.Zone, "allow", "", map[string]any{"plan_id": in.PlanID})
 		res.PlanID = in.PlanID
 		return nil, *res, nil
 	})
@@ -587,69 +585,6 @@ func toolError(err error) error {
 		return errors.New("upstream: EuroDNS returned an error")
 	}
 	return errors.New("internal error")
-}
-
-// planStore keeps plans in memory, bound to subject, zone, changes and zone
-// version; single use. Plans do not survive a restart and are local to the
-// replica.
-type planStore struct {
-	mu    sync.Mutex
-	ttl   time.Duration
-	now   func() time.Time
-	plans map[string]storedPlan
-}
-
-type storedPlan struct {
-	subject, zone string
-	changes       []uiapi.RRsetChange
-	version       int64
-	expires       time.Time
-}
-
-var (
-	errPlanUnknown = errors.New("unknown or already used plan_id: plan again")
-	errPlanExpired = errors.New("plan expired: plan again")
-	errPlanOwner   = errors.New("plan belongs to another caller")
-)
-
-func newPlanStore(ttl time.Duration, now func() time.Time) *planStore {
-	return &planStore{ttl: ttl, now: now, plans: map[string]storedPlan{}}
-}
-
-func (p *planStore) put(subject, zone string, changes []uiapi.RRsetChange, version int64) string {
-	var b [16]byte
-	_, _ = rand.Read(b[:])
-	id := "plan-" + hex.EncodeToString(b[:])
-	cp, _ := json.Marshal(changes)
-	var frozen []uiapi.RRsetChange
-	_ = json.Unmarshal(cp, &frozen)
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	now := p.now()
-	for k, v := range p.plans {
-		if now.After(v.expires) {
-			delete(p.plans, k)
-		}
-	}
-	p.plans[id] = storedPlan{subject: subject, zone: zone, changes: frozen, version: version, expires: now.Add(p.ttl)}
-	return id
-}
-
-func (p *planStore) take(id, subject string) (storedPlan, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	sp, ok := p.plans[id]
-	switch {
-	case !ok:
-		return storedPlan{}, errPlanUnknown
-	case sp.subject != subject:
-		return storedPlan{}, errPlanOwner
-	case p.now().After(sp.expires):
-		delete(p.plans, id)
-		return storedPlan{}, errPlanExpired
-	}
-	delete(p.plans, id)
-	return sp, nil
 }
 
 // subjectLimiter is a token bucket per subject.

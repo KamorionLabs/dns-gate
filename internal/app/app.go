@@ -142,6 +142,8 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		Ownership:   st,
 		Ops:         eng,
 		Terraform:   server.InventoryTerraform(eng),
+		Plans:       st,
+		Versions:    st,
 		UIFiles:     web.FS(),
 		Log:         log,
 	}
@@ -166,6 +168,33 @@ func (a *App) Run(ctx context.Context) {
 		go a.Discovery.Run(ctx)
 	}
 	go zonewrite.RunReconciler(ctx, a.Engine, a.authz.ManagedZones, a.Config.ReconcileInterval.D(), a.log)
+	go a.runPlanGC(ctx, planGCInterval)
+}
+
+// planGCInterval is the period of the expired plan purge of Run.
+const planGCInterval = 15 * time.Minute
+
+// GCPlans purges the expired RRset plans of the store; a maintenance task
+// calls it when the gate does not run the loops of Run.
+func (a *App) GCPlans(ctx context.Context) (int, error) {
+	return a.Store.GCPlans(ctx, time.Now())
+}
+
+func (a *App) runPlanGC(ctx context.Context, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if n, err := a.GCPlans(ctx); err != nil {
+				a.log.Warn("plan gc", "err", err)
+			} else if n > 0 {
+				a.log.Info("plan gc", "removed", n)
+			}
+		}
+	}
 }
 
 func openStore(ctx context.Context, cfg *config.Config, log *slog.Logger) (store.Store, error) {

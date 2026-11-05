@@ -55,12 +55,12 @@ func (s *Server) uiSubject(r *http.Request) (*identity.Subject, *session, *authn
 }
 
 func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
-	rest := strings.TrimPrefix(r.URL.Path, "/api/v1")
-	isPolicy := rest == "/policy" || strings.HasPrefix(rest, "/policy/")
-	isAdopt := strings.HasPrefix(rest, "/zones/") && (strings.HasSuffix(rest, "/adopt") || strings.HasSuffix(rest, "/adopt/preview"))
-	isDelegated := strings.HasPrefix(rest, "/policy/delegated/")
-	if r.Method != http.MethodGet && !((isPolicy || isAdopt) && r.Method == http.MethodPost) &&
-		!(isDelegated && (r.Method == http.MethodPut || r.Method == http.MethodDelete)) {
+	pattern, params, status := matchAPIRoute(r.Method, r.URL.Path)
+	switch status {
+	case http.StatusNotFound:
+		writeError(w, http.StatusNotFound, "not_found", "unknown API endpoint")
+		return
+	case http.StatusMethodNotAllowed:
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
@@ -76,12 +76,22 @@ func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
 	authn.StripCredentials(r.Header)
 	ctx := identity.With(r.Context(), subj)
 	r = r.WithContext(ctx)
-	if isPolicy {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/v1")
+	switch {
+	case pattern == routePolicy || strings.HasPrefix(pattern, routePolicy+"/"):
 		s.handlePolicyAPI(w, r, subj, sess, strings.TrimPrefix(rest, "/policy"))
 		return
-	}
-	if zp := strings.Split(strings.TrimPrefix(rest, "/zones/"), "/"); strings.HasPrefix(rest, "/zones/") && len(zp) >= 2 && zp[1] != "rrsets" {
-		s.handleZoneOps(w, r, subj, sess, zp[0], strings.Join(zp[1:], "/"))
+	case pattern == routeRRset:
+		s.handleRRset(w, r, subj, sess, params["zone"], params["host"], params["type"])
+		return
+	case pattern == routePlan:
+		s.handlePlan(w, r, subj, params["zone"])
+		return
+	case pattern == routeApply:
+		s.handleApply(w, r, subj, sess, params["zone"])
+		return
+	case pattern != routeZoneRRsets && strings.HasPrefix(pattern, routeZoneOps):
+		s.handleZoneOps(w, r, subj, sess, params["zone"], strings.TrimPrefix(pattern, routeZoneOps))
 		return
 	}
 
@@ -147,6 +157,12 @@ func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		if inv.RRsets == nil {
 			inv.RRsets = []uiapi.RRset{}
+		}
+		fillHashes(inv.RRsets)
+		if s.cfg.Versions != nil {
+			if v, err := s.cfg.Versions.ZoneVersion(ctx, zone); err == nil {
+				w.Header().Set("ETag", zoneETag(v))
+			}
 		}
 		writeJSON(w, http.StatusOK, inv)
 	case rest == "/audit":
