@@ -1,4 +1,4 @@
-package zonewrite
+package eurodnsapi
 
 import (
 	"context"
@@ -15,10 +15,14 @@ import (
 	"time"
 
 	"github.com/KamorionLabs/dns-gate/internal/audit"
+	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/provider"
+	eurodnsprov "github.com/KamorionLabs/dns-gate/internal/provider/eurodns"
 	"github.com/KamorionLabs/dns-gate/internal/store"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
+	"github.com/KamorionLabs/dns-gate/internal/zonewrite"
 	eurodns "github.com/KamorionLabs/eurodns-go"
 	"github.com/KamorionLabs/eurodns-go/eurodnstest"
 	"github.com/KamorionLabs/eurodns-go/rrset"
@@ -39,8 +43,8 @@ type fakeAuthz struct{ max int }
 
 func has(s *identity.Subject, role string) bool { return slices.Contains(s.Roles, role) }
 
-func (f *fakeAuthz) IsProtected(_ string, k rrset.Key) bool {
-	return k.Host == rrset.Apex && (k.Type == "NS" || k.Type == "MX")
+func (f *fakeAuthz) IsProtected(_ string, k dns.Key) bool {
+	return k.Host == dns.Apex && (k.Type == "NS" || k.Type == "MX")
 }
 
 func (f *fakeAuthz) Allow(s *identity.Subject, action, _ string) bool {
@@ -54,7 +58,7 @@ func (f *fakeAuthz) Allow(s *identity.Subject, action, _ string) bool {
 	}
 }
 
-func (f *fakeAuthz) AllowRRset(s *identity.Subject, action, zone string, k rrset.Key) bool {
+func (f *fakeAuthz) AllowRRset(s *identity.Subject, action, zone string, k dns.Key) bool {
 	if f.IsProtected(zone, k) {
 		return false
 	}
@@ -121,7 +125,8 @@ type env struct {
 	authz *fakeAuthz
 	audit *recorder
 	clock *clock
-	eng   Engine
+	eng   zonewrite.Engine
+	api   *Facade
 }
 
 func baseZone() *eurodns.Zone {
@@ -201,11 +206,13 @@ func newEnvFull(t *testing.T, opts eurodnstest.Options, st store.Store, checkHoo
 		st = store.NewMemoryWithClock(c.Now)
 	}
 	e := &env{t: t, srv: srv, st: st, authz: &fakeAuthz{}, audit: &recorder{}, clock: c}
-	e.eng, err = New(Config{Client: client, Store: e.st, Authz: e.authz, Audit: e.audit, Zones: []string{zoneName},
+	providers := provider.Single(eurodnsprov.NewWithClient("eurodns", base, client))
+	e.eng, err = zonewrite.New(zonewrite.Config{Providers: providers, Store: e.st, Authz: e.authz, Audit: e.audit, Zones: []string{zoneName},
 		Holder: "test", LockWait: 2 * time.Second, CheckOnWrite: true, Now: c.Now})
 	if err != nil {
 		t.Fatal(err)
 	}
+	e.api = New(Config{Engine: e.eng, Authz: e.authz, Providers: providers})
 	return e
 }
 
@@ -213,14 +220,14 @@ func rec(typ, host, rdata string) eurodns.Record {
 	return eurodns.Record{Type: typ, Host: host, TTL: 3600, RData: rdata}
 }
 
-func reasonOf(err error) Reason {
-	if ze, ok := AsError(err); ok {
+func reasonOf(err error) zonewrite.Reason {
+	if ze, ok := zonewrite.AsError(err); ok {
 		return ze.Reason
 	}
-	return Reason(fmt.Sprintf("not a zonewrite error: %v", err))
+	return zonewrite.Reason(fmt.Sprintf("not a zonewrite error: %v", err))
 }
 
-func (e *env) wantReason(err error, want Reason) {
+func (e *env) wantReason(err error, want zonewrite.Reason) {
 	e.t.Helper()
 	if got := reasonOf(err); got != want {
 		e.t.Fatalf("reason = %s, want %s (err %v)", got, want, err)
@@ -228,7 +235,7 @@ func (e *env) wantReason(err error, want Reason) {
 }
 
 func (e *env) add(s *identity.Subject, recs ...eurodns.Record) (*eurodns.Zone, error) {
-	return e.eng.AddRecords(context.Background(), s, zoneName, recs, "")
+	return e.api.AddRecords(context.Background(), s, zoneName, recs, "")
 }
 
 func (e *env) mustAdd(s *identity.Subject, recs ...eurodns.Record) *eurodns.Zone {
@@ -303,14 +310,14 @@ func TestCreateUpdateDeleteOwned(t *testing.T) {
 		t.Fatalf("values %v", got)
 	}
 	id := e.recordID("www", "A", "192.0.2.1")
-	if _, err := e.eng.DeleteRecord(context.Background(), alice, zoneName, id, ""); err != nil {
+	if _, err := e.api.DeleteRecord(context.Background(), alice, zoneName, id, ""); err != nil {
 		t.Fatal(err)
 	}
 	if got := e.upstream("www", "A"); !slices.Equal(got, []string{"192.0.2.2"}) {
 		t.Fatalf("after delete %v", got)
 	}
 	id = e.recordID("www", "A", "192.0.2.2")
-	if _, err := e.eng.DeleteRecord(context.Background(), alice, zoneName, id, ""); err != nil {
+	if _, err := e.api.DeleteRecord(context.Background(), alice, zoneName, id, ""); err != nil {
 		t.Fatal(err)
 	}
 	if e.own("www", "A") != nil || len(e.upstream("www", "A")) != 0 {
@@ -321,7 +328,7 @@ func TestCreateUpdateDeleteOwned(t *testing.T) {
 	}
 	ev := e.audit.find("addDnsRecords", "allow")
 	if len(ev) != 2 || ev[0].SubjectName != "alice@example.com" || ev[0].SubjectCategory != "human" ||
-		len(ev[0].Changes) != 1 || ev[0].Changes[0].Op != "create" || ev[1].SnapshotID == nil {
+		len(ev[0].Changes) != 1 || ev[0].Changes[0].Op != "create" || ev[1].SnapshotID == "" {
 		t.Fatalf("audit %+v", ev)
 	}
 	if ch := ev[1].Changes[0]; ch.Op != "update" || len(ch.OldValues) != 1 || len(ch.NewValues) != 2 {
@@ -337,14 +344,14 @@ func TestForeignRRsetIsUntouchable(t *testing.T) {
 	e := newEnv(t, eurodnstest.Options{})
 	before := e.foreignJSON()
 	_, err := e.add(alice, rec("CNAME", "legacy", "new.example.net."))
-	e.wantReason(err, ReasonForeignRRset)
-	_, err = e.eng.DeleteRecord(context.Background(), alice, zoneName, e.recordID("legacy", "CNAME", "old.example.net."), "")
-	e.wantReason(err, ReasonForeignRRset)
+	e.wantReason(err, zonewrite.ReasonForeignRRset)
+	_, err = e.api.DeleteRecord(context.Background(), alice, zoneName, e.recordID("legacy", "CNAME", "old.example.net."), "")
+	e.wantReason(err, zonewrite.ReasonForeignRRset)
 	z := e.srv.Zone(zoneName)
 	z.Records = slices.DeleteFunc(z.Records, func(r eurodns.Record) bool { return r.Host == "legacy" })
-	e.wantReason(e.eng.SaveZone(context.Background(), alice, zoneName, z, ""), ReasonForeignRRset)
+	e.wantReason(e.api.SaveZone(context.Background(), alice, zoneName, z, ""), zonewrite.ReasonForeignRRset)
 	_, err = e.add(alice, rec("NS", "@", "ns2.example.net."))
-	e.wantReason(err, ReasonForbidden)
+	e.wantReason(err, zonewrite.ReasonForbidden)
 	if after := e.foreignJSON(); after != before {
 		t.Fatal("foreign records changed")
 	}
@@ -357,9 +364,9 @@ func TestNotOwner(t *testing.T) {
 	e := newEnv(t, eurodnstest.Options{})
 	e.mustAdd(alice, rec("A", "www", "192.0.2.1"))
 	_, err := e.add(bob, rec("A", "www", "192.0.2.9"))
-	e.wantReason(err, ReasonNotOwner)
-	_, err = e.eng.DeleteRecord(context.Background(), bob, zoneName, e.recordID("www", "A", "192.0.2.1"), "")
-	e.wantReason(err, ReasonNotOwner)
+	e.wantReason(err, zonewrite.ReasonNotOwner)
+	_, err = e.api.DeleteRecord(context.Background(), bob, zoneName, e.recordID("www", "A", "192.0.2.1"), "")
+	e.wantReason(err, zonewrite.ReasonNotOwner)
 }
 
 func TestConsoleChangeTaintsThenAdoptRehabilitates(t *testing.T) {
@@ -374,18 +381,18 @@ func TestConsoleChangeTaintsThenAdoptRehabilitates(t *testing.T) {
 	e.srv.Seed(z)
 
 	_, err := e.add(alice, rec("A", "www", "192.0.2.2"))
-	e.wantReason(err, ReasonTainted)
+	e.wantReason(err, zonewrite.ReasonTainted)
 	if o := e.own("www", "A"); o.State != store.StateTainted {
 		t.Fatalf("state %s", o.State)
 	}
 	_, err = e.add(alice, rec("A", "www", "192.0.2.2"))
-	e.wantReason(err, ReasonTainted)
+	e.wantReason(err, zonewrite.ReasonTainted)
 	if len(e.audit.find("gate.taint", "allow")) != 1 {
 		t.Fatal("taint not audited")
 	}
 
-	e.wantReason(e.eng.Adopt(context.Background(), alice, zoneName, eurodns.AdoptRequest{RRsets: []eurodns.AdoptRRset{{Host: "www", Type: "A"}}}), ReasonForbidden)
-	if err := e.eng.Adopt(context.Background(), admin, zoneName, eurodns.AdoptRequest{RRsets: []eurodns.AdoptRRset{{Host: "www", Type: "a"}}}); err != nil {
+	e.wantReason(e.api.Adopt(context.Background(), alice, zoneName, eurodns.AdoptRequest{RRsets: []eurodns.AdoptRRset{{Host: "www", Type: "A"}}}), zonewrite.ReasonForbidden)
+	if err := e.api.Adopt(context.Background(), admin, zoneName, eurodns.AdoptRequest{RRsets: []eurodns.AdoptRRset{{Host: "www", Type: "a"}}}); err != nil {
 		t.Fatal(err)
 	}
 	if o := e.own("www", "A"); o.State != store.StateActive || !o.Adopted || o.UpdatedByName != "root@example.com" {
@@ -425,27 +432,27 @@ func TestReconcileDetectsDrift(t *testing.T) {
 func TestIfMatch(t *testing.T) {
 	e := newEnv(t, eurodnstest.Options{})
 	ctx := context.Background()
-	z, err := e.eng.GetZone(ctx, alice, zoneName)
+	z, err := e.api.GetZone(ctx, alice, zoneName)
 	if err != nil || z.ETag != `"v0"` {
 		t.Fatalf("get %v %q", err, z.ETag)
 	}
-	if _, err := e.eng.AddRecords(ctx, alice, zoneName, []eurodns.Record{rec("A", "www", "192.0.2.1")}, `"v0"`); err != nil {
+	if _, err := e.api.AddRecords(ctx, alice, zoneName, []eurodns.Record{rec("A", "www", "192.0.2.1")}, `"v0"`); err != nil {
 		t.Fatal(err)
 	}
-	_, err = e.eng.AddRecords(ctx, alice, zoneName, []eurodns.Record{rec("A", "api", "192.0.2.1")}, `"v0"`)
-	e.wantReason(err, ReasonPrecondition)
-	if _, err := e.eng.AddRecords(ctx, alice, zoneName, []eurodns.Record{rec("A", "api", "192.0.2.1")}, `W/"v1", "v9"`); err != nil {
+	_, err = e.api.AddRecords(ctx, alice, zoneName, []eurodns.Record{rec("A", "api", "192.0.2.1")}, `"v0"`)
+	e.wantReason(err, zonewrite.ReasonPrecondition)
+	if _, err := e.api.AddRecords(ctx, alice, zoneName, []eurodns.Record{rec("A", "api", "192.0.2.1")}, `W/"v1", "v9"`); err != nil {
 		t.Fatal(err)
 	}
 	stale := z
 	stale.Records = append(stale.Records, rec("A", "new", "192.0.2.3"))
-	e.wantReason(e.eng.SaveZone(ctx, alice, zoneName, stale, `"v0"`), ReasonPrecondition)
+	e.wantReason(e.api.SaveZone(ctx, alice, zoneName, stale, `"v0"`), zonewrite.ReasonPrecondition)
 }
 
 func TestRebaseForACMEStaleZone(t *testing.T) {
 	e := newEnv(t, eurodnstest.Options{})
 	ctx := context.Background()
-	stale, err := e.eng.GetZone(ctx, acme, zoneName)
+	stale, err := e.api.GetZone(ctx, acme, zoneName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -454,7 +461,7 @@ func TestRebaseForACMEStaleZone(t *testing.T) {
 	// lego-style write: stale zone + challenge, no If-Match.
 	stale.Records = append(stale.Records, eurodns.Record{Type: "TXT", Host: "_acme-challenge.www", TTL: 600, RData: "token-1"})
 	stale.URLForwards = nil
-	if err := e.eng.SaveZone(ctx, acme, zoneName, stale, ""); err != nil {
+	if err := e.api.SaveZone(ctx, acme, zoneName, stale, ""); err != nil {
 		t.Fatal(err)
 	}
 	if len(e.upstream("www", "A")) != 1 || len(e.upstream("_acme-challenge.www", "TXT")) != 1 {
@@ -473,17 +480,17 @@ func TestRebaseForACMEStaleZone(t *testing.T) {
 	}
 
 	// Without rebase the same stale write is refused.
-	stale2, _ := e.eng.GetZone(ctx, bob, zoneName)
+	stale2, _ := e.api.GetZone(ctx, bob, zoneName)
 	e.mustAdd(alice, rec("A", "api", "192.0.2.2"))
 	stale2.Records = append(stale2.Records, rec("A", "bob", "192.0.2.3"))
-	e.wantReason(e.eng.SaveZone(ctx, bob, zoneName, stale2, ""), ReasonNotOwner)
+	e.wantReason(e.api.SaveZone(ctx, bob, zoneName, stale2, ""), zonewrite.ReasonNotOwner)
 }
 
 func TestMaxChanges(t *testing.T) {
 	e := newEnv(t, eurodnstest.Options{})
 	e.authz.max = 1
 	_, err := e.add(alice, rec("A", "a", "192.0.2.1"), rec("A", "b", "192.0.2.2"))
-	e.wantReason(err, ReasonTooMany)
+	e.wantReason(err, zonewrite.ReasonTooMany)
 	e.mustAdd(alice, rec("A", "a", "192.0.2.1"))
 }
 
@@ -492,8 +499,8 @@ func TestForwardsRequireZoneAdmin(t *testing.T) {
 	ctx := context.Background()
 	z := e.srv.Zone(zoneName)
 	z.URLForwards = []json.RawMessage{}
-	e.wantReason(e.eng.SaveZone(ctx, alice, zoneName, z, ""), ReasonForbidden)
-	if err := e.eng.SaveZone(ctx, admin, zoneName, z, ""); err != nil {
+	e.wantReason(e.api.SaveZone(ctx, alice, zoneName, z, ""), zonewrite.ReasonForbidden)
+	if err := e.api.SaveZone(ctx, admin, zoneName, z, ""); err != nil {
 		t.Fatal(err)
 	}
 	if len(e.srv.Zone(zoneName).URLForwards) != 0 {
@@ -505,22 +512,22 @@ func TestAdopt(t *testing.T) {
 	e := newEnv(t, eurodnstest.Options{})
 	ctx := context.Background()
 	req := eurodns.AdoptRequest{RRsets: []eurodns.AdoptRRset{{Host: "legacy.example.com.", Type: "CNAME"}}}
-	e.wantReason(e.eng.Adopt(ctx, bob, zoneName, req), ReasonForbidden)
-	if err := e.eng.Adopt(ctx, admin, zoneName, req); err != nil {
+	e.wantReason(e.api.Adopt(ctx, bob, zoneName, req), zonewrite.ReasonForbidden)
+	if err := e.api.Adopt(ctx, admin, zoneName, req); err != nil {
 		t.Fatal(err)
 	}
 	o := e.own("legacy", "CNAME")
 	if o == nil || !o.Adopted || o.Owner != "team-a" || o.CreatedByName != "root@example.com" {
 		t.Fatalf("adopted %+v", o)
 	}
-	if err := e.eng.Adopt(ctx, admin, zoneName, req); err != nil {
+	if err := e.api.Adopt(ctx, admin, zoneName, req); err != nil {
 		t.Fatalf("second adopt must be a no-op: %v", err)
 	}
 	if len(e.audit.find("gate.adopt", "allow")) != 1 {
 		t.Fatal("adopt audit")
 	}
-	e.wantReason(e.eng.Adopt(ctx, admin, zoneName, eurodns.AdoptRequest{RRsets: []eurodns.AdoptRRset{{Host: "nope", Type: "A"}}}), ReasonNotFound)
-	e.wantReason(e.eng.Adopt(ctx, admin, zoneName, eurodns.AdoptRequest{RRsets: []eurodns.AdoptRRset{{Host: "@", Type: "MX"}}}), ReasonForbidden)
+	e.wantReason(e.api.Adopt(ctx, admin, zoneName, eurodns.AdoptRequest{RRsets: []eurodns.AdoptRRset{{Host: "nope", Type: "A"}}}), zonewrite.ReasonNotFound)
+	e.wantReason(e.api.Adopt(ctx, admin, zoneName, eurodns.AdoptRequest{RRsets: []eurodns.AdoptRRset{{Host: "@", Type: "MX"}}}), zonewrite.ReasonForbidden)
 
 	_, err := e.add(alice, rec("CNAME", "legacy", "new.example.net."))
 	if err == nil {
@@ -532,11 +539,11 @@ func TestAdopt(t *testing.T) {
 			z.Records[i].RData = "new.example.net."
 		}
 	}
-	if err := e.eng.SaveZone(ctx, alice, zoneName, z, ""); err != nil {
+	if err := e.api.SaveZone(ctx, alice, zoneName, z, ""); err != nil {
 		t.Fatalf("owner team update of adopted RRset: %v", err)
 	}
 	other := &identity.Subject{Issuer: "idp", ID: "carol", Roles: []string{"writer", "admin"}, Teams: []string{"team-c"}}
-	e.wantReason(e.eng.Adopt(ctx, other, zoneName, req), ReasonNotOwner)
+	e.wantReason(e.api.Adopt(ctx, other, zoneName, req), zonewrite.ReasonNotOwner)
 }
 
 func TestEphemeralGC(t *testing.T) {
@@ -549,7 +556,7 @@ func TestEphemeralGC(t *testing.T) {
 		t.Fatal(err)
 	}
 	// One challenge is cleaned up by its client, the other is forgotten.
-	if _, err := e.eng.DeleteRecord(ctx, acme, zoneName, e.recordID("_acme-challenge.api", "TXT", "tok2"), ""); err != nil {
+	if _, err := e.api.DeleteRecord(ctx, acme, zoneName, e.recordID("_acme-challenge.api", "TXT", "tok2"), ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.eng.Reconcile(ctx, zoneName); err != nil {
@@ -635,20 +642,20 @@ func TestReassignedIDs(t *testing.T) {
 	e.mustAdd(alice, rec("A", "www", "192.0.2.1"), rec("A", "api", "192.0.2.2"))
 	e.mustAdd(alice, rec("A", "www", "192.0.2.3"))
 	id := e.recordID("api", "A", "192.0.2.2")
-	if _, err := e.eng.DeleteRecord(ctx, alice, zoneName, id, ""); err != nil {
+	if _, err := e.api.DeleteRecord(ctx, alice, zoneName, id, ""); err != nil {
 		t.Fatal(err)
 	}
 	if e.own("api", "A") != nil || e.own("www", "A").State != store.StateActive {
 		t.Fatal("ownership lost track after id renumbering")
 	}
-	_, err := e.eng.DeleteRecord(ctx, alice, zoneName, id, "")
-	e.wantReason(err, ReasonNotFound)
+	_, err := e.api.DeleteRecord(ctx, alice, zoneName, id, "")
+	e.wantReason(err, zonewrite.ReasonNotFound)
 }
 
 func TestUnmanagedZone(t *testing.T) {
 	e := newEnv(t, eurodnstest.Options{})
-	_, err := e.eng.AddRecords(context.Background(), alice, "other.org", []eurodns.Record{rec("A", "www", "192.0.2.1")}, "")
-	e.wantReason(err, ReasonNotFound)
+	_, err := e.api.AddRecords(context.Background(), alice, "other.org", []eurodns.Record{rec("A", "www", "192.0.2.1")}, "")
+	e.wantReason(err, zonewrite.ReasonNotFound)
 }
 
 func TestConcurrentWritersNoLostUpdate(t *testing.T) {
@@ -736,7 +743,7 @@ func TestRunReconcilerStops(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		RunReconciler(ctx, e.eng, func() []string { return []string{zoneName} }, 10*time.Millisecond, nil)
+		zonewrite.RunReconciler(ctx, e.eng, func() []string { return []string{zoneName} }, 10*time.Millisecond, nil)
 		close(done)
 	}()
 	time.Sleep(50 * time.Millisecond)
@@ -766,22 +773,9 @@ func TestEngineOnSQLite(t *testing.T) {
 	}
 	wg.Wait()
 	_, err = e.add(bob, rec("A", "s0", "192.0.2.9"))
-	e.wantReason(err, ReasonNotOwner)
+	e.wantReason(err, zonewrite.ReasonNotOwner)
 	if o := e.own("s3", "A"); o == nil || o.State != store.StateActive {
 		t.Fatalf("ownership %+v", o)
-	}
-}
-
-func TestIfMatchAcceptsQuotedAndBareTags(t *testing.T) {
-	for _, h := range []string{`"v3"`, `v3`, `W/"v3"`, `"v1", "v3"`, `*`, ``} {
-		if !ifMatchOK(h, 3) {
-			t.Errorf("ifMatchOK(%q, 3) = false", h)
-		}
-	}
-	for _, h := range []string{`"v2"`, `v4`, `W/v30`} {
-		if ifMatchOK(h, 3) {
-			t.Errorf("ifMatchOK(%q, 3) = true", h)
-		}
 	}
 }
 
@@ -815,7 +809,7 @@ func TestServerManagedRecordsIgnored(t *testing.T) {
 	e := newEnv(t, eurodnstest.Options{})
 	e.srv.Seed(withSOA(baseZone(), 2026060101))
 	ctx := context.Background()
-	stale, err := e.eng.GetZone(ctx, alice, zoneName)
+	stale, err := e.api.GetZone(ctx, alice, zoneName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -834,14 +828,14 @@ func TestServerManagedRecordsIgnored(t *testing.T) {
 	}
 	// Stale SOA (and stale view of www) from a rebase client: not refused for the SOA.
 	stale.Records = append(stale.Records, eurodns.Record{Type: "TXT", Host: "_acme-challenge", TTL: 600, RData: "tok"})
-	if err := e.eng.SaveZone(ctx, acme, zoneName, stale, ""); err != nil {
+	if err := e.api.SaveZone(ctx, acme, zoneName, stale, ""); err != nil {
 		t.Fatalf("stale SOA refused: %v", err)
 	}
 	// Same for a regular owner sending its full zone with an old serial.
-	full, _ := e.eng.GetZone(ctx, alice, zoneName)
+	full, _ := e.api.GetZone(ctx, alice, zoneName)
 	bumpSOA(e)
 	full.Records = append(full.Records, rec("A", "api", "192.0.2.3"))
-	if err := e.eng.SaveZone(ctx, alice, zoneName, full, ""); err != nil {
+	if err := e.api.SaveZone(ctx, alice, zoneName, full, ""); err != nil {
 		t.Fatalf("owner save with old serial: %v", err)
 	}
 	soaID := int64(0)
@@ -850,14 +844,17 @@ func TestServerManagedRecordsIgnored(t *testing.T) {
 			soaID = *r.ID
 		}
 	}
-	_, err = e.eng.DeleteRecord(ctx, admin, zoneName, soaID, "")
-	e.wantReason(err, ReasonForbidden)
+	_, err = e.api.DeleteRecord(ctx, admin, zoneName, soaID, "")
+	e.wantReason(err, zonewrite.ReasonForbidden)
 	_, err = e.add(admin, eurodns.Record{Type: "SOA", Host: "@", TTL: 86400, RData: "x. y. 1 2 3 4 5"})
-	e.wantReason(err, ReasonForbidden)
-	e.wantReason(e.eng.Adopt(ctx, admin, zoneName, eurodns.AdoptRequest{RRsets: []eurodns.AdoptRRset{{Host: "@", Type: "SOA"}}}), ReasonNotFound)
+	e.wantReason(err, zonewrite.ReasonForbidden)
+	e.wantReason(e.api.Adopt(ctx, admin, zoneName, eurodns.AdoptRequest{RRsets: []eurodns.AdoptRRset{{Host: "@", Type: "SOA"}}}), zonewrite.ReasonForbidden)
 }
 
-func TestRelativeTargetsRefused(t *testing.T) {
+// Targets are read like Route53 and the dnsgate Terraform provider do: a
+// name of several labels is absolute, a single label is refused. An RRset
+// stored with a relative target is read-only until fixed at EuroDNS.
+func TestRelativeTargets(t *testing.T) {
 	e := newEnv(t, eurodnstest.Options{})
 	ctx := context.Background()
 	for _, r := range []eurodns.Record{
@@ -865,32 +862,32 @@ func TestRelativeTargetsRefused(t *testing.T) {
 		rec("MX", "mail", "10 mx.example.net"),
 		rec("SRV", "_sip._tcp", "10 5 5060 sip.example.net"),
 	} {
-		_, err := e.add(alice, r)
-		e.wantReason(err, ReasonInvalid)
-		if !strings.Contains(err.Error(), "must end with a dot") {
-			t.Fatalf("message %q", err)
+		e.mustAdd(alice, r)
+		if got := e.upstream(rrset.NormalizeHost(r.Host, zoneName), r.Type); len(got) != 1 || got[0] != r.RData+"." {
+			t.Fatalf("%s stored as %v", r.Type, got)
+		}
+		if o := e.own(r.Host, r.Type); o == nil || o.State != store.StateActive {
+			t.Fatalf("%s ownership %+v", r.Type, o)
 		}
 	}
-	e.mustAdd(alice, rec("CNAME", "app", "target.example.net."))
+	_, err := e.add(alice, rec("CNAME", "short", "internal"))
+	e.wantReason(err, zonewrite.ReasonInvalid)
+	if !strings.Contains(err.Error(), "single label") {
+		t.Fatalf("message %q", err)
+	}
 	e.mustAdd(alice, rec("TXT", "note", "no dot needed"))
 
-	// An existing relative value is not rejected by the target rule itself,
-	// but the check warning it raises blocks any change to its RRset.
 	z := e.srv.Zone(zoneName)
 	z.Records = append(z.Records, rec("MX", "sub", "10 mail"))
 	e.srv.Seed(z)
-	if err := e.eng.Adopt(ctx, admin, zoneName, eurodns.AdoptRequest{RRsets: []eurodns.AdoptRRset{{Host: "sub", Type: "MX"}}}); err != nil {
-		t.Fatal(err)
+	e.wantReason(e.api.Adopt(ctx, admin, zoneName, eurodns.AdoptRequest{RRsets: []eurodns.AdoptRRset{{Host: "sub", Type: "MX"}}}), zonewrite.ReasonForbidden)
+	_, err = e.add(admin, rec("MX", "sub", "20 mx2.example.net."))
+	e.wantReason(err, zonewrite.ReasonForbidden)
+	if !strings.Contains(err.Error(), "relative_target") {
+		t.Fatalf("expected the read-only reason, got %q", err)
 	}
-	_, err := e.add(alice, rec("MX", "sub", "20 mx2.example.net."))
-	e.wantReason(err, ReasonInvalid)
-	if !strings.Contains(err.Error(), "EuroDNS validation") {
-		t.Fatalf("expected the check warning, got %q", err)
-	}
-	_, err = e.add(alice, rec("MX", "sub", "30 mx3"))
-	e.wantReason(err, ReasonInvalid)
-	if !strings.Contains(err.Error(), "must end with a dot") {
-		t.Fatalf("expected the target rule, got %q", err)
+	if got := e.upstream("sub", "MX"); len(got) != 1 || got[0] != "10 mail" {
+		t.Fatalf("relative value rewritten: %v", got)
 	}
 }
 
@@ -912,7 +909,7 @@ func TestCheckWarningsOnChangedRRsets(t *testing.T) {
 
 	set(warning("www", "A", "record shadows a wildcard"))
 	_, err := e.add(alice, rec("A", "www", "192.0.2.1"))
-	e.wantReason(err, ReasonInvalid)
+	e.wantReason(err, zonewrite.ReasonInvalid)
 	if !strings.Contains(err.Error(), "record shadows a wildcard") {
 		t.Fatalf("message %q", err)
 	}
@@ -925,5 +922,29 @@ func TestCheckWarningsOnChangedRRsets(t *testing.T) {
 
 	set(json.RawMessage(`{"messages":["zone is broken"],"severity":"ERROR"}`))
 	_, err = e.add(alice, rec("A", "web", "192.0.2.1"))
-	e.wantReason(err, ReasonInvalid)
+	e.wantReason(err, zonewrite.ReasonInvalid)
+}
+
+type otherProvider struct{ provider.Provider }
+
+func (otherProvider) ID() string   { return "route53-x" }
+func (otherProvider) Kind() string { return "route53" }
+
+// The EuroDNS API only serves the zones of a EuroDNS provider.
+func TestOtherProviderZonesRefused(t *testing.T) {
+	f := New(Config{Providers: provider.Single(otherProvider{})})
+	if f.Serves(zoneName) {
+		t.Fatal("a route53 zone served by the EuroDNS API")
+	}
+	ctx := context.Background()
+	_, err := f.GetZone(ctx, alice, zoneName)
+	if ze, ok := zonewrite.AsError(err); !ok || ze.Reason != zonewrite.ReasonNotFound || !strings.Contains(ze.Message, "route53-x") {
+		t.Fatalf("get zone: %v", err)
+	}
+	if err := f.Adopt(ctx, admin, zoneName, eurodns.AdoptRequest{RRsets: []eurodns.AdoptRRset{{Host: "www", Type: "A"}}}); err == nil {
+		t.Fatal("adopt through the EuroDNS extension on a route53 zone")
+	}
+	if _, err := f.Do(ctx, alice, Call{Op: "addDnsRecords", Zone: zoneName, Body: json.RawMessage(`[]`)}); err == nil {
+		t.Fatal("empty add accepted")
+	}
 }

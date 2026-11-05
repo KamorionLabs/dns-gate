@@ -88,12 +88,13 @@ and 3 are enforced by the gate on every request.
    │ 6. upstream  shared transport, ~1 req/s, retries         │
    │ 7. audit     JSON: subject, delta, snapshot before write │
    └─────────────────────────────┬────────────────────────────┘
-                                 │ X-APP-ID / X-API-KEY (sole holder, allowlisted IP)
-                                 ▼
-                       rest-api.eurodns.com
-                                 ▲
-                ┌────────────────┘
-   store (memory | DynamoDB): ownership, zone versions, zone locks
+                                 │ provider credentials (sole holder)
+                 ┌───────────────┴───────────────┐
+                 ▼                               ▼
+       EuroDNS (X-APP-ID / X-API-KEY,     Route53 (AWS credentials,
+       allowlisted IP)                    optional assumed role)
+
+   store (memory | sqlite | postgres | DynamoDB): ownership, zone versions, zone locks
 ```
 
 Repositories:
@@ -109,14 +110,52 @@ Main packages of the gate:
 | Package | Role |
 |---|---|
 | `internal/identity` | `Subject` (issuer, id, claims, roles, teams). |
+| `internal/dns` | Provider-neutral model: `Zone`, `RRset` (values or alias, read-only reason), `Change`, `ContentHash`. |
+| `internal/provider` | Provider contract (`Provider`, `Checker`, `Snapshotter`, `Resolver`, capabilities, errors); `provider/eurodns` and `provider/route53` adapters. |
+| `internal/eurodnsapi` | EuroDNS-compatible API facade (full-zone PUT, record ids, forwards, passthrough) over the neutral engine, for EuroDNS zones only. |
 | `internal/policy` | RBAC engine implementing `Authorizer`. |
 | `internal/routes` | Route table generated from `api/openapi.json`, plus the hand-written operation → action mapping. |
-| `internal/zonewrite` | `Engine`: every DNS zone read/write on behalf of a subject, ownership enforcement, reconcile. |
+| `internal/zonewrite` | `Engine`: every DNS zone read/write on behalf of a subject on the neutral model, provider resolved per zone, ownership enforcement, reconcile. |
 | `internal/store` | `Store`: ownership entries, zone versions, zone locks (memory, DynamoDB). |
 | `internal/audit` | Structured audit events (stdout and store). |
-| `internal/discovery` | Listing of the EuroDNS account zones (`zones_discovery`), filtered and cached in memory. |
+| `internal/discovery` | Listing of the zones of every provider account, filtered and cached in memory; resolves the provider of a zone. |
 | `internal/uiapi` | JSON API for the web UI (inventory, audit, policy revisions, adoption, Terraform export). |
 | MCP server | `/mcp` endpoint for LLM agents (section 17). |
+
+### 4.1 Providers
+
+A provider is one upstream account (`providers[]` in the configuration). The core
+(RBAC, ownership, audit, UI, MCP, REST API) only sees the neutral model; each adapter
+converts its records to RRsets and back:
+
+| Method | Contract |
+|---|---|
+| `ReadZone` | Current RRsets sorted by key; `ReadOnly` set on RRsets the gate never writes; `Native` keeps the provider payload (the EuroDNS zone with its forwards). |
+| `Normalize` | Validates a desired RRset and returns it in the canonical form of `ReadZone`, so that the hash stored at write time is the hash read back. |
+| `Apply` | Writes RRset changes computed against the zone read under the lock. |
+| `Check` (optional) | Server-side dry run (EuroDNS `check`), blocking problems refuse the write. |
+| `LatestSnapshot` (optional) | Snapshot id recorded in the audit (EuroDNS). |
+
+`Capabilities` tell the engine how to write: `FullZoneWrite` (EuroDNS rewrites the
+whole zone), `AtomicBatch` (a failed write known not applied rolls the claims back;
+otherwise the claims are settled against a fresh read at once), `ConditionalWrite`
+(the provider fails with `ErrConflict` when an RRset changed since the read, mapped to
+`412 precondition`), `Alias` (alias RRsets are refused elsewhere), types and TTLs.
+
+A zone is served by exactly one provider: the only one whose `zones` include/exclude
+globs select it, or, when several do, the only one of them whose account lists it
+(`internal/discovery`). Ownership, locks and the audit stay keyed by zone name.
+
+**EuroDNS adapter.** One rate-limited transport per account carries every call
+(reads, writes, checks, snapshots, listing, passthrough). RRsets are grouped with
+`eurodns-go/rrset`; `dns.ContentHash` equals `rrset.ContentHash` byte for byte, so the
+ownership entries written before the neutral model stay valid. SOA and locked records
+make their RRset read-only (`server_managed`), and so does a target stored relative to
+the zone (`relative_target`): the gate cannot write it back without changing its
+meaning. Writes are a full-zone save of the current zone with the changes applied
+(`zonediff.Apply`), forwards and unknown fields kept byte for byte. Desired targets of
+several labels without an ending dot are written absolute, like Route53 and the
+dnsgate Terraform provider read them; a single label is refused as ambiguous.
 
 ## 5. Request pipeline
 
@@ -133,9 +172,9 @@ request
   ├─ action = mapping[operationId]  (e.g. getDnsZone → dns.read)
   ├─ zone check: {domain-name} must be a managed zone (base or managed layer) ──► else 403
   ├─ Authorizer.Allow(subject, action, zone) ──► else 403
-  ├─ dispatch
-  │     passthrough-read  → reverse proxy with injected EuroDNS credentials
-  │     engine            → zonewrite.Engine (all DNS zone writes and zone reads)
+  ├─ dispatch (EuroDNS API paths: only for zones of a eurodns provider, else 404)
+  │     passthrough-read  → reverse proxy with the credentials of the zone's account
+  │     engine            → eurodnsapi facade → zonewrite.Engine
   │     gate extension    → /.well-known/dns-gate[...]
   └─ audit event (allow | deny | error)
 ```
@@ -166,11 +205,11 @@ is denied, so a new EuroDNS endpoint is never exposed by accident.
 
 ### 6.1 Unit of ownership: the RRset
 
-A EuroDNS record has no free-form field (only `id`, `type`, `host`, `ttl`, `rdata`,
-`updated`, `locked`, `isDynDns`, `proxy`), so ownership cannot be stored on the
-record. It lives in the gate's store, keyed by **RRset** = `(zone, host, type)`,
-with `host` normalized (`rrset.NormalizeHost`: lowercase, no trailing dot, zone
-suffix stripped, apex = `@`).
+Providers offer no free-form field on records (a EuroDNS record only has `id`,
+`type`, `host`, `ttl`, `rdata`, `updated`, `locked`, `isDynDns`, `proxy`), so
+ownership cannot be stored on the record. It lives in the gate's store, keyed by
+**RRset** = `(zone, host, type)`, with `host` normalized (`dns.NormalizeHost`:
+lowercase, no trailing dot, zone suffix stripped, apex = `@`).
 
 An ownership entry (`store.Ownership`):
 
@@ -179,7 +218,7 @@ An ownership entry (`store.Ownership`):
 | `Zone`, `Host`, `Type` | RRset key |
 | `Owner` | team (not the individual identity, which may rotate) |
 | `CreatedBy`, `CreatedAt`, `RequestID` | provenance |
-| `ContentHash` | `rrset.ContentHash` (TTL + sorted values) after the last gate write |
+| `ContentHash` | `dns.ContentHash` (TTL + sorted values, or the alias target) after the last gate write |
 | `PendingHash` | expected hash while a write is in flight |
 | `State` | `pending`, `active`, `tainted` |
 | `Adopted` | true when the RRset pre-existed and was adopted |
@@ -195,9 +234,13 @@ An ownership entry (`store.Ownership`):
 | Modify/delete an RRset owned by another team | refused | `not_owner` / 403 |
 | Modify/delete an owned RRset whose upstream content no longer matches `ContentHash` | refused, entry marked `tainted` | `tainted` / 409 |
 | Any change on a protected RRset | refused, even for admins | `forbidden` / 403 |
+| Any change or adoption of a read-only RRset (SOA, EuroDNS locked or relative target, Route53 routing policy) | refused | `forbidden` / 403 |
+| `MustNotExist` on an existing RRset (RRset API) | refused | `foreign_rrset` / 409 if not owned, `precondition` / 412 if owned |
+| `ExpectedHash` differs from the upstream content (RRset API) | refused | `precondition` / 412 |
+| Alias RRset on a provider without alias support, value or TTL refused by `Normalize` | refused | `invalid_zone` / 400 |
 | More changes than `Authorizer.MaxChangesPerRequest` | refused | `too_many_changes` / 403 |
 | `If-Match` does not match the zone version | refused | `precondition` / 412 |
-| EuroDNS `check` reports an invalid zone | refused | `invalid_zone` / 400 |
+| The provider check (EuroDNS `check`) reports a blocking problem | refused | `invalid_zone` / 400 |
 | Zone lock not acquired within `LockWait` | refused, client retries | `zone_locked` / 423 |
 
 The CNAME exclusivity rule falls out naturally: creating a CNAME where foreign
@@ -216,8 +259,8 @@ described in section 16.
 ### 6.4 Rebase on full-zone PUT
 
 `PUT /dns-zones/{d}` carries a whole zone, often stale (the client read it earlier).
-The engine computes `zonediff.Diff(current, desired)` against the **current** zone,
-read under the zone lock.
+The EuroDNS facade computes `zonediff.Diff(current, desired)` against the **current**
+zone, read under the zone lock by the engine.
 
 - Default: any difference outside the caller's scope (RBAC or ownership) is refused.
 - Roles with `rebase_on_save` (ACME clients such as lego): out-of-scope differences are
@@ -279,8 +322,12 @@ Notes:
 - All writes (`POST dns-records`, `DELETE dns-records/{id}`, `PUT dns-zones`) are
   turned into one atomic upstream `PUT` of `current + allowed changes`. A `DELETE`
   by id is resolved against the current zone to find the RRset it belongs to.
-- Cost: 4 to 5 upstream requests per write (about 5 seconds at 1 request per second).
-  DNS writes are low volume; this is the price of atomicity and ownership checks.
+- Cost at EuroDNS: 4 to 5 upstream requests per write (about 5 seconds at 1 request per
+  second). DNS writes are low volume; this is the price of atomicity and ownership
+  checks.
+- The flow is the same for every provider, through `Provider.ReadZone`, `Check`,
+  `Apply`. A provider without atomic batches may apply part of a write: its claims are
+  settled at once against a fresh read, and reconcile settles any left.
 - A crash between the pending claim and the confirmation is resolved by reconcile.
 
 ## 8. Store
@@ -378,14 +425,14 @@ Kept minimal and invisible to plain EuroDNS clients:
 
 ## 11. Rate limit and high availability
 
-- The upstream budget (10 requests per 10 seconds per IP) is global. The shared
-  transport (`eurodns.Transport`) waits rather than drops (default one request per
+- The EuroDNS budget (10 requests per 10 seconds per IP) is global. The shared
+  transport of each EuroDNS account (`eurodns.Transport`) waits rather than drops (default one request per
   1.1 s, small burst), and retries on 429/5xx with backoff.
 - The gate must be the only caller from its egress IP.
 - Zone GETs are coalesced (singleflight) and cached briefly; the cache is
   invalidated on every write.
-- Zone discovery costs one request per 100 domains per `zones_discovery.refresh`
-  and per replica.
+- Zone discovery costs one EuroDNS request per 100 domains per
+  `providers[].zones.refresh` and per replica.
 - v0.1 runs a single replica: an IaC call tolerates a short unavailability, and the
   EuroDNS console remains the break-glass path. With the DynamoDB store, locks and
   zone versions already work across replicas; a shared rate limiter is the remaining
@@ -423,13 +470,15 @@ bindings:
 ```
 
 Host patterns are relative to the zone: `*` matches exactly one label, `**` one or
-more labels (`rrset.MatchHost`).
+more labels (`glob.MatchHost`).
 
 ## 13. Audit
 
 One event per request (`audit.Event`): time, request id, subject (`issuer:id`),
-teams, action, zone, decision (`allow`/`deny`/`error`), reason, RRset changes (old
-and new TTL and values), id of the latest EuroDNS snapshot taken before the write.
+teams, action, zone, provider id, decision (`allow`/`deny`/`error`), reason, RRset
+changes (old and new TTL, values or alias), id (a string) of the latest provider
+snapshot taken before the write (EuroDNS; events recorded with a numeric id still
+decode).
 
 Events go to two places:
 
@@ -490,8 +539,11 @@ subject.
 
 The inventory is a cache in the store, filled by reconcile (one GET per zone per
 interval) and refreshed by every gate write. When a zone's cache is empty (first
-start), the inventory performs **one** EuroDNS GET for that zone to fill it; after
-that, UI requests never call EuroDNS. This keeps the UI out of the upstream rate
+start), the inventory performs **one** provider read for that zone to fill it; after
+that, UI requests never call the provider. Single-RRset reads (`Engine.RRset`, the
+RRset API read by a Terraform plan) use the same cache and one ownership lookup:
+writes do not rely on it, they check `ExpectedHash` under the lock against a fresh
+read. This keeps the UI out of the upstream rate
 budget: browsing cannot get the gate banned. `last_synced_at` tells how fresh the
 view is.
 
@@ -636,10 +688,10 @@ route table of the EuroDNS-compatible API, the write engine, reconcile (at each
 round), the UI and MCP. Activating a revision that adds a zone is therefore enough
 to manage it, on every replica within the reload interval.
 
-With `zones_discovery`, `internal/discovery` lists the account domains
-(`searchDomains`, paginated, through the shared rate-limited transport) at start
-and every `refresh`, filtered by `include`/`exclude` globs, and keeps the list in
-memory. Discovered zones that are not managed are **unmanaged**:
+`internal/discovery` lists the zones of every provider account (`ListZones`: EuroDNS
+`searchDomains`, paginated, through the shared rate-limited transport) at start and
+every `providers[].zones.refresh`, filtered by the `include`/`exclude` globs of the
+provider, and keeps the lists in memory. Discovered zones that are not managed are **unmanaged**:
 
 | | Managed | Unmanaged |
 |---|---|---|

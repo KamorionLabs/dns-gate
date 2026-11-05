@@ -12,6 +12,11 @@ replicaCount: 1
 config:
   listen:
     address: ":8080"
+  providers:
+    - id: eurodns
+      kind: eurodns
+      zones: {include: ["*"]}
+      eurodns: {}
   zones: []
   store:
     type: sqlite
@@ -25,10 +30,11 @@ config:
       hosts: ["@"]
       types: [NS, SOA, MX, CAA]
 
-# Existing Secret holding the EuroDNS credentials (keys below).
+# Existing Secret holding the EuroDNS credentials (keys below), exposed as
+# EURODNS_APP_ID_FILE and EURODNS_API_KEY_FILE to every eurodns provider.
 eurodns:
   existingSecret: ""
-  appIdKey: app-id      # optional if config.upstream.app_id is set
+  appIdKey: app-id      # empty when every eurodns provider sets eurodns.app_id
   apiKeyKey: api-key
 
 # Existing Secret for the UI login (when config.ui.enabled).

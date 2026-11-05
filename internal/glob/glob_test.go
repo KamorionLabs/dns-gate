@@ -54,3 +54,34 @@ func TestCovered(t *testing.T) {
 		}
 	}
 }
+
+func TestMatchHost(t *testing.T) {
+	cases := []struct {
+		p, h string
+		ok   bool
+	}{
+		{"@", "@", true},
+		{"@", "www", false},
+		{"*", "@", false},
+		{"**", "@", false},
+		{"*", "www", true},
+		{"*", "a.b", false},
+		{"**", "a.b.c", true},
+		{"*.staging", "app.staging", true},
+		{"*.staging", "a.app.staging", false},
+		{"**.staging", "a.app.staging", true},
+		{"**.staging", "staging", false},
+		{"_*.staging", "_acme-challenge.staging", true},
+		{"_*.staging", "acme.staging", false},
+		{"_acme-challenge.**", "_acme-challenge.www", true},
+		{"_acme-challenge", "_acme-challenge", true},
+		{"Www", "www", true},
+		{"a*b*c", "axxbyyc", true},
+		{"a*b*c", "axxbyy", false},
+	}
+	for _, c := range cases {
+		if got := MatchHost(c.p, c.h); got != c.ok {
+			t.Errorf("MatchHost(%q,%q)=%v want %v", c.p, c.h, got, c.ok)
+		}
+	}
+}

@@ -41,7 +41,7 @@ func NewHolder(c *config.Config) (*Holder, error) {
 	return h, nil
 }
 
-// SetDiscovery attaches the account zone list (zones_discovery): discovered
+// SetDiscovery attaches the provider zone lists (zone discovery): discovered
 // zones that are not managed become readable. Call it before serving.
 func (h *Holder) SetDiscovery(d Discovery) {
 	h.mu.Lock()
@@ -51,7 +51,7 @@ func (h *Holder) SetDiscovery(d Discovery) {
 	h.cur.Store(compile(h.cfg, h.base, cur.Managed, cur.RevisionID, d))
 }
 
-// Discovery returns the account zone list, nil without zones_discovery.
+// Discovery returns the provider zone lists, nil when not attached.
 func (h *Holder) Discovery() Discovery { return h.disc }
 
 // Config returns the loaded configuration.

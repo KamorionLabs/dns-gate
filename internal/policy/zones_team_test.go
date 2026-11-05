@@ -6,9 +6,9 @@ import (
 	"testing"
 
 	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
-	"github.com/KamorionLabs/eurodns-go/rrset"
 )
 
 type fakeDiscovery map[string]bool
@@ -54,7 +54,7 @@ func TestUnmanagedZonesReadOnly(t *testing.T) {
 			t.Fatalf("%s must be denied on an unmanaged zone", a)
 		}
 	}
-	if e.AllowRRset(admin, ActionRecordWrite, "other.net", rrset.Key{Host: "www", Type: "A"}) {
+	if e.AllowRRset(admin, ActionRecordWrite, "other.net", dns.Key{Host: "www", Type: "A"}) {
 		t.Fatal("RRset write on an unmanaged zone")
 	}
 	if _, ok := e.OwnerTeam(&identity.Subject{Roles: []string{"admin"}, Teams: []string{"dns"}}, "other.net"); ok {
@@ -143,13 +143,13 @@ func TestValidateZonesDiscovered(t *testing.T) {
 		t.Fatal(paths(errs))
 	}
 	doc.Zones = []string{"b.example.org"}
-	if errs := ValidateZonesDiscovered(doc, h.Current(), disc, true); !strings.Contains(paths(errs), "not found in the EuroDNS account") {
+	if errs := ValidateZonesDiscovered(doc, h.Current(), disc, true); !strings.Contains(paths(errs), "not found in a provider account") {
 		t.Fatalf("got %q", paths(errs))
 	}
 	if errs := ValidateZonesDiscovered(doc, h.Current(), disc, false); !strings.Contains(paths(errs), "not loaded yet") {
 		t.Fatalf("got %q", paths(errs))
 	}
-	if errs := ValidateZonesDiscovered(doc, h.Current(), nil, false); !strings.Contains(paths(errs), "requires zones_discovery.enabled") {
+	if errs := ValidateZonesDiscovered(doc, h.Current(), nil, false); !strings.Contains(paths(errs), "requires the zone listing of the providers") {
 		t.Fatalf("got %q", paths(errs))
 	}
 	// A zone already managed by the active revision is not checked again.

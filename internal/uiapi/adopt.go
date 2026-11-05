@@ -30,13 +30,18 @@ type AdoptSelection struct {
 
 // AdoptCandidate is one RRset in a preview.
 type AdoptCandidate struct {
-	Host      string   `json:"host"`
-	Type      string   `json:"type"`
-	TTL       int      `json:"ttl"`
-	Values    []string `json:"values"`
-	Status    string   `json:"status"` // current inventory status
-	Adoptable bool     `json:"adoptable"`
-	Reason    string   `json:"reason,omitempty"` // why not: protected, server_managed, owned_by_other_team, already_owned, forbidden, relative_target
+	Host      string     `json:"host"`
+	Type      string     `json:"type"`
+	TTL       int        `json:"ttl"`
+	Values    []string   `json:"values"`
+	Alias     *dns.Alias `json:"alias,omitempty"`
+	Status    string     `json:"status"` // current inventory status
+	Adoptable bool       `json:"adoptable"`
+	// Reason tells why not: protected, owned_by_other_team, already_owned,
+	// forbidden, not_found, the read-only reason of the RRset
+	// (server_managed...), or the provider refusal of its content
+	// (relative_target, invalid).
+	Reason string `json:"reason,omitempty"`
 }
 
 // AdoptPreview is the dry-run result.

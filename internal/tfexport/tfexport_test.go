@@ -7,18 +7,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/KamorionLabs/dns-gate/internal/dns"
+	eurodnsprov "github.com/KamorionLabs/dns-gate/internal/provider/eurodns"
 	eurodns "github.com/KamorionLabs/eurodns-go"
-	"github.com/KamorionLabs/eurodns-go/rrset"
 )
 
 var update = flag.Bool("update", false, "rewrite golden files")
 
-func sets(recs ...eurodns.Record) []rrset.Set {
-	var out []rrset.Set
-	for _, s := range rrset.Group("example.com", recs) {
-		out = append(out, s)
-	}
-	return out
+func sets(recs ...eurodns.Record) []dns.RRset {
+	return eurodnsprov.FromNative("eurodns", "example.com", &eurodns.Zone{Records: recs}).RRsets
 }
 
 func r(typ, host string, ttl int, rdata string) eurodns.Record {
@@ -73,10 +70,10 @@ func TestRenderNoImportsAndPrefix(t *testing.T) {
 }
 
 func TestResourceNamesUniqueAndValid(t *testing.T) {
-	in := []rrset.Set{
-		{Key: rrset.Key{Host: "a.b", Type: "A"}, TTL: 3600, Values: []string{"192.0.2.1"}},
-		{Key: rrset.Key{Host: "a_b", Type: "A"}, TTL: 3600, Values: []string{"192.0.2.2"}},
-		{Key: rrset.Key{Host: "a..b", Type: "A"}, TTL: 3600, Values: []string{"192.0.2.3"}},
+	in := []dns.RRset{
+		{Key: dns.Key{Host: "a.b", Type: "A"}, TTL: 3600, Values: []string{"192.0.2.1"}},
+		{Key: dns.Key{Host: "a_b", Type: "A"}, TTL: 3600, Values: []string{"192.0.2.2"}},
+		{Key: dns.Key{Host: "a..b", Type: "A"}, TTL: 3600, Values: []string{"192.0.2.3"}},
 	}
 	out := Render("example.com", in, Options{})
 	for _, want := range []string{`"a_b_a" {`, `"a_b_a_2" {`, `"a_b_a_3" {`, "to = eurodns_record_set.a_b_a_3"} {
@@ -87,7 +84,7 @@ func TestResourceNamesUniqueAndValid(t *testing.T) {
 	for _, tc := range []struct{ host, want string }{
 		{"@", "apex_txt"}, {"*", "wildcard_txt"}, {"_dmarc", "dmarc_txt"}, {"9lives", "r_9lives_txt"}, {"--", "txt"},
 	} {
-		if got := resourceName("", rrset.Key{Host: tc.host, Type: "TXT"}); got != tc.want {
+		if got := resourceName("", dns.Key{Host: tc.host, Type: "TXT"}); got != tc.want {
 			t.Errorf("%q: %q, want %q", tc.host, got, tc.want)
 		}
 	}

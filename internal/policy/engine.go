@@ -5,8 +5,9 @@ import (
 	"time"
 
 	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/dns"
+	"github.com/KamorionLabs/dns-gate/internal/glob"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
-	"github.com/KamorionLabs/eurodns-go/rrset"
 )
 
 // Engine implements Authorizer on the current snapshot of a Holder. Deny by
@@ -72,12 +73,12 @@ func (e *Engine) AllowMeta(s *identity.Subject, action string) bool {
 
 // AllowRRset checks an action on one RRset. Protected RRsets are never
 // writable nor adoptable; they stay readable.
-func (e *Engine) AllowRRset(s *identity.Subject, action, zone string, key rrset.Key) bool {
+func (e *Engine) AllowRRset(s *identity.Subject, action, zone string, key dns.Key) bool {
 	return e.snap().Decide(roles(s), action, zone, &key).Allowed
 }
 
 // IsProtected reports whether an RRset is in the protected list.
-func (e *Engine) IsProtected(zone string, key rrset.Key) bool {
+func (e *Engine) IsProtected(zone string, key dns.Key) bool {
 	_, ok := e.snap().protectedBy(normZone(zone), normKey(key))
 	return ok
 }
@@ -168,7 +169,7 @@ func (e *Engine) EphemeralTTL(s *identity.Subject) time.Duration {
 func hostMatches(patterns []string, host string) bool {
 	for _, p := range patterns {
 		p = strings.ToLower(p)
-		if p == host || p == "**" || rrset.MatchHost(p, host) {
+		if p == host || p == "**" || glob.MatchHost(p, host) {
 			return true
 		}
 	}
@@ -184,12 +185,12 @@ func typeMatches(types []string, t string) bool {
 	return false
 }
 
-func normKey(k rrset.Key) rrset.Key {
+func normKey(k dns.Key) dns.Key {
 	h := strings.TrimSuffix(strings.ToLower(k.Host), ".")
 	if h == "" {
 		h = "@"
 	}
-	return rrset.Key{Host: h, Type: strings.ToUpper(k.Type)}
+	return dns.Key{Host: h, Type: strings.ToUpper(k.Type)}
 }
 
 func contains(ss []string, s string) bool {

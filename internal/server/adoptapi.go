@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/glob"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
@@ -14,7 +15,6 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/tfexport"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 	"github.com/KamorionLabs/dns-gate/internal/version"
-	"github.com/KamorionLabs/eurodns-go/rrset"
 )
 
 // Operations are the engine methods behind adoption and RRset plans
@@ -183,7 +183,7 @@ func InventoryTerraform(e Engine) TerraformRenderer {
 		if err != nil {
 			return "", err
 		}
-		var sets []rrset.Set
+		var sets []dns.RRset
 		for _, r := range inv.RRsets {
 			if r.Status != uiapi.StatusManaged || (f.Team != "" && r.Owner != f.Team) {
 				continue
@@ -200,7 +200,7 @@ func InventoryTerraform(e Engine) TerraformRenderer {
 					continue
 				}
 			}
-			sets = append(sets, rrset.Set{Key: rrset.Key{Host: r.Host, Type: r.Type}, TTL: r.TTL, Values: r.Values})
+			sets = append(sets, dns.RRset{Key: dns.Key{Host: r.Host, Type: r.Type}, TTL: r.TTL, Values: r.Values, Alias: r.Alias, ReadOnly: r.ReadOnly})
 		}
 		header := []string{"Managed RRsets exported by dns-gate " + version.Version + "."}
 		if f.Team != "" {

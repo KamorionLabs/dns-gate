@@ -11,7 +11,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
-	"github.com/KamorionLabs/eurodns-go/rrset"
+	"github.com/KamorionLabs/dns-gate/internal/dns"
 )
 
 // ProviderSource is the provider the generated configuration targets.
@@ -26,12 +26,12 @@ type Options struct {
 
 const maxInlineList = 100
 
-// Render returns HCL for the given RRsets. SOA and locked (server-managed)
+// Render returns HCL for the given RRsets. SOA and read-only (server-managed)
 // RRsets are skipped. Output is deterministic: RRsets sorted by host then
 // type, values sorted, stable resource names.
-func Render(zone string, sets []rrset.Set, opts Options) string {
+func Render(zone string, sets []dns.RRset, opts Options) string {
 	zone = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(zone)), ".")
-	kept := make([]rrset.Set, 0, len(sets))
+	kept := make([]dns.RRset, 0, len(sets))
 	for _, s := range sets {
 		if !serverManaged(s) {
 			kept = append(kept, s)
@@ -85,23 +85,15 @@ func Render(zone string, sets []rrset.Set, opts Options) string {
 	return b.String()
 }
 
-func serverManaged(s rrset.Set) bool {
-	if strings.EqualFold(s.Key.Type, "SOA") {
-		return true
-	}
-	for _, r := range s.Records {
-		if rrset.ServerManaged(r) {
-			return true
-		}
-	}
-	return false
+func serverManaged(s dns.RRset) bool {
+	return s.ReadOnly != "" || strings.EqualFold(s.Key.Type, "SOA")
 }
 
 // resourceName builds a valid Terraform identifier: letters, digits,
 // underscores and dashes, starting with a letter or an underscore.
-func resourceName(prefix string, k rrset.Key) string {
+func resourceName(prefix string, k dns.Key) string {
 	host := k.Host
-	if host == rrset.Apex || host == "" {
+	if host == dns.Apex || host == "" {
 		host = "apex"
 	}
 	host = strings.ReplaceAll(host, "*", "wildcard")

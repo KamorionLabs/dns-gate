@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"slices"
 	"sort"
@@ -16,23 +15,26 @@ import (
 	"time"
 
 	"github.com/KamorionLabs/dns-gate/internal/audit"
+	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/provider"
 	"github.com/KamorionLabs/dns-gate/internal/store"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
-	eurodns "github.com/KamorionLabs/eurodns-go"
-	"github.com/KamorionLabs/eurodns-go/rrset"
-	"github.com/KamorionLabs/eurodns-go/zonediff"
 	"golang.org/x/sync/singleflight"
 )
 
 // pendingDelete is the PendingHash of a claim whose RRset is being deleted.
 const pendingDelete = "-"
 
+// readOnlySOA is the read-only reason of server-managed RRsets (SOA, and
+// any RRset a provider flags so): they are left out of adoption filters.
+const readOnlySOA = "server_managed"
+
 var reconcilerSubject = &identity.Subject{Issuer: "gate", ID: "reconciler", Name: "gate:reconciler", Category: identity.CategorySystem}
 
 type cachedZone struct {
-	zone     *eurodns.Zone
+	zone     *dns.Zone
 	syncedAt time.Time
 	writeAt  *time.Time
 }
@@ -54,8 +56,8 @@ type noopAudit struct{}
 func (noopAudit) Log(context.Context, audit.Event) {}
 
 func newEngine(cfg Config) (*engine, error) {
-	if cfg.Client == nil || cfg.Store == nil || cfg.Authz == nil {
-		return nil, errors.New("zonewrite: Client, Store and Authz are required")
+	if cfg.Providers == nil || cfg.Store == nil || cfg.Authz == nil {
+		return nil, errors.New("zonewrite: Providers, Store and Authz are required")
 	}
 	if cfg.Audit == nil {
 		cfg.Audit = noopAudit{}
@@ -98,7 +100,7 @@ func newEngine(cfg Config) (*engine, error) {
 	return e, nil
 }
 
-func normZone(z string) string { return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(z)), ".") }
+func normZone(z string) string { return dns.NormalizeZone(z) }
 
 func newID() string {
 	b := make([]byte, 16)
@@ -133,7 +135,7 @@ func requestID(ctx context.Context) string {
 	return newID()
 }
 
-func keyString(k rrset.Key) string { return k.Host + " " + k.Type }
+func keyString(k dns.Key) string { return k.Host + " " + k.Type }
 
 func (e *engine) managed(zone string) (string, error) {
 	zone = normZone(zone)
@@ -141,6 +143,27 @@ func (e *engine) managed(zone string) (string, error) {
 		return zone, fail(ReasonNotFound, "zone %s is not managed by this gate", zone)
 	}
 	return zone, nil
+}
+
+// provider returns the provider serving zone.
+func (e *engine) provider(zone string) (provider.Provider, error) {
+	p, err := e.cfg.Providers.Provider(zone)
+	if err != nil {
+		return nil, &Error{Reason: ReasonUpstream, Message: "no provider for zone " + zone + ": " + err.Error(), Err: err}
+	}
+	return p, nil
+}
+
+// providerID is the id of the provider of zone, "" when unknown.
+func (e *engine) providerID(zone string) string {
+	if zone == "" {
+		return ""
+	}
+	p, err := e.cfg.Providers.Provider(zone)
+	if err != nil {
+		return ""
+	}
+	return p.ID()
 }
 
 // lock serializes writers on a zone: an in-process semaphore, then the store lease.
@@ -188,35 +211,43 @@ func (e *engine) lock(ctx context.Context, zone string) (func(), error) {
 	}, nil
 }
 
+// upstreamError maps a provider error to an engine error.
 func upstreamError(op string, err error) *Error {
-	var api *eurodns.APIError
-	if errors.As(err, &api) {
-		switch {
-		case api.StatusCode == http.StatusNotFound:
-			return &Error{Reason: ReasonNotFound, Message: op + ": not found upstream", Err: err}
-		case api.StatusCode == http.StatusBadRequest:
-			return &Error{Reason: ReasonInvalid, Message: op + ": rejected by EuroDNS", Details: api.Report, Err: err}
-		}
+	var ie *provider.InvalidError
+	var re *provider.RejectedError
+	switch {
+	case errors.As(err, &ie):
+		return &Error{Reason: ReasonInvalid, Message: keyString(ie.Key) + ": " + ie.Message, Err: err}
+	case errors.As(err, &re):
+		return &Error{Reason: ReasonInvalid, Message: re.Message, Details: re.Details, Err: err}
+	case errors.Is(err, provider.ErrZoneNotFound):
+		return &Error{Reason: ReasonNotFound, Message: op + ": not found upstream", Err: err}
+	case errors.Is(err, provider.ErrConflict):
+		return &Error{Reason: ReasonPrecondition, Message: op + ": the upstream content changed during the write; retry", Err: err}
 	}
-	return &Error{Reason: ReasonUpstream, Message: op + ": EuroDNS call failed", Err: err}
+	return &Error{Reason: ReasonUpstream, Message: op + ": provider call failed", Err: err}
 }
 
-// definiteFailure reports whether an upstream write is known not to have been applied.
-func definiteFailure(err error) bool {
-	var api *eurodns.APIError
-	return errors.As(err, &api) && api.StatusCode >= 400 && api.StatusCode < 500
+// notApplied reports whether a provider write is known not to have been applied.
+func notApplied(err error) bool {
+	var ie *provider.InvalidError
+	return errors.Is(err, provider.ErrNotApplied) || errors.Is(err, provider.ErrZoneNotFound) ||
+		errors.Is(err, provider.ErrConflict) || errors.As(err, &ie)
 }
 
-func (e *engine) fetch(ctx context.Context, zone string) (*eurodns.Zone, error) {
-	z, err := e.cfg.Client.GetZone(ctx, zone)
+func (e *engine) fetch(ctx context.Context, p provider.Provider, zone string) (*dns.Zone, error) {
+	z, err := p.ReadZone(ctx, zone)
 	if err != nil {
 		return nil, upstreamError("get zone", err)
+	}
+	if z.Provider == "" {
+		z.Provider = p.ID()
 	}
 	e.remember(zone, z, false)
 	return z, nil
 }
 
-func (e *engine) remember(zone string, z *eurodns.Zone, written bool) {
+func (e *engine) remember(zone string, z *dns.Zone, written bool) {
 	now := e.now()
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -233,19 +264,28 @@ func (e *engine) remember(zone string, z *eurodns.Zone, written bool) {
 	}
 }
 
-func (e *engine) ownerships(ctx context.Context, zone string) (map[rrset.Key]store.Ownership, error) {
+func (e *engine) ownerships(ctx context.Context, zone string) (map[dns.Key]store.Ownership, error) {
 	list, err := e.cfg.Store.List(ctx, zone)
 	if err != nil {
 		return nil, &Error{Reason: ReasonUpstream, Message: "store list failed", Err: err}
 	}
-	m := make(map[rrset.Key]store.Ownership, len(list))
+	m := make(map[dns.Key]store.Ownership, len(list))
 	for _, o := range list {
-		m[rrset.Key{Host: o.Host, Type: o.Type}] = o
+		m[dns.Key{Host: o.Host, Type: o.Type}] = o
 	}
 	return m, nil
 }
 
-func findSet(sets map[rrset.Key]rrset.Set, k rrset.Key) (rrset.Set, rrset.Key, bool) {
+// index returns the RRsets of a zone by key.
+func index(z *dns.Zone) map[dns.Key]dns.RRset {
+	out := make(map[dns.Key]dns.RRset, len(z.RRsets))
+	for _, s := range z.RRsets {
+		out[s.Key] = s
+	}
+	return out
+}
+
+func findSet(sets map[dns.Key]dns.RRset, k dns.Key) (dns.RRset, dns.Key, bool) {
 	if s, ok := sets[k]; ok {
 		return s, k, true
 	}
@@ -254,40 +294,47 @@ func findSet(sets map[rrset.Key]rrset.Set, k rrset.Key) (rrset.Set, rrset.Key, b
 			return s, key, true
 		}
 	}
-	return rrset.Set{}, k, false
+	return dns.RRset{}, k, false
 }
 
-// newSet builds an RRset from records, forcing a uniform TTL.
-func newSet(key rrset.Key, ttl int, recs []eurodns.Record) rrset.Set {
-	out := rrset.Set{Key: key, TTL: ttl}
-	for _, r := range recs {
-		r.TTL = ttl
-		out.Records = append(out.Records, r)
-		out.Values = append(out.Values, r.RData)
+// readOnly returns why an RRset is never written, "" if it may be.
+func readOnly(k dns.Key, s *dns.RRset) string {
+	if s != nil && s.ReadOnly != "" {
+		return s.ReadOnly
 	}
-	sort.Strings(out.Values)
-	return out
+	if strings.EqualFold(k.Type, "SOA") {
+		return readOnlySOA
+	}
+	return ""
 }
 
-func setValues(s *rrset.Set) (int, []string) {
+func setValues(s *dns.RRset) (int, []string, *dns.Alias) {
 	if s == nil {
-		return 0, nil
+		return 0, nil, nil
 	}
-	return s.TTL, slices.Clone(s.Values)
+	return s.TTL, slices.Clone(s.Values), s.Alias
 }
 
-func uiChange(op string, key rrset.Key, old, new *rrset.Set) uiapi.Change {
+func uiChange(op string, key dns.Key, old, new *dns.RRset) uiapi.Change {
 	c := uiapi.Change{Op: op, Host: key.Host, Type: key.Type}
-	c.OldTTL, c.OldValues = setValues(old)
-	c.NewTTL, c.NewValues = setValues(new)
+	c.OldTTL, c.OldValues, c.OldAlias = setValues(old)
+	c.NewTTL, c.NewValues, c.NewAlias = setValues(new)
 	return c
 }
 
-func (e *engine) emit(ctx context.Context, s *identity.Subject, action, zone, decision, reason string, changes []uiapi.Change, snapshot *int64, extra map[string]any) {
+func uiChanges(changes []dns.Change) []uiapi.Change {
+	out := make([]uiapi.Change, 0, len(changes))
+	for _, c := range changes {
+		out = append(out, uiChange(string(c.Op), c.Key, c.Old, c.New))
+	}
+	return out
+}
+
+func (e *engine) emit(ctx context.Context, s *identity.Subject, action, zone, decision, reason string, changes []uiapi.Change, snapshot string, extra map[string]any) {
 	e.cfg.Audit.Log(ctx, audit.Event{
 		Time: e.now().UTC(), RequestID: requestID(ctx), Subject: s.String(), SubjectName: s.Name,
-		SubjectCategory: s.Category, Teams: s.Teams, Action: action, Zone: zone, Decision: decision,
-		Reason: reason, Changes: changes, SnapshotID: snapshot, Extra: extra,
+		SubjectCategory: s.Category, Teams: s.Teams, Action: action, Zone: zone, Provider: e.providerID(zone),
+		Decision: decision, Reason: reason, Changes: changes, SnapshotID: uiapi.SnapshotID(snapshot), Extra: extra,
 	})
 }
 
@@ -301,7 +348,7 @@ func (e *engine) deny(ctx context.Context, s *identity.Subject, action, zone str
 			decision = "deny"
 		}
 	}
-	e.emit(ctx, s, action, zone, decision, reason, nil, nil, map[string]any{"message": err.Error()})
+	e.emit(ctx, s, action, zone, decision, reason, nil, "", map[string]any{"message": err.Error()})
 	return err
 }
 
@@ -311,8 +358,8 @@ func setActor(o *store.Ownership, s *identity.Subject, rid string, now time.Time
 }
 
 // taint marks an ownership tainted and audits it.
-func (e *engine) taint(ctx context.Context, o store.Ownership, current *rrset.Set, why string) {
-	key := rrset.Key{Host: o.Host, Type: o.Type}
+func (e *engine) taint(ctx context.Context, o store.Ownership, current *dns.RRset, why string) {
+	key := dns.Key{Host: o.Host, Type: o.Type}
 	o.State, o.PendingHash = store.StateTainted, ""
 	o.UpdatedAt = e.now()
 	if err := e.cfg.Store.Put(ctx, o); err != nil {
@@ -320,12 +367,12 @@ func (e *engine) taint(ctx context.Context, o store.Ownership, current *rrset.Se
 		return
 	}
 	e.emit(ctx, reconcilerSubject, "gate.taint", o.Zone, "allow", string(ReasonTainted),
-		[]uiapi.Change{uiChange("taint", key, nil, current)}, nil, map[string]any{"message": why})
+		[]uiapi.Change{uiChange("taint", key, nil, current)}, "", map[string]any{"message": why})
 }
 
 // resolvePending settles claims left by an interrupted write, against the
 // current upstream RRsets. owns is updated in place.
-func (e *engine) resolvePending(ctx context.Context, zone string, sets map[rrset.Key]rrset.Set, owns map[rrset.Key]store.Ownership) {
+func (e *engine) resolvePending(ctx context.Context, zone string, sets map[dns.Key]dns.RRset, owns map[dns.Key]store.Ownership) {
 	for key, o := range owns {
 		if o.State != store.StatePending {
 			continue
@@ -333,7 +380,7 @@ func (e *engine) resolvePending(ctx context.Context, zone string, sets map[rrset
 		set, _, present := findSet(sets, key)
 		var hash string
 		if present {
-			hash = rrset.ContentHash(set)
+			hash = dns.ContentHash(set)
 		}
 		next := o
 		next.PendingHash = ""
@@ -350,7 +397,7 @@ func (e *engine) resolvePending(ctx context.Context, zone string, sets map[rrset
 		case present && hash == o.ContentHash:
 			next.State = store.StateActive
 		default:
-			var cur *rrset.Set
+			var cur *dns.RRset
 			if present {
 				cur = &set
 			}
@@ -369,139 +416,98 @@ func (e *engine) resolvePending(ctx context.Context, zone string, sets map[rrset
 	}
 }
 
-// userSets groups the records the gate may reason about: SOA and locked
-// records are managed by EuroDNS (the SOA serial changes on every write) and
-// never take part in deltas, hashes or drift detection.
-func userSets(zone string, recs []eurodns.Record) map[rrset.Key]rrset.Set {
-	user := make([]eurodns.Record, 0, len(recs))
-	for _, r := range recs {
-		if !rrset.ServerManaged(r) {
-			user = append(user, r)
+// settle rebases plan changes on the current RRsets: Old is the current
+// RRset, Op follows from Old and New, changes with neither are dropped.
+func settle(sets map[dns.Key]dns.RRset, changes []dns.Change) []dns.Change {
+	out := make([]dns.Change, 0, len(changes))
+	for _, c := range changes {
+		key := dns.Key{Host: c.Key.Host, Type: strings.ToUpper(strings.TrimSpace(c.Key.Type))}
+		var old *dns.RRset
+		if s, k, ok := findSet(sets, key); ok {
+			cp := s
+			old, key = &cp, k
 		}
-	}
-	return rrset.Group(zone, user)
-}
-
-// managedKeys returns the RRset keys holding server-managed records.
-func managedKeys(zone string, recs []eurodns.Record) map[rrset.Key]bool {
-	out := map[rrset.Key]bool{}
-	for _, r := range recs {
-		if rrset.ServerManaged(r) {
-			out[rrset.KeyOf(zone, r)] = true
+		n := c.New
+		if n != nil {
+			cp := *n
+			cp.Key = key
+			n = &cp
 		}
+		switch {
+		case old == nil && n == nil:
+			continue
+		case old == nil:
+			c = dns.Change{Op: dns.OpCreate, Key: key, New: n}
+		case n == nil:
+			c = dns.Change{Op: dns.OpDelete, Key: key, Old: old}
+		default:
+			c = dns.Change{Op: dns.OpUpdate, Key: key, Old: old, New: n}
+		}
+		out = append(out, c)
 	}
 	return out
-}
-
-// relativeTargets lists new values whose target EuroDNS would store relative
-// to the zone (no ending dot).
-func relativeTargets(c zonediff.Change) []string {
-	if c.New == nil || !rrset.NeedsFQDN(c.Key.Type) {
-		return nil
-	}
-	var old []string
-	if c.Old != nil {
-		old = c.Old.Values
-	}
-	var bad []string
-	for _, v := range c.New.Values {
-		if slices.Contains(old, v) {
-			continue
-		}
-		if t := rrset.TargetOf(c.Key.Type, v); t != "" && !strings.HasSuffix(t, ".") {
-			bad = append(bad, v)
-		}
-	}
-	return bad
-}
-
-// blockingProblems returns the validation problems that refuse a write:
-// every error, and warnings on an RRset the request changes.
-func blockingProblems(zone string, rep *eurodns.ValidationReport, changed map[rrset.Key]bool) []string {
-	if rep == nil {
-		return nil
-	}
-	var out []string
-	for _, p := range rep.Problems() {
-		if p.Severity != eurodns.SeverityWarning {
-			out = append(out, p.String())
-			continue
-		}
-		if p.Host == "" && p.Type == "" {
-			continue
-		}
-		k := rrset.Key{Host: rrset.NormalizeHost(p.Host, zone), Type: strings.ToUpper(strings.TrimSpace(p.Type))}
-		if changed[k] {
-			out = append(out, p.String())
-		}
-	}
-	if len(out) == 0 && rep.IsValid != nil && !*rep.IsValid {
-		out = append(out, "zone rejected by EuroDNS validation")
-	}
-	return out
-}
-
-type plan struct {
-	changes  []zonediff.Change
-	ignored  []string
-	forwards bool
-	desired  *eurodns.Zone
 }
 
 type claim struct {
-	change zonediff.Change
+	change dns.Change
 	prev   *store.Ownership
 	cur    store.Ownership
 }
 
-// mutate runs the common write pipeline; build turns the request into RRset changes.
-func (e *engine) mutate(ctx context.Context, s *identity.Subject, zoneIn, ifMatch, action string,
-	build func(cur *eurodns.Zone, sets map[rrset.Key]rrset.Set) (*plan, error)) (*eurodns.Zone, error) {
+// Write runs the common write pipeline; build turns the request into RRset changes.
+func (e *engine) Write(ctx context.Context, s *identity.Subject, zoneIn, ifMatch, action string, build BuildFunc) (*dns.Zone, int64, error) {
 	ctx = WithRequestID(ctx, requestID(ctx))
 	zone, err := e.managed(zoneIn)
 	if err != nil {
-		return nil, e.deny(ctx, s, action, zone, err)
+		return nil, 0, e.deny(ctx, s, action, zone, err)
 	}
 	if !e.cfg.Authz.Allow(s, policy.ActionRecordWrite, zone) {
-		return nil, e.deny(ctx, s, action, zone, fail(ReasonForbidden, "not allowed to write in zone %s", zone))
+		return nil, 0, e.deny(ctx, s, action, zone, fail(ReasonForbidden, "not allowed to write in zone %s", zone))
+	}
+	p, err := e.provider(zone)
+	if err != nil {
+		return nil, 0, e.deny(ctx, s, action, zone, err)
 	}
 	unlock, err := e.lock(ctx, zone)
 	if err != nil {
-		return nil, e.deny(ctx, s, action, zone, err)
+		return nil, 0, e.deny(ctx, s, action, zone, err)
 	}
 	defer unlock()
 
-	cur, err := e.fetch(ctx, zone)
+	cur, err := e.fetch(ctx, p, zone)
 	if err != nil {
-		return nil, e.deny(ctx, s, action, zone, err)
+		return nil, 0, e.deny(ctx, s, action, zone, err)
 	}
-	sets := userSets(zone, cur.Records)
+	sets := index(cur)
 	owns, err := e.ownerships(ctx, zone)
 	if err != nil {
-		return nil, e.deny(ctx, s, action, zone, err)
+		return nil, 0, e.deny(ctx, s, action, zone, err)
 	}
 	e.resolvePending(ctx, zone, sets, owns)
 	version, err := e.cfg.Store.ZoneVersion(ctx, zone)
 	if err != nil {
-		return nil, e.deny(ctx, s, action, zone, &Error{Reason: ReasonUpstream, Message: "store zone version failed", Err: err})
+		return nil, 0, e.deny(ctx, s, action, zone, &Error{Reason: ReasonUpstream, Message: "store zone version failed", Err: err})
 	}
 	if !ifMatchOK(ifMatch, version) {
-		return nil, e.deny(ctx, s, action, zone, fail(ReasonPrecondition, "zone changed: current ETag is %s", etag(version)))
+		return nil, 0, e.deny(ctx, s, action, zone, fail(ReasonPrecondition, "zone changed: current ETag is %s", etag(version)))
 	}
-	p, err := build(cur, sets)
+	plan, err := build(cur)
 	if err != nil {
-		return nil, e.deny(ctx, s, action, zone, err)
+		return nil, 0, e.deny(ctx, s, action, zone, err)
 	}
-	if len(p.ignored) > 0 {
-		e.log.Info("rebase ignored out-of-scope differences", "zone", zone, "subject", s.String(), "ignored", p.ignored)
+	if plan == nil {
+		plan = &Plan{}
 	}
-	if len(p.changes) == 0 && !p.forwards {
-		cur.ETag = etag(version)
-		return cur, nil
+	plan.Changes = settle(sets, plan.Changes)
+	if len(plan.Ignored) > 0 {
+		e.log.Info("rebase ignored out-of-scope differences", "zone", zone, "subject", s.String(), "ignored", plan.Ignored)
 	}
-	claims, err := e.validate(ctx, s, zone, cur, owns, p, false)
+	if len(plan.Changes) == 0 && !plan.Settings {
+		return cur, version, nil
+	}
+	claims, err := e.validate(ctx, s, p, zone, sets, owns, plan, false)
 	if err != nil {
-		return nil, e.deny(ctx, s, action, zone, err)
+		return nil, 0, e.deny(ctx, s, action, zone, err)
 	}
 	now := e.now()
 	rid := RequestID(ctx)
@@ -528,53 +534,41 @@ func (e *engine) mutate(ctx context.Context, s *identity.Subject, zoneIn, ifMatc
 		if cl.change.New == nil {
 			cl.cur.PendingHash = pendingDelete
 		} else {
-			cl.cur.PendingHash = rrset.ContentHash(*cl.change.New)
+			cl.cur.PendingHash = dns.ContentHash(*cl.change.New)
 		}
 		setActor(&cl.cur, s, rid, now)
 		if err := e.cfg.Store.Put(ctx, cl.cur); err != nil {
 			revert()
-			return nil, e.deny(ctx, s, action, zone, &Error{Reason: ReasonUpstream, Message: "store claim failed", Err: err})
+			return nil, 0, e.deny(ctx, s, action, zone, &Error{Reason: ReasonUpstream, Message: "store claim failed", Err: err})
 		}
 		cl.cur.Version++
 		written++
 	}
 
-	desired := zonediff.Apply(zone, cur, p.changes)
-	if p.forwards && p.desired != nil {
-		desired.URLForwards, desired.MailForwards = p.desired.URLForwards, p.desired.MailForwards
-		desired.DomainConnect, desired.Extra = p.desired.DomainConnect, p.desired.Extra
+	base := cur
+	if plan.Base != nil {
+		base = plan.Base
 	}
-	if e.cfg.CheckOnWrite {
-		checked, err := e.cfg.Client.CheckZone(ctx, zone, desired)
-		if err != nil {
-			revert()
-			return nil, e.deny(ctx, s, action, zone, upstreamError("check zone", err))
-		}
-		changed := make(map[rrset.Key]bool, len(p.changes))
-		for _, c := range p.changes {
-			changed[c.Key] = true
-		}
-		if checked != nil {
-			if problems := blockingProblems(zone, checked.Report, changed); len(problems) > 0 {
-				revert()
-				return nil, e.deny(ctx, s, action, zone, &Error{Reason: ReasonInvalid,
-					Message: "EuroDNS validation: " + strings.Join(problems, "; "), Details: checked.Report})
-			}
-		}
+	if err := e.check(ctx, p, zone, base, plan.Changes); err != nil {
+		revert()
+		return nil, 0, e.deny(ctx, s, action, zone, err)
 	}
-	snapshot := e.latestSnapshot(ctx, zone)
-	if err := e.cfg.Client.SaveZone(ctx, zone, desired); err != nil {
-		if definiteFailure(err) {
+	snapshot := e.latestSnapshot(ctx, p, zone)
+	if err := p.Apply(ctx, zone, base, plan.Changes); err != nil {
+		switch {
+		case !p.Capabilities().AtomicBatch:
+			e.settleClaims(ctx, p, zone)
+		case notApplied(err):
 			revert()
 		}
-		return nil, e.deny(ctx, s, action, zone, upstreamError("save zone", err))
+		return nil, 0, e.deny(ctx, s, action, zone, upstreamError("write zone", err))
 	}
-	result := desired
-	if after, err := e.fetch(ctx, zone); err != nil {
+	var result *dns.Zone
+	if after, err := e.fetch(ctx, p, zone); err != nil {
 		e.log.Warn("confirmation read failed, reconcile will settle the claims", "zone", zone, "error", err)
 	} else {
 		result = after
-		e.confirm(ctx, zone, claims, userSets(zone, after.Records))
+		e.confirm(ctx, zone, claims, index(after))
 	}
 	e.remember(zone, nil, true)
 	newVersion, err := e.cfg.Store.BumpZoneVersion(ctx, zone, version)
@@ -582,49 +576,94 @@ func (e *engine) mutate(ctx context.Context, s *identity.Subject, zoneIn, ifMatc
 		e.log.Warn("zone version bump failed", "zone", zone, "error", err)
 		newVersion = version
 	}
-	changes := make([]uiapi.Change, 0, len(p.changes))
-	for _, c := range p.changes {
-		changes = append(changes, uiChange(string(c.Op), c.Key, c.Old, c.New))
-	}
 	var extra map[string]any
-	if len(p.ignored) > 0 {
-		extra = map[string]any{"ignored_out_of_scope": p.ignored}
+	if len(plan.Ignored) > 0 {
+		extra = map[string]any{"ignored_out_of_scope": plan.Ignored}
 	}
-	e.emit(ctx, s, action, zone, "allow", "", changes, snapshot, extra)
-	result.ETag = etag(newVersion)
-	return result, nil
+	e.emit(ctx, s, action, zone, "allow", "", uiChanges(plan.Changes), snapshot, extra)
+	return result, newVersion, nil
+}
+
+// check runs the provider dry run when enabled and refuses blocking problems.
+func (e *engine) check(ctx context.Context, p provider.Provider, zone string, base *dns.Zone, changes []dns.Change) error {
+	c, ok := p.(provider.Checker)
+	if !e.cfg.CheckOnWrite || !ok {
+		return nil
+	}
+	problems, err := c.Check(ctx, zone, base, changes)
+	if err != nil {
+		return upstreamError("check zone", err)
+	}
+	var blocking []string
+	for _, pb := range problems {
+		if pb.Blocking {
+			blocking = append(blocking, pb.Message)
+		}
+	}
+	if len(blocking) > 0 {
+		return &Error{Reason: ReasonInvalid, Message: p.ID() + " validation: " + strings.Join(blocking, "; "), Details: problems}
+	}
+	return nil
+}
+
+// settleClaims resolves the pending claims of zone against a fresh read,
+// after a failed write of a provider without atomic batches.
+func (e *engine) settleClaims(ctx context.Context, p provider.Provider, zone string) {
+	after, err := e.fetch(ctx, p, zone)
+	if err != nil {
+		e.log.Warn("read after a failed write failed, reconcile will settle the claims", "zone", zone, "error", err)
+		return
+	}
+	owns, err := e.ownerships(ctx, zone)
+	if err != nil {
+		return
+	}
+	e.resolvePending(ctx, zone, index(after), owns)
 }
 
 // validate applies every business rule to a plan and returns the claims to
-// write. With dry set it has no side effect (drift is reported, not tainted).
-func (e *engine) validate(ctx context.Context, s *identity.Subject, zone string, cur *eurodns.Zone,
-	owns map[rrset.Key]store.Ownership, p *plan, dry bool) ([]claim, error) {
-	if max := e.cfg.Authz.MaxChangesPerRequest(s); max > 0 && len(p.changes) > max {
-		return nil, fail(ReasonTooMany, "%d RRset changes exceed the limit of %d", len(p.changes), max)
+// write; plan.Changes get their normalized New. With dry set it has no side
+// effect (drift is reported, not tainted).
+func (e *engine) validate(ctx context.Context, s *identity.Subject, p provider.Provider, zone string, sets map[dns.Key]dns.RRset,
+	owns map[dns.Key]store.Ownership, plan *Plan, dry bool) ([]claim, error) {
+	if max := e.cfg.Authz.MaxChangesPerRequest(s); max > 0 && len(plan.Changes) > max {
+		return nil, fail(ReasonTooMany, "%d RRset changes exceed the limit of %d", len(plan.Changes), max)
 	}
-	if p.forwards && !e.cfg.Authz.Allow(s, policy.ActionZoneAdmin, zone) {
-		return nil, fail(ReasonForbidden, "URL/mail forwards and zone settings require %s", policy.ActionZoneAdmin)
+	if plan.Settings && !e.cfg.Authz.Allow(s, policy.ActionZoneAdmin, zone) {
+		return nil, fail(ReasonForbidden, "zone settings (EuroDNS URL/mail forwards) require %s", policy.ActionZoneAdmin)
 	}
+	caps := p.Capabilities()
 
 	now := e.now()
-	serverManaged := managedKeys(zone, cur.Records)
-	claims := make([]claim, 0, len(p.changes))
-	for _, c := range p.changes {
+	claims := make([]claim, 0, len(plan.Changes))
+	for i := range plan.Changes {
+		c := &plan.Changes[i]
 		if !e.cfg.Authz.AllowRRset(s, policy.ActionRecordWrite, zone, c.Key) {
 			return nil, fail(ReasonForbidden, "not allowed to write %s in %s", keyString(c.Key), zone)
 		}
-		if serverManaged[c.Key] || c.Key.Type == "SOA" {
-			return nil, fail(ReasonForbidden, "%s is managed by EuroDNS (SOA or locked record)", keyString(c.Key))
+		cur, exists := sets[c.Key]
+		var curp *dns.RRset
+		if exists {
+			curp = &cur
 		}
-		if bad := relativeTargets(c); len(bad) > 0 {
-			return nil, fail(ReasonInvalid,
-				"%s: target of %q must end with a dot, otherwise EuroDNS stores it relative to %s", keyString(c.Key), bad[0], zone)
+		if ro := readOnly(c.Key, curp); ro != "" {
+			return nil, fail(ReasonForbidden, "%s is read-only at provider %s (%s)", keyString(c.Key), p.ID(), ro)
+		}
+		if c.New != nil {
+			if c.New.Alias != nil && !caps.Alias {
+				return nil, fail(ReasonInvalid, "%s: provider %s does not support alias records", keyString(c.Key), p.ID())
+			}
+			n, err := p.Normalize(zone, *c.New)
+			if err != nil {
+				return nil, upstreamError("normalize", err)
+			}
+			n.Key = c.Key
+			c.New = &n
 		}
 		o, owned := owns[c.Key]
 		if c.Old == nil {
-			cl := claim{change: c}
+			cl := claim{change: *c}
 			if owned {
-				// Owned but absent upstream: the owner team may recreate it.
 				if !slices.Contains(s.Teams, o.Owner) {
 					return nil, fail(ReasonNotOwner, "%s is owned by team %s", keyString(c.Key), o.Owner)
 				}
@@ -663,21 +702,20 @@ func (e *engine) validate(ctx context.Context, s *identity.Subject, zone string,
 		if o.State == store.StatePending {
 			return nil, fail(ReasonLocked, "%s has an unsettled previous write; retry shortly", keyString(c.Key))
 		}
-		if rrset.ContentHash(*c.Old) != o.ContentHash {
+		if dns.ContentHash(*c.Old) != o.ContentHash {
 			if !dry {
 				e.taint(ctx, o, c.Old, "changed outside the gate")
 			}
 			return nil, fail(ReasonTainted, "%s was changed outside the gate; an admin must adopt it again", keyString(c.Key))
 		}
 		prev := o
-		claims = append(claims, claim{change: c, prev: &prev, cur: o})
+		claims = append(claims, claim{change: *c, prev: &prev, cur: o})
 	}
-
 	return claims, nil
 }
 
-// confirm turns pending claims into their final state after a successful save.
-func (e *engine) confirm(ctx context.Context, zone string, claims []claim, after map[rrset.Key]rrset.Set) {
+// confirm turns pending claims into their final state after a successful write.
+func (e *engine) confirm(ctx context.Context, zone string, claims []claim, after map[dns.Key]dns.RRset) {
 	for _, cl := range claims {
 		set, _, present := findSet(after, cl.change.Key)
 		o := cl.cur
@@ -687,14 +725,14 @@ func (e *engine) confirm(ctx context.Context, zone string, claims []claim, after
 		case cl.change.New == nil && !present:
 			err = e.cfg.Store.Delete(ctx, zone, o.Host, o.Type, o.Version)
 		case cl.change.New != nil && present:
-			o.State, o.ContentHash = store.StateActive, rrset.ContentHash(set)
+			o.State, o.ContentHash = store.StateActive, dns.ContentHash(set)
 			err = e.cfg.Store.Put(ctx, o)
 		default:
-			var cur *rrset.Set
+			var cur *dns.RRset
 			if present {
 				cur = &set
 			}
-			e.taint(ctx, o, cur, "upstream state differs from the saved zone")
+			e.taint(ctx, o, cur, "upstream state differs from the written zone")
 		}
 		if err != nil {
 			e.log.Warn("claim confirmation failed, reconcile will settle it", "zone", zone, "rrset", keyString(cl.change.Key), "error", err)
@@ -702,182 +740,70 @@ func (e *engine) confirm(ctx context.Context, zone string, claims []claim, after
 	}
 }
 
-func (e *engine) latestSnapshot(ctx context.Context, zone string) *int64 {
-	snaps, err := e.cfg.Client.ListSnapshots(ctx, zone)
-	if err != nil || len(snaps) == 0 {
-		return nil
+func (e *engine) latestSnapshot(ctx context.Context, p provider.Provider, zone string) string {
+	sn, ok := p.(provider.Snapshotter)
+	if !ok {
+		return ""
 	}
-	best := snaps[0]
-	for _, sn := range snaps[1:] {
-		if sn.CreatedAt > best.CreatedAt || (sn.CreatedAt == best.CreatedAt && sn.ID > best.ID) {
-			best = sn
-		}
+	id, err := sn.LatestSnapshot(ctx, zone)
+	if err != nil {
+		return ""
 	}
-	return &best.ID
+	return id
 }
 
-func (e *engine) GetZone(ctx context.Context, s *identity.Subject, zoneIn string) (*eurodns.Zone, error) {
+func (e *engine) Authorize(ctx context.Context, s *identity.Subject, zoneIn, action, op string) (provider.Provider, error) {
 	zone, err := e.managed(zoneIn)
 	if err != nil {
 		return nil, err
 	}
-	if !e.cfg.Authz.Allow(s, policy.ActionDNSRead, zone) {
-		return nil, e.deny(ctx, s, "getDnsZone", zone, fail(ReasonForbidden, "not allowed to read zone %s", zone))
+	if !e.cfg.Authz.Allow(s, action, zone) {
+		return nil, e.deny(ctx, s, op, zone, fail(ReasonForbidden, "%s is not allowed on zone %s", action, zone))
 	}
-	z, err := e.fetch(ctx, zone)
+	return e.provider(zone)
+}
+
+func (e *engine) ReadZone(ctx context.Context, s *identity.Subject, zoneIn, op string) (*dns.Zone, int64, error) {
+	p, err := e.Authorize(ctx, s, zoneIn, policy.ActionDNSRead, op)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+	zone := normZone(zoneIn)
+	z, err := e.fetch(ctx, p, zone)
+	if err != nil {
+		return nil, 0, err
 	}
 	v, err := e.cfg.Store.ZoneVersion(ctx, zone)
 	if err != nil {
-		return nil, &Error{Reason: ReasonUpstream, Message: "store zone version failed", Err: err}
+		return nil, 0, &Error{Reason: ReasonUpstream, Message: "store zone version failed", Err: err}
 	}
-	z.ETag = etag(v)
-	return z, nil
+	return z, v, nil
 }
 
-func (e *engine) CheckZone(ctx context.Context, s *identity.Subject, zoneIn string, z *eurodns.Zone) (*eurodns.Zone, error) {
-	zone, err := e.managed(zoneIn)
-	if err != nil {
-		return nil, err
-	}
-	if !e.cfg.Authz.Allow(s, policy.ActionDNSRead, zone) {
-		return nil, e.deny(ctx, s, "checkDnsZone", zone, fail(ReasonForbidden, "not allowed to read zone %s", zone))
-	}
-	out, err := e.cfg.Client.CheckZone(ctx, zone, z)
-	if err != nil {
-		return nil, upstreamError("check zone", err)
-	}
-	return out, nil
-}
-
-func (e *engine) SaveZone(ctx context.Context, s *identity.Subject, zone string, z *eurodns.Zone, ifMatch string) error {
-	if z == nil {
-		return fail(ReasonInvalid, "empty zone")
-	}
-	rebase := e.cfg.Authz.RebaseOnSave(s)
-	_, err := e.mutate(ctx, s, zone, ifMatch, "saveDnsZone", func(cur *eurodns.Zone, _ map[rrset.Key]rrset.Set) (*plan, error) {
-		zn := normZone(zone)
-		d := zonediff.Diff(zn, cur, z)
-		p := &plan{desired: z, forwards: d.ForwardsChanged || d.OtherChanged}
-		for _, c := range d.Changes {
-			if e.cfg.Authz.AllowRRset(s, policy.ActionRecordWrite, zn, c.Key) {
-				p.changes = append(p.changes, c)
-				continue
-			}
-			if !rebase {
-				return nil, fail(ReasonForbidden, "not allowed to write %s in %s", keyString(c.Key), zn)
-			}
-			p.ignored = append(p.ignored, string(c.Op)+" "+keyString(c.Key))
-		}
-		if rebase && p.forwards {
-			p.ignored = append(p.ignored, "forwards/zone settings")
-			p.forwards = false
-		}
-		return p, nil
-	})
-	return err
-}
-
-func (e *engine) AddRecords(ctx context.Context, s *identity.Subject, zone string, recs []eurodns.Record, ifMatch string) (*eurodns.Zone, error) {
-	if len(recs) == 0 {
-		return nil, fail(ReasonInvalid, "no records")
-	}
-	return e.mutate(ctx, s, zone, ifMatch, "addDnsRecords", func(_ *eurodns.Zone, sets map[rrset.Key]rrset.Set) (*plan, error) {
-		zn := normZone(zone)
-		clean := make([]eurodns.Record, 0, len(recs))
-		for _, r := range recs {
-			clean = append(clean, eurodns.Record{Type: r.Type, Host: r.Host, TTL: r.TTL, RData: r.RData, IsDynDNS: r.IsDynDNS, Proxy: r.Proxy, Extra: r.Extra})
-		}
-		requested := rrset.Group(zn, clean)
-		keys := make([]rrset.Key, 0, len(requested))
-		for k := range requested {
-			keys = append(keys, k)
-		}
-		sort.Slice(keys, func(i, j int) bool { return keyString(keys[i]) < keyString(keys[j]) })
-		p := &plan{}
-		for _, k := range keys {
-			req := requested[k]
-			old, key, exists := findSet(sets, k)
-			if !exists {
-				n := newSet(k, req.TTL, req.Records)
-				p.changes = append(p.changes, zonediff.Change{Op: zonediff.OpCreate, Key: k, New: &n})
-				continue
-			}
-			merged := slices.Clone(old.Records)
-			added := false
-			for _, r := range req.Records {
-				if !slices.Contains(old.Values, r.RData) {
-					merged = append(merged, r)
-					added = true
-				}
-			}
-			if !added && req.TTL == old.TTL {
-				continue
-			}
-			o := old
-			n := newSet(key, req.TTL, merged)
-			p.changes = append(p.changes, zonediff.Change{Op: zonediff.OpUpdate, Key: key, Old: &o, New: &n})
-		}
-		return p, nil
-	})
-}
-
-func (e *engine) DeleteRecord(ctx context.Context, s *identity.Subject, zone string, id int64, ifMatch string) (*eurodns.Zone, error) {
-	return e.mutate(ctx, s, zone, ifMatch, "deleteDnsRecord", func(cur *eurodns.Zone, sets map[rrset.Key]rrset.Set) (*plan, error) {
-		zn := normZone(zone)
-		var target *eurodns.Record
-		for i := range cur.Records {
-			if r := cur.Records[i]; r.ID != nil && *r.ID == id {
-				target = &cur.Records[i]
-				break
-			}
-		}
-		if target == nil {
-			return nil, fail(ReasonNotFound, "record %d not found in %s", id, zn)
-		}
-		if rrset.ServerManaged(*target) {
-			return nil, fail(ReasonForbidden, "record %d is managed by EuroDNS (SOA or locked record)", id)
-		}
-		old, key, ok := findSet(sets, rrset.Key{Host: rrset.NormalizeHost(target.Host, zn), Type: target.Type})
-		if !ok {
-			return nil, fail(ReasonNotFound, "record %d not found in %s", id, zn)
-		}
-		var rest []eurodns.Record
-		for _, r := range old.Records {
-			if r.ID == nil || *r.ID != id {
-				rest = append(rest, r)
-			}
-		}
-		o := old
-		if len(rest) == 0 {
-			return &plan{changes: []zonediff.Change{{Op: zonediff.OpDelete, Key: key, Old: &o}}}, nil
-		}
-		n := newSet(key, old.TTL, rest)
-		return &plan{changes: []zonediff.Change{{Op: zonediff.OpUpdate, Key: key, Old: &o, New: &n}}}, nil
-	})
-}
-
-func (e *engine) Adopt(ctx context.Context, s *identity.Subject, zoneIn string, req eurodns.AdoptRequest) error {
+func (e *engine) Adopt(ctx context.Context, s *identity.Subject, zoneIn string, refs []uiapi.RRsetRef, owner string) error {
 	const action = "gate.adopt"
 	ctx = WithRequestID(ctx, requestID(ctx))
 	zone, err := e.managed(zoneIn)
 	if err != nil {
 		return e.deny(ctx, s, action, zone, err)
 	}
-	if len(req.RRsets) == 0 {
+	if len(refs) == 0 {
 		return e.deny(ctx, s, action, zone, fail(ReasonInvalid, "no RRsets to adopt"))
+	}
+	p, err := e.provider(zone)
+	if err != nil {
+		return e.deny(ctx, s, action, zone, err)
 	}
 	unlock, err := e.lock(ctx, zone)
 	if err != nil {
 		return e.deny(ctx, s, action, zone, err)
 	}
 	defer unlock()
-	cur, err := e.fetch(ctx, zone)
+	cur, err := e.fetch(ctx, p, zone)
 	if err != nil {
 		return e.deny(ctx, s, action, zone, err)
 	}
-	sets := userSets(zone, cur.Records)
+	sets := index(cur)
 	owns, err := e.ownerships(ctx, zone)
 	if err != nil {
 		return e.deny(ctx, s, action, zone, err)
@@ -888,13 +814,11 @@ func (e *engine) Adopt(ctx context.Context, s *identity.Subject, zoneIn string, 
 	rid := RequestID(ctx)
 	var writes []store.Ownership
 	var changes []uiapi.Change
-	for _, r := range req.RRsets {
-		want := rrset.Key{Host: rrset.NormalizeHost(r.Host, zone), Type: strings.ToUpper(r.Type)}
+	for _, r := range refs {
+		want := refKey(zone, r)
 		set, key, ok := findSet(sets, want)
 		o, owned := owns[key]
-		// Importing an RRset the caller's team already owns (terraform import
-		// in gate mode) is a no-op that only needs write access on it.
-		if ok && owned && o.State == store.StateActive && o.ContentHash == rrset.ContentHash(set) && slices.Contains(s.Teams, o.Owner) {
+		if ok && owned && o.State == store.StateActive && o.ContentHash == dns.ContentHash(set) && slices.Contains(s.Teams, o.Owner) {
 			if !e.cfg.Authz.AllowRRset(s, policy.ActionRecordWrite, zone, key) && !e.cfg.Authz.AllowRRset(s, policy.ActionRecordAdopt, zone, key) {
 				return e.deny(ctx, s, action, zone, fail(ReasonForbidden, "not allowed to manage %s in %s", keyString(key), zone))
 			}
@@ -906,19 +830,22 @@ func (e *engine) Adopt(ctx context.Context, s *identity.Subject, zoneIn string, 
 		if !ok {
 			return e.deny(ctx, s, action, zone, fail(ReasonNotFound, "%s does not exist in %s", keyString(want), zone))
 		}
-		hash := rrset.ContentHash(set)
+		if ro := readOnly(key, &set); ro != "" {
+			return e.deny(ctx, s, action, zone, fail(ReasonForbidden, "%s is read-only at provider %s (%s)", keyString(key), p.ID(), ro))
+		}
+		hash := dns.ContentHash(set)
 		switch {
 		case owned && !slices.Contains(s.Teams, o.Owner):
 			return e.deny(ctx, s, action, zone, fail(ReasonNotOwner, "%s is owned by team %s", keyString(key), o.Owner))
 		case owned:
 			o.State, o.ContentHash, o.PendingHash, o.Adopted = store.StateActive, hash, "", true
 		default:
-			owner, err := e.adoptOwner(s, zone, req.Owner)
+			team, err := e.adoptOwner(s, zone, owner)
 			if err != nil {
 				return e.deny(ctx, s, action, zone, err)
 			}
 			o = store.Ownership{
-				Zone: zone, Host: key.Host, Type: key.Type, Owner: owner, State: store.StateActive,
+				Zone: zone, Host: key.Host, Type: key.Type, Owner: team, State: store.StateActive,
 				ContentHash: hash, Adopted: true, CreatedAt: now,
 				CreatedBy: s.String(), CreatedByName: s.Name, CreatedByCategory: s.Category,
 			}
@@ -934,7 +861,7 @@ func (e *engine) Adopt(ctx context.Context, s *identity.Subject, zoneIn string, 
 		}
 	}
 	if len(writes) > 0 {
-		e.emit(ctx, s, action, zone, "allow", "", changes, nil, nil)
+		e.emit(ctx, s, action, zone, "allow", "", changes, "", nil)
 	}
 	return nil
 }
@@ -945,16 +872,20 @@ func (e *engine) Reconcile(ctx context.Context, zoneIn string) error {
 	if err != nil {
 		return err
 	}
+	p, err := e.provider(zone)
+	if err != nil {
+		return err
+	}
 	unlock, err := e.lock(ctx, zone)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	cur, err := e.fetch(ctx, zone)
+	cur, err := e.fetch(ctx, p, zone)
 	if err != nil {
 		return err
 	}
-	sets := userSets(zone, cur.Records)
+	sets := index(cur)
 	owns, err := e.ownerships(ctx, zone)
 	if err != nil {
 		return err
@@ -962,10 +893,10 @@ func (e *engine) Reconcile(ctx context.Context, zoneIn string) error {
 	e.resolvePending(ctx, zone, sets, owns)
 
 	now := e.now()
-	var gc []zonediff.Change
-	gcOwn := map[rrset.Key]store.Ownership{}
+	var gc []dns.Change
+	gcOwn := map[dns.Key]store.Ownership{}
 	var expired []uiapi.Change
-	keys := make([]rrset.Key, 0, len(owns))
+	keys := make([]dns.Key, 0, len(owns))
 	for k := range owns {
 		keys = append(keys, k)
 	}
@@ -974,7 +905,7 @@ func (e *engine) Reconcile(ctx context.Context, zoneIn string) error {
 		o := owns[key]
 		set, skey, present := findSet(sets, key)
 		isExpired := o.ExpiresAt != nil && now.After(*o.ExpiresAt)
-		if o.State == store.StateActive && present && rrset.ContentHash(set) != o.ContentHash {
+		if o.State == store.StateActive && present && dns.ContentHash(set) != o.ContentHash {
 			cp := set
 			e.taint(ctx, o, &cp, "changed outside the gate")
 			continue
@@ -989,9 +920,9 @@ func (e *engine) Reconcile(ctx context.Context, zoneIn string) error {
 			e.taint(ctx, o, nil, "deleted outside the gate")
 			continue
 		}
-		if present && isExpired && o.State == store.StateActive {
+		if present && isExpired && o.State == store.StateActive && readOnly(skey, &set) == "" {
 			cp := set
-			gc = append(gc, zonediff.Change{Op: zonediff.OpDelete, Key: skey, Old: &cp})
+			gc = append(gc, dns.Change{Op: dns.OpDelete, Key: skey, Old: &cp})
 			gcOwn[skey] = o
 		}
 	}
@@ -1000,15 +931,14 @@ func (e *engine) Reconcile(ctx context.Context, zoneIn string) error {
 		if err != nil {
 			return err
 		}
-		snapshot := e.latestSnapshot(ctx, zone)
-		desired := zonediff.Apply(zone, cur, gc)
-		if err := e.cfg.Client.SaveZone(ctx, zone, desired); err != nil {
-			e.emit(ctx, reconcilerSubject, "gate.expire", zone, "error", string(ReasonUpstream), nil, nil, map[string]any{"message": err.Error()})
-			return upstreamError("save zone", err)
+		snapshot := e.latestSnapshot(ctx, p, zone)
+		if err := p.Apply(ctx, zone, cur, gc); err != nil {
+			e.emit(ctx, reconcilerSubject, "gate.expire", zone, "error", string(ReasonUpstream), nil, "", map[string]any{"message": err.Error()})
+			return upstreamError("write zone", err)
 		}
 		e.remember(zone, nil, true)
-		if after, err := e.fetch(ctx, zone); err == nil {
-			afterSets := userSets(zone, after.Records)
+		if after, err := e.fetch(ctx, p, zone); err == nil {
+			afterSets := index(after)
 			for key, o := range gcOwn {
 				if _, _, still := findSet(afterSets, key); !still {
 					if err := e.cfg.Store.Delete(ctx, zone, o.Host, o.Type, o.Version); err != nil {
@@ -1025,7 +955,11 @@ func (e *engine) Reconcile(ctx context.Context, zoneIn string) error {
 		}
 		e.emit(ctx, reconcilerSubject, "gate.expire", zone, "allow", "", expired, snapshot, nil)
 	} else if len(expired) > 0 {
-		e.emit(ctx, reconcilerSubject, "gate.expire", zone, "allow", "", expired, nil, nil)
+		e.emit(ctx, reconcilerSubject, "gate.expire", zone, "allow", "", expired, "", nil)
 	}
 	return nil
 }
+
+// ProviderError maps an error of a provider call made outside the engine
+// (a provider API facade) to an engine error.
+func ProviderError(op string, err error) *Error { return upstreamError(op, err) }

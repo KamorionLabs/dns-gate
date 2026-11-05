@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/store"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
-	"github.com/KamorionLabs/eurodns-go/rrset"
 )
 
 func layeredConfig() *config.Config {
@@ -155,11 +155,11 @@ func TestMergedEvaluation(t *testing.T) {
 	if strings.Join(res.Groups, ",") != "operators" || strings.Join(res.Roles, ",") != "base-reader,web-writer" || res.Teams[0] != "web" {
 		t.Fatalf("resolution %+v", res)
 	}
-	d := snap.Decide(res.Roles, ActionRecordWrite, "example.com", &rrset.Key{Host: "www.staging", Type: "CNAME"})
+	d := snap.Decide(res.Roles, ActionRecordWrite, "example.com", &dns.Key{Host: "www.staging", Type: "CNAME"})
 	if !d.Allowed || d.Layer != LayerManaged || d.Matched != "roles.web-writer.rules[0]" {
 		t.Fatalf("decision %+v", d)
 	}
-	if snap.Decide(res.Roles, ActionRecordWrite, "example.com", &rrset.Key{Host: "www", Type: "CNAME"}).Allowed {
+	if snap.Decide(res.Roles, ActionRecordWrite, "example.com", &dns.Key{Host: "www", Type: "CNAME"}).Allowed {
 		t.Fatal("outside record scope")
 	}
 	if snap.Decide(res.Roles, "policy.approve", "", nil).Allowed {

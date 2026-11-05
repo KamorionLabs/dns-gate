@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/glob"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
-	"github.com/KamorionLabs/eurodns-go/rrset"
 )
 
 // Layers of the policy.
@@ -42,8 +42,8 @@ type compiledBinding struct {
 	delegation string         // owner delegation of a delegated binding, "" otherwise
 }
 
-// Discovery is the list of zones found in the EuroDNS account
-// (zones_discovery, see internal/discovery).
+// Discovery is the list of zones found in the provider accounts
+// (zone discovery, see internal/discovery).
 type Discovery interface {
 	// Discovered reports whether zone is in the account, after the
 	// include and exclude filters.
@@ -65,7 +65,7 @@ type Snapshot struct {
 	Managed    *uiapi.PolicyDocument
 
 	zones      map[string]bool // managed: base zones and managed document zones
-	discovery  Discovery       // live account list, nil without zones_discovery
+	discovery  Discovery       // live account lists, nil without discovery
 	roles      map[string]*compiledRole
 	groups     map[string]*compiledGroup
 	groupNames []string
@@ -409,7 +409,7 @@ func IsMeta(action string) bool { return strings.HasPrefix(action, "policy.") }
 
 // Decide evaluates an action for a set of roles. key is nil for zone-level
 // checks.
-func (s *Snapshot) Decide(roles []string, action, zone string, key *rrset.Key) Decision {
+func (s *Snapshot) Decide(roles []string, action, zone string, key *dns.Key) Decision {
 	meta := IsMeta(action)
 	zone = normZone(zone)
 	if !meta && !s.zones[zone] {
@@ -521,7 +521,7 @@ func ZoneCovered(bounds []string, pattern string) bool {
 	return glob.Covered(bounds, pattern)
 }
 
-func (s *Snapshot) protectedBy(zone string, key rrset.Key) (config.Protected, bool) {
+func (s *Snapshot) protectedBy(zone string, key dns.Key) (config.Protected, bool) {
 	for _, p := range s.protected {
 		if glob.Any(p.Zones, zone) && hostMatches(p.Hosts, key.Host) && typeMatches(p.Types, key.Type) {
 			return p, true
@@ -532,7 +532,7 @@ func (s *Snapshot) protectedBy(zone string, key rrset.Key) (config.Protected, bo
 
 func (s *Snapshot) role(name string) *compiledRole { return s.roles[name] }
 
-func scopeMatches(sc uiapi.RecordScope, key rrset.Key) bool {
+func scopeMatches(sc uiapi.RecordScope, key dns.Key) bool {
 	if len(sc.Hosts) > 0 && !hostMatches(sc.Hosts, key.Host) {
 		return false
 	}
@@ -542,7 +542,7 @@ func scopeMatches(sc uiapi.RecordScope, key rrset.Key) bool {
 	return true
 }
 
-func rrsetKey(host, typ string) rrset.Key { return rrset.Key{Host: host, Type: typ} }
+func rrsetKey(host, typ string) dns.Key { return dns.Key{Host: host, Type: typ} }
 
 // Explain simulates the decision for an OIDC subject with concrete claims.
 func (s *Snapshot) Explain(issuer string, claims map[string]any, action, zone, host, typ string) uiapi.ExplainResponse {
@@ -565,7 +565,7 @@ func (s *Snapshot) Explain(issuer string, claims map[string]any, action, zone, h
 	if res.Bindings != nil {
 		resp.Bindings = res.Bindings
 	}
-	var key *rrset.Key
+	var key *dns.Key
 	if host != "" || typ != "" {
 		k := rrsetKey(host, typ)
 		key = &k

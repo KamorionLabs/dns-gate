@@ -1,11 +1,13 @@
 # dns-gate
 
-A security gateway in front of the [EuroDNS](https://www.eurodns.com) REST API.
+A security gateway in front of DNS provider APIs: [EuroDNS](https://www.eurodns.com)
+today, AWS Route53 next, several accounts of each in one gate.
 
 **How it works, with diagrams: <https://kamorionlabs.github.io/dns-gate/>**
 
 EuroDNS API keys carry no scope: one key reaches every domain, contact, nameserver
-profile, subscription and DNS zone of the account. dns-gate holds that key
+profile, subscription and DNS zone of the account; cloud DNS credentials are rarely
+scoped finer than a hosted zone. dns-gate holds the provider credentials
 alone, authenticates clients with short-lived OIDC tokens and enforces, on every
 request:
 
@@ -14,8 +16,8 @@ request:
   admin explicitly adopted), and only for the team that owns them;
 - **safe writes**: per-zone lock, `ETag`/`If-Match`, mandatory dry run, protected
   records, blast-radius limits;
-- **the upstream rate limit** (10 requests per 10 seconds per IP, with progressive
-  bans) for all clients combined;
+- **the upstream rate limit** (EuroDNS: 10 requests per 10 seconds per IP, with
+  progressive bans) for all clients combined;
 - a full **audit trail**, browsable in a **web UI** (zone inventory with ownership
   status, filterable history with diffs, what the signed-in user may do, and a
   Connect page with ready-to-paste setups for Claude Code, Claude Desktop,
@@ -26,7 +28,8 @@ request:
   only ever decided by the base file, and human access uses Entra ID SSO with app
   roles (`Gate.Reader`, `Gate.Operator`, `Gate.PolicyAdmin`) assigned to groups.
 
-The API contract stays the EuroDNS one: an existing EuroDNS client works through the
+Every zone has a provider-neutral RRset API under `/api/v1`. For EuroDNS zones the
+EuroDNS contract stays available too: an existing EuroDNS client works through the
 gate by changing its base URL and credentials.
 
 > Status: **beta**. In production since November 2026 for one organization: 14 zones,
@@ -39,7 +42,7 @@ Also included:
 - **onboarding of existing zones**: bulk adoption team by team (preview, all-or-nothing
   apply, mandatory comment) and Terraform export with `import` blocks, whose first
   plan must be empty — see [docs/ONBOARDING.md](docs/ONBOARDING.md);
-- **zone discovery**: the zones of the EuroDNS account outside the configured ones
+- **zone discovery**: the zones of the provider accounts outside the configured ones
   are listed read-only and brought under management from the UI by a reviewed
   policy revision, without a redeploy — see [docs/CONFIG.md](docs/CONFIG.md#zone-discovery);
 - **one binding for many pipelines**: the owner team derived from a claim
@@ -85,16 +88,16 @@ flowchart LR
   end
 
   store[("Store<br/>ownership, zone locks,<br/>audit, policy revisions")]
-  eurodns["EuroDNS REST API<br/>rest-api.eurodns.com"]
+  eurodns["DNS providers<br/>EuroDNS, Route53"]
 
   callers -- "short-lived token" --> gate
-  gate -- "the only EuroDNS key,<br/>one shared rate budget" --> eurodns
+  gate -- "the only provider credentials,<br/>one shared rate budget per account" --> eurodns
   gate <--> store
 ```
 
-Three layers of protection: the EuroDNS user scope (upstream), RBAC and ownership
-(gate). Every write, whatever the client sent, becomes one checked save of the zone
-as it is now:
+Three layers of protection: the provider credential scope (upstream), RBAC and
+ownership (gate). Every write, whatever the client sent, is computed against the zone
+as it is now (at EuroDNS, one checked save of the whole zone):
 
 ```mermaid
 sequenceDiagram
@@ -142,8 +145,8 @@ Existing EuroDNS clients (ACME) can use scoped virtual keys instead. Details in
 ## Quickstart (local)
 
 ```sh
-export EURODNS_APP_ID=...   # EuroDNS credentials, held by the gate only
-export EURODNS_API_KEY=...
+export EURODNS_APP_ID=...   # EuroDNS credentials of the "eurodns" provider,
+export EURODNS_API_KEY=...  # held by the gate only
 go run ./cmd/dns-gate --config examples/config.yaml
 ```
 
@@ -156,6 +159,7 @@ Kubernetes: Helm chart in `charts/dns-gate`.
 
 - [Design](docs/DESIGN.md)
 - [Configuration reference](docs/CONFIG.md)
+- [Migrating a 0.x configuration to providers](docs/MIGRATION-0.x.md)
 - [Threat model](docs/THREAT-MODEL.md)
 - [ACME / certificates](docs/ACME.md)
 - [Onboarding existing zones](docs/ONBOARDING.md)

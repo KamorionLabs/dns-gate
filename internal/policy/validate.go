@@ -273,7 +273,7 @@ func validateBinding(v *verrs, at string, b uiapi.Binding, groupOK func(path, g 
 }
 
 // ValidateZonesDiscovered checks that every zone a managed document adds
-// (not already managed by cur, the active snapshot) exists in the EuroDNS
+// (not already managed by cur, the active snapshot) exists in a provider
 // account. Zones already managed are not checked again, so that a zone
 // removed from the account does not block unrelated policy changes.
 func ValidateZonesDiscovered(d uiapi.PolicyDocument, cur *Snapshot, disc Discovery, loaded bool) []uiapi.ValidationError {
@@ -286,11 +286,11 @@ func ValidateZonesDiscovered(d uiapi.PolicyDocument, cur *Snapshot, disc Discove
 		at := fmt.Sprintf("zones[%d]", i)
 		switch {
 		case disc == nil:
-			v.add(at, "zone %q is not managed yet: adding zones requires zones_discovery.enabled", z)
+			v.add(at, "zone %q is not managed yet: adding zones requires the zone listing of the providers", z)
 		case !loaded:
-			v.add(at, "the zone list of the EuroDNS account is not loaded yet: retry later")
+			v.add(at, "the zone lists of the provider accounts are not loaded yet: retry later")
 		case !disc.Discovered(z):
-			v.add(at, "zone %q was not found in the EuroDNS account (or is filtered out by zones_discovery include/exclude)", z)
+			v.add(at, "zone %q was not found in a provider account (or is filtered out by providers[].zones include/exclude)", z)
 		}
 	}
 	return v
