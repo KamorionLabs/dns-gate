@@ -32,11 +32,14 @@ type Holder struct {
 	disc Discovery
 	cur  atomic.Pointer[Snapshot]
 	mu   sync.Mutex // serializes refreshes
+	now  func() time.Time
+	// checkedAt is the start of the last Refresh, successful or not.
+	checkedAt time.Time
 }
 
 // NewHolder compiles the base layer.
 func NewHolder(c *config.Config) (*Holder, error) {
-	h := &Holder{cfg: c, base: BaseDocument(c)}
+	h := &Holder{cfg: c, base: BaseDocument(c), now: time.Now}
 	h.cur.Store(compile(c, h.base, nil, "", nil))
 	return h, nil
 }
@@ -84,6 +87,31 @@ func (h *Holder) CompileUnchecked(doc *uiapi.PolicyDocument, revisionID string) 
 func (h *Holder) Refresh(ctx context.Context, src ActiveSource) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	return h.refreshLocked(ctx, src)
+}
+
+// RefreshIfStale refreshes when the last refresh started more than maxAge
+// ago (ReloadInterval when <= 0); like Run, a failed refresh is retried
+// after maxAge while the previous snapshot is served. It replaces Run where
+// no goroutine may live between requests (AWS Lambda).
+func (h *Holder) RefreshIfStale(ctx context.Context, src ActiveSource, maxAge time.Duration) error {
+	if maxAge <= 0 {
+		maxAge = ReloadInterval
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.checkedAt.IsZero() && h.now().Sub(h.checkedAt) < maxAge {
+		return nil
+	}
+	return h.refreshLocked(ctx, src)
+}
+
+func (h *Holder) refreshLocked(ctx context.Context, src ActiveSource) error {
+	h.checkedAt = h.now()
+	return h.load(ctx, src)
+}
+
+func (h *Holder) load(ctx context.Context, src ActiveSource) error {
 	rev, err := src.ActiveRevision(ctx)
 	if errors.Is(err, store.ErrNotFound) {
 		if h.Current().RevisionID != "" {
