@@ -25,8 +25,18 @@ info:
     meant for programs.
 
     **EuroDNS-compatible API.** Every other path of the gate is the EuroDNS
-    API, served under RBAC and ownership; it is documented by EuroDNS at
-    <https://docapi.eurodns.com/> and not repeated here.
+    API, served under RBAC and ownership for the zones of EuroDNS providers
+    (`404 zone_not_eurodns` for a zone of another provider); it is
+    documented by EuroDNS at <https://docapi.eurodns.com/> and not repeated
+    here.
+
+    **Gate tokens and OAuth.** With an issuer marked `self: true`, the gate
+    signs its own tokens: `POST /api/v1/tokens` issues one to a web UI
+    session, and its keys are served at `/.well-known/jwks.json`. With a SAML
+    UI login, the gate also runs a stateless OAuth 2.0 authorization server
+    for the Claude Desktop extension (`/.well-known/oauth-authorization-server`,
+    `/.well-known/openid-configuration`, `/oauth/authorize`, `/oauth/token`),
+    standard OAuth 2.0 with PKCE not described here.
   license:
     name: MIT
     url: https://github.com/KamorionLabs/dns-gate/blob/main/LICENSE
@@ -48,7 +58,7 @@ tags:
   - name: discovery
     description: Gate detection.
   - name: identity
-    description: Who is calling and how to connect.
+    description: Who is calling, how to connect, and gate-issued tokens.
   - name: zones
     description: Zones and their RRsets.
   - name: rrsets
@@ -78,6 +88,50 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/GateInfo" }
+
+  /.well-known/jwks.json:
+    get:
+      tags: [discovery]
+      operationId: getJWKS
+      summary: Public keys of gate-issued tokens
+      description: "Served when an issuer has `self: true` (404 otherwise). No authentication."
+      security: []
+      responses:
+        "200":
+          description: JSON Web Key Set.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [keys]
+                properties:
+                  keys: { type: array, items: { type: object } }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/tokens:
+    post:
+      tags: [identity]
+      operationId: issueToken
+      summary: A gate token for the web UI session
+      description: |
+        Issues a bearer token signed by the gate issuer (`self: true`) for the
+        signed-in UI user, with the identity of the session, to use with curl
+        or the Terraform provider. Session cookie only (`403 session_required`
+        for a bearer token or a virtual key), with `X-Gate-CSRF`; `404
+        not_found` when no issuer has `self: true`. The lifetime is the
+        issuer's `token_ttl`, capped by the session.
+      security:
+        - session: []
+      responses:
+        "200":
+          description: Token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IssuedToken" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
 
   /api/v1/me:
     get:
@@ -184,8 +238,16 @@ paths:
         (providers with alias records, such as Route53). The engine checks RBAC
         (dns.record.write on the zone, host and type), ownership (the RRset must
         be new or owned by the caller's team) and the preconditions under the
-        zone lock. `If-None-Match: *` creates only; `If-Match: "<hash>"` replaces
-        only the RRset with that content hash.
+        zone lock, against a fresh read of the provider. `If-None-Match: *`
+        creates only: `409 foreign_rrset` when an RRset created outside the
+        gate exists, `412 precondition` when the gate owns one. `If-Match:
+        "<hash>"` replaces only the RRset with that content hash. Writes to
+        other RRsets of the zone in between do not refuse the request.
+
+        Values are in zone file presentation format; TXT values are the text
+        itself, unquoted, at any length (the gate or the provider splits them
+        in 255-byte strings). Targets without a trailing dot are absolute; a
+        single-label target is refused (`400 relative_target`).
       parameters:
         - $ref: "#/components/parameters/IfMatch"
         - $ref: "#/components/parameters/IfNoneMatch"
@@ -265,7 +327,12 @@ paths:
       tags: [plans]
       operationId: applyPlan
       summary: Apply a plan, exactly as planned
-      description: Fails with `412 precondition` when the zone changed since the plan (plan again), `410 plan_expired`, `404 not_found` for an unknown or used plan, `403 forbidden` for the plan of another caller.
+      description: |
+        Fails with `412 precondition` when the zone changed since the plan,
+        `410 plan_expired` when the plan expired, `404 plan_not_found` for an
+        unknown or already applied plan or the plan of another zone (plan
+        again in these three cases), and `403 forbidden` for the plan of
+        another caller.
       requestBody:
         required: true
         content:
@@ -823,12 +890,14 @@ components:
           description: |
             Stable machine-readable reason; clients should treat an unknown
             value by its HTTP status. Status by reason:
-            400 invalid, bad_request, invalid_policy, delegation_required;
+            400 invalid, relative_target, bad_request, invalid_policy,
+            delegation_required;
             401 unauthenticated;
             403 forbidden, not_owner, too_many_changes, reauth_required, csrf,
             no_binding, bound_claims, source_ip, policy_not_editable,
-            self_approval, delegated_object;
-            404 not_found; 405 method_not_allowed;
+            self_approval, delegated_object, session_required;
+            404 not_found, plan_not_found, zone_not_eurodns;
+            405 method_not_allowed;
             409 foreign_rrset, tainted, adopt_conflict, not_owner (delegated
             object of another delegation), policy_busy, conflict, name_taken,
             stale_revision, approval_required, invalid_status, already_decided;
@@ -837,6 +906,7 @@ components:
             501 not_implemented; 502 upstream; 503 store_unavailable; 504 timeout.
           enum:
             - invalid
+            - relative_target
             - bad_request
             - invalid_policy
             - delegation_required
@@ -852,7 +922,10 @@ components:
             - policy_not_editable
             - self_approval
             - delegated_object
+            - session_required
             - not_found
+            - plan_not_found
+            - zone_not_eurodns
             - method_not_allowed
             - foreign_rrset
             - tainted
@@ -940,11 +1013,22 @@ components:
           type: object
           properties:
             url: { type: string }
-            kind: { type: string, enum: [entra, oidc] }
+            kind: { type: string, enum: [entra, oidc, saml], description: "saml: url is the gate issuer, if any." }
             tenant_id: { type: string }
         client_id: { type: string }
         cli_scope: { type: string }
         claude_desktop_extension_url: { type: string }
+        tokens_url: { type: string, description: "POST here for a gate token (UI session); absent without a gate issuer." }
+
+    IssuedToken:
+      type: object
+      required: [access_token, token_type, expires_in, expires_at, issuer]
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, enum: [Bearer] }
+        expires_in: { type: integer, description: "Seconds." }
+        expires_at: { type: string, format: date-time }
+        issuer: { type: string, description: "URL of the gate issuer." }
 
     ZoneSummary:
       type: object
@@ -979,7 +1063,7 @@ components:
         ttl: { type: integer }
         values: { type: array, items: { type: string } }
         alias: { $ref: "#/components/schemas/Alias" }
-        read_only: { type: string, description: "Why the gate never writes this RRset (server_managed, routing_policy, locked...)." }
+        read_only: { type: string, description: "Why the gate never writes this RRset (server_managed, routing_policy, relative_target...)." }
         hash: { type: string, description: "Content hash (TTL and values or alias), the ETag of the RRset." }
         status: { type: string, enum: [managed, tainted, pending, foreign, missing] }
         protected: { type: boolean }
@@ -997,6 +1081,7 @@ components:
       required: [zone, rrsets]
       properties:
         zone: { type: string }
+        provider: { type: string, description: "Provider instance id serving the zone." }
         unmanaged: { type: boolean }
         last_synced_at: { type: string, format: date-time }
         rrsets: { type: array, items: { $ref: "#/components/schemas/RRset" } }
@@ -1032,8 +1117,10 @@ components:
         type: { type: string }
         old_ttl: { type: integer }
         old_values: { type: array, items: { type: string } }
+        old_alias: { $ref: "#/components/schemas/Alias" }
         new_ttl: { type: integer }
         new_values: { type: array, items: { type: string } }
+        new_alias: { $ref: "#/components/schemas/Alias" }
 
     PlanRequest:
       type: object
@@ -1128,7 +1215,8 @@ components:
         decision: { type: string, enum: [allow, deny, error] }
         reason: { type: string }
         changes: { type: array, items: { $ref: "#/components/schemas/Change" } }
-        snapshot_id: { type: integer }
+        provider: { type: string, description: "Provider instance id of the zone." }
+        snapshot_id: { type: string, description: "Provider snapshot taken before the write (EuroDNS)." }
 
     AuditPage:
       type: object

@@ -51,7 +51,7 @@ func specRoutes(t *testing.T) (map[string]bool, map[string]any) {
 // does not serve.
 func TestOpenAPICoversRoutes(t *testing.T) {
 	spec, ops := specRoutes(t)
-	served := map[string]bool{"GET " + GateInfoPath: true}
+	served := map[string]bool{"GET " + GateInfoPath: true, "GET " + jwksPath: true}
 	for _, rt := range apiRoutes {
 		served[rt.Method+" "+rt.Pattern] = true
 	}
