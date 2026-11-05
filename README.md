@@ -154,6 +154,7 @@ Kubernetes: Helm chart in `charts/dns-gate`.
 
 ## Documentation
 
+- [API guide](docs/API.md) and [API reference](https://kamorionlabs.github.io/dns-gate/api.html) ([OpenAPI](api/dns-gate.openapi.yaml))
 - [Design](docs/DESIGN.md)
 - [Configuration reference](docs/CONFIG.md)
 - [Threat model](docs/THREAT-MODEL.md)
