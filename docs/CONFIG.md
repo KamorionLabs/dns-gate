@@ -472,7 +472,7 @@ Adoption brings RRsets created outside the gate (foreign) under the ownership of
 
 Both are mutations for CSRF (cookie sessions) and the apply requires the same recent authentication as policy changes for humans.
 
-`GET /api/v1/zones/{zone}/terraform?team=&hosts=&types=` (`ui.read`) downloads the **managed** RRsets of a zone as Terraform/OpenTofu configuration for the `kamorionlabs/eurodns` provider: one `eurodns_record_set` per RRset plus `import` blocks, so a team can move what it adopted into its own stack. `hosts` (host globs) and `types` accept comma-separated values or repeated parameters; `rrsets=www/A,@/MX` exports exactly that selection (for example what was just adopted) and takes precedence over `hosts` and `types`.
+`GET /api/v1/zones/{zone}/terraform?team=&hosts=&types=&provider=` (`ui.read`) downloads the **managed** RRsets of a zone as Terraform/OpenTofu configuration: one resource per RRset plus `import` blocks (id `<zone>/<host>/<type>`), so a team can move what it adopted into its own stack. By default the resources are `dnsgate_record_set` of the `KamorionLabs/dnsgate` provider, which talks to the gate REST API and works for every DNS provider behind the gate (attributes `zone`, `name`, `type`, `ttl`, `values`, or an `alias` block `{name, zone_id, evaluate_target_health}`); `provider=eurodns` exports `eurodns_record_set` of the `kamorionlabs/eurodns` provider instead (EuroDNS-compatible API, alias RRsets skipped). `hosts` (host globs) and `types` accept comma-separated values or repeated parameters; `rrsets=www/A,@/MX` exports exactly that selection (for example what was just adopted) and takes precedence over `hosts` and `types`.
 
 ## MCP
 

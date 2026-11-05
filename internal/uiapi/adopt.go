@@ -8,7 +8,7 @@ import "github.com/KamorionLabs/dns-gate/internal/dns"
 //
 //	POST /api/v1/zones/{zone}/adopt/preview  AdoptSelection -> AdoptPreview   (dns.record.adopt)
 //	POST /api/v1/zones/{zone}/adopt          AdoptApply     -> AdoptResult    (dns.record.adopt)
-//	GET  /api/v1/zones/{zone}/terraform?team=&hosts=&types=  -> text/plain HCL (ui.read)
+//	GET  /api/v1/zones/{zone}/terraform?team=&hosts=&types=&rrsets=&provider=dnsgate|eurodns -> text/plain HCL (ui.read)
 //
 // Apply is all-or-nothing: if any selected RRset is no longer adoptable (or
 // changed since the preview, see PreviewToken), nothing is adopted and the

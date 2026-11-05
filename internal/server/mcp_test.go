@@ -16,6 +16,7 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/config"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/tfexport"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 	"github.com/KamorionLabs/dns-gate/internal/zonewrite"
 )
@@ -89,7 +90,7 @@ func (f *fakeOps) terraform(ctx context.Context, s *identity.Subject, zone strin
 	for _, r := range flt.RRsets {
 		refs = append(refs, r.Host+"/"+r.Type)
 	}
-	return "# zone " + zone + " team=" + flt.Team + " hosts=" + strings.Join(flt.Hosts, ",") + " types=" + strings.Join(flt.Types, ",") + " rrsets=" + strings.Join(refs, ",") + "\n", nil
+	return "# zone " + zone + " provider=" + string(flt.Provider) + " team=" + flt.Team + " hosts=" + strings.Join(flt.Hosts, ",") + " types=" + strings.Join(flt.Types, ",") + " rrsets=" + strings.Join(refs, ",") + "\n", nil
 }
 
 func mcpEnv(t *testing.T, writes bool) *env {
@@ -320,6 +321,14 @@ func TestAdoptEndpoints(t *testing.T) {
 	if r.StatusCode != 200 || !strings.Contains(string(b), "hosts=www,api,mail types=A,CNAME,MX rrsets=www/A,@/MX,api/CNAME") {
 		t.Fatalf("terraform lists: %d %s", r.StatusCode, b)
 	}
+	r = e.do(t, "GET", "/api/v1/zones/example.com/terraform?provider=eurodns", tok, "", nil)
+	b, _ = io.ReadAll(r.Body)
+	if r.StatusCode != 200 || !strings.Contains(string(b), "provider=eurodns ") {
+		t.Fatalf("terraform provider: %d %s", r.StatusCode, b)
+	}
+	if r = e.do(t, "GET", "/api/v1/zones/example.com/terraform?provider=route53", tok, "", nil); r.StatusCode != 400 {
+		t.Fatalf("unknown provider: %d", r.StatusCode)
+	}
 	if r = e.do(t, "GET", "/api/v1/zones/example.com/terraform?rrsets=www", tok, "", nil); r.StatusCode != 400 {
 		t.Fatalf("bad rrsets: %d", r.StatusCode)
 	}
@@ -356,19 +365,23 @@ func cookiejarNew() (*cookiejar.Jar, error) { return cookiejar.New(nil) }
 func TestInventoryTerraform(t *testing.T) {
 	render := InventoryTerraform(&fakeEngine{})
 	out, err := render(context.Background(), &identity.Subject{}, "example.com", TerraformFilter{Team: "web", Types: []string{"A"}})
-	if err != nil || !strings.Contains(out, "eurodns_record_set") || !strings.Contains(out, "192.0.2.1") && !strings.Contains(out, `"www"`) {
+	if err != nil || !strings.Contains(out, "dnsgate_record_set") || !strings.Contains(out, "192.0.2.1") && !strings.Contains(out, `"www"`) {
 		t.Fatalf("render: %v\n%s", err, out)
 	}
+	out, _ = render(context.Background(), &identity.Subject{}, "example.com", TerraformFilter{Provider: tfexport.ProviderEuroDNS})
+	if !strings.Contains(out, `resource "eurodns_record_set" "www_a"`) {
+		t.Fatalf("eurodns export:\n%s", out)
+	}
 	out, _ = render(context.Background(), &identity.Subject{}, "example.com", TerraformFilter{RRsets: []uiapi.RRsetRef{{Host: "WWW", Type: "a"}}, Types: []string{"MX"}})
-	if !strings.Contains(out, "eurodns_record_set") {
+	if !strings.Contains(out, "dnsgate_record_set") {
 		t.Fatalf("exact selection must take precedence over types:\n%s", out)
 	}
 	out, _ = render(context.Background(), &identity.Subject{}, "example.com", TerraformFilter{RRsets: []uiapi.RRsetRef{{Host: "api", Type: "A"}}})
-	if strings.Contains(out, "eurodns_record_set\" ") {
+	if strings.Contains(out, "dnsgate_record_set\" ") {
 		t.Fatalf("unselected RRset exported:\n%s", out)
 	}
 	out, _ = render(context.Background(), &identity.Subject{}, "example.com", TerraformFilter{Team: "other"})
-	if strings.Contains(out, "eurodns_record_set\" ") {
+	if strings.Contains(out, "dnsgate_record_set\" ") {
 		t.Fatalf("team filter ignored:\n%s", out)
 	}
 }

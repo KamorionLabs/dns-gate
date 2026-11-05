@@ -706,7 +706,7 @@ step-by-step guide is [ONBOARDING.md](ONBOARDING.md).
 |---|---|---|
 | `POST /api/v1/zones/{zone}/adopt/preview` | `dns.record.adopt` | dry run on a selection (explicit RRsets and/or host globs + types), for an owner team |
 | `POST /api/v1/zones/{zone}/adopt` | `dns.record.adopt` | apply the adoptable candidates of a preview |
-| `GET /api/v1/zones/{zone}/terraform?team=&hosts=&types=` | `ui.read` | Terraform HCL for the RRsets owned by a team |
+| `GET /api/v1/zones/{zone}/terraform?team=&hosts=&types=&provider=` | `ui.read` | Terraform HCL for the RRsets owned by a team |
 
 - **Preview** lists every selected RRset with its TTL, values, current status and
   whether it is adoptable. Reasons for refusal: `protected`, `server_managed` (SOA,
@@ -724,7 +724,9 @@ step-by-step guide is [ONBOARDING.md](ONBOARDING.md).
 
 ### 16.2 Terraform export
 
-The export returns HCL for the team's RRsets: one `eurodns_record_set` per RRset and
+The export returns HCL for the team's RRsets: one `dnsgate_record_set` per RRset
+(provider `KamorionLabs/dnsgate`, any DNS provider behind the gate, alias RRsets as an
+`alias` block; `provider=eurodns` exports `eurodns_record_set` instead) and
 one `import` block (Terraform and OpenTofu 1.5+) with the import id
 `<zone>/<host>/<type>`. Applied as is, the **first plan must show only imports and
 no changes**; any diff means the export and the zone disagree and must be

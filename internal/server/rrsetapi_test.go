@@ -41,8 +41,8 @@ func TestRRsetGet(t *testing.T) {
 	tok := e.token("writer")
 	r := e.do(t, "GET", "/api/v1/zones/example.com/rrsets/WWW/a", tok, "", nil)
 	rs := decode[uiapi.RRset](t, r)
-	want := dns.ContentHash(dns.RRset{Key: dns.Key{Host: "www", Type: "A"}})
-	if r.StatusCode != 200 || rs.Hash != want || r.Header.Get("ETag") != `"`+want+`"` || rs.Values == nil {
+	want := dns.ContentHash(dns.RRset{Key: dns.Key{Host: "www", Type: "A"}, TTL: 600, Values: []string{"192.0.2.1"}})
+	if r.StatusCode != 200 || rs.Hash != want || r.Header.Get("ETag") != `"`+want+`"` || rs.Values[0] != "192.0.2.1" {
 		t.Fatalf("get: %d %q %+v", r.StatusCode, r.Header.Get("ETag"), rs)
 	}
 	for path, status := range map[string]int{

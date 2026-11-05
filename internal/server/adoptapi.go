@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/glob"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
@@ -14,7 +15,6 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/tfexport"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 	"github.com/KamorionLabs/dns-gate/internal/version"
-	"github.com/KamorionLabs/eurodns-go/rrset"
 )
 
 // Operations are the engine methods behind adoption and RRset plans
@@ -28,17 +28,20 @@ type Operations interface {
 
 // TerraformFilter selects the managed RRsets exported as HCL.
 type TerraformFilter struct {
-	Team   string
-	Hosts  []string
-	Types  []string
-	RRsets []uiapi.RRsetRef // exact selection, takes precedence over Hosts and Types
+	// Provider is the Terraform provider targeted (default dnsgate).
+	Provider tfexport.Provider
+	Team     string
+	Hosts    []string
+	Types    []string
+	RRsets   []uiapi.RRsetRef // exact selection, takes precedence over Hosts and Types
 }
 
 // TerraformRenderer renders the managed RRsets of a zone as Terraform.
 type TerraformRenderer func(ctx context.Context, s *identity.Subject, zone string, f TerraformFilter) (string, error)
 
 // handleZoneOps serves /api/v1/zones/{zone}/adopt[/preview] and
-// /api/v1/zones/{zone}/terraform. parts is the path after /api/v1.
+// /api/v1/zones/{zone}/terraform?provider=dnsgate|eurodns. op is the path
+// after the zone.
 func (s *Server) handleZoneOps(w http.ResponseWriter, r *http.Request, subj *identity.Subject, sess *session, zone string, op string) {
 	zone = strings.ToLower(zone)
 	if !config.ValidFQDN(zone) || !s.pol.Managed(zone) {
@@ -112,7 +115,7 @@ func (s *Server) serveTerraform(w http.ResponseWriter, r *http.Request, subj *id
 	q := r.URL.Query()
 	for k, v := range q {
 		switch {
-		case k == "team" && len(v) == 1:
+		case (k == "team" || k == "provider") && len(v) == 1:
 		case k == "hosts" || k == "types" || k == "rrsets":
 		default:
 			writeError(w, http.StatusBadRequest, "bad_request", "unknown or repeated query parameter "+k)
@@ -120,7 +123,12 @@ func (s *Server) serveTerraform(w http.ResponseWriter, r *http.Request, subj *id
 		}
 	}
 	// hosts, types and rrsets accept comma-separated values and repeated parameters.
-	f := TerraformFilter{Team: q.Get("team"), Hosts: splitAll(q["hosts"]), Types: splitAll(q["types"])}
+	prov, ok := tfexport.ParseProvider(q.Get("provider"))
+	if !ok {
+		writeError(w, http.StatusBadRequest, "bad_request", "provider must be dnsgate or eurodns")
+		return
+	}
+	f := TerraformFilter{Provider: prov, Team: q.Get("team"), Hosts: splitAll(q["hosts"]), Types: splitAll(q["types"])}
 	for i := range f.Types {
 		f.Types[i] = strings.ToUpper(f.Types[i])
 	}
@@ -183,7 +191,7 @@ func InventoryTerraform(e Engine) TerraformRenderer {
 		if err != nil {
 			return "", err
 		}
-		var sets []rrset.Set
+		var sets []dns.RRset
 		for _, r := range inv.RRsets {
 			if r.Status != uiapi.StatusManaged || (f.Team != "" && r.Owner != f.Team) {
 				continue
@@ -200,13 +208,13 @@ func InventoryTerraform(e Engine) TerraformRenderer {
 					continue
 				}
 			}
-			sets = append(sets, rrset.Set{Key: rrset.Key{Host: r.Host, Type: r.Type}, TTL: r.TTL, Values: r.Values})
+			sets = append(sets, dns.RRset{Key: dns.Key{Host: r.Host, Type: r.Type}, TTL: r.TTL, Values: r.Values, Alias: r.Alias, ReadOnly: r.ReadOnly})
 		}
 		header := []string{"Managed RRsets exported by dns-gate " + version.Version + "."}
 		if f.Team != "" {
 			header = append(header, "Owner team: "+f.Team+".")
 		}
-		return tfexport.Render(zone, sets, tfexport.Options{Header: header}), nil
+		return tfexport.Render(zone, sets, tfexport.Options{Provider: f.Provider, Header: header}), nil
 	}
 }
 
