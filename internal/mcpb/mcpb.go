@@ -28,7 +28,7 @@ var relaySource []byte
 type Params struct {
 	GateURL  string // public base URL of the gate
 	MCPURL   string // MCP endpoint
-	Issuer   string // OIDC issuer URL users sign in with
+	Issuer   string // OIDC issuer URL users sign in with (the gate itself with a SAML UI login)
 	ClientID string // public client registered with the issuer
 	Scope    string // extra scope for a gate token (ui.cli_scope), may be empty
 	Version  string // gate version, reported as the extension version

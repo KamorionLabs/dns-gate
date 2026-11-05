@@ -10,6 +10,7 @@
 //	GET /api/v1/zones/{zone}/rrsets        -> ZoneInventory
 //	GET /api/v1/audit?zone=&host=&type=&subject=&category=&decision=&since=&until=&limit=&cursor=
 //	                                       -> AuditPage
+//	POST /api/v1/tokens                    -> gate token of the UI session
 package uiapi
 
 import (
@@ -49,6 +50,9 @@ type Connect struct {
 	// ClaudeDesktopExtensionURL downloads the Claude Desktop extension of the
 	// gate; empty without MCP or UI login.
 	ClaudeDesktopExtensionURL string `json:"claude_desktop_extension_url"`
+	// TokensURL issues gate tokens to the UI session (POST, CSRF); empty
+	// without a gate issuer.
+	TokensURL string `json:"tokens_url,omitempty"`
 }
 
 // ConnectMCP describes the MCP endpoint.
@@ -61,7 +65,7 @@ type ConnectMCP struct {
 // ConnectIssuer describes the OIDC issuer humans sign in with.
 type ConnectIssuer struct {
 	URL      string `json:"url"`
-	Kind     string `json:"kind"`                // entra | oidc
+	Kind     string `json:"kind"`                // entra | oidc | saml (URL: the gate issuer, if any)
 	TenantID string `json:"tenant_id,omitempty"` // Entra only
 }
 

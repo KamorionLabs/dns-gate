@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -20,6 +21,7 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/config"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/samlauth"
 )
 
 const loginTTL = 10 * time.Minute
@@ -30,10 +32,14 @@ var protocolClaims = map[string]bool{
 }
 
 // uiAuth implements the UI login: OIDC authorization code flow with PKCE
-// (S256), state and nonce, and an encrypted session cookie.
+// (S256), state and nonce, or SAML 2.0 (saml set), and an encrypted
+// session cookie.
 type uiAuth struct {
 	cfg        config.UI
 	issuer     config.Issuer
+	saml       *samlauth.Provider
+	groups     GroupLookup
+	log        *slog.Logger
 	authn      *authn.Authenticator
 	client     *http.Client
 	now        func() time.Time
@@ -52,28 +58,48 @@ type oidcEndpoints struct {
 	Token         string `json:"token_endpoint"`
 }
 
-func newUIAuth(c *config.Config, a *authn.Authenticator, client *http.Client, now func() time.Time) *uiAuth {
-	u := &uiAuth{cfg: c.UI, authn: a, client: client, now: now}
-	for _, is := range c.Issuers {
-		if is.Name == c.UI.Issuer {
+func newUIAuth(c *config.Config, a *authn.Authenticator, client *http.Client, now func() time.Time, groups GroupLookup) (*uiAuth, error) {
+	u := &uiAuth{cfg: c.UI, authn: a, client: client, now: now, groups: groups}
+	issuer, redirectURL := c.UI.Issuer, c.UI.RedirectURL
+	if s := c.UI.SAML; s != nil {
+		issuer, redirectURL = s.Issuer, s.ACSURL
+		p, err := samlauth.New(*s, client)
+		if err != nil {
+			return nil, err
+		}
+		u.saml = p
+	}
+	for _, is := range c.AllIssuers() {
+		if is.Name == issuer {
 			u.issuer = is
 		}
 	}
-	redirect, _ := url.Parse(c.UI.RedirectURL)
+	redirect, err := url.Parse(redirectURL)
+	if err != nil {
+		return nil, err
+	}
 	u.cookies = newCookieNames(redirect.Scheme == "https")
 	u.origin = redirect.Scheme + "://" + redirect.Host
 	u.editMaxAge = c.Policy.EditMaxAge.D()
-	u.sealer, _ = newSealer(c.UI.SessionKey) // key length validated by config
-	return u
+	if u.sealer, err = newSealer(c.UI.SessionKey); err != nil {
+		return nil, err
+	}
+	return u, nil
 }
 
 func (u *uiAuth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	switch r.URL.Path {
-	case "/auth/login":
+	switch p := r.URL.Path; {
+	case p == "/auth/login" && u.saml != nil:
+		u.samlLogin(w, r)
+	case p == config.SAMLACSPath && u.saml != nil:
+		u.samlACS(w, r)
+	case p == config.SAMLMetadataPath && u.saml != nil:
+		u.samlMetadata(w, r)
+	case p == "/auth/login":
 		u.login(w, r)
-	case "/auth/callback":
+	case p == "/auth/callback" && u.saml == nil:
 		u.callback(w, r)
-	case "/auth/logout":
+	case p == "/auth/logout":
 		if r.Method != http.MethodPost {
 			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "POST only")
 			return
@@ -223,7 +249,19 @@ func (u *uiAuth) callback(w http.ResponseWriter, r *http.Request) {
 			kept[k] = v
 		}
 	}
-	if _, err := u.subject(kept); err != nil {
+	sess := session{Issuer: u.issuer.Name, Claims: kept, Expires: u.now().Add(u.cfg.SessionTTL.D()).Unix(), AMR: policyClaimStrings(claims["amr"])}
+	if at, ok := claims["auth_time"].(float64); ok {
+		sess.AuthTime = int64(at)
+	} else if st.Reauth {
+		sess.AuthTime = u.now().Unix()
+	}
+	u.establish(w, r, sess, st.Next)
+}
+
+// establish checks that the session claims are bound, then sets the session
+// and CSRF cookies and redirects to next.
+func (u *uiAuth) establish(w http.ResponseWriter, r *http.Request, sess session, next string) {
+	if _, err := u.subject(sess.Claims); err != nil {
 		var ae *authn.Error
 		if errors.As(err, &ae) {
 			writeError(w, ae.Status, ae.Reason, ae.Message)
@@ -231,13 +269,6 @@ func (u *uiAuth) callback(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, http.StatusForbidden, "forbidden", "not allowed")
 		return
-	}
-	exp := u.now().Add(u.cfg.SessionTTL.D())
-	sess := session{Issuer: u.issuer.Name, Claims: kept, Expires: exp.Unix(), AMR: policyClaimStrings(claims["amr"])}
-	if at, ok := claims["auth_time"].(float64); ok {
-		sess.AuthTime = int64(at)
-	} else if st.Reauth {
-		sess.AuthTime = u.now().Unix()
 	}
 	val, err := u.sealer.seal(u.cookies.session, sess)
 	if err != nil {
@@ -248,9 +279,13 @@ func (u *uiAuth) callback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "session_too_large", "session claims too large for a cookie")
 		return
 	}
-	http.SetCookie(w, u.cookies.cookie(u.cookies.session, val, u.cfg.SessionTTL.D()))
-	http.SetCookie(w, u.csrfCookie(randomToken(), u.cfg.SessionTTL.D()))
-	http.Redirect(w, r, st.Next, http.StatusSeeOther)
+	ttl := time.Unix(sess.Expires, 0).Sub(u.now())
+	if ttl > u.cfg.SessionTTL.D() || ttl < time.Minute {
+		ttl = u.cfg.SessionTTL.D()
+	}
+	http.SetCookie(w, u.cookies.cookie(u.cookies.session, val, ttl))
+	http.SetCookie(w, u.csrfCookie(randomToken(), ttl))
+	http.Redirect(w, r, next, http.StatusSeeOther)
 }
 
 func (u *uiAuth) exchange(ctx context.Context, tokenURL, code, verifier string) (string, error) {
@@ -332,9 +367,10 @@ func (u *uiAuth) checkCSRF(r *http.Request) bool {
 
 func policyClaimStrings(v any) []string { return policy.ClaimStrings(v) }
 
-// safeNext only allows redirects back into the UI.
+// safeNext only allows redirects back into the UI or to the authorization
+// endpoint of the gate issuer.
 func safeNext(next string) string {
-	if next == "" || !strings.HasPrefix(next, "/ui/") || strings.Contains(next, "//") || strings.Contains(next, `\`) {
+	if next == "" || !(strings.HasPrefix(next, "/ui/") || strings.HasPrefix(next, oauthAuthorizePath+"?")) || strings.Contains(next, "//") || strings.Contains(next, `\`) {
 		return "/ui/"
 	}
 	return next

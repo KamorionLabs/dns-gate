@@ -20,6 +20,7 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/config"
 	"github.com/KamorionLabs/dns-gate/internal/discovery"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
+	"github.com/KamorionLabs/dns-gate/internal/identitystore"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
 	"github.com/KamorionLabs/dns-gate/internal/requestid"
 	"github.com/KamorionLabs/dns-gate/internal/routes"
@@ -63,8 +64,12 @@ type Config struct {
 	// Ops and Terraform back adoption, RRset plans (MCP) and the HCL export.
 	Ops       Operations
 	Terraform TerraformRenderer
-	// HTTPClient is used for the UI OIDC login (discovery, token exchange).
+	// HTTPClient is used for the UI OIDC login (discovery, token exchange)
+	// and the SAML IdP metadata.
 	HTTPClient *http.Client
+	// SAMLGroups resolves the groups of SAML users; nil builds the AWS
+	// identity store lookup of ui.saml.groups_from_identity_store, if any.
+	SAMLGroups GroupLookup
 	Log        *slog.Logger
 	Now        func() time.Time
 }
@@ -126,7 +131,18 @@ func New(c Config) (*Server, error) {
 		s.mcp = s.newMCP()
 	}
 	if c.Config.UI.Enabled {
-		s.ui = newUIAuth(c.Config, c.Authn, c.HTTPClient, c.Now)
+		groups := c.SAMLGroups
+		if sc := c.Config.UI.SAML; groups == nil && sc != nil && sc.GroupsFromIdentityStore != nil {
+			l, err := identitystore.NewAWS(context.Background(), *sc.GroupsFromIdentityStore)
+			if err != nil {
+				return nil, err
+			}
+			groups = l
+		}
+		if s.ui, err = newUIAuth(c.Config, c.Authn, c.HTTPClient, c.Now, groups); err != nil {
+			return nil, err
+		}
+		s.ui.log = c.Log
 		if c.UIFiles != nil {
 			s.static = spaHandler(c.UIFiles)
 		}
@@ -134,14 +150,22 @@ func New(c Config) (*Server, error) {
 	return s, nil
 }
 
+// samlACSMaxBody is the body limit of the SAML assertion consumer service,
+// whatever limits.max_body_bytes (a signed response is several kilobytes).
+const samlACSMaxBody = 512 << 10
+
 // Handler returns the root handler.
 func (s *Server) Handler() http.Handler {
 	return s.withRequestID(securityHeaders(http.HandlerFunc(s.route)))
 }
 
 func (s *Server) route(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.Config.Limits.MaxBodyBytes)
 	p := r.URL.Path
+	limit := s.cfg.Config.Limits.MaxBodyBytes
+	if p == config.SAMLACSPath && limit < samlACSMaxBody {
+		limit = samlACSMaxBody
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	switch {
 	case p == "/healthz" || p == "/readyz":
 		w.Header().Set("Content-Type", "text/plain")
@@ -152,6 +176,14 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		s.mcp.serveResourceMetadata(w, r)
 	case p == GateInfoPath:
 		s.handleGateInfo(w, r)
+	case p == jwksPath && s.cfg.Authn.TokenIssuer() != nil:
+		s.handleJWKS(w, r)
+	case (p == oidcConfigPath || p == oauthMetadataPath) && s.authorizationServer():
+		s.handleOAuthMetadata(w, r)
+	case p == oauthAuthorizePath && s.authorizationServer():
+		s.handleAuthorize(w, r)
+	case p == oauthTokenPath && s.authorizationServer():
+		s.handleToken(w, r)
 	case strings.HasPrefix(p, GateInfoPath+"/"):
 		s.handleExtension(w, r)
 	case p == "/" && s.ui != nil:

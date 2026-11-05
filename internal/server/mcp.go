@@ -78,8 +78,8 @@ func (m *mcpServer) serveResourceMetadata(w http.ResponseWriter, r *http.Request
 		"scopes_supported":         []string{},
 		"resource_name":            "dns-gate",
 	}
-	if m.s.ui != nil {
-		doc["authorization_servers"] = []string{m.s.ui.issuer.Issuer}
+	if issuer, _, _, ok := m.s.extensionLogin(); ok {
+		doc["authorization_servers"] = []string{issuer}
 	}
 	writeJSON(w, http.StatusOK, doc)
 }
