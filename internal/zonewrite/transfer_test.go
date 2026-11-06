@@ -169,9 +169,16 @@ func TestTeamRename(t *testing.T) {
 	e.wantReason(err, ReasonForbidden)
 	_, err = tr.DecideTransfer(ctx, alice, v.ID, true, "")
 	e.wantReason(err, ReasonForbidden)
-	done, err := tr.DecideTransfer(ctx, auditor, v.ID, true, "ok")
-	if err != nil || done.Status != uiapi.TransferApplied || done.Moved != 3 {
-		t.Fatalf("rename %+v %v", done, err)
+	pending, err := tr.DecideTransfer(ctx, auditor, v.ID, true, "ok")
+	if err != nil || pending.Status != uiapi.TransferApplying {
+		t.Fatalf("rename approval %+v %v", pending, err)
+	}
+	e.clock.Add(3 * time.Minute)
+	if n, err := e.eng.(TransferRetrier).RetryTransfers(ctx); err != nil || n != 1 {
+		t.Fatalf("rename apply: %d %v", n, err)
+	}
+	if done, _ := tr.GetTransfer(ctx, auditor, v.ID); done.Status != uiapi.TransferApplied || done.Moved != 3 {
+		t.Fatalf("rename %+v", done)
 	}
 	for _, k := range []dns.Key{{Host: "n1", Type: "A"}, {Host: "n2", Type: "A"}} {
 		if o := e.own(k.Host, k.Type); o.Owner != "team-c" {
@@ -213,6 +220,7 @@ func TestTransferAppliedLaterWhenZoneLocked(t *testing.T) {
 	if err := e.st.Unlock(ctx, zoneName, "another-replica"); err != nil {
 		t.Fatal(err)
 	}
+	e.clock.Add(3 * time.Minute)
 	if n, err := e.eng.(TransferRetrier).RetryTransfers(ctx); err != nil || n != 1 {
 		t.Fatalf("retry: %d %v", n, err)
 	}
@@ -272,9 +280,17 @@ func TestRenameApprovalNeedsOwnershipApproveOnEveryRRset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	padmin := bound(&identity.Subject{Issuer: "idp", ID: "pat", Category: identity.CategoryHuman, Roles: []string{"policy-admin"}, Teams: []string{"team-c"}})
-	_, err = tr.DecideTransfer(ctx, padmin, v.ID, true, "")
-	e.wantReason(err, ReasonForbidden)
+	padmin := bound(&identity.Subject{Issuer: "idp", ID: "pat", Name: "pat@example.com", Category: identity.CategoryHuman, Roles: []string{"policy-admin"}, Teams: []string{"team-c"}})
+	if _, err := tr.DecideTransfer(ctx, padmin, v.ID, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	e.clock.Add(3 * time.Minute)
+	if _, err := e.eng.(TransferRetrier).RetryTransfers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := e.st.GetTransfer(ctx, v.ID); got.Status != uiapi.TransferFailed {
+		t.Fatalf("rename status %s", got.Status)
+	}
 	if o := e.own("@", "A"); o.Owner != "team-a" {
 		t.Fatalf("renamed without the right on the RRset: %+v", o)
 	}
@@ -392,6 +408,7 @@ func TestTransferRetriedAfterCrash(t *testing.T) {
 	}
 	fs.fail = false
 	retry := e.eng.(TransferRetrier)
+	e.clock.Add(3 * time.Minute)
 	if n, err := retry.RetryTransfers(ctx); err != nil || n != 1 {
 		t.Fatalf("retry: %d %v", n, err)
 	}
@@ -434,13 +451,20 @@ func TestRenameCoversStoreZonesAndRetries(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := tr.DecideTransfer(ctx, auditor, v.ID, true, ""); err != nil {
+		t.Fatal(err)
+	}
 	fs.fail = true
-	res, err := tr.DecideTransfer(ctx, auditor, v.ID, true, "")
-	if err == nil || res.Status != uiapi.TransferApplying {
-		t.Fatalf("a transient store error keeps the rename retryable: %+v %v", res, err)
+	e.clock.Add(3 * time.Minute)
+	retry := e.eng.(TransferRetrier)
+	if _, err := retry.RetryTransfers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := e.st.GetTransfer(ctx, v.ID); got.Status != uiapi.TransferApplying {
+		t.Fatalf("a transient store error keeps the rename retryable: %+v", got)
 	}
 	fs.fail = false
-	if _, err := e.eng.(TransferRetrier).RetryTransfers(ctx); err != nil {
+	if _, err := retry.RetryTransfers(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if o, _ := e.st.Get(ctx, "released.example.com", "old", "A"); o.Owner != "team-c" {
@@ -508,5 +532,181 @@ func TestTransferPersonRules(t *testing.T) {
 				t.Fatalf("allowed=%v, got %v", tc.allowed, err)
 			}
 		})
+	}
+}
+
+type updateFailStore struct {
+	*reassignFailStore
+	failApplied  bool
+	conflictOnce bool
+	listedZones  int
+}
+
+func (f *updateFailStore) UpdateTransfer(ctx context.Context, t store.Transfer) error {
+	if t.Status == uiapi.TransferApplied && f.conflictOnce {
+		f.conflictOnce = false
+		cur, _ := f.Store.GetTransfer(ctx, t.ID)
+		cur.Comment += " "
+		_ = f.Store.UpdateTransfer(ctx, *cur)
+		return store.ErrConflict
+	}
+	if t.Status == uiapi.TransferApplied && f.failApplied {
+		return errors.New("store unavailable")
+	}
+	return f.Store.UpdateTransfer(ctx, t)
+}
+
+func (f *updateFailStore) ListOwnedZones(ctx context.Context) ([]string, error) {
+	f.listedZones++
+	return f.Store.ListOwnedZones(ctx)
+}
+
+type rebinder map[string]*identity.Subject
+
+func (r rebinder) Rebind(s *identity.Subject) (*identity.Subject, error) {
+	if b, ok := r[s.String()]; ok {
+		return b, nil
+	}
+	return nil, errors.New("no binding")
+}
+
+func newRaceEnv(t *testing.T, rb Rebinder) (*env, *updateFailStore) {
+	c := &clock{t: time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)}
+	fs := &updateFailStore{reassignFailStore: &reassignFailStore{Store: store.NewMemoryWithClock(c.Now)}}
+	e := newEnvConfig(t, eurodnstest.Options{}, fs, func(cfg *Config) {
+		cfg.TombstoneTTL, cfg.TransferTTL = 7*24*time.Hour, 24*time.Hour
+		cfg.Teams = teamList{"team-a": true, "team-b": true, "team-c": true}
+		cfg.Now, cfg.Rebinder = c.Now, rb
+	})
+	e.clock = c
+	return e, fs
+}
+
+func TestTransferRetrierWaitsAndLeases(t *testing.T) {
+	e, fs := newRaceEnv(t, nil)
+	ctx := context.Background()
+	if _, err := e.eng.ApplyRRsets(ctx, alice, zoneName, put("w1", "192.0.2.1"), 0); err != nil {
+		t.Fatal(err)
+	}
+	tr, retry := e.eng.(Transfers), e.eng.(TransferRetrier)
+	v, err := tr.ProposeTransfer(ctx, alice, zoneName, uiapi.TransferProposal{RRsets: adoptRefs("w1 A"), ToTeam: "team-b", Comment: "move"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs.fail = true
+	if _, err := tr.DecideTransfer(ctx, teamMate, v.ID, true, ""); err == nil {
+		t.Fatal("transient failure expected")
+	}
+	fs.fail = false
+	if n, _ := retry.RetryTransfers(ctx); n != 0 {
+		t.Fatal("a transfer just decided must be left to the replica applying it")
+	}
+	e.clock.Add(3 * time.Minute)
+	held, _ := e.st.GetTransfer(ctx, v.ID)
+	until := e.clock.Now().Add(time.Minute)
+	held.LeaseHolder, held.LeaseUntil = "other-replica", &until
+	if err := e.st.UpdateTransfer(ctx, *held); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := retry.RetryTransfers(ctx); n != 0 {
+		t.Fatal("a transfer leased by another replica must be skipped")
+	}
+	e.clock.Add(2 * time.Minute)
+	if n, err := retry.RetryTransfers(ctx); err != nil || n != 1 {
+		t.Fatalf("retry after the lease: %d %v", n, err)
+	}
+}
+
+func TestTransferApplyAuditedDespiteStatusConflict(t *testing.T) {
+	e, fs := newRaceEnv(t, nil)
+	ctx := context.Background()
+	if _, err := e.eng.ApplyRRsets(ctx, alice, zoneName, put("w2", "192.0.2.1"), 0); err != nil {
+		t.Fatal(err)
+	}
+	tr := e.eng.(Transfers)
+	v, err := tr.ProposeTransfer(ctx, alice, zoneName, uiapi.TransferProposal{RRsets: adoptRefs("w2 A"), ToTeam: "team-b", Comment: "move"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs.conflictOnce = true
+	done, err := tr.DecideTransfer(ctx, teamMate, v.ID, true, "")
+	if err != nil || done.Status != uiapi.TransferApplied {
+		t.Fatalf("committed move reported as an error: %+v %v", done, err)
+	}
+	if len(e.audit.find("gate.transfer.apply", "allow")) != 1 {
+		t.Fatal("committed move not audited")
+	}
+}
+
+func TestTransferRetryIdempotentAfterTargetEdit(t *testing.T) {
+	e, fs := newRaceEnv(t, nil)
+	ctx := context.Background()
+	if _, err := e.eng.ApplyRRsets(ctx, alice, zoneName, put("w3", "192.0.2.1"), 0); err != nil {
+		t.Fatal(err)
+	}
+	tr := e.eng.(Transfers)
+	v, err := tr.ProposeTransfer(ctx, alice, zoneName, uiapi.TransferProposal{RRsets: adoptRefs("w3 A"), ToTeam: "team-b", Comment: "move"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs.failApplied = true
+	_, _ = tr.DecideTransfer(ctx, teamMate, v.ID, true, "")
+	fs.failApplied = false
+	if o := e.own("w3", "A"); o.Owner != "team-b" {
+		t.Fatalf("move not committed: %+v", o)
+	}
+	if _, err := e.eng.ApplyRRsets(ctx, bob, zoneName, put("w3", "192.0.2.9"), 0); err != nil {
+		t.Fatal(err)
+	}
+	e.clock.Add(10 * time.Minute)
+	if _, err := e.eng.(TransferRetrier).RetryTransfers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := e.st.GetTransfer(ctx, v.ID); got.Status != uiapi.TransferApplied {
+		t.Fatalf("a moved RRset edited by its new team failed the retry: %+v", got)
+	}
+}
+
+func TestTransferRetryRechecksTheApprover(t *testing.T) {
+	rb := rebinder{}
+	e, fs := newRaceEnv(t, rb)
+	ctx := context.Background()
+	if _, err := e.eng.ApplyRRsets(ctx, alice, zoneName, put("w4", "192.0.2.1"), 0); err != nil {
+		t.Fatal(err)
+	}
+	tr := e.eng.(Transfers)
+	v, err := tr.ProposeTransfer(ctx, alice, zoneName, uiapi.TransferProposal{RRsets: adoptRefs("w4 A"), ToTeam: "team-b", Comment: "move"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs.fail = true
+	_, _ = tr.DecideTransfer(ctx, teamMate, v.ID, true, "")
+	fs.fail = false
+	reader := *teamMate
+	reader.Roles, reader.TeamRoles = []string{"reader"}, map[string][]string{"team-a": {"reader"}}
+	rb[teamMate.String()] = &reader
+	e.clock.Add(3 * time.Minute)
+	if _, err := e.eng.(TransferRetrier).RetryTransfers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := e.st.GetTransfer(ctx, v.ID); got.Status != uiapi.TransferFailed {
+		t.Fatalf("an approver who lost the right still applies the transfer: %+v", got)
+	}
+	if o := e.own("w4", "A"); o.Owner != "team-a" {
+		t.Fatalf("moved: %+v", o)
+	}
+}
+
+func TestRenameApprovalDoesNotScanTheStore(t *testing.T) {
+	e, fs := newRaceEnv(t, nil)
+	ctx := context.Background()
+	tr := e.eng.(Transfers)
+	v, err := tr.ProposeRename(ctx, admin, "team-a", uiapi.TeamRenameRequest{To: "team-b", Comment: "merge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := tr.DecideTransfer(ctx, auditor, v.ID, true, "")
+	if err != nil || res.Status != uiapi.TransferApplying || fs.listedZones != 0 {
+		t.Fatalf("rename approval: %+v %v, %d store scans", res, err, fs.listedZones)
 	}
 }

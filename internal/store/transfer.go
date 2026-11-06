@@ -80,8 +80,28 @@ type Transfer struct {
 	DecidedAt         *time.Time     `json:"decided_at,omitempty"`
 	DecisionComment   string         `json:"decision_comment,omitempty"`
 	Moved             int            `json:"moved,omitempty"`
-	Error             string         `json:"error,omitempty"`
-	Version           int64          `json:"-"`
+	// Approver is the subject that approved the transfer: its rights are
+	// checked again when the apply is retried.
+	Approver *SubjectRecord `json:"approver,omitempty"`
+	// LeaseHolder applies the transfer until LeaseUntil: other gate
+	// replicas leave it alone meanwhile.
+	LeaseHolder string     `json:"lease_holder,omitempty"`
+	LeaseUntil  *time.Time `json:"lease_until,omitempty"`
+	Error       string     `json:"error,omitempty"`
+	Version     int64      `json:"-"`
+}
+
+// SubjectRecord is an authenticated subject as stored with a transfer.
+type SubjectRecord struct {
+	Kind      string              `json:"kind,omitempty"`
+	Issuer    string              `json:"issuer"`
+	ID        string              `json:"id"`
+	Name      string              `json:"name,omitempty"`
+	Category  string              `json:"category,omitempty"`
+	Claims    map[string]any      `json:"claims,omitempty"`
+	Roles     []string            `json:"roles,omitempty"`
+	Teams     []string            `json:"teams,omitempty"`
+	TeamRoles map[string][]string `json:"team_roles,omitempty"`
 }
 
 // TransferQuery filters ListTransfers. Limit defaults to 50, capped at 500.
@@ -135,7 +155,7 @@ func cloneTransfer(t Transfer) Transfer {
 	t.Items = append([]TransferItem(nil), t.Items...)
 	t.RequesterPersons = append([]string(nil), t.RequesterPersons...)
 	t.CreatedAt, t.ExpiresAt = t.CreatedAt.UTC(), t.ExpiresAt.UTC()
-	t.DecidedAt = utcPtr(t.DecidedAt)
+	t.DecidedAt, t.LeaseUntil = utcPtr(t.DecidedAt), utcPtr(t.LeaseUntil)
 	return t
 }
 
@@ -670,7 +690,7 @@ func (s *sqlStore) Reassign(ctx context.Context, from string, owns []Ownership, 
 		args = append(args, o.Zone, o.Host, o.Type, o.Version)
 		n, err := execTx(`UPDATE ownership SET owner = ?, created_by = ?, created_by_name = ?, created_by_category = ?,
 			updated_by = ?, updated_by_name = ?, updated_by_category = ?, created_at = ?, updated_at = ?, request_id = ?,
-			content_hash = ?, pending_hash = ?, state = ?, adopted = ?, expires_at = ?, version = ?
+			content_hash = ?, pending_hash = ?, state = ?, adopted = ?, expires_at = ?, version = ?, transfer_id = ?
 			WHERE zone = ? AND host = ? AND type = ? AND version = ?`, args...)
 		if err != nil {
 			return fmt.Errorf("store: reassign: %w", err)

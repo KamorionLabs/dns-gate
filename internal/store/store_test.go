@@ -714,12 +714,13 @@ func reassignConformance(t *testing.T, s Store, clock *fakeClock) {
 		t.Fatal("a conflicting reassign changed a tombstone")
 	}
 	b.Owner = "ops"
+	a.TransferID, b.TransferID = "tr-1", "tr-1"
 	if err := s.Reassign(ctx, "web", []Ownership{*a, *b}, []Tombstone{moved}); err != nil {
 		t.Fatal(err)
 	}
 	for _, h := range []string{"a", "b"} {
 		cur, _ := s.Get(ctx, z, h, "A")
-		if cur.Owner != "ops" || cur.Version != 2 || cur.ContentHash != "h-"+h {
+		if cur.Owner != "ops" || cur.Version != 2 || cur.ContentHash != "h-"+h || cur.TransferID != "tr-1" {
 			t.Fatalf("reassigned %+v", cur)
 		}
 	}

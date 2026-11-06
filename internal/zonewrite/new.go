@@ -61,10 +61,20 @@ type Config struct {
 	// UntrustedEmail lists the issuers whose email claim does not identify
 	// a person.
 	UntrustedEmail map[string]bool
+	// Rebinder binds the approver of a transfer again with the current
+	// policy before a retried apply; without it the subject recorded at
+	// the approval is used.
+	Rebinder Rebinder
 	// Teams tells which teams may own RRsets; any valid team name when nil.
 	Teams  TeamDirectory
 	Now    func() time.Time
 	Logger *slog.Logger
+}
+
+// Rebinder binds a subject recorded earlier with the current policy
+// (authn.Authenticator implements it).
+type Rebinder interface {
+	Rebind(s *identity.Subject) (*identity.Subject, error)
 }
 
 // TeamDirectory knows the teams of the policy (policy.Engine implements it).

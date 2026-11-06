@@ -52,6 +52,7 @@ type ownershipItem struct {
 	State             string `dynamodbav:"state"`
 	Adopted           bool   `dynamodbav:"adopted"`
 	ExpiresAt         string `dynamodbav:"expires_at,omitempty"`
+	TransferID        string `dynamodbav:"transfer_id,omitempty"`
 	Version           int64  `dynamodbav:"version"`
 }
 
@@ -99,7 +100,7 @@ func toItem(o Ownership) ownershipItem {
 		CreatedAt: o.CreatedAt.UTC().Format(time.RFC3339Nano),
 		UpdatedAt: o.UpdatedAt.UTC().Format(time.RFC3339Nano), RequestID: o.RequestID,
 		ContentHash: o.ContentHash, PendingHash: o.PendingHash, State: string(o.State),
-		Adopted: o.Adopted, Version: o.Version,
+		Adopted: o.Adopted, TransferID: o.TransferID, Version: o.Version,
 	}
 	if o.ExpiresAt != nil {
 		it.ExpiresAt = o.ExpiresAt.UTC().Format(time.RFC3339Nano)
@@ -113,7 +114,7 @@ func fromItem(it ownershipItem) Ownership {
 		CreatedByName: it.CreatedByName, CreatedByCategory: it.CreatedByCategory,
 		UpdatedBy: it.UpdatedBy, UpdatedByName: it.UpdatedByName, UpdatedByCategory: it.UpdatedByCategory,
 		RequestID: it.RequestID, ContentHash: it.ContentHash, PendingHash: it.PendingHash,
-		State: State(it.State), Adopted: it.Adopted, Version: it.Version,
+		State: State(it.State), Adopted: it.Adopted, TransferID: it.TransferID, Version: it.Version,
 	}
 	o.CreatedAt, _ = time.Parse(time.RFC3339Nano, it.CreatedAt)
 	o.UpdatedAt, _ = time.Parse(time.RFC3339Nano, it.UpdatedAt)

@@ -108,6 +108,14 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		opts.Holder, _ = os.Hostname()
 	}
 	keys, _ := st.(store.APIKeyStore)
+	an, err := authn.New(cfg, &http.Client{Timeout: 10 * time.Second}, holder)
+	if err != nil {
+		return nil, err
+	}
+	if keys != nil {
+		an.SetAPIKeys(keys, auditLog)
+	}
+	an.SetLogger(log)
 	eng, err := zonewrite.New(zonewrite.Config{
 		Guard:                   server.ACMEGuard(keys),
 		Providers:               disc,
@@ -135,14 +143,6 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		return nil, fmt.Errorf("engine: %w", err)
 	}
 
-	an, err := authn.New(cfg, &http.Client{Timeout: 10 * time.Second}, holder)
-	if err != nil {
-		return nil, err
-	}
-	if keys != nil {
-		an.SetAPIKeys(keys, auditLog)
-	}
-	an.SetLogger(log)
 	scfg := server.Config{
 		Config:      cfg,
 		Authn:       an,

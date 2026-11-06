@@ -284,6 +284,33 @@ func (a *Authenticator) verify(ctx context.Context, is *issuer, raw string, audi
 	return claims, nil
 }
 
+// Rebind binds a subject authenticated earlier again with the current
+// policy (the approver of an ownership transfer whose apply is retried):
+// a virtual key must still exist and be valid, an OIDC or SAML subject is
+// bound from its recorded claims.
+func (a *Authenticator) Rebind(s *identity.Subject) (*identity.Subject, error) {
+	if s.Kind == identity.KindVirtualKey {
+		for _, vk := range a.policy.Current().VirtualKeys() {
+			if vk.ID != s.ID {
+				continue
+			}
+			if vk.ExpiresAt != nil && !a.now().Before(*vk.ExpiresAt) {
+				return nil, unauthorized("virtual key expired")
+			}
+			roles := append([]string(nil), vk.Roles...)
+			sort.Strings(roles)
+			teamRoles := map[string][]string{}
+			for _, t := range vk.Teams {
+				teamRoles[t] = roles
+			}
+			return &identity.Subject{Kind: identity.KindVirtualKey, Issuer: "virtual-key", ID: vk.ID, Claims: map[string]any{},
+				Roles: roles, Teams: append([]string(nil), vk.Teams...), TeamRoles: teamRoles, Name: vk.ID, Category: identity.CategoryKey}, nil
+		}
+		return nil, unauthorized("virtual key removed")
+	}
+	return a.SubjectFromClaims(s.Issuer, s.Claims, s.Category)
+}
+
 // SubjectFromClaims binds verified claims of the named issuer. category
 // overrides the issuer category when not empty (UI sessions are human).
 func (a *Authenticator) SubjectFromClaims(issuerName string, claims map[string]any, category string) (*identity.Subject, error) {

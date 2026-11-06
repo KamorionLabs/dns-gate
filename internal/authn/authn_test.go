@@ -283,3 +283,27 @@ func TestTeamFromSubject(t *testing.T) {
 		t.Fatalf("bound claims: %v", err)
 	}
 }
+
+func TestRebindUsesTheCurrentPolicy(t *testing.T) {
+	a, p := setup(t)
+	s, err := a.Authenticate(bearer(p.Sign(good())))
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := a.Rebind(s)
+	if err != nil || strings.Join(again.Roles, ",") != "writer" || again.TeamRoles["web"][0] != "writer" {
+		t.Fatalf("rebind %+v %v", again, err)
+	}
+	gone := *s
+	gone.Claims = map[string]any{"sub": "repo:other/x", "repository_owner": "acme"}
+	if _, err := a.Rebind(&gone); err == nil {
+		t.Fatal("a subject no binding applies to any more was bound again")
+	}
+	vk, err := a.Rebind(&identity.Subject{Kind: identity.KindVirtualKey, ID: "caddy"})
+	if err != nil || vk.TeamRoles["platform"][0] != "acme-solver" {
+		t.Fatalf("virtual key %+v %v", vk, err)
+	}
+	if _, err := a.Rebind(&identity.Subject{Kind: identity.KindVirtualKey, ID: "old"}); err == nil {
+		t.Fatal("expired virtual key bound again")
+	}
+}
