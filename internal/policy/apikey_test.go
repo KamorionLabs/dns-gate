@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 )
 
 func TestKeyRoleProblem(t *testing.T) {
@@ -96,5 +97,45 @@ func TestKeyRoleProblemEphemeralAndCap(t *testing.T) {
 		if (tc.want == "") != (got == "") || !strings.Contains(got, tc.want) {
 			t.Errorf("%s gives %s: %q, want %q", tc.holder, tc.role, got, tc.want)
 		}
+	}
+}
+
+// The grant recorded with a key holds the role's declared rules and
+// limits: raising the global change limit or the bounds of the managed
+// layer does not count as a widened role.
+func TestRoleGrantDeclared(t *testing.T) {
+	rule := []config.Rule{{Zones: []string{"example.com"}, Actions: []string{ActionDNSRead, ActionRecordWrite}}}
+	cfg := func(maxChanges int, bounds []string) *config.Config {
+		return &config.Config{
+			Zones:  []string{"example.com"},
+			Limits: config.Limits{MaxChangesPerRequest: maxChanges},
+			Roles:  map[string]config.Role{"inherit": {EphemeralTTL: config.Duration(time.Hour), Rules: rule}},
+			Policy: config.Policy{Editable: true, Bounds: config.Bounds{Zones: []string{"example.com"}, Actions: bounds}},
+		}
+	}
+	a, _ := FromConfig(cfg(20, []string{ActionDNSRead})).Holder().Current().RoleGrant("inherit")
+	b, _ := FromConfig(cfg(50, []string{ActionDNSRead})).Holder().Current().RoleGrant("inherit")
+	if !b.Within(a) {
+		t.Errorf("a higher global limit widened the role: %+v vs %+v", b, a)
+	}
+	doc := uiapi.PolicyDocument{Roles: map[string]uiapi.Role{"managed": {EphemeralTTL: "1h",
+		Rules: []uiapi.Rule{{Zones: []string{"example.com"}, Actions: []string{ActionDNSRead, ActionRecordWrite}}}}}}
+	grant := func(bounds []string) RoleGrant {
+		h, err := NewHolder(cfg(20, bounds))
+		if err != nil {
+			t.Fatal(err)
+		}
+		g, ok := h.CompileUnchecked(&doc, "r1").RoleGrant("managed")
+		if !ok {
+			t.Fatal("managed role missing")
+		}
+		return g
+	}
+	if narrow, wide := grant([]string{ActionDNSRead}), grant([]string{ActionDNSRead, ActionRecordWrite}); !wide.Within(narrow) {
+		t.Errorf("wider bounds widened the role: %+v vs %+v", wide, narrow)
+	}
+	explicit := RoleGrant{Rules: a.Rules, EphemeralTTL: a.EphemeralTTL, MaxChanges: 30}
+	if explicit.Within(a) || !a.Within(a) {
+		t.Error("declared limits not compared")
 	}
 }
