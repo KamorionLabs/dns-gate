@@ -172,9 +172,13 @@ action `dns.forward.write` ([CONFIG.md](CONFIG.md#roles), [API.md](API.md#url-fo
   `dns.zone.admin` and ignored ownership. It is now a forward write: new forwards
   are owned by the caller's team, owned forwards follow the ownership rules
   (`403 not_owner` for another team), and `dns.zone.admin` still changes or deletes
-  the forwards the gate does not own, which stay unowned. Clients that send the
-  forwards back unchanged are not affected; mail forwards and the other zone
-  settings still require `dns.zone.admin`.
+  the forwards the gate does not own, which stay unowned, but no longer creates
+  forwards (`dns.forward.write` is required). Clients that send the forwards back
+  unchanged are not affected, hosts holding several forwards included; mail
+  forwards and the other zone settings still require `dns.zone.admin`.
+- New A, AAAA, CNAME and APEX records are refused on a host whose forward belongs
+  to another team or to nobody, and a protected entry listing those types now
+  protects the forward of its hosts too.
 - Grant `dns.forward.write` to the roles that manage redirects (add it to
   `policy.bounds.actions` for managed roles and to delegations where needed), and
   adopt existing forwards with `dns.record.adopt` (type `URLFWD`).

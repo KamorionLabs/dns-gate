@@ -445,8 +445,10 @@ paths:
         `400 invalid` for a provider without forwards (Route53).
 
         `require_https: true` refuses the write with `409 https_unavailable`
-        unless the forwards of the zone answer HTTPS (`https.status` active,
-        pending or no_forward). At EuroDNS that takes an HTTPS redirect
+        unless the forwards of the zone answer HTTPS (`https.status` active or
+        no_forward; pending is refused). A forward is not created over A,
+        AAAA, CNAME or APEX records of its host owned by another team or by
+        nobody (`403 not_owner`, `409 foreign_rrset`). At EuroDNS that takes an HTTPS redirect
         subscription on the domain, a paid product ordered outside the gate;
         without it a forward answers plain HTTP only. The URL target may be
         https:// either way.
@@ -2020,7 +2022,7 @@ components:
         the gate never orders one.
       required: [status]
       properties:
-        status: { type: string, enum: [active, pending, no_forward, inactive, unsupported, unknown] }
+        status: { type: string, enum: [active, pending, no_forward, inactive, unsupported, unknown], description: "inactive also covers a subscription past its expiration date; unknown is a failed read, kept 30 seconds." }
         subscription: { type: string, description: "Provider subscription id." }
         expires_at: { type: string }
         message: { type: string }
@@ -2044,12 +2046,16 @@ components:
       type: object
       additionalProperties: false
       required: [type, url]
+      description: |
+        `url` is an absolute http or https URL in canonical form, without user
+        information, spaces, control characters nor unencoded `< > " ' ` \ { } | ^`.
+        Frame fields are plain text without control characters nor `< > " ' ``.
       properties:
         type: { type: string, enum: ["301", "302", frame] }
-        url: { type: string }
-        title: { type: string }
-        keywords: { type: string }
-        description: { type: string }
+        url: { type: string, maxLength: 2048 }
+        title: { type: string, maxLength: 200 }
+        keywords: { type: string, maxLength: 500 }
+        description: { type: string, maxLength: 1000 }
         require_https: { type: boolean, description: "Refuse unless the forwards of the zone answer HTTPS (not stored)." }
 
     RRset:

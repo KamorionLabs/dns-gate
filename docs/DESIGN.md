@@ -183,10 +183,13 @@ several labels without an ending dot are written absolute, like Route53 and the
 dnsgate Terraform provider read them; a single label is refused as ambiguous.
 Each entry of `urlForwards` is the RRset `{host, URLFWD}` (see 6.1.1): a write
 replaces only the entries of the forwards it changes, keeping their `id` and
-unknown fields, every other entry byte for byte; a host with several entries, or an
-entry of unknown `forwardType`, is read-only (`duplicate_forward`,
-`unsupported_forward`), and so are `URL`/`MAIL` pseudo records if EuroDNS lists
-any (`forward_record`). Forward errors of the `check` report are mapped to the
+unknown fields (as raw JSON, numbers untouched), every other entry byte for byte; a
+host with several entries, or an entry of unknown `forwardType`, is read-only
+(`duplicate_forward`, `unsupported_forward`), and so are `URL`/`MAIL` pseudo records
+if EuroDNS lists any (`forward_record`). The EuroDNS spec lists `URL` and `MAIL` as
+pseudo record types of forwards; whether `GET` returns them is **not verified
+against the live API**: a write deleting a forward leaves out the `URL` pseudo
+records of its host, so that the save neither resurrects nor refuses it. Forward errors of the `check` report are mapped to the
 forward key. Mail forwards are not modelled: kept as read, changed only by a
 full-zone PUT with `dns.zone.admin`.
 
@@ -345,15 +348,25 @@ MCP all reuse the RRset machinery with that key. Its content hash is
 prefixed by its length in bytes, so no field can bleed into another); hashes of
 other RRsets are unchanged. Writing requires `dns.forward.write`, scoped by
 `records.hosts` (`policy.WriteAction`); providers without forwards (Route53) report
-`Capabilities.Forwards` false and the engine refuses forward changes.
+`Capabilities.Forwards` false and the engine refuses forward changes. A forward
+shadows the `A`, `AAAA`, `CNAME` and `APEX` records of its host
+(`policy.ForwardShadowTypes`): the engine creates one only where those records are
+absent or owned by the caller's teams, and the reverse; a protected entry listing
+one of those types protects the forward. Through the full-zone PUT,
+`dns.zone.admin` only changes or deletes unowned forwards (audited as
+`zone_admin_forwards`), never creates one. Frame fields are plain text with length
+limits and URLs must be canonical http(s) URLs: EuroDNS serves frame forwards as a
+page on the customer host.
 
 HTTPS: a EuroDNS forward entry has no HTTPS setting; the forward host answers HTTPS
 only with an *HTTPS redirect* subscription on the domain (a paid product: a
 certificate for the forward hosts, state ACTIVE, PENDING or NO_FORWARD). The
 adapter reads it (`GET /subscriptions?subscription-types=HTTPS_REDIRECT&domain-name=`
-then `GET /https-redirect-subscriptions/{id}`, cached 10 minutes per zone) and the
-API reports it; `require_https` on a forward write is refused
-(`https_unavailable`) unless it is active, pending or no_forward. The gate never
+then `GET /https-redirect-subscriptions/{id}`, cached 10 minutes per zone, a failure
+30 seconds; one lookup per zone at a time, with its own timeout, before the zone
+lock) and the API reports it, an expired subscription as inactive;
+`require_https` on a forward write is refused (`https_unavailable`) unless it is
+active or no_forward. The gate never
 orders, renews nor deletes subscriptions (orders are paid, and the passthrough
 keeps denying the subscription operations).
 

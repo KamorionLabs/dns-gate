@@ -164,8 +164,15 @@ curl -sS -i "${auth[@]}" -X DELETE "$GATE/api/v1/zones/example.com/forwards/go"
 }
 ```
 
-`type` is `301`, `302` or `frame`; `url` an absolute `http://` or `https://` URL;
-`title`, `keywords` and `description` apply to frames only. The `ETag` is the
+`type` is `301`, `302` or `frame`; `url` an absolute `http://` or `https://` URL of
+at most 2048 bytes, without user information, spaces, control characters nor
+unencoded `< > " ' \` \ { } | ^`, written in canonical form (as Go's `net/url`
+prints it back); `title` (200 characters), `keywords` (500) and `description`
+(1000) apply to frames only and are plain text, without control characters nor
+`< > " ' \``: EuroDNS serves them in the page it shows on the forward host. A
+forward cannot be created over `A`, `AAAA`, `CNAME` or `APEX` records of its host
+owned by another team or by nobody, nor those records over the forward of another
+team (see [CONFIG.md](CONFIG.md#url-forwards)). The `ETag` is the
 content hash of the forward (see the `Forward` schema of the OpenAPI document).
 In a plan, a forward change is `{"host": "go", "type": "URLFWD", "forward":
 {"type": "302", "url": "https://…"}}` (or `"delete": true`), and the planned and
@@ -179,10 +186,12 @@ holding a certificate for the forward hosts. The gate reads its state
 cached 10 minutes; an API key without access to subscriptions gives `unknown`) and
 reports it as `https.status`: `active`, `pending` (certificate being issued),
 `no_forward` (active, issued once the zone has a forward), `inactive` (plain HTTP
-only), `unknown`, or `unsupported` (provider without forwards). The gate never
+only, or a subscription past its expiration date), `unknown` (read failed, kept 30
+seconds), or `unsupported` (provider without forwards). The gate never
 orders, renews nor cancels a subscription. `"require_https": true` in the body
 (or in a plan change) refuses the write with `409 https_unavailable` unless the
-status is `active`, `pending` or `no_forward`; it is a check only, nothing is
+status is `active` or `no_forward` (`pending` is refused: the certificate is not
+issued yet); it is checked before the zone lock, and is a check only, nothing is
 stored.
 
 ## Plan, then apply
