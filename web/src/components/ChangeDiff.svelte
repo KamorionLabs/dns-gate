@@ -3,6 +3,7 @@
   import { opLabel } from '../lib/labels';
   import { ttl as fmtTTL } from '../lib/format';
   import { zoneHref } from '../lib/router.svelte';
+  import { forwardLines, isForward, typeLabel } from '../lib/forwards';
   import Host from './Host.svelte';
 
   let {
@@ -16,8 +17,13 @@
   const retyped = $derived(!!change.old_type && change.old_type !== change.type);
 
   const aliasLine = (a?: { target: string } | null) => (a ? [`alias ${a.target}`] : []);
-  const oldV = $derived(change.old_values?.length ? change.old_values : aliasLine(change.old_alias));
-  const newV = $derived(change.new_values?.length ? change.new_values : aliasLine(change.new_alias));
+  const forward = $derived(isForward(change) || !!change.old_forward || !!change.new_forward);
+  const oldV = $derived(
+    forward ? forwardLines(change.old_forward) : change.old_values?.length ? change.old_values : aliasLine(change.old_alias),
+  );
+  const newV = $derived(
+    forward ? forwardLines(change.new_forward) : change.new_values?.length ? change.new_values : aliasLine(change.new_alias),
+  );
   const lines = $derived.by(() => {
     const out: { kind: 'add' | 'del' | 'keep'; v: string }[] = [];
     for (const v of oldV) if (!newV.includes(v)) out.push({ kind: 'del', v });
@@ -37,7 +43,7 @@
     {:else}
       <Host host={change.host} zone={zone ?? ''} showZone={false} />
     {/if}
-    <span class="type mono">{change.type}</span>
+    <span class="type" class:mono={!forward}>{typeLabel(change.type)}</span>
     {#if ttlChanged}
       <span class="ttl mono num">TTL {fmtTTL(change.old_ttl ?? 0)} → {fmtTTL(change.new_ttl ?? 0)}</span>
     {:else if change.new_ttl ?? change.old_ttl}

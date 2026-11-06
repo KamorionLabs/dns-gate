@@ -48,6 +48,10 @@ export function describePermissions(perms: Permission[]): string[] {
     if (verbs.length === 1 && verbs[0] === 'read' && !scoped) zone.push(`Read ${at}`);
     else if (verbs.length) zone.push(`${capital(list(verbs))} ${what(p)} in ${at}`);
     else if (p.actions.includes('ui.read')) zone.push(`Browse ${at} in this console`);
+    if (p.actions.includes('dns.forward.write')) {
+      const hosts = p.hosts.filter((h) => h !== '**');
+      zone.push(`Write URL forwards${hosts.length ? ' matching ' + hosts.join(', ') : ''} in ${at}`);
+    }
     if (p.actions.includes('dns.zone.admin')) zone.push(`Manage DNSSEC and zone settings of ${at}`);
     if (p.actions.includes('dns.zone.profile')) {
       const everywhere = p.zones.some((z) => /^\*+$/.test(z)) && p.hosts.length === 0 && p.types.length === 0;
