@@ -155,3 +155,38 @@ func TestTombstoneBlocksAdoptionForAnotherTeam(t *testing.T) {
 		t.Fatalf("tombstone kept after adoption: %v", err)
 	}
 }
+
+func TestAdoptForAnotherTeamChecksEachRRset(t *testing.T) {
+	e := newTeamsEnv(t)
+	ctx := context.Background()
+	e.srv.Seed(withRecords(baseZone(), rec("A", "free", "192.0.2.10"), rec("A", "www", "192.0.2.11")))
+	partial := bound(&identity.Subject{Issuer: "idp", ID: "pia", Category: identity.CategoryHuman, Roles: []string{"adopter", "approver-www"}, Teams: []string{"team-a"}})
+	p, err := e.eng.PreviewAdopt(ctx, partial, zoneName, uiapi.AdoptSelection{RRsets: adoptRefs("free A", "www A"), Owner: "team-b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Candidates) != 2 || p.Candidates[0].Adoptable || p.Candidates[0].Reason != adoptForbidden || !p.Candidates[1].Adoptable {
+		t.Fatalf("approval checked per RRset: %+v", p.Candidates)
+	}
+	e.wantReason(e.eng.Adopt(ctx, partial, zoneName, adoptRefs("free A"), "team-b"), ReasonForbidden)
+	if err := e.eng.Adopt(ctx, partial, zoneName, adoptRefs("www A"), "team-b"); err != nil {
+		t.Fatalf("approval on the RRset: %v", err)
+	}
+}
+
+func TestAdoptionNeverLiftsAnotherTeamTombstone(t *testing.T) {
+	e := newTeamsEnv(t)
+	ctx := context.Background()
+	if _, err := e.eng.ApplyRRsets(ctx, alice, zoneName, put("kept", "192.0.2.1"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.eng.ApplyRRsets(ctx, alice, zoneName, del("kept"), 0); err != nil {
+		t.Fatal(err)
+	}
+	e.srv.Seed(withRecords(e.srv.Zone(zoneName), rec("A", "kept", "192.0.2.9")))
+	p, err := e.eng.PreviewAdopt(ctx, admin, zoneName, uiapi.AdoptSelection{RRsets: adoptRefs("kept A"), Owner: "team-b"})
+	if err != nil || p.Candidates[0].Adoptable || p.Candidates[0].Reason != adoptReserved {
+		t.Fatalf("an approver lifted the tombstone of team-a: %+v %v", p, err)
+	}
+	e.wantReason(e.eng.Adopt(ctx, admin, zoneName, adoptRefs("kept A"), "team-b"), ReasonNotOwner)
+}

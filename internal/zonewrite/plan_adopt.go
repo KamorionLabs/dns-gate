@@ -252,8 +252,10 @@ func (e *engine) adoptCandidates(s *identity.Subject, p provider.Provider, zone,
 			c.Reason = adoptOtherTeam
 		case owned && o.State != store.StateTainted:
 			c.Reason = adoptAlreadyOwned
-		case !owned && e.reserved(s, zone, owner, tombs, k):
+		case !owned && reserved(owner, tombs, k):
 			c.Reason = adoptReserved
+		case !owned && !e.adoptsFor(s, zone, owner, k):
+			c.Reason = adoptForbidden
 		case !e.cfg.Authz.AllowRRset(s, policy.ActionRecordAdopt, zone, k):
 			c.Reason = adoptForbidden
 		case invalidReason(p, zone, set) != "":
@@ -316,8 +318,8 @@ func parsePreviewToken(tok string) (zone, owner string, hashes map[dns.Key]strin
 }
 
 // adoptOwner returns the team adopted RRsets go to: the caller's team by
-// default, another of its teams, or any known team when the caller holds
-// dns.ownership.approve on the zone.
+// default, another of its teams, or a known team when the caller holds
+// dns.ownership.approve in the zone (checked again on each RRset).
 func (e *engine) adoptOwner(s *identity.Subject, zone, owner string) (string, error) {
 	if owner == "" {
 		team, ok := e.cfg.Authz.OwnerTeam(s, zone)
@@ -346,12 +348,18 @@ func (e *engine) knownTeam(team string) bool {
 	return teamNameRe.MatchString(team)
 }
 
-// reservedFor tells whether a tombstone keeps an unowned RRset from going
-// to owner: it belongs to another team and the caller cannot approve
-// ownership changes on the zone.
-func (e *engine) reserved(s *identity.Subject, zone, owner string, tombs map[dns.Key]store.Tombstone, k dns.Key) bool {
+// reserved tells whether a tombstone keeps an unowned RRset from going to
+// owner: it belongs to another team. Adoption never lifts it, whoever the
+// caller is: the RRset changes team through a transfer (a second person).
+func reserved(owner string, tombs map[dns.Key]store.Tombstone, k dns.Key) bool {
 	t, ok := tombs[k]
-	return ok && t.Team != owner && !e.cfg.Authz.Allow(s, policy.ActionOwnershipApprove, zone)
+	return ok && t.Team != owner
+}
+
+// adoptsFor reports whether s may adopt an RRset for owner: one of its
+// teams, or another team with dns.ownership.approve on that RRset.
+func (e *engine) adoptsFor(s *identity.Subject, zone, owner string, k dns.Key) bool {
+	return slices.Contains(s.Teams, owner) || e.approves(s, zone, k)
 }
 
 func (e *engine) PreviewAdopt(ctx context.Context, s *identity.Subject, zoneIn string, sel uiapi.AdoptSelection) (*uiapi.AdoptPreview, error) {

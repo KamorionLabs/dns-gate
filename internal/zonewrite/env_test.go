@@ -62,6 +62,8 @@ func (f *fakeAuthz) Allow(s *identity.Subject, action, _ string) bool {
 		return has(s, "admin") || has(s, "adopter")
 	case "policy.propose", "policy.approve", "policy.read":
 		return has(s, "admin") || has(s, "policy-admin")
+	case policy.ActionOwnershipApprove:
+		return has(s, "admin") || has(s, "approver-www")
 	default:
 		return has(s, "admin")
 	}
@@ -78,6 +80,9 @@ func (f *fakeAuthz) AllowRRset(s *identity.Subject, action, zone string, k dns.K
 		return has(s, "acme") && k.Type == "TXT" && strings.HasPrefix(k.Host, "_acme-challenge")
 	}
 	if action == policy.ActionRecordAdopt && has(s, "adopter") {
+		return true
+	}
+	if action == policy.ActionOwnershipApprove && has(s, "approver-www") && k.Host == "www" {
 		return true
 	}
 	return has(s, "admin")

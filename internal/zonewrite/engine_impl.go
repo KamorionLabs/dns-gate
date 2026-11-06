@@ -925,8 +925,11 @@ func (e *engine) Adopt(ctx context.Context, s *identity.Subject, zoneIn string, 
 			if err != nil {
 				return e.deny(ctx, s, action, zone, err)
 			}
-			if e.reserved(s, zone, team, tombs, key) {
+			if reserved(team, tombs, key) {
 				return e.deny(ctx, s, action, zone, fail(ReasonNotOwner, "%s was deleted by team %s and stays reserved for it: ask for a transfer", keyString(key), tombs[key].Team))
+			}
+			if !e.adoptsFor(s, zone, team, key) {
+				return e.deny(ctx, s, action, zone, fail(ReasonForbidden, "adopting %s for team %s requires %s on it", keyString(key), team, policy.ActionOwnershipApprove))
 			}
 			o = store.Ownership{
 				Zone: zone, Host: key.Host, Type: key.Type, Owner: team, State: store.StateActive,
