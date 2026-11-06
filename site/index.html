@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>dns-gate · scoped, audited DNS changes on EuroDNS, Route53 and more</title>
-<meta name="description" content="dns-gate holds the credentials of your DNS providers (EuroDNS, Route53, more to come) alone, lets pipelines, people and AI assistants in with short-lived identities, and lets each team change only the DNS records it owns.">
+<title>dns-gate · delegate DNS changes without handing out provider keys</title>
+<meta name="description" content="dns-gate sits in front of your DNS providers, holds their credentials alone, and lets teams, pipelines, third parties and ACME clients change exactly the records they own, with their own identity, under RBAC, ownership and audit.">
 <meta property="og:title" content="dns-gate">
-<meta property="og:description" content="Scoped, audited DNS changes on EuroDNS, Route53 and more: OIDC, RBAC per zone, host and type, record ownership, safe writes, audit, REST API, web UI and MCP server.">
+<meta property="og:description" content="Delegate DNS changes without handing out provider keys: OIDC and SAML identities, RBAC per zone, host and type, record ownership, safe writes, audit with diffs, REST API, web UI, MCP server, Terraform provider and ACME DNS-01.">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="style.css">
 </head>
@@ -28,7 +28,7 @@
   <div class="wrap">
     <a class="brand" href="#"><svg width="22" height="22" aria-hidden="true"><use href="#seal-managed"/></svg>dns-gate</a>
     <nav class="nav" aria-label="Sections">
-      <a href="#why">Why</a>
+      <a href="#why">Problem</a>
       <a href="#how">How it works</a>
       <a href="#ownership">Ownership</a>
       <a href="#policy">Policy</a>
@@ -44,13 +44,13 @@
 <section class="hero">
   <div class="wrap">
     <div>
-      <h1>Scoped, audited DNS changes, whatever the provider</h1>
-      <p class="lead">DNS provider credentials open far more than one record. dns-gate holds them alone, for EuroDNS and Route53 today and more to come, lets pipelines, people and AI assistants in with short-lived identities, and lets each team change only the records it owns.</p>
+      <h1>Delegate DNS changes without handing out provider keys</h1>
+      <p class="lead">A DNS provider key or role usually opens a whole account or zone. dns-gate holds those credentials alone and lets teams, pipelines, third parties and ACME clients change exactly the records they own, with their own identity, through one API in front of every provider.</p>
       <div class="actions">
         <a class="btn primary" href="#how">See how it works</a>
         <a class="btn secondary" href="api.html">API reference</a>
       </div>
-      <p class="meta"><span>EuroDNS</span><span>Route53</span><span>Go</span><span>Helm chart</span><span>OpenTofu provider</span><span>REST API</span><span>MCP server</span><span>MIT</span></p>
+      <p class="meta"><span>OIDC and SAML</span><span>REST API</span><span>Web UI</span><span>MCP server</span><span>Terraform provider</span><span>ACME DNS-01</span><span>Container or Lambda</span><span>MIT</span></p>
     </div>
 
     <figure class="ledger" aria-label="A zone as the gate sees it: each record set with its owner team and custody state">
@@ -78,47 +78,44 @@
 <section id="why">
   <div class="wrap">
     <div class="sec-head">
-      <p class="kicker">Why a gate</p>
-      <h2 class="sec-title">One provider key opens the whole account</h2>
-      <p class="sec-lead">EuroDNS is the extreme case: its API authenticates with two headers and no scope, and the key that adds a CNAME can also change the registrant contact, the nameservers or the renewal of every domain. With any provider, the credential a pipeline needs for one record reaches much more, and nothing says which team owns which record. A leaked key is a domain hijack, not just a DNS change.</p>
+      <p class="kicker">The problem</p>
+      <h2 class="sec-title">DNS access is all or nothing</h2>
+      <p class="sec-lead">Provider credentials are coarse: the key or role a pipeline needs for one record usually reaches every record of the zone, often every zone of the account, sometimes the domains themselves. So teams, pipelines, third parties and ACME clients either get far too much power, or wait for a central team to make the change.</p>
     </div>
     <div class="fan">
       <figure>
-        <svg viewBox="0 0 560 410" role="img" aria-label="One EuroDNS API key reaches DNS zones, registrant contacts, nameserver profiles, renewals, SSL certificates and DNSSEC; pipelines only need DNS zones">
-          <rect x="0" y="165" width="210" height="80" rx="8" class="f-gate st-seal" stroke-width="1"/>
-          <text x="20" y="199" font-size="16" font-weight="600" class="f-on-gate">EuroDNS API key</text>
-          <text x="20" y="222" font-size="12" class="f-on-gate mono" opacity="0.75" font-family="ui-monospace, Menlo, monospace">X-APP-ID + X-API-KEY</text>
+        <svg viewBox="0 0 560 342" role="img" aria-label="One provider credential reaches the record a pipeline needs, but also every other record of the zone, every zone of the account, the registrar settings and DNSSEC">
+          <rect x="0" y="131" width="210" height="80" rx="8" class="f-gate st-seal" stroke-width="1"/>
+          <text x="20" y="165" font-size="16" font-weight="600" class="f-on-gate">Provider credential</text>
+          <text x="20" y="188" font-size="12" class="f-on-gate" opacity="0.75" font-family="ui-monospace, Menlo, monospace">API key or IAM role</text>
           <g stroke-width="1.5" fill="none" class="st-rule">
-            <path d="M210 205 L324 31" marker-end="url(#arrow)"/>
-            <path d="M210 205 L324 99" marker-end="url(#arrow)"/>
-            <path d="M210 205 L324 167" marker-end="url(#arrow)"/>
-            <path d="M210 205 L324 235" marker-end="url(#arrow)"/>
-            <path d="M210 205 L324 303" marker-end="url(#arrow)"/>
-            <path d="M210 205 L324 371" marker-end="url(#arrow)"/>
+            <path d="M210 171 L324 31" marker-end="url(#arrow)"/>
+            <path d="M210 171 L324 99" marker-end="url(#arrow)"/>
+            <path d="M210 171 L324 167" marker-end="url(#arrow)"/>
+            <path d="M210 171 L324 235" marker-end="url(#arrow)"/>
+            <path d="M210 171 L324 303" marker-end="url(#arrow)"/>
           </g>
           <rect x="330" y="8" width="230" height="46" rx="6" class="f-wash st-seal" stroke-width="1.5"/>
-          <text x="348" y="37" font-size="15" font-weight="600" class="f-seal">DNS zones</text>
+          <text x="348" y="37" font-size="15" font-weight="600" class="f-seal">The one record needed</text>
           <g class="f-sheet st-soft" stroke-width="1">
             <rect x="330" y="76" width="230" height="46" rx="6"/>
             <rect x="330" y="144" width="230" height="46" rx="6"/>
             <rect x="330" y="212" width="230" height="46" rx="6"/>
             <rect x="330" y="280" width="230" height="46" rx="6"/>
-            <rect x="330" y="348" width="230" height="46" rx="6"/>
           </g>
           <g font-size="15" class="f-ink2">
-            <text x="348" y="105">Registrant contacts</text>
-            <text x="348" y="173">Nameserver profiles</text>
-            <text x="348" y="241">Renewals, subscriptions</text>
-            <text x="348" y="309">SSL certificates</text>
-            <text x="348" y="377">DNSSEC</text>
+            <text x="348" y="105">Every record of the zone</text>
+            <text x="348" y="173">Every zone of the account</text>
+            <text x="348" y="241">Registrar: contacts, NS</text>
+            <text x="348" y="309">DNSSEC, zone settings</text>
           </g>
         </svg>
       </figure>
       <div class="facts">
-        <div class="fact"><h3>Keys carry no scope</h3><div><p>One key reaches domains, contacts, renewals.</p><p class="fix">The gate holds it alone; callers bring short-lived tokens scoped to zone, host and type.</p></div></div>
-        <div class="fact"><h3>10 requests per 10 s per IP</h3><div><p>Progressive bans: one noisy client blocks everyone behind the same IP.</p><p class="fix">One shared budget for every client, writes serialized per zone.</p></div></div>
-        <div class="fact"><h3>Whole-zone saves only</h3><div><p>The right to change a record is the right to wipe the zone.</p><p class="fix">Every changed record set is checked; a team only changes what it owns.</p></div></div>
-        <div class="fact"><h3>No ETag, no If-Match</h3><div><p>Two concurrent writers silently overwrite each other.</p><p class="fix">Per-zone lock, zone version served as ETag, If-Match honoured.</p></div></div>
+        <div class="fact"><h3>Too much power, or a queue</h3><div><p>Handing out the provider key is a domain hijack waiting to happen; keeping it means every change goes through one team.</p><p class="fix">The gate holds the credentials; each caller gets exactly its zones, host patterns and record types.</p></div></div>
+        <div class="fact"><h3>Nobody knows who owns a record</h3><div><p>A record has no field for an owner: any pipeline can overwrite another team’s.</p><p class="fix">Each record set is owned by the team that created or adopted it, and only that team changes it.</p></div></div>
+        <div class="fact"><h3>Changes overwrite each other</h3><div><p>Consoles, scripts and pipelines edit the same zone with no lock and no precondition.</p><p class="fix">Per-zone lock, plan then apply against content hashes, drift detected and blocked.</p></div></div>
+        <div class="fact"><h3>No audit with diffs</h3><div><p>Provider logs, when they exist, say an API key changed something.</p><p class="fix">Every request, allowed or denied, is logged with the identity, the team and the diff.</p></div></div>
       </div>
     </div>
   </div>
@@ -129,15 +126,15 @@
     <div class="sec-head">
       <p class="kicker">How it works</p>
       <h2 class="sec-title">One gate in front of your DNS providers</h2>
-      <p class="sec-lead">Clients use the gate REST API, the same for every provider, or keep the EuroDNS API they already speak: only the base URL and the credentials change. Every request, read or write, walks the same seven checks before anything reaches a provider.</p>
+      <p class="sec-lead">Callers bring their own identity and use one API, the same for every provider. Every request, read or write, walks the same checks before anything reaches a provider.</p>
     </div>
     <div class="arch">
       <div class="col">
         <div class="box"><h3>OpenTofu / Terraform</h3><p>dnsgate provider</p></div>
-        <div class="box"><h3>CI pipelines</h3><p>GitHub, GitLab, Azure DevOps, AWS OIDC</p></div>
-        <div class="box"><h3>People</h3><p>web UI, Entra ID SSO</p></div>
+        <div class="box"><h3>CI and workloads</h3><p>GitHub, GitLab, Azure DevOps, Kubernetes, Entra ID, AWS</p></div>
+        <div class="box"><h3>People</h3><p>web UI, OIDC or SAML sign-in</p></div>
         <div class="box"><h3>AI assistants</h3><p>MCP server at <code>/mcp</code></p></div>
-        <div class="box"><h3>Existing EuroDNS clients</h3><p>scoped virtual keys</p></div>
+        <div class="box"><h3>ACME clients, third parties</h3><p>certbot, acme.sh, lego, cert-manager</p></div>
       </div>
       <div class="link"><small>token</small></div>
       <div class="gate">
@@ -154,10 +151,16 @@
         </ol>
       </div>
       <div class="right">
-        <div class="row"><div class="link"><small>one key each</small></div><div class="box upstream"><h3>DNS providers</h3><p>EuroDNS · Route53 · more to come</p></div></div>
+        <div class="row"><div class="link"><small>one key each</small></div><div class="box upstream"><h3>DNS providers</h3><p>Route 53 · EuroDNS · more on the roadmap</p></div></div>
         <div class="row"><div class="link both"><small>state</small></div><div class="box"><h3>Store</h3><p>ownership, zone locks, plans, audit, policy revisions · DynamoDB, PostgreSQL, or SQLite for one replica</p></div></div>
       </div>
     </div>
+  </div>
+</section>
+
+<section id="providers" style="padding-top:0">
+  <div class="wrap">
+    <p class="sec-lead">Providers today: <b>Route 53</b> and <b>EuroDNS</b>, several accounts each, zones discovered from the accounts. On the roadmap: <a href="https://github.com/KamorionLabs/dns-gate/issues/18">Cloudflare</a>, <a href="https://github.com/KamorionLabs/dns-gate/issues/19">OVHcloud</a>, <a href="https://github.com/KamorionLabs/dns-gate/issues/20">Azure DNS</a>, <a href="https://github.com/KamorionLabs/dns-gate/issues/30">Google Cloud DNS</a>, <a href="https://github.com/KamorionLabs/dns-gate/issues/31">Gandi</a>, <a href="https://github.com/KamorionLabs/dns-gate/issues/32">Infomaniak, Scaleway, IONOS</a>, <a href="https://github.com/KamorionLabs/dns-gate/issues/33">PowerDNS</a>, <a href="https://github.com/KamorionLabs/dns-gate/issues/34">RFC 2136</a> and a <a href="https://github.com/KamorionLabs/dns-gate/issues/35">libdns adapter</a> for the long tail.</p>
   </div>
 </section>
 
@@ -182,7 +185,7 @@
         </div>
       </div>
       <div class="points">
-        <div class="point"><span class="n">1</span><div><h3>Provider account scope</h3><p>The gate’s own credentials are limited at the provider, a restricted EuroDNS user or an IAM role scoped to the hosted zones: a last line if the gate itself is compromised.</p></div></div>
+        <div class="point"><span class="n">1</span><div><h3>Provider account scope</h3><p>The gate’s own credentials are limited at the provider, an IAM role scoped to the hosted zones or a restricted EuroDNS user: a last line if the gate itself is compromised.</p></div></div>
         <div class="point"><span class="n">2</span><div><h3>RBAC</h3><p>Who may read or write which zone, host pattern and record type. Protected records, such as the apex NS, SOA, MX and CAA, win over any role.</p></div></div>
         <div class="point"><span class="n">3</span><div><h3>Ownership</h3><p>Only record sets created or adopted through the gate, owned by one of the caller’s teams, and unchanged since the gate last wrote them.</p></div></div>
       </div>
@@ -226,15 +229,15 @@
     <div class="sec-head">
       <p class="kicker">Safe writes</p>
       <h2 class="sec-title">Every write is checked against the zone as it is now</h2>
-      <p class="sec-lead">Adding, changing or deleting a record set is computed against the current zone, under a lock and with the expected content of each record set, so a client holding a stale copy cannot overwrite or wipe records it never saw. With EuroDNS, which has no record update endpoint, the write is one checked save of the whole zone:</p>
+      <p class="sec-lead">Adding, changing or deleting a record set is computed against the current zone, under a lock and with the expected content of each record set, so a client holding a stale copy cannot overwrite or wipe records it never saw. The gate then writes through the provider’s own API: record set changes where it has them (Route 53), one checked save of the whole zone where it has not (EuroDNS).</p>
     </div>
     <div class="seq scroll">
-      <svg viewBox="0 0 900 550" role="img" aria-label="Write sequence: the client sends a change; the gate locks the zone and compares the version in the store, reads the current zone from EuroDNS, checks the diff, writes a pending claim, runs the EuroDNS check, saves the whole zone and reads it back, then marks the claim active, bumps the version, unlocks and audits, and answers with the new ETag">
+      <svg viewBox="0 0 900 550" role="img" aria-label="Write sequence: the client sends a change; the gate locks the zone and compares the version in the store, reads the current zone from the provider, checks the diff, writes a pending claim, runs the provider dry run when there is one, applies the change and reads the zone back, then marks the claim active, bumps the version, unlocks and audits, and answers with the new ETag">
         <g font-size="14" font-weight="600" text-anchor="middle">
           <rect x="15" y="10" width="150" height="40" rx="6" class="f-well st-soft"/><text x="90" y="35" class="f-ink">Client</text>
           <rect x="255" y="10" width="150" height="40" rx="6" class="f-gate st-seal" stroke-width="1"/><text x="330" y="35" class="f-on-gate">dns-gate</text>
           <rect x="495" y="10" width="150" height="40" rx="6" class="f-well st-soft"/><text x="570" y="35" class="f-ink">Store</text>
-          <rect x="735" y="10" width="150" height="40" rx="6" class="f-well st-soft"/><text x="810" y="35" class="f-ink">EuroDNS</text>
+          <rect x="735" y="10" width="150" height="40" rx="6" class="f-well st-soft"/><text x="810" y="35" class="f-ink">Provider</text>
         </g>
         <g stroke-width="1" stroke-dasharray="3 4" class="st-rule">
           <path d="M90 50 V540"/><path d="M330 50 V540"/><path d="M570 50 V540"/><path d="M810 50 V540"/>
@@ -258,17 +261,17 @@
           <text x="330" y="246" class="f-ink">4 · diff against the current zone</text>
           <text x="330" y="266">RBAC · ownership · protected · limit</text>
           <text x="450" y="302">5 · pending ownership claim</text>
-          <text x="450" y="352">6 · check (dry run)</text>
+          <text x="450" y="352">6 · dry run, where the provider has one</text>
           <text x="450" y="452">8 · claim active, unlock, audit</text>
-          <text x="210" y="502">9 · EuroDNS response, new ETag</text>
+          <text x="210" y="502">9 · result, new ETag</text>
         </g>
-        <text x="572" y="402" font-size="13" font-weight="600" text-anchor="middle" class="f-seal">7 · save the whole zone, then read it back</text>
+        <text x="572" y="402" font-size="13" font-weight="600" text-anchor="middle" class="f-seal">7 · apply the change, then read it back</text>
       </svg>
     </div>
     <div class="stats">
-      <div class="stat"><b>4–5</b><span>EuroDNS calls per write</span></div>
-      <div class="stat"><b>~5 s</b><span>per write at the shared rate, by design</span></div>
-      <div class="stat"><b>1</b><span>writer at a time per zone</span></div>
+      <div class="stat"><b>1</b><span>writer at a time per zone, across replicas</span></div>
+      <div class="stat"><b>plan</b><span>then apply, bound to the zone version</span></div>
+      <div class="stat"><b>diff</b><span>of every write in the audit log</span></div>
     </div>
   </div>
 </section>
@@ -344,12 +347,12 @@ resource "dnsgate_record_set" "apex" {
       <div class="caller">
         <h3>CI pipelines</h3>
         <p>Short-lived OIDC tokens with the gate as audience, bound to exact subjects.</p>
-        <p class="ids">GitHub Actions · GitLab CI · Azure DevOps · AWS STS · Kubernetes service accounts · Entra ID</p>
+        <p class="ids">GitHub Actions · GitLab CI · Azure DevOps · AWS outbound identity federation · Kubernetes service accounts · Entra ID</p>
       </div>
       <div class="caller">
         <h3>People</h3>
         <p>A web console: every record set with its seal and owner, a journal of every request with the diff of each write, who can change what, zone by zone, and the policy editor.</p>
-        <p class="ids">Entra ID SSO · app roles Reader, Operator, PolicyAdmin</p>
+        <p class="ids">OIDC or SAML sign-in · Entra ID · IAM Identity Center · any IdP</p>
       </div>
       <div class="caller">
         <h3>AI assistants</h3>
@@ -357,9 +360,9 @@ resource "dnsgate_record_set" "apex" {
         <p class="ids">Claude Code · Claude Desktop extension · any MCP client</p>
       </div>
       <div class="caller">
-        <h3>Existing EuroDNS clients</h3>
-        <p>Third parties without OIDC, such as ACME clients, use gate-issued API keys: hashed, expiring, bound to a network, a team and a role, rotated and revoked through the API. certbot, acme.sh, lego and cert-manager solve DNS-01 challenges through the gate's httpreq and acme-dns endpoints, with no CNAME.</p>
-        <p class="ids">lego · Caddy · scripts</p>
+        <h3>Certificates and third parties</h3>
+        <p>ACME clients write their <code>_acme-challenge</code> records through the gate’s httpreq and acme-dns endpoints, on any provider, with no CNAME: an OIDC token, a 15-minute token from the token exchange, or, for parties without an identity provider, an API key bound to a team and a role, rotated and revoked through the API.</p>
+        <p class="ids">certbot · acme.sh · lego · win-acme · cert-manager · Caddy</p>
       </div>
     </div>
   </div>
@@ -369,16 +372,15 @@ resource "dnsgate_record_set" "apex" {
   <div class="wrap">
     <div class="sec-head">
       <p class="kicker">Run it</p>
-      <h2 class="sec-title">One container, one Helm chart</h2>
-      <p class="sec-lead">The gate is a single Go binary with its web UI built in. Validate a configuration before you ship it, run it locally against a test zone, then deploy the chart.</p>
+      <h2 class="sec-title">A container or a Lambda</h2>
+      <p class="sec-lead">The gate is a single Go binary with its web UI built in. Validate a configuration before you ship it, run it locally against a test zone, then deploy the Helm chart, or the same binary as an AWS Lambda function behind API Gateway.</p>
     </div>
     <div class="run">
       <div>
         <h3>Locally</h3>
-<pre class="code"><code><span class="c"># provider credentials, held by the gate only</span>
-export EURODNS_APP_ID=...
-export EURODNS_API_KEY=...
-<span class="c"># Route53: the AWS credential chain (role, profile)</span>
+<pre class="code"><code><span class="c"># provider credentials, held by the gate only:</span>
+<span class="c"># Route 53 through the AWS credential chain (role, profile),</span>
+<span class="c"># EuroDNS through EURODNS_APP_ID and EURODNS_API_KEY</span>
 
 go run ./cmd/dns-gate -check -config config.yaml   <span class="c"># validate only</span>
 go run ./cmd/dns-gate -config config.yaml</code></pre>
@@ -388,6 +390,11 @@ go run ./cmd/dns-gate -config config.yaml</code></pre>
   -f values.yaml
 
 <span class="c"># image: ghcr.io/kamorionlabs/dns-gate</span></code></pre>
+        <h3 style="margin-top:28px">On AWS Lambda</h3>
+<pre class="code"><code>make lambda   <span class="c"># dist/dns-gate_&lt;version&gt;_lambda_arm64.zip</span>
+
+<span class="c"># provided.al2023, arm64, API Gateway HTTP API,</span>
+<span class="c"># DynamoDB store, no VPC</span></code></pre>
       </div>
       <div>
         <h3>Repositories</h3>
@@ -401,7 +408,7 @@ go run ./cmd/dns-gate -config config.yaml</code></pre>
           <svg class="seal s-managed" width="20" height="20" aria-hidden="true"><use href="#seal-managed"/></svg>
           <p><b>Beta, in production since November 2026</b> for one organization: 14 zones, OpenTofu pipelines writing certificate validation and site records, the web UI and the MCP server. Versions are still 0.x.</p>
         </div>
-        <p style="margin-top:20px;color:var(--ink-2);font-size:15px">Read more: <a href="api.html">API reference</a> · <a href="https://github.com/KamorionLabs/dns-gate/blob/main/docs/API.md">API guide</a> · <a href="https://github.com/KamorionLabs/dns-gate/blob/main/docs/DESIGN.md">design</a> · <a href="https://github.com/KamorionLabs/dns-gate/blob/main/docs/CONFIG.md">configuration</a> · <a href="https://github.com/KamorionLabs/dns-gate/blob/main/docs/THREAT-MODEL.md">threat model</a> · <a href="https://github.com/KamorionLabs/dns-gate/blob/main/docs/ONBOARDING.md">onboarding existing zones</a></p>
+        <p style="margin-top:20px;color:var(--ink-2);font-size:15px">Read more: <a href="api.html">API reference</a> · <a href="https://github.com/KamorionLabs/dns-gate/blob/main/docs/API.md">API guide</a> · <a href="https://github.com/KamorionLabs/dns-gate/blob/main/docs/DESIGN.md">design</a> · <a href="https://github.com/KamorionLabs/dns-gate/blob/main/docs/CONFIG.md">configuration</a> · <a href="https://github.com/KamorionLabs/dns-gate/blob/main/docs/THREAT-MODEL.md">threat model</a> · <a href="https://github.com/KamorionLabs/dns-gate/blob/main/docs/ONBOARDING.md">onboarding existing zones</a> · <a href="https://github.com/KamorionLabs/dns-gate/blob/main/docs/ACME.md">certificates (ACME)</a> · <a href="https://github.com/KamorionLabs/dns-gate/blob/main/docs/DEPLOY-LAMBDA.md">AWS Lambda</a></p>
       </div>
     </div>
   </div>
