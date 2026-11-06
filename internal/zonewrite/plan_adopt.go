@@ -312,7 +312,7 @@ func (e *engine) adoptCandidates(g *grants, s *identity.Subject, p provider.Prov
 			out = append(out, c)
 			continue
 		}
-		c.TTL, c.Values, c.Alias, c.Forward, c.hash = set.TTL, slices.Clone(set.Values), set.Alias, set.Forward, dns.ContentHash(set)
+		c.TTL, c.Values, c.Alias, c.Forward, c.hash = set.TTL, append([]string{}, set.Values...), set.Alias, set.Forward, dns.ContentHash(set)
 		o, owned := owns[k]
 		c.Status = statusOf(o, owned, set, true)
 		ro := readOnly(k, &set)
