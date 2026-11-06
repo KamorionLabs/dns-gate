@@ -163,6 +163,9 @@ func (a *Authenticator) bindGateToken(claims map[string]any) (*identity.Subject,
 	if is == nil || is.cfg.Self {
 		return nil, unauthorized("gate token of an unknown issuer")
 	}
+	if _, exchanged := claims[ClaimExchanged]; exchanged && !is.cfg.TokenExchange {
+		return nil, unauthorized("exchanged token of an issuer without token_exchange")
+	}
 	cat, _ := claims[ClaimCategory].(string)
 	if cat != identity.CategoryHuman && cat != identity.CategoryPipeline {
 		cat = ""

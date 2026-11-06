@@ -24,8 +24,11 @@ const (
 	tokenTypeIDToken     = "urn:ietf:params:oauth:token-type:id_token"
 
 	// DefaultExchangeTTL is the lifetime of an exchanged token when the
-	// request names none; token_ttl of the gate issuer caps it.
+	// request names none. The token_ttl of the gate issuer, the
+	// max_exchanged_ttl of the subject issuer and the expiry of the subject
+	// token plus ExchangeGrace cap it.
 	DefaultExchangeTTL = 15 * time.Minute
+	ExchangeGrace      = 5 * time.Minute
 	minExchangeTTL     = time.Minute
 )
 
@@ -108,9 +111,6 @@ func (s *Server) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 		}
 		ttl = time.Duration(n) * time.Second
 	}
-	if ttl > t.TTL() {
-		ttl = t.TTL()
-	}
 	x, err := s.cfg.Authn.ExchangeToken(r.Context(), f.Get("subject_token"))
 	if err != nil {
 		var ae *authn.Error
@@ -122,6 +122,13 @@ func (s *Server) handleTokenExchange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := s.now()
+	ttl = min(ttl, t.TTL())
+	if x.MaxTTL > 0 {
+		ttl = min(ttl, x.MaxTTL)
+	}
+	if !x.Expiry.IsZero() {
+		ttl = min(ttl, x.Expiry.Add(ExchangeGrace).Sub(now))
+	}
 	tok, err := t.IssueExchanged(x, ttl, now)
 	if err != nil {
 		s.log.Error("token exchange", "err", err)

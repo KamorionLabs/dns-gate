@@ -23,6 +23,10 @@ type Exchange struct {
 	Issuer  string
 	Claims  map[string]any
 	TokenID string
+	// MaxTTL is the max_exchanged_ttl of the issuer, Expiry the expiry of
+	// the subject token: both bound the gate token.
+	MaxTTL time.Duration
+	Expiry time.Time
 }
 
 // ExchangeToken validates a subject token for the token exchange exactly as
@@ -68,7 +72,11 @@ func (a *Authenticator) ExchangeToken(ctx context.Context, raw string) (*Exchang
 	if jti == "" {
 		jti = "-"
 	}
-	return &Exchange{Subject: s, Issuer: is.cfg.Name, Claims: claims, TokenID: jti}, nil
+	var exp time.Time
+	if v, ok := claims["exp"].(float64); ok {
+		exp = time.Unix(int64(v), 0)
+	}
+	return &Exchange{Subject: s, Issuer: is.cfg.Name, Claims: claims, TokenID: jti, MaxTTL: is.cfg.MaxExchangedTTL.D(), Expiry: exp}, nil
 }
 
 // IssueExchanged signs the gate token of an exchange, valid for ttl (capped

@@ -294,8 +294,11 @@ type Issuer struct {
 	TokenTTL Duration `yaml:"token_ttl"`
 	// TokenExchange lets the tokens of this issuer be exchanged for gate
 	// tokens (POST /api/v1/token-exchange, RFC 8693); needs a gate issuer.
-	TokenExchange bool   `yaml:"token_exchange"`
-	SigningKey    []byte `yaml:"-"`
+	TokenExchange bool `yaml:"token_exchange"`
+	// MaxExchangedTTL caps the lifetime of the gate tokens exchanged for
+	// tokens of this issuer (default 15m).
+	MaxExchangedTTL Duration `yaml:"max_exchanged_ttl"`
+	SigningKey      []byte   `yaml:"-"`
 	// SAML marks the subject issuer of the SAML login (AllIssuers).
 	SAML bool `yaml:"-"`
 }
@@ -366,6 +369,9 @@ type Protected struct {
 	Hosts []string `yaml:"hosts"`
 	Types []string `yaml:"types"`
 }
+
+// DefaultMaxExchangedTTL caps the lifetime of exchanged gate tokens.
+const DefaultMaxExchangedTTL = 15 * time.Minute
 
 // ReservedIssuers are issuer names of subjects the gate makes itself: API
 // keys, virtual keys and the gate's own actors ("gate:reconciler"). No
@@ -628,6 +634,9 @@ func (c *Config) defaults() {
 		if c.Issuers[i].ClockSkew == 0 {
 			c.Issuers[i].ClockSkew = Duration(60 * time.Second)
 		}
+		if c.Issuers[i].TokenExchange && c.Issuers[i].MaxExchangedTTL == 0 {
+			c.Issuers[i].MaxExchangedTTL = Duration(DefaultMaxExchangedTTL)
+		}
 	}
 }
 
@@ -743,6 +752,9 @@ func (c *Config) Validate() error {
 		}
 		if is.TokenExchange && is.Self {
 			add("%s.token_exchange: gate tokens are never exchanged", at)
+		}
+		if is.MaxExchangedTTL != 0 && (!is.TokenExchange || is.MaxExchangedTTL.D() < time.Minute || is.MaxExchangedTTL.D() > 24*time.Hour) {
+			add("%s.max_exchanged_ttl: between 1m and 24h, with token_exchange only", at)
 		}
 		if is.SubjectClaim != "" && is.SubjectTemplate != "" {
 			add("%s: subject_claim and subject_template are exclusive", at)

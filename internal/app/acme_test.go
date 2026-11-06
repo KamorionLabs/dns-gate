@@ -664,11 +664,11 @@ func TestTokenExchangeRefusals(t *testing.T) {
 	gateTok, _ := out["access_token"].(string)
 	k := e.createKey(`{"name": "k", "team": "web", "role": "acme"}`)
 
-	long := exchangeForm(ci)
-	long.Set("expires_in", "7200")
-	long.Set("requested_token_type", "urn:ietf:params:oauth:token-type:jwt")
-	if status, out := e.exchange(long); status != 200 || out["expires_in"].(float64) != 3600 || out["issued_token_type"] != "urn:ietf:params:oauth:token-type:jwt" {
-		t.Fatalf("lifetime not capped by token_ttl: %d %v", status, out)
+	short := exchangeForm(ci)
+	short.Set("expires_in", "120")
+	short.Set("requested_token_type", "urn:ietf:params:oauth:token-type:jwt")
+	if status, out := e.exchange(short); status != 200 || out["expires_in"].(float64) != 120 || out["issued_token_type"] != "urn:ietf:params:oauth:token-type:jwt" {
+		t.Fatalf("requested lifetime: %d %v", status, out)
 	}
 	for name, tc := range map[string]struct {
 		form url.Values
@@ -770,5 +770,21 @@ func TestDocsACMEScripts(t *testing.T) {
 		if got := e.txt("_acme-challenge"); len(got) != 0 {
 			t.Fatalf("%v: after cleanup %v", creds, got)
 		}
+	}
+}
+
+// The lifetime of an exchanged token is bounded by max_exchanged_ttl
+// (default 15m) and by the expiry of the subject token plus 5 minutes.
+func TestTokenExchangeLifetimeBounds(t *testing.T) {
+	e := newACMEEnv(t)
+	long := exchangeForm(e.idp.Sign(map[string]any{"sub": "repo:example/certs:ref:refs/heads/main", "aud": "dns-gate"}))
+	long.Set("expires_in", "3600")
+	if status, out := e.exchange(long); status != 200 || out["expires_in"].(float64) != 900 {
+		t.Fatalf("not capped by max_exchanged_ttl: %d %v", status, out)
+	}
+	short := exchangeForm(e.idp.Sign(map[string]any{"sub": "repo:example/certs:ref:refs/heads/main", "aud": "dns-gate", "exp": time.Now().Add(time.Minute).Unix()}))
+	status, out := e.exchange(short)
+	if got, _ := out["expires_in"].(float64); status != 200 || got > 361 || got < 355 {
+		t.Fatalf("not capped by the subject token expiry: %d %v", status, out)
 	}
 }

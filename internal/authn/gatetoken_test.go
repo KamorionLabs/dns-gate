@@ -97,3 +97,23 @@ func TestGateTokenRoundTrip(t *testing.T) {
 		t.Fatalf("token without subject: %v", err)
 	}
 }
+
+// An exchanged gate token is refused once its original issuer no longer
+// opts in to the token exchange.
+func TestExchangedTokenNeedsOptIn(t *testing.T) {
+	a, key := gateSetup(t)
+	kid := a.TokenIssuer().JWKS().Keys[0].KeyID
+	now := time.Now()
+	signer, _ := jose.NewSigner(jose.SigningKey{Algorithm: jose.EdDSA, Key: jose.JSONWebKey{Key: key, KeyID: kid}}, nil)
+	claims := map[string]any{"iss": "https://dns.example.com", "aud": "https://dns.example.com", "sub": "alice@example.com",
+		"gate_iss": "identity-center", "groups": []string{"DNS-Writers"}, "exp": now.Add(time.Hour).Unix()}
+	plain, _ := jwt.Signed(signer).Claims(claims).Serialize()
+	if _, err := a.Authenticate(bearer(plain)); err != nil {
+		t.Fatalf("session token: %v", err)
+	}
+	claims[ClaimExchanged] = "jti-1"
+	exchanged, _ := jwt.Signed(signer).Claims(claims).Serialize()
+	if _, err := a.Authenticate(bearer(exchanged)); status(err) != 401 {
+		t.Fatalf("exchanged token of an issuer without token_exchange: %v", err)
+	}
+}
