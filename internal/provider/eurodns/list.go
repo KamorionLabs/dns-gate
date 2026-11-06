@@ -44,13 +44,30 @@ type lister struct {
 }
 
 type domainResult struct {
-	DomainName     string `json:"domainName"`
-	FolderFullPath string `json:"folderFullPath"`
+	DomainName     string          `json:"domainName"`
+	FolderFullPath json.RawMessage `json:"folderFullPath"`
+}
+
+// folder returns the normalized folder of a search result: "/" for null or
+// an empty path (no folder), "" when the field is absent or not a string
+// (unknown: folder selectors never match it).
+func (r domainResult) folder() string {
+	if len(r.FolderFullPath) == 0 {
+		return ""
+	}
+	if string(r.FolderFullPath) == "null" {
+		return glob.RootFolder
+	}
+	var p string
+	if json.Unmarshal(r.FolderFullPath, &p) != nil {
+		return ""
+	}
+	return glob.NormalizeFolder(p)
 }
 
 // ListZoneFolders returns the zones of the account with their EuroDNS
-// folder (folderFullPath of POST /domains/search, "/" for a domain in no
-// folder).
+// folder (folderFullPath of POST /domains/search): "/" for a domain in no
+// folder, "" when EuroDNS does not tell.
 func (p *Provider) ListZoneFolders(ctx context.Context) (map[string]string, error) {
 	items, err := (&lister{BaseURL: p.baseURL, Transport: p.transport}).search(ctx)
 	if err != nil {
@@ -58,7 +75,7 @@ func (p *Provider) ListZoneFolders(ctx context.Context) (map[string]string, erro
 	}
 	out := make(map[string]string, len(items))
 	for _, it := range items {
-		out[dns.NormalizeZone(it.DomainName)] = glob.NormalizeFolder(it.FolderFullPath)
+		out[dns.NormalizeZone(it.DomainName)] = it.folder()
 	}
 	return out, nil
 }

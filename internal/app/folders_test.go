@@ -183,18 +183,28 @@ roles:
 	if err != nil {
 		t.Fatal(err)
 	}
-	moved := map[string]string{}
+	moved, seen := map[string]string{}, map[string]string{}
 	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
 		var e struct {
 			Action, Zone, Provider, Subject string
+			RequestID                       string `json:"request_id"`
 			Extra                           map[string]string
 		}
-		if json.Unmarshal([]byte(line), &e) == nil && e.Action == ActionZoneFolderChanged {
-			if e.Provider != "eurodns" || e.Subject != "gate:discovery" {
-				t.Fatalf("event: %s", line)
-			}
-			moved[e.Zone] = e.Extra["old"] + " -> " + e.Extra["new"]
+		if json.Unmarshal([]byte(line), &e) != nil || !strings.HasPrefix(e.Action, "gate.zone.folder_") {
+			continue
 		}
+		if e.Provider != "eurodns" || e.Subject != "gate:discovery" || e.RequestID == "" {
+			t.Fatalf("event: %s", line)
+		}
+		switch e.Action {
+		case ActionZoneFolderChanged:
+			moved[e.Zone] = e.Extra["old"] + " -> " + e.Extra["new"]
+		case ActionZoneFolderSeen:
+			seen[e.Zone] = e.Extra["new"]
+		}
+	}
+	if len(seen) != 5 || seen["example.it"] != "/IT" || seen["example.com"] != "/" || seen["madrid.example.es"] != "/ES/Madrid" {
+		t.Fatalf("zones seen: %v", seen)
 	}
 	if len(moved) != 2 || moved["example.es"] != "/ES -> /FR" || moved["example.fr"] != "/FR -> /ES/Barcelona" {
 		t.Fatalf("folder change events: %v\n%s", moved, raw)

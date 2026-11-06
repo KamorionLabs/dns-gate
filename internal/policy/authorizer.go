@@ -44,3 +44,11 @@ type Authorizer interface {
 	// IsProtected reports whether an RRset is in the protected list.
 	IsProtected(zone string, key dns.Key) bool
 }
+
+// FolderGrants is implemented by authorizers whose rules select zones by
+// provider folder. GrantFolder returns the folder through which an RRset
+// action is granted, "" when it is granted otherwise or refused; the write
+// engine records it in the audit.
+type FolderGrants interface {
+	GrantFolder(s *identity.Subject, action, zone string, key dns.Key) string
+}

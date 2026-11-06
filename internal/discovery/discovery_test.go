@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/KamorionLabs/dns-gate/internal/provider"
+	"github.com/KamorionLabs/dns-gate/internal/requestid"
 )
 
 func TestFilter(t *testing.T) {
@@ -194,12 +195,21 @@ func TestFolders(t *testing.T) {
 	}}
 	plain := &fakeLister{id: "r53", names: []string{"example.org"}}
 	var changes []FolderChange
+	ids := map[string]bool{}
+	now := time.Unix(1_700_000_000, 0)
 	d := New(Config{
 		Sources: []Source{
-			{Provider: l, Exclude: []string{"*.net"}, Folders: []string{"/ES", "/ES/**", "/"}},
+			{Provider: l, Exclude: []string{"*.net"}, Folders: []string{"/ES", "/ES/**", "/"}, Refresh: time.Hour},
 			{Provider: plain, Include: []string{"*.org"}},
 		},
-		OnFolderChange: func(_ context.Context, c FolderChange) { changes = append(changes, c) },
+		Now: func() time.Time { return now },
+		OnFolderChange: func(ctx context.Context, c FolderChange) {
+			if ctx.Err() != nil || requestid.From(ctx) == "" {
+				t.Errorf("event context: err %v, request id %q", ctx.Err(), requestid.From(ctx))
+			}
+			ids[requestid.From(ctx)] = true
+			changes = append(changes, c)
+		},
 	})
 	if err := d.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
@@ -221,28 +231,77 @@ func TestFolders(t *testing.T) {
 	if st := d.Status(); strings.Join(st.Providers[0].Folders, ",") != "/ES,/ES/**,/" {
 		t.Fatalf("status = %+v", st.Providers[0])
 	}
-	if len(changes) != 0 {
-		t.Fatalf("no change at the first listing: %+v", changes)
+	sorted := func() []FolderChange {
+		sort.Slice(changes, func(i, j int) bool { return changes[i].Zone < changes[j].Zone })
+		out := changes
+		changes = nil
+		return out
+	}
+	seen := sorted()
+	if len(seen) != 4 || len(ids) != 1 {
+		t.Fatalf("first listing: %+v (request ids %v)", seen, ids)
+	}
+	for _, c := range seen {
+		if c.Kind != FolderSeen || c.Old != "" || c.New == "" {
+			t.Fatalf("first listing: %+v", seen)
+		}
 	}
 
 	l.move("example.es", "/FR")
 	l.move("example.fr", "/ES/Barcelona")
 	l.move("excluded.net", "/FR")
-	if err := d.Refresh(context.Background()); err != nil {
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := d.Refresh(cancelled); err != nil {
 		t.Fatal(err)
 	}
-	sort.Slice(changes, func(i, j int) bool { return changes[i].Zone < changes[j].Zone })
-	want := []FolderChange{{Provider: "eu", Zone: "example.es", Old: "/ES", New: "/FR"}, {Provider: "eu", Zone: "example.fr", Old: "/FR", New: "/ES/Barcelona"}}
-	if len(changes) != 2 || changes[0] != want[0] || changes[1] != want[1] {
-		t.Fatalf("changes = %+v", changes)
+	moved := sorted()
+	want := []FolderChange{{Kind: FolderChanged, Provider: "eu", Zone: "example.es", Old: "/ES", New: "/FR"}, {Kind: FolderChanged, Provider: "eu", Zone: "example.fr", Old: "/FR", New: "/ES/Barcelona"}}
+	if len(moved) != 2 || moved[0] != want[0] || moved[1] != want[1] || len(ids) != 2 {
+		t.Fatalf("changes = %+v", moved)
 	}
 	if d.Discovered("example.es") || !d.Discovered("example.fr") || d.Folder("example.fr") != "/ES/Barcelona" {
 		t.Fatalf("zones after the move = %v", d.DiscoveredZones())
 	}
 
-	// A failed listing keeps the folders of the previous one.
+	l.mu.Lock()
+	delete(l.folders, "example.com")
+	l.mu.Unlock()
+	if err := d.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if gone := sorted(); len(gone) != 1 || gone[0] != (FolderChange{Kind: FolderGone, Provider: "eu", Zone: "example.com", Old: "/"}) {
+		t.Fatalf("zone removed from the account: %+v", gone)
+	}
+
+	// A failed listing keeps the folders of the previous one, for three
+	// refresh periods (default FolderMaxAge): then folder rules close.
 	l.err = errors.New("upstream down")
-	if err := d.Refresh(context.Background()); err == nil || d.Folder("example.fr") != "/ES/Barcelona" {
+	now = now.Add(3 * time.Hour)
+	if err := d.Refresh(context.Background()); err == nil || d.Folder("example.fr") != "/ES/Barcelona" || d.Status().Providers[0].FoldersStale {
 		t.Fatalf("folders after a failed listing: %v %q", err, d.Folder("example.fr"))
+	}
+	now = now.Add(time.Minute)
+	if d.Folder("example.fr") != "" || !d.Discovered("example.fr") {
+		t.Fatalf("stale folder still served: %q", d.Folder("example.fr"))
+	}
+	st := d.Status().Providers[0]
+	if !st.FoldersStale || st.FolderMaxAge != 3*time.Hour {
+		t.Fatalf("status of stale folders: %+v", st)
+	}
+}
+
+func TestFolderOfZoneListedTwice(t *testing.T) {
+	a := &folderLister{fakeLister: fakeLister{id: "eu-a"}, folders: map[string]string{"example.es": "/ES"}}
+	b := &folderLister{fakeLister: fakeLister{id: "eu-b"}, folders: map[string]string{"example.es": "/FR", "other.es": "/FR"}}
+	d := New(Config{Sources: []Source{{Provider: a}, {Provider: b}}})
+	if err := d.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.Folder("example.es"); got != "" {
+		t.Fatalf("folder of a zone listed by two providers = %q", got)
+	}
+	if got := d.Folder("other.es"); got != "/FR" {
+		t.Fatalf("folder = %q", got)
 	}
 }

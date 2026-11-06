@@ -4,7 +4,8 @@ import "testing"
 
 func TestNormalizeFolder(t *testing.T) {
 	for in, want := range map[string]string{
-		"": "/", "/": "/", " / ": "/", "ES": "/ES", "/ES/": "/ES", "/ES/Madrid": "/ES/Madrid", "ES/Madrid/": "/ES/Madrid",
+		"": "/", "/": "/", "ES": "/ES", "/ES/": "/ES", "/ES/Madrid": "/ES/Madrid", "ES/Madrid/": "/ES/Madrid",
+		"ES ": "/ES ", "//ES//Madrid": "/ES/Madrid",
 	} {
 		if got := NormalizeFolder(in); got != want {
 			t.Errorf("NormalizeFolder(%q) = %q, want %q", in, got, want)
@@ -80,7 +81,7 @@ func TestValidFolderPattern(t *testing.T) {
 			t.Errorf("%q: %v", p, err)
 		}
 	}
-	for _, p := range []string{"", "ES", "/ES/", "//ES", "/ES//x", "/ES/a**", "/E?", "/ES/ ", "/a\x01"} {
+	for _, p := range []string{"", "ES", "/ES/", "//ES", "/ES//x", "/ES/a**", "/E?", "/ES/ ", "/a\x01", "/ES ", "/ ES", "/ES/Madrid "} {
 		if ValidFolderPattern(p) == nil {
 			t.Errorf("%q accepted", p)
 		}

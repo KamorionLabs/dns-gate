@@ -5,6 +5,7 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -83,17 +84,31 @@ func (e *env) scenarioFolders(t *testing.T) {
 		t.Fatal(err)
 	}
 	var moves []string
+	writeFolder := ""
 	for _, line := range strings.Split(string(raw), "\n") {
 		var ev struct {
-			Action string            `json:"action"`
-			Zone   string            `json:"zone"`
-			Extra  map[string]string `json:"extra"`
+			Action   string         `json:"action"`
+			Zone     string         `json:"zone"`
+			Decision string         `json:"decision"`
+			Extra    map[string]any `json:"extra"`
+			Changes  []struct {
+				Host string `json:"host"`
+			} `json:"changes"`
 		}
-		if json.Unmarshal([]byte(line), &ev) == nil && ev.Action == app.ActionZoneFolderChanged && ev.Zone == discoveredZone {
-			moves = append(moves, ev.Extra["old"]+" -> "+ev.Extra["new"])
+		if json.Unmarshal([]byte(line), &ev) != nil || ev.Zone != discoveredZone {
+			continue
+		}
+		if ev.Action == app.ActionZoneFolderChanged {
+			moves = append(moves, fmt.Sprint(ev.Extra["old"])+" -> "+fmt.Sprint(ev.Extra["new"]))
+		}
+		if ev.Decision == "allow" && len(ev.Changes) == 1 && ev.Changes[0].Host == "a.es" {
+			writeFolder, _ = ev.Extra["folder"].(string)
 		}
 	}
 	if strings.Join(moves, ", ") != "/ -> /ES/Madrid, /ES/Madrid -> /FR" {
 		t.Fatalf("folder change events: %v", moves)
+	}
+	if writeFolder != "/ES/Madrid" {
+		t.Fatalf("the write granted through /ES/Madrid is audited with folder %q", writeFolder)
 	}
 }

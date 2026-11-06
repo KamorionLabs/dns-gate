@@ -12,7 +12,7 @@
   import Icon from '../components/Icon.svelte';
   import ProviderBadge from '../components/ProviderBadge.svelte';
   import { providerLabel } from '../lib/labels';
-  import { folderOptions, inFolder } from '../lib/folders';
+  import { folderLabel, folderOptions, inFolder } from '../lib/folders';
 
   let all = $state<ZoneSummary[] | null>(null);
   let error = $state<string | null>(null);
@@ -62,7 +62,8 @@
   const filter = $derived<ZoneFilter>(
     (zoneFilters as readonly string[]).includes(router.params.get('filter') ?? '') ? (router.params.get('filter') as ZoneFilter) : 'all',
   );
-  // EuroDNS folders: a folder shows its zones and those of its subfolders.
+  // EuroDNS folders: the filter is a folder glob, read as ?folder= of the API
+  // ("/ES" that folder only, "/ES/**" every folder below it).
   const folders = $derived(folderOptions(all ?? []));
   const folderSel = $derived(router.params.get('folder') ?? '');
   const match = (z: ZoneSummary) => (!q || z.zone.includes(q)) && inFolder(folderSel, z.folder);
@@ -166,7 +167,7 @@
         <span class="sr-only">Folder</span>
         <select value={folderSel} onchange={(e) => router.setParams({ folder: e.currentTarget.value || undefined })}>
           <option value="">All folders</option>
-          {#each folders.includes(folderSel) || !folderSel ? folders : [folderSel, ...folders] as f (f)}<option value={f}>{f === '/' ? '/ (no folder)' : f}</option>{/each}
+          {#each folders.includes(folderSel) || !folderSel ? folders : [folderSel, ...folders] as f (f)}<option value={f}>{folderLabel(f)}</option>{/each}
         </select>
         <span class="chev"><Icon name="chevron" size={12} /></span>
       </label>

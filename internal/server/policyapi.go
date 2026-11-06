@@ -826,11 +826,14 @@ func (s *Server) discoveryView(c *config.Config) *uiapi.ZonesDiscovery {
 		}
 		v := uiapi.ProviderDiscovery{ID: p.ID, Kind: p.Kind, Include: nonNil(p.Zones.Include), Exclude: nonNil(p.Zones.Exclude),
 			Folders: p.Zones.Folders, Refresh: p.Zones.Refresh.D().String()}
+		if p.Kind == config.KindEuroDNS {
+			v.FolderMaxAge = p.Zones.FolderMaxAge().String()
+		}
 		for _, ps := range st.Providers {
 			if ps.ID != p.ID {
 				continue
 			}
-			v.Loaded, v.Count = ps.Loaded, ps.Count
+			v.Loaded, v.Count, v.FoldersStale = ps.Loaded, ps.Count, ps.FoldersStale
 			if !ps.LastRefreshAt.IsZero() {
 				t := ps.LastRefreshAt
 				v.LastRefreshAt = &t

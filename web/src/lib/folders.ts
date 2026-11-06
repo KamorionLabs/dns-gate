@@ -24,25 +24,32 @@ export function ruleCovers(r: { zones?: string[] | null; folders?: string[] | nu
   return !!f && (r.folders ?? []).some((p) => folderMatch(p, f));
 }
 
-/** Whether a folder is the selected folder or one of its subfolders ("/" selects the root only). */
-export function inFolder(selected: string, folder: string | undefined): boolean {
-  if (!selected) return true;
-  if (!folder) return false;
-  if (selected === '/') return folder === '/';
-  return folder === selected || folder.startsWith(selected + '/');
+/** Whether a zone folder matches the folder glob of the filter (as ?folder= of the API); no filter keeps every zone. */
+export function inFolder(glob: string, folder: string | undefined): boolean {
+  return !glob || folderMatch(glob, folder ?? '');
 }
 
-/** The folders of the zones and their parents, sorted, for a folder filter. */
+/**
+ * Folder globs for a folder filter, sorted: each folder of the zones (only
+ * that folder) and, for each folder with subfolders, "<folder>/**" (every
+ * folder below it, as the API reads it).
+ */
 export function folderOptions(zones: { folder?: string }[]): string[] {
   const out = new Set<string>();
   for (const z of zones) {
     if (!z.folder) continue;
-    if (z.folder === '/') {
-      out.add('/');
-      continue;
-    }
+    out.add(z.folder);
+    if (z.folder === '/') continue;
     const parts = z.folder.split('/').filter(Boolean);
-    for (let i = 1; i <= parts.length; i++) out.add('/' + parts.slice(0, i).join('/'));
+    for (let i = 0; i < parts.length; i++) out.add('/' + parts.slice(0, i).join('/') + (i ? '/' : '') + '**');
   }
   return [...out].sort((a, b) => a.localeCompare(b));
+}
+
+/** Label of a folder glob in the filter. */
+export function folderLabel(glob: string): string {
+  if (glob === '/') return '/ (no folder)';
+  if (glob === '/**') return '/** (every folder)';
+  if (glob.endsWith('/**')) return `${glob} (below ${glob.slice(0, -3)})`;
+  return glob;
 }

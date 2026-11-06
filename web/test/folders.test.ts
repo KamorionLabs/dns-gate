@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { folderMatch } from '../src/lib/glob.ts';
-import { folderOf, folderOptions, inFolder, rememberFolders, ruleCovers } from '../src/lib/folders.ts';
+import { folderLabel, folderOf, folderOptions, inFolder, rememberFolders, ruleCovers } from '../src/lib/folders.ts';
 import { canWriteZone, rbacAllows } from '../src/lib/rights.ts';
 import { describePermissions } from '../src/lib/permissions.ts';
 import { fromDoc, toDoc } from '../src/lib/editor.ts';
@@ -43,16 +43,19 @@ test('rules select zones by folder once the folder is known', () => {
   assert.deepEqual(describePermissions(me.permissions!), ['Write records in the zones in folders /ES, /ES/**']);
 });
 
-test('the zone list filters on a folder and its subfolders', () => {
+test('the zone list filters on folder globs, as the API', () => {
   const zones = [{ folder: '/ES/Madrid' }, { folder: '/' }, { folder: '/FR' }, {}];
-  assert.deepEqual(folderOptions(zones), ['/', '/ES', '/ES/Madrid', '/FR']);
-  assert.ok(inFolder('/ES', '/ES/Madrid'));
+  assert.deepEqual(folderOptions(zones), ['/', '/**', '/ES/**', '/ES/Madrid', '/FR']);
+  assert.ok(!inFolder('/ES', '/ES/Madrid'), '/ES is that folder only');
+  assert.ok(inFolder('/ES/**', '/ES/Madrid'));
+  assert.ok(!inFolder('/ES/**', '/ES'));
   assert.ok(inFolder('/ES', '/ES'));
-  assert.ok(!inFolder('/ES', '/ESP'));
+  assert.ok(!inFolder('/ES/**', '/ESP/x'));
   assert.ok(!inFolder('/', '/ES'));
   assert.ok(inFolder('/', '/'));
   assert.ok(inFolder('', undefined));
   assert.ok(!inFolder('/ES', undefined));
+  assert.equal(folderLabel('/ES/**'), '/ES/** (below /ES)');
 });
 
 test('the policy editor keeps the folders of rules', () => {

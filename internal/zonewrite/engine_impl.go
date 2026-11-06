@@ -590,7 +590,8 @@ func (e *engine) Write(ctx context.Context, s *identity.Subject, zoneIn, ifMatch
 	if len(plan.Ignored) > 0 {
 		extra = map[string]any{"ignored_out_of_scope": plan.Ignored}
 	}
-	e.emit(ctx, s, action, zone, "allow", "", uiChanges(plan.Changes), snapshot, extra)
+	changes := uiChanges(plan.Changes)
+	e.emit(ctx, s, action, zone, "allow", "", changes, snapshot, e.withGrantFolder(s, zone, changes, extra, policy.ActionRecordWrite))
 	e.committed(ctx, zone, plan)
 	return result, newVersion, nil
 }
@@ -947,7 +948,7 @@ func (e *engine) Adopt(ctx context.Context, s *identity.Subject, zoneIn string, 
 		}
 	}
 	if len(writes) > 0 {
-		e.emit(ctx, s, action, zone, "allow", "", changes, "", nil)
+		e.emit(ctx, s, action, zone, "allow", "", changes, "", e.withGrantFolder(s, zone, changes, nil, policy.ActionRecordAdopt, policy.ActionRecordWrite))
 	}
 	return nil
 }

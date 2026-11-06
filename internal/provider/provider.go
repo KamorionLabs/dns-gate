@@ -62,7 +62,7 @@ type Checker interface {
 type FolderLister interface {
 	// ListZoneFolders returns the normalized names of the zones of the
 	// account with the folder of each, normalized by glob.NormalizeFolder
-	// ("/" for the zones in no folder).
+	// ("/" for the zones in no folder, "" when the provider does not tell).
 	ListZoneFolders(ctx context.Context) (map[string]string, error)
 }
 

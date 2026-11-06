@@ -58,6 +58,7 @@ func folderConfig() *config.Config {
 	c.Roles["mixed"] = config.Role{Rules: []config.Rule{{Zones: []string{"example.com"}, Folders: []string{"/FR"}, Actions: []string{ActionDNSRead}}}}
 	c.Bindings = append(c.Bindings, config.Binding{Role: "es-writer", Team: "es", Groups: []string{"policy-admins"}})
 	c.Policy.Bounds.Folders = []string{"/ES/**", "/FR"}
+	c.Policy.Bounds.Zones = append(c.Policy.Bounds.Zones, "example.es", "example.fr")
 	return c
 }
 
@@ -172,7 +173,38 @@ func TestFolderImpact(t *testing.T) {
 	if !gain {
 		t.Fatalf("impact: %+v", Impact(old, snap, nil))
 	}
+	dynamic := ""
+	for _, it := range Impact(old, snap, nil) {
+		if it.Kind == "warning" && it.Role == "fr-writer" {
+			dynamic = it.Message
+		}
+		if strings.Contains(it.Message, "not listed") {
+			t.Fatalf("discovery is loaded: %+v", it)
+		}
+	}
+	if !strings.Contains(dynamic, "dynamic folder rule") || !strings.Contains(dynamic, "1 zone currently") {
+		t.Fatalf("dynamic folder rule entry: %q", dynamic)
+	}
+	for _, it := range Impact(snap, snap, nil) {
+		if it.Role == "fr-writer" {
+			t.Fatalf("unchanged folder rule reported again: %+v", it)
+		}
+	}
+
+	h.SetDiscovery(notLoaded{h.Discovery().(*folderDiscovery)})
+	snap, _ = h.Compile(&doc, "r2")
+	warned := false
+	for _, it := range Impact(h.Current(), snap, nil) {
+		warned = warned || (it.Kind == "warning" && strings.Contains(it.Message, "not listed"))
+	}
+	if !warned {
+		t.Fatalf("no warning while discovery is not loaded: %+v", Impact(h.Current(), snap, nil))
+	}
 }
+
+type notLoaded struct{ *folderDiscovery }
+
+func (notLoaded) Loaded() bool { return false }
 
 func TestFolderManagedBounds(t *testing.T) {
 	c := folderConfig()
@@ -278,5 +310,48 @@ func TestFolderKeyRoleProblem(t *testing.T) {
 	widened := RoleGrant{Rules: []uiapi.Rule{{Folders: []string{"/ES/**"}, Actions: []string{ActionRecordWrite}}}}
 	if widened.Within(issued) || !issued.Within(widened) {
 		t.Fatal("RoleGrant.Within must compare folders")
+	}
+}
+
+func TestFolderRulesStayWithinBoundsZones(t *testing.T) {
+	c := folderConfig()
+	c.Policy.Bounds.Zones = []string{"example.com"}
+	c.Policy.Bounds.Folders = []string{"/ES/**"}
+	h := mustHolder(t, c)
+	d := &folderDiscovery{folders: map[string]string{"example.com": "/ES/a", "secret.net": "/ES/x"}}
+	h.SetDiscovery(d)
+	doc := uiapi.PolicyDocument{
+		Roles:    map[string]uiapi.Role{"es-managed": {Rules: []uiapi.Rule{{Folders: []string{"/ES/**"}, Actions: []string{ActionRecordWrite}}}}},
+		Bindings: []uiapi.Binding{{Role: "es-managed", Team: "es", Groups: []string{"policy-admins"}}},
+	}
+	Normalize(&doc)
+	snap, errs := h.Compile(&doc, "r1")
+	if len(errs) > 0 {
+		t.Fatalf("document: %+v", errs)
+	}
+	if snap.Decide([]string{"es-managed"}, ActionRecordWrite, "secret.net", nil).Allowed {
+		t.Fatal("a managed folder rule reached a zone outside policy.bounds.zones")
+	}
+	if !snap.Decide([]string{"es-managed"}, ActionRecordWrite, "example.com", nil).Allowed {
+		t.Fatal("a managed folder rule must apply to a zone within policy.bounds.zones")
+	}
+	for _, it := range Impact(h.Current(), snap, nil) {
+		if it.Role == "es-managed" && strings.Contains(strings.Join(it.Zones, ","), "secret.net") {
+			t.Fatalf("impact grants a zone outside the bounds: %+v", it)
+		}
+	}
+
+	dc := delegationConfig()
+	dc.Policy.Bounds.Folders = []string{"/ES/**"}
+	dc.Policy.Delegations[0].Allow.Folders = []string{"/ES/**"}
+	base := BaseDocument(dc)
+	b := uiapi.Binding{Role: "r", Team: "team-a", Subjects: []uiapi.SubjectMatcher{{Issuer: "idp", Claims: map[string][]string{"sub": {"p-a"}}}}}
+	dd := delegatedDoc(uiapi.Rule{Folders: []string{"/ES/**"}, Actions: []string{ActionRecordWrite}}, b, "ci")
+	ds := compile(dc, base, &dd, "r", &folderDiscovery{folders: map[string]string{"example.com": "/ES/a", "example.org": "/ES/b"}})
+	if ds.Decide([]string{"r"}, ActionRecordWrite, "example.org", nil).Allowed {
+		t.Fatal("a delegated folder rule reached a zone outside allow.zones")
+	}
+	if !ds.Decide([]string{"r"}, ActionRecordWrite, "example.com", nil).Allowed {
+		t.Fatal("a delegated folder rule must apply within allow.zones")
 	}
 }

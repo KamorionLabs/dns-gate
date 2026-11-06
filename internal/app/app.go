@@ -23,6 +23,7 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/provider"
 	eurodnsprov "github.com/KamorionLabs/dns-gate/internal/provider/eurodns"
 	route53prov "github.com/KamorionLabs/dns-gate/internal/provider/route53"
+	"github.com/KamorionLabs/dns-gate/internal/requestid"
 	"github.com/KamorionLabs/dns-gate/internal/server"
 	"github.com/KamorionLabs/dns-gate/internal/store"
 	"github.com/KamorionLabs/dns-gate/internal/version"
@@ -82,7 +83,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 			profiles[pc.ID] = true
 		}
 		sources = append(sources, discovery.Source{Provider: p, Include: pc.Zones.Include, Exclude: pc.Zones.Exclude,
-			Folders: pc.Zones.Folders, Refresh: pc.Zones.Refresh.D()})
+			Folders: pc.Zones.Folders, Refresh: pc.Zones.Refresh.D(), FolderMaxAge: pc.Zones.FolderMaxAge()})
 	}
 
 	if cfg.SingleReplicaStore() {
@@ -190,18 +191,31 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 	return a, nil
 }
 
-// ActionZoneFolderChanged is the audit action of a zone found in another
-// provider folder than at the previous listing: the rules selecting zones by
-// folder apply from then on.
-const ActionZoneFolderChanged = "gate.zone.folder_changed"
+// Audit actions of the provider folders found by discovery: the rules
+// selecting zones by folder follow them.
+const (
+	// ActionZoneFolderChanged: the zone is in another folder than at the
+	// previous listing.
+	ActionZoneFolderChanged = "gate.zone.folder_changed"
+	// ActionZoneFolderSeen: first listing of the zone by this process.
+	ActionZoneFolderSeen = "gate.zone.folder_seen"
+	// ActionZoneFolderGone: the zone is no longer listed.
+	ActionZoneFolderGone = "gate.zone.folder_gone"
+)
 
-// folderChangeAudit records the folder changes found by discovery.
+var folderActions = map[string]string{
+	discovery.FolderChanged: ActionZoneFolderChanged,
+	discovery.FolderSeen:    ActionZoneFolderSeen,
+	discovery.FolderGone:    ActionZoneFolderGone,
+}
+
+// folderChangeAudit records the folders found by discovery.
 func folderChangeAudit(l audit.Logger, now func() time.Time) func(context.Context, discovery.FolderChange) {
 	return func(ctx context.Context, c discovery.FolderChange) {
 		l.Log(ctx, audit.Event{
-			Time: now().UTC(), Subject: "gate:discovery", SubjectName: "gate:discovery", SubjectCategory: identity.CategorySystem,
-			Action: ActionZoneFolderChanged, Zone: c.Zone, Provider: c.Provider, Decision: "allow",
-			Extra: map[string]any{"old": c.Old, "new": c.New},
+			Time: now().UTC(), RequestID: requestid.From(ctx), Subject: "gate:discovery", SubjectName: "gate:discovery",
+			SubjectCategory: identity.CategorySystem, Action: folderActions[c.Kind], Zone: c.Zone, Provider: c.Provider,
+			Decision: "allow", Extra: map[string]any{"old": c.Old, "new": c.New},
 		})
 	}
 }

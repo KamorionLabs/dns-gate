@@ -9,14 +9,16 @@ import (
 const RootFolder = "/"
 
 // NormalizeFolder returns the canonical form of a provider folder path: a
-// leading "/", no trailing "/", and "/" for the root (an empty path).
+// leading "/", no empty segment, no trailing "/", and "/" for the root (an
+// empty path). Only slashes are normalized: "ES " and "ES" stay distinct.
 func NormalizeFolder(path string) string {
-	p := strings.TrimSpace(path)
-	p = strings.Trim(p, "/")
-	if p == "" {
-		return RootFolder
+	var segs []string
+	for _, s := range strings.Split(path, "/") {
+		if s != "" {
+			segs = append(segs, s)
+		}
 	}
-	return "/" + p
+	return "/" + strings.Join(segs, "/")
 }
 
 // MatchFolder reports whether a folder path ("/" for the root, "/ES/Sub")
@@ -107,6 +109,8 @@ func ValidFolderPattern(p string) error {
 		switch {
 		case strings.TrimSpace(s) == "":
 			return errors.New("empty folder segment")
+		case strings.TrimSpace(s) != s:
+			return errors.New("leading or trailing spaces in a folder segment")
 		case strings.Contains(s, "**") && s != "**":
 			return errors.New("** must be a whole segment")
 		case strings.ContainsFunc(s, func(r rune) bool { return r < 0x20 || r == 0x7f }):

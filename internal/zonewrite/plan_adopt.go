@@ -514,6 +514,7 @@ func (e *engine) AdoptMany(ctx context.Context, s *identity.Subject, zoneIn stri
 		res.Adopted = append(res.Adopted, uiapi.RRsetRef{Host: c.key.Host, Type: c.key.Type})
 		changes = append(changes, uiChange("adopt", c.key, nil, &set))
 	}
-	e.emit(ctx, s, action, zone, "allow", "", changes, "", map[string]any{"comment": req.Comment, "owner": owner})
+	e.emit(ctx, s, action, zone, "allow", "", changes, "",
+		e.withGrantFolder(s, zone, changes, map[string]any{"comment": req.Comment, "owner": owner}, policy.ActionRecordAdopt))
 	return res, nil
 }

@@ -286,6 +286,16 @@ func (s *Snapshot) Folder(zone string) string {
 	return fd.Folder(normZone(zone))
 }
 
+// discoveryLoaded reports whether zone discovery has listed every provider
+// account at least once (true for a discovery that does not tell).
+func (s *Snapshot) discoveryLoaded() bool {
+	if s.discovery == nil {
+		return false
+	}
+	l, ok := s.discovery.(interface{ Loaded() bool })
+	return !ok || l.Loaded()
+}
+
 // ruleSelects reports whether a rule applies to a zone: the zone matches
 // its zones, or the folder of the zone (folder, computed on demand) matches
 // its folders. via is the folder when the rule applies through it only.
@@ -300,6 +310,26 @@ func (s *Snapshot) ruleSelects(r uiapi.Rule, zone string, folder func() string) 
 		return true, f
 	}
 	return false, ""
+}
+
+// ruleApplies is ruleSelects for a rule of the role cr. A managed rule that
+// applies through a folder must also find the zone within
+// policy.bounds.zones, and a delegated one within the allow.zones of its
+// delegation: folders narrow the bounds, they never widen them.
+func (s *Snapshot) ruleApplies(cr *compiledRole, r uiapi.Rule, zone string, folder func() string) (bool, string) {
+	ok, via := s.ruleSelects(r, zone, folder)
+	if !ok || via == "" || cr.layer != LayerManaged {
+		return ok, via
+	}
+	if !glob.Any(s.bounds.Zones, zone) {
+		return false, ""
+	}
+	if cr.delegation != "" {
+		if d := s.delegations[cr.delegation]; d == nil || !glob.Any(d.Allow.Zones, zone) {
+			return false, ""
+		}
+	}
+	return true, via
 }
 
 // folderOnce returns a function computing the folder of zone at most once.
@@ -540,7 +570,7 @@ func (s *Snapshot) Decide(roles []string, action, zone string, key *dns.Key) Dec
 			via := ""
 			if !meta {
 				var ok bool
-				if ok, via = s.ruleSelects(r, zone, folder); !ok {
+				if ok, via = s.ruleApplies(cr, r, zone, folder); !ok {
 					continue
 				}
 			}

@@ -346,12 +346,17 @@ type ZonesDiscovery struct {
 
 // ProviderDiscovery is the zone listing of one provider account.
 type ProviderDiscovery struct {
-	ID            string     `json:"id"`
-	Kind          string     `json:"kind"`
-	Include       []string   `json:"include"`
-	Exclude       []string   `json:"exclude"`
-	Folders       []string   `json:"folders,omitempty"` // folder filter (EuroDNS)
-	Refresh       string     `json:"refresh"`
+	ID      string   `json:"id"`
+	Kind    string   `json:"kind"`
+	Include []string `json:"include"`
+	Exclude []string `json:"exclude"`
+	Folders []string `json:"folders,omitempty"` // folder filter (EuroDNS)
+	Refresh string   `json:"refresh"`
+	// FolderMaxAge is how long folders are trusted while listings fail
+	// (EuroDNS); FoldersStale tells that they are older, so that folder
+	// rules match no zone of the provider.
+	FolderMaxAge  string     `json:"folder_max_age,omitempty"`
+	FoldersStale  bool       `json:"folders_stale,omitempty"`
 	Loaded        bool       `json:"loaded"`
 	Count         int        `json:"count"`
 	LastRefreshAt *time.Time `json:"last_refresh_at,omitempty"`

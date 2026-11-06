@@ -2,6 +2,7 @@ package policy
 
 import (
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -34,7 +35,7 @@ func (s *Snapshot) grants() map[grantKey]bool {
 					continue
 				}
 				for z := range s.zones {
-					if ok, _ := s.ruleSelects(r, z, s.folderOnce(z)); ok {
+					if ok, _ := s.ruleApplies(cr, r, z, s.folderOnce(z)); ok {
 						out[grantKey{who, roleName, z, a}] = true
 					}
 				}
@@ -95,7 +96,7 @@ func (s *Snapshot) teamWrites() map[string]map[string]bool {
 				continue
 			}
 			for z := range s.zones {
-				if ok, _ := s.ruleSelects(r, z, s.folderOnce(z)); ok {
+				if ok, _ := s.ruleApplies(cr, r, z, s.folderOnce(z)); ok {
 					if out[team] == nil {
 						out[team] = map[string]bool{}
 					}
@@ -215,6 +216,8 @@ func Impact(old, new *Snapshot, owned OwnedCounter) []uiapi.ImpactItem {
 		}
 	}
 
+	items = append(items, folderItems(old, new)...)
+
 	// Teams losing write where they own RRsets.
 	ow, nw := old.teamWrites(), new.teamWrites()
 	for _, team := range keysOf(ow) {
@@ -257,6 +260,43 @@ func Impact(old, new *Snapshot, owned OwnedCounter) []uiapi.ImpactItem {
 	})
 	if items == nil {
 		items = []uiapi.ImpactItem{}
+	}
+	return items
+}
+
+// folderItems warns about the folder rules new has and old has not: the
+// zones they reach follow the EuroDNS folder layout, not the policy; and
+// about every folder rule while zone discovery has not listed the accounts
+// (they match no zone until it has).
+func folderItems(old, new *Snapshot) []uiapi.ImpactItem {
+	var items []uiapi.ImpactItem
+	found := false
+	for _, name := range sortedKeys(new.roles) {
+		cr := new.roles[name]
+		for i, r := range cr.role.Rules {
+			if len(r.Folders) == 0 {
+				continue
+			}
+			found = true
+			if or := old.roles[name]; or != nil && i < len(or.role.Rules) && reflect.DeepEqual(or.role.Rules[i], r) {
+				continue
+			}
+			var zones []string
+			for _, z := range keys(new.zones) {
+				if ok, via := new.ruleApplies(cr, r, z, new.folderOnce(z)); ok && via != "" {
+					zones = append(zones, z)
+				}
+			}
+			items = append(items, uiapi.ImpactItem{
+				Kind: "warning", Who: "role " + name, Role: name, Zones: zones, Actions: r.Actions,
+				Message: fmt.Sprintf("role %s rules[%d] is a dynamic folder rule (%s, %d zone%s currently): its zones follow the EuroDNS folders, moving a domain changes them without a policy revision",
+					name, i, strings.Join(r.Folders, ", "), len(zones), map[bool]string{true: "s"}[len(zones) != 1]),
+			})
+		}
+	}
+	if found && !new.discoveryLoaded() {
+		items = append(items, uiapi.ImpactItem{Kind: "warning", Who: "zone discovery",
+			Message: "the provider accounts are not listed yet (zone discovery not loaded): folder rules match no zone until they are"})
 	}
 	return items
 }
