@@ -56,6 +56,7 @@ const READ_ACTIONS = new Set([
   'mcp.who_can',
   'mcp.plan_rrset_change',
   'mcp.adopt_preview',
+  'mcp.transfer_list',
   'checkDnsZone',
 ]);
 

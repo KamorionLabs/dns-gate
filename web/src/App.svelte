@@ -13,6 +13,10 @@
   import ProposalsView from './views/ProposalsView.svelte';
   import ProposalView from './views/ProposalView.svelte';
   import SimulatorView from './views/SimulatorView.svelte';
+  import TeamsView from './views/TeamsView.svelte';
+  import TeamView from './views/TeamView.svelte';
+  import TransfersView from './views/TransfersView.svelte';
+  import TransferView from './views/TransferView.svelte';
 
   let me = $state<Me | null>(null);
   $effect(() => {
@@ -29,6 +33,14 @@
     <JournalView />
   {:else if router.route.name === 'connect'}
     <ConnectView />
+  {:else if router.route.name === 'teams'}
+    <TeamsView />
+  {:else if router.route.name === 'team'}
+    {#key router.route.team}<TeamView team={router.route.team} />{/key}
+  {:else if router.route.name === 'transfers'}
+    <TransfersView />
+  {:else if router.route.name === 'transfer'}
+    {#key router.route.id}<TransferView id={router.route.id} />{/key}
   {:else if router.route.name === 'proposal'}
     {#key router.route.id}<ProposalView id={router.route.id} />{/key}
   {:else if router.route.name === 'policy'}

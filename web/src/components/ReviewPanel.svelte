@@ -1,7 +1,8 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { api, ApiError } from '../lib/api';
-  import type { PlanResult } from '../lib/types';
+  import type { Me, PlanResult, Tombstone } from '../lib/types';
+  import { planTeam } from '../lib/teams';
   import { kindVerb, shownPlanChange, shownStaged, stagedKey, toRequest, type StagedChange } from '../lib/staging';
   import { reasonLabel, writeReasonText } from '../lib/labels';
   import { journalHref } from '../lib/router.svelte';
@@ -14,6 +15,8 @@
   let {
     zone,
     staged,
+    me = null,
+    tombstones = [],
     onclose,
     onunstage,
     onapplied,
@@ -21,6 +24,8 @@
   }: {
     zone: string;
     staged: StagedChange[];
+    me?: Me | null;
+    tombstones?: Tombstone[];
     onclose: () => void;
     onunstage: (key: string) => void;
     onapplied: (r: PlanResult) => void;
@@ -35,6 +40,10 @@
   let refusal = $state<{ reason?: string; message?: string; stale: boolean } | null>(null);
   let dropped = $state<StagedChange[]>([]);
   let reloading = $state(false);
+
+  // With several teams, the team the changes are made for (new record sets go to it).
+  let chosen = $state<string | undefined>(undefined);
+  const choice = $derived(planTeam(me, staged, chosen, tombstones));
 
   const STALE = new Set(['precondition', 'plan_expired', 'plan_not_found', 'tainted', 'foreign_rrset', 'not_found']);
 
@@ -52,7 +61,7 @@
     phase = 'planning';
     refusal = null;
     try {
-      const p = await api.plan(zone, toRequest(staged));
+      const p = await api.plan(zone, toRequest(staged), choice.team);
       plan = p;
       if (p.allowed && p.plan_id) phase = 'plan';
       else refuse(p.reason, p.message);
@@ -66,6 +75,7 @@
   // A new plan whenever the staged list changes (a change removed from here).
   $effect(() => {
     void staged.map(stagedKey).join();
+    void choice.team;
     // once applied, the staged list is emptied: the result stays on screen
     untrack(() => phase !== 'done' && phase !== 'applying' && runPlan());
   });
@@ -74,7 +84,7 @@
     if (!plan?.plan_id) return;
     phase = 'applying';
     try {
-      const r = await api.apply(zone, plan.plan_id);
+      const r = await api.apply(zone, plan.plan_id, plan.team ?? choice.team);
       if (!r.allowed) {
         plan = r;
         refuse(r.reason, r.message);
@@ -141,6 +151,23 @@
           <ul class="plain">{#each dropped as d (stagedKey(d))}<li class="mono">{kindVerb[d.kind]} {d.host} {d.type}</li>{/each}</ul>
           Check the zone and stage them again if they are still needed.
         </div>
+      </div>
+    {/if}
+
+    {#if n > 0 && choice.options.length > 1}
+      <div class="teampick">
+        {#if choice.choose}
+          <label for="plan-team">Owner team of the new record sets</label>
+          <span class="field sel">
+            <select id="plan-team" value={choice.team} disabled={phase === 'applying'} onchange={(e) => (chosen = e.currentTarget.value)}>
+              {#each choice.options as t (t)}<option value={t}>{t}{t === me?.default_team ? ' (default)' : ''}</option>{/each}
+            </select>
+            <span class="chev"><Icon name="chevron" size={12} /></span>
+          </span>
+          <p class="dim small">You are a member of several teams: only members of this team will be able to change them.</p>
+        {:else}
+          <p class="dim small"><Icon name="team" size={13} /> {choice.note}</p>
+        {/if}
       </div>
     {/if}
 
@@ -327,6 +354,29 @@
   .why {
     color: var(--wax);
     font-size: 12px;
+  }
+  .teampick {
+    display: grid;
+    gap: 6px;
+    padding: var(--s3) var(--s4);
+    border: 1px solid var(--rule);
+    border-radius: var(--r-md);
+    background: var(--sheet);
+  }
+  .teampick label {
+    font-weight: 500;
+  }
+  .teampick p {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .sel {
+    justify-self: start;
+    min-width: 200px;
+  }
+  .sel select {
+    flex: 1;
   }
   .confirm {
     display: grid;
