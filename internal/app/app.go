@@ -215,6 +215,37 @@ func (a *App) Run(ctx context.Context) {
 	if a.PlanGC != nil {
 		go a.runPlanGC(ctx, a.PlanGC)
 	}
+	go a.WarnUndeclaredOwners(ctx)
+}
+
+// WarnUndeclaredOwners logs a warning for each team owning RRsets in a
+// managed zone that the policy neither declares nor names (migration to the
+// teams block): such a team is declared automatically until the block
+// exists, and owns RRsets nobody may change once it does.
+func (a *App) WarnUndeclaredOwners(ctx context.Context) {
+	snap := a.Policy.Current()
+	seen := map[string]bool{}
+	for _, z := range a.authz.ManagedZones() {
+		list, err := a.Store.List(ctx, z)
+		if err != nil {
+			a.log.Warn("ownership scan failed", "zone", z, "error", err)
+			continue
+		}
+		for _, o := range list {
+			if seen[o.Owner] {
+				continue
+			}
+			seen[o.Owner] = true
+			if _, known := snap.TeamInfo(o.Owner, nil, false); known {
+				continue
+			}
+			if snap.StrictTeams() {
+				a.log.Warn("team owns RRsets but is not declared: nobody can change them until it is declared or renamed", "team", o.Owner, "zone", z)
+			} else {
+				a.log.Warn("team owns RRsets but is not declared under teams: declared automatically for now", "team", o.Owner, "zone", z)
+			}
+		}
+	}
 }
 
 // newProvider builds the adapter of a configured provider.
