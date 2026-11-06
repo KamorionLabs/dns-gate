@@ -123,6 +123,10 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 	if err != nil {
 		return nil, err
 	}
+	keys, _ := st.(store.APIKeyStore)
+	if keys != nil {
+		an.SetAPIKeys(keys, auditLog)
+	}
 	scfg := server.Config{
 		Config:      cfg,
 		Authn:       an,
@@ -137,6 +141,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		Terraform:   server.InventoryTerraform(eng),
 		Plans:       st,
 		Versions:    st,
+		APIKeys:     keys,
 		UIFiles:     web.FS(),
 		Discovery:   disc,
 		Log:         log,

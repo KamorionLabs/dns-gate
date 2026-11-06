@@ -87,6 +87,9 @@ func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
 	case pattern == routeTokens:
 		s.handleIssueToken(w, r, subj, sess)
 		return
+	case pattern == routeAPIKeys || strings.HasPrefix(pattern, routeAPIKeys+"/"):
+		s.handleAPIKeys(w, r, subj, sess, pattern, params["id"])
+		return
 	case pattern == routeRRset:
 		s.handleRRset(w, r, subj, sess, params["zone"], params["host"], params["type"])
 		return

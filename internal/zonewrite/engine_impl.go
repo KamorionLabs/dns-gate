@@ -709,7 +709,12 @@ func (e *engine) validate(ctx context.Context, s *identity.Subject, p provider.P
 			return nil, fail(ReasonTainted, "%s was changed outside the gate; an admin must adopt it again", keyString(c.Key))
 		}
 		prev := o
-		claims = append(claims, claim{change: *c, prev: &prev, cur: o})
+		cl := claim{change: *c, prev: &prev, cur: o}
+		if ttl := e.cfg.Authz.EphemeralTTL(s); ttl > 0 && o.ExpiresAt != nil {
+			exp := now.Add(ttl)
+			cl.cur.ExpiresAt = &exp
+		}
+		claims = append(claims, cl)
 	}
 	return claims, nil
 }

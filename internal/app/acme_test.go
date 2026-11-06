@@ -1,0 +1,562 @@
+package app
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/lambdarun"
+	"github.com/KamorionLabs/dns-gate/internal/oidctest"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
+	eurodns "github.com/KamorionLabs/eurodns-go"
+	"github.com/KamorionLabs/eurodns-go/eurodnstest"
+)
+
+// acmeEnv is a gate wired by New in front of the EuroDNS fake, with an
+// OIDC issuer for key management.
+type acmeEnv struct {
+	t    *testing.T
+	fake *eurodnstest.Server
+	idp  *oidctest.Provider
+	gate *httptest.Server
+	app  *App
+}
+
+func newACMEEnv(t *testing.T) *acmeEnv {
+	t.Helper()
+	e := &acmeEnv{t: t, fake: eurodnstest.NewServer(eurodnstest.Options{AppID: "app", APIKey: "k"}), idp: oidctest.New()}
+	t.Cleanup(e.fake.Close)
+	t.Cleanup(e.idp.Close)
+	e.fake.Seed(&eurodns.Zone{Name: "example.com", Records: []eurodns.Record{
+		{Type: "A", Host: "www", TTL: 3600, RData: "192.0.2.1"},
+		{Type: "TXT", Host: "_acme-challenge.legacy", TTL: 600, RData: `"foreign"`},
+	}})
+	yaml := `
+providers:
+  - id: eurodns
+    kind: eurodns
+    eurodns: {base_url: "` + e.fake.URL + `", app_id: app, rate: {every: 1ms, burst: 50}}
+zones: [example.com]
+store: {type: sqlite, sqlite: {path: ` + filepath.Join(t.TempDir(), "g.db") + `}}
+issuers:
+  - {name: ci, issuer: "` + e.idp.URL + `", audiences: [dns-gate], category: pipeline}
+roles:
+  acme:
+    ephemeral_ttl: 1h
+    rules:
+      - zones: [example.com]
+        actions: [dns.read, dns.record.write]
+        records: {hosts: ["_acme-challenge", "_acme-challenge.**"], types: [TXT]}
+  acme-permanent:
+    rules:
+      - zones: [example.com]
+        actions: [dns.record.write]
+        records: {hosts: ["_acme-challenge", "_acme-challenge.**"], types: [TXT]}
+  key-admin:
+    rules:
+      - zones: [example.com]
+        actions: [dns.read, dns.record.write, ui.read, gate.apikey.manage]
+  writer:
+    rules:
+      - zones: [example.com]
+        actions: [dns.read, dns.record.write, ui.read]
+bindings:
+  - {role: key-admin, team: web, subjects: [{issuer: ci, claims: {sub: [admin]}}]}
+  - {role: writer, team: web, subjects: [{issuer: ci, claims: {sub: [writer]}}]}
+`
+	cfg, err := config.Parse([]byte(yaml), func(k string) string {
+		if k == "EURODNS_API_KEY" {
+			return "k"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	a, err := New(ctx, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), Options{Holder: "t", AuditOutput: devNull(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.app = a
+	e.gate = httptest.NewServer(a.Handler())
+	t.Cleanup(e.gate.Close)
+	return e
+}
+
+func devNull(t *testing.T) *os.File {
+	f, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { f.Close() })
+	return f
+}
+
+func (e *acmeEnv) do(method, path string, hdr map[string]string, body string) (int, []byte) {
+	e.t.Helper()
+	req, _ := http.NewRequest(method, e.gate.URL+path, strings.NewReader(body))
+	for k, v := range hdr {
+		req.Header.Set(k, v)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(resp.Body)
+	return resp.StatusCode, b
+}
+
+func (e *acmeEnv) bearer(sub string) map[string]string {
+	return map[string]string{"Authorization": "Bearer " + e.idp.Sign(map[string]any{"sub": sub, "aud": "dns-gate"}), "Content-Type": "application/json"}
+}
+
+func (e *acmeEnv) createKey(body string) uiapi.IssuedAPIKey {
+	e.t.Helper()
+	status, b := e.do("POST", "/api/v1/api-keys", e.bearer("admin"), body)
+	if status != http.StatusCreated {
+		e.t.Fatalf("create key: %d %s", status, b)
+	}
+	var k uiapi.IssuedAPIKey
+	if err := json.Unmarshal(b, &k); err != nil {
+		e.t.Fatal(err)
+	}
+	return k
+}
+
+// txt returns the upstream values of a TXT RRset, unquoted and sorted.
+func (e *acmeEnv) txt(host string) []string {
+	var out []string
+	for _, r := range e.fake.Zone("example.com").Records {
+		if r.Type == "TXT" && r.Host == host {
+			out = append(out, strings.Trim(r.RData, `"`))
+		}
+	}
+	slices.Sort(out)
+	return out
+}
+
+func basic(user, pass string) map[string]string {
+	return map[string]string{
+		"Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte(user+":"+pass)),
+		"Content-Type":  "application/json",
+	}
+}
+
+// challenge returns a DNS-01 TXT value (43 base64url characters).
+func challenge(seed string) string {
+	sum := sha256.Sum256([]byte(seed))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+// lego httpreq, default and RAW modes: a wildcard and an apex challenge
+// coexist in one RRset and are removed one by one.
+func TestACMEHTTPReq(t *testing.T) {
+	e := newACMEEnv(t)
+	k := e.createKey(`{"name": "lego", "team": "web", "role": "acme"}`)
+	auth := basic(k.ID, k.Key)
+	apex, wild := challenge("apex"), challenge("wildcard")
+	for _, v := range []string{apex, wild, wild} {
+		if status, b := e.do("POST", "/acme/httpreq/present", auth, `{"fqdn": "_acme-challenge.example.com.", "value": "`+v+`"}`); status != 200 {
+			t.Fatalf("present: %d %s", status, b)
+		}
+	}
+	if got := e.txt("_acme-challenge"); !slices.Equal(got, sortedOf(apex, wild)) {
+		t.Fatalf("after present: %v", got)
+	}
+	if status, b := e.do("POST", "/acme/httpreq/cleanup", auth, `{"fqdn": "_acme-challenge.example.com.", "value": "`+apex+`"}`); status != 200 {
+		t.Fatalf("cleanup: %d %s", status, b)
+	}
+	if got := e.txt("_acme-challenge"); !slices.Equal(got, []string{wild}) {
+		t.Fatalf("after first cleanup: %v", got)
+	}
+	e.do("POST", "/acme/httpreq/cleanup", auth, `{"fqdn": "_acme-challenge.example.com.", "value": "`+wild+`"}`)
+	if got := e.txt("_acme-challenge"); len(got) != 0 {
+		t.Fatalf("after cleanup: %v", got)
+	}
+
+	raw := `{"domain": "*.www.example.com", "token": "tok", "keyAuth": "tok.thumbprint"}`
+	if status, b := e.do("POST", "/acme/httpreq/present", auth, raw); status != 200 {
+		t.Fatalf("raw present: %d %s", status, b)
+	}
+	if got := e.txt("_acme-challenge.www"); !slices.Equal(got, []string{challenge("tok.thumbprint")}) {
+		t.Fatalf("raw mode: %v", got)
+	}
+	e.do("POST", "/acme/httpreq/cleanup", auth, raw)
+	if got := e.txt("_acme-challenge.www"); len(got) != 0 {
+		t.Fatalf("raw cleanup: %v", got)
+	}
+
+	for body, want := range map[string]int{
+		`{"fqdn": "www.example.com.", "value": "x"}`:                      400,
+		`{"fqdn": "_acme-challenge.example.org.", "value": "x"}`:          400,
+		`{"fqdn": "_acme-challenge.legacy.example.com.", "value": "abc"}`: 409,
+		`{"value": "x"}`: 400,
+	} {
+		if status, b := e.do("POST", "/acme/httpreq/present", auth, body); status != want {
+			t.Errorf("%s: %d %s, want %d", body, status, b, want)
+		}
+	}
+	if status, _ := e.do("POST", "/acme/httpreq/present", basic(k.ID, k.Key+"x"), `{"fqdn": "_acme-challenge.example.com.", "value": "x"}`); status != 401 {
+		t.Errorf("bad key: %d", status)
+	}
+	if status, _ := e.do("GET", "/acme/httpreq/present", auth, ""); status != 405 {
+		t.Errorf("GET present: %d", status)
+	}
+	if status, b := e.do("POST", "/acme/httpreq/present", e.bearer("writer"), `{"fqdn": "_acme-challenge.example.com.", "value": "x"}`); status != 403 || !strings.Contains(string(b), "ephemeral_required") {
+		t.Errorf("permanent role: %d %s", status, b)
+	}
+}
+
+func sortedOf(v ...string) []string {
+	slices.Sort(v)
+	return v
+}
+
+// acme.sh dns_acmedns: the exact request of dnsapi/dns_acmedns.sh (curl
+// POST, X-Api-User / X-Api-Key, body {"subdomain":"...", "txt": "..."}),
+// whose response must contain the quoted value. ACMEDNS_SUBDOMAIN is the
+// domain itself; like acme-dns, the two most recent values are kept.
+func TestACMEDNSAcmeSh(t *testing.T) {
+	e := newACMEEnv(t)
+	k := e.createKey(`{"name": "acme.sh", "team": "web", "role": "acme"}`)
+	hdr := map[string]string{"X-Api-User": k.ID, "X-Api-Key": k.Key, "Content-Type": "application/json"}
+	values := []string{challenge("a"), challenge("b"), challenge("c")}
+	for _, v := range values {
+		status, b := e.do("POST", "/acme/acme-dns/update", hdr, `{"subdomain":"www.example.com", "txt": "`+v+`"}`)
+		if status != 200 || !strings.Contains(string(b), `"`+v+`"`) {
+			t.Fatalf("update: %d %s", status, b)
+		}
+	}
+	if got := e.txt("_acme-challenge.www"); !slices.Equal(got, sortedOf(values[1], values[2])) {
+		t.Fatalf("two most recent values expected: %v", got)
+	}
+	status, b := e.do("POST", "/acme/acme-dns/update", hdr, `{"subdomain":"www.example.com", "txt": "`+values[1]+`"}`)
+	if status != 200 || !slices.Equal(e.txt("_acme-challenge.www"), sortedOf(values[1], values[2])) {
+		t.Fatalf("repeated value: %d %s %v", status, b, e.txt("_acme-challenge.www"))
+	}
+
+	for body, want := range map[string]string{
+		`{"subdomain":"www.example.com", "txt": "short"}`:                                  "bad_txt",
+		`{"subdomain":"www.example.org", "txt": "` + values[0] + `"}`:                      "bad_subdomain",
+		`{"subdomain":"8e5700ea-a4bf-41c7-8a77-e990661dcc6a", "txt": "` + values[0] + `"}`: "bad_subdomain",
+	} {
+		status, b := e.do("POST", "/acme/acme-dns/update", hdr, body)
+		var r struct{ Error string }
+		_ = json.Unmarshal(b, &r)
+		if status != 400 || r.Error != want {
+			t.Errorf("%s: %d %s, want %s", body, status, b, want)
+		}
+	}
+	bad := map[string]string{"X-Api-User": k.ID, "X-Api-Key": tamper(k.Key)}
+	if status, _ := e.do("POST", "/acme/acme-dns/update", bad, `{"subdomain":"www.example.com", "txt": "`+values[0]+`"}`); status != 401 {
+		t.Errorf("bad key: %d", status)
+	}
+	other := map[string]string{"X-Api-User": "0123456789abcdef", "X-Api-Key": k.Key}
+	if status, _ := e.do("POST", "/acme/acme-dns/update", other, `{"subdomain":"www.example.com", "txt": "`+values[0]+`"}`); status != 401 {
+		t.Errorf("user of another key: %d", status)
+	}
+}
+
+// The certbot acme-dns hook (acme-dns-certbot-joohoi, acme-dns-auth.py):
+// /register without credentials is refused with an explanation; with the
+// storage file seeded from acme_dns_accounts, the hook only calls /update
+// with the stored subdomain (python requests also sends basic auth when the
+// URL carries the key). /register with the key and a domain works too.
+func TestACMEDNSCertbotHook(t *testing.T) {
+	e := newACMEEnv(t)
+	k := e.createKey(`{"name": "certbot", "team": "web", "role": "acme", "acme_domains": ["www.example.com", "*.example.com", "example.com"]}`)
+	if len(k.ACMEDNSAccounts) != 2 || len(k.ACMEDomains) != 2 {
+		t.Fatalf("accounts %+v", k.ACMEDNSAccounts)
+	}
+	acct := k.ACMEDNSAccounts["www.example.com"]
+	if acct.Username != k.ID || acct.Password != k.Key || acct.FullDomain != "_acme-challenge.www.example.com" || len(acct.SubDomain) != 36 {
+		t.Fatalf("account %+v", acct)
+	}
+
+	status, b := e.do("POST", "/acme/acme-dns/register", nil, "")
+	if status != 401 || !strings.Contains(string(b), "registration_requires_api_key") {
+		t.Fatalf("anonymous register: %d %s", status, b)
+	}
+
+	update := func(a uiapi.ACMEDNSAccount, txt string, extra map[string]string) (int, []byte) {
+		body, _ := json.Marshal(map[string]string{"subdomain": a.SubDomain, "txt": txt})
+		hdr := map[string]string{"X-Api-User": a.Username, "X-Api-Key": a.Password, "Content-Type": "application/json"}
+		for k, v := range extra {
+			hdr[k] = v
+		}
+		return e.do("POST", "/acme/acme-dns/update", hdr, strings.ReplaceAll(string(body), `","`, `", "`))
+	}
+	v1, v2 := challenge("www-1"), challenge("www-2")
+	if status, b := update(acct, v1, nil); status != 200 {
+		t.Fatalf("hook update: %d %s", status, b)
+	}
+	if status, b := update(acct, v2, map[string]string{"Authorization": basic(k.ID, k.Key)["Authorization"]}); status != 200 {
+		t.Fatalf("hook update with URL credentials: %d %s", status, b)
+	}
+	if got := e.txt("_acme-challenge.www"); !slices.Equal(got, sortedOf(v1, v2)) {
+		t.Fatalf("www values: %v", got)
+	}
+	apex := k.ACMEDNSAccounts["example.com"]
+	if status, b := update(apex, v1, nil); status != 200 || !slices.Equal(e.txt("_acme-challenge"), []string{v1}) {
+		t.Fatalf("apex: %d %s %v", status, b, e.txt("_acme-challenge"))
+	}
+
+	reg := basic(k.ID, k.Key)
+	delete(reg, "Content-Type")
+	status, b = e.do("POST", "/acme/acme-dns/register", reg, `{"allowfrom": ["127.0.0.0/8"]}`)
+	if status != 400 || !strings.Contains(string(b), "domain_required") {
+		t.Fatalf("register without domain: %d %s", status, b)
+	}
+	status, b = e.do("POST", "/acme/acme-dns/register", reg, `{"allowfrom": ["127.0.0.0/8"], "domain": "api.example.com"}`)
+	var created uiapi.ACMEDNSAccount
+	_ = json.Unmarshal(b, &created)
+	if status != 201 || created.Username != k.ID || created.Password != k.Key || created.FullDomain != "_acme-challenge.api.example.com" || created.AllowFrom[0] != "127.0.0.0/8" {
+		t.Fatalf("register: %d %s", status, b)
+	}
+	if status, b := update(created, v2, nil); status != 200 || !slices.Equal(e.txt("_acme-challenge.api"), []string{v2}) {
+		t.Fatalf("registered update: %d %s", status, b)
+	}
+	if status, b := e.do("POST", "/acme/acme-dns/register", reg, `{"allowfrom": ["192.0.2.0/24"], "domain": "api.example.com"}`); status == 201 {
+		var far uiapi.ACMEDNSAccount
+		_ = json.Unmarshal(b, &far)
+		if status, _ := update(far, v1, nil); status != 401 {
+			t.Errorf("update outside allowfrom: %d", status)
+		}
+	}
+	if status, b := e.do("POST", "/acme/acme-dns/register", reg, `{"domain": "www.example.org"}`); status != 400 {
+		t.Errorf("register outside managed zones: %d %s", status, b)
+	}
+
+	var view uiapi.APIKey
+	_, b = e.do("GET", "/api/v1/api-keys/"+k.ID, e.bearer("admin"), "")
+	_ = json.Unmarshal(b, &view)
+	if view.LastUsedAt == nil || view.LastUsedIP != "127.0.0.1" || len(view.ACMEDNS) < 3 {
+		t.Fatalf("key view %+v", view)
+	}
+}
+
+// Keys: rotation overlap, revocation, roles beyond the caller's rights.
+func TestAPIKeyLifecycle(t *testing.T) {
+	e := newACMEEnv(t)
+	k := e.createKey(`{"name": "lego", "team": "web", "role": "acme", "allowed_cidrs": ["127.0.0.0/8"]}`)
+	present := func(key string) int {
+		status, _ := e.do("POST", "/acme/httpreq/present", basic(k.ID, key), `{"fqdn": "_acme-challenge.example.com.", "value": "v"}`)
+		return status
+	}
+	if present(k.Key) != 200 {
+		t.Fatal("new key refused")
+	}
+	status, b := e.do("POST", "/api/v1/api-keys/"+k.ID+"/rotate", e.bearer("admin"), `{"overlap": "1h"}`)
+	var rot uiapi.IssuedAPIKey
+	_ = json.Unmarshal(b, &rot)
+	if status != 200 || rot.Key == k.Key || rot.PreviousKeyExpiresAt == nil {
+		t.Fatalf("rotate: %d %s", status, b)
+	}
+	if present(k.Key) != 200 || present(rot.Key) != 200 {
+		t.Fatal("overlap not honoured")
+	}
+	if status, _ := e.do("POST", "/api/v1/api-keys/"+k.ID+"/rotate", e.bearer("admin"), `{"overlap": "0s"}`); status != 200 {
+		t.Fatal("second rotation")
+	}
+	if present(rot.Key) != 401 {
+		t.Fatal("previous key still accepted after a rotation without overlap")
+	}
+
+	for body, want := range map[string]int{
+		`{"name": "x", "team": "web", "role": "key-admin"}`:                                           403,
+		`{"name": "x", "team": "ops", "role": "acme"}`:                                                403,
+		`{"name": "x", "team": "web", "role": "nope"}`:                                                403,
+		`{"name": "", "team": "web", "role": "acme"}`:                                                 400,
+		`{"name": "x", "team": "web", "role": "acme", "allowed_cidrs": ["x"]}`:                        400,
+		`{"name": "x", "team": "web", "role": "acme-permanent", "acme_domains": ["www.example.com"]}`: 400,
+		`{"name": "x", "team": "web", "role": "acme", "acme_domains": ["www.example.org"]}`:           400,
+	} {
+		if status, b := e.do("POST", "/api/v1/api-keys", e.bearer("admin"), body); status != want {
+			t.Errorf("%s: %d %s, want %d", body, status, b, want)
+		}
+	}
+	if status, _ := e.do("GET", "/api/v1/api-keys", e.bearer("writer"), ""); status != 403 {
+		t.Errorf("list without gate.apikey.manage: %d", status)
+	}
+	other := e.createKey(`{"name": "other", "team": "web", "role": "acme"}`)
+	if status, _ := e.do("GET", "/api/v1/api-keys", basic(other.ID, other.Key), ""); status != 403 {
+		t.Errorf("a key listed keys: %d", status)
+	}
+
+	status, b = e.do("PUT", "/api/v1/api-keys/"+k.ID, e.bearer("admin"), `{"name": "lego renamed", "description": "d", "acme_domains": ["www.example.com"]}`)
+	var upd uiapi.APIKey
+	_ = json.Unmarshal(b, &upd)
+	if status != 200 || upd.Name != "lego renamed" || len(upd.AllowedCIDRs) != 0 || !slices.Equal(upd.ACMEDomains, []string{"www.example.com"}) {
+		t.Fatalf("put: %d %s", status, b)
+	}
+	if status, _ := e.do("PUT", "/api/v1/api-keys/"+k.ID, e.bearer("admin"), `{"name": "x", "role": "writer"}`); status != 409 {
+		t.Errorf("role change: %d", status)
+	}
+
+	if status, _ := e.do("DELETE", "/api/v1/api-keys/"+k.ID, e.bearer("admin"), ""); status != 204 {
+		t.Fatal("revoke")
+	}
+	_, b = e.do("GET", "/api/v1/api-keys/"+k.ID, e.bearer("admin"), "")
+	var rev uiapi.APIKey
+	_ = json.Unmarshal(b, &rev)
+	if rev.Status != uiapi.APIKeyRevoked || len(rev.ACMEDNS) != 0 {
+		t.Fatalf("revoked view %s", b)
+	}
+	var list []uiapi.APIKey
+	_, b = e.do("GET", "/api/v1/api-keys", e.bearer("admin"), "")
+	_ = json.Unmarshal(b, &list)
+	if len(list) != 1 || list[0].ID != other.ID {
+		t.Fatalf("list %s", b)
+	}
+	_, b = e.do("GET", "/api/v1/api-keys?include_revoked=true", e.bearer("admin"), "")
+	_ = json.Unmarshal(b, &list)
+	if len(list) != 2 {
+		t.Fatalf("list with revoked %s", b)
+	}
+	if status, _ := e.do("POST", "/acme/httpreq/present", basic(other.ID, other.Key), `{"fqdn": "_acme-challenge.example.com.", "value": "v"}`); status != 200 {
+		t.Fatal("other key")
+	}
+	time.Sleep(10 * time.Millisecond)
+	if present(k.Key) != 401 {
+		t.Fatal("revoked key accepted")
+	}
+}
+
+// TestACMEDNSRealCertbotHook runs the unmodified acme-dns-auth.py of
+// acme-dns-certbot-joohoi when DNS_GATE_TEST_CERTBOT_HOOK names it (python3
+// with requests on the PATH): seeded storage, then the hook as certbot
+// calls it, for a name and its wildcard.
+func TestACMEDNSRealCertbotHook(t *testing.T) {
+	hook := os.Getenv("DNS_GATE_TEST_CERTBOT_HOOK")
+	if hook == "" {
+		t.Skip("DNS_GATE_TEST_CERTBOT_HOOK not set")
+	}
+	e := newACMEEnv(t)
+	k := e.createKey(`{"name": "certbot", "team": "web", "role": "acme", "acme_domains": ["www.example.com"]}`)
+	dir := t.TempDir()
+	storage := filepath.Join(dir, "acmedns.json")
+	b, _ := json.Marshal(k.ACMEDNSAccounts)
+	if err := os.WriteFile(storage, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	src, err := os.ReadFile(hook)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := strings.Replace(string(src), `ACMEDNS_URL = "https://auth.acme-dns.io"`, `ACMEDNS_URL = "`+e.gate.URL+`/acme/acme-dns"`, 1)
+	script = strings.Replace(script, `STORAGE_PATH = "/etc/letsencrypt/acmedns.json"`, `STORAGE_PATH = "`+storage+`"`, 1)
+	path := filepath.Join(dir, "acme-dns-auth.py")
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	values := []string{challenge("certbot-www"), challenge("certbot-wildcard")}
+	for i, domain := range []string{"www.example.com", "*.www.example.com"} {
+		cmd := exec.Command("python3", path)
+		cmd.Env = append(os.Environ(), "CERTBOT_DOMAIN="+domain, "CERTBOT_VALIDATION="+values[i])
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("hook %s: %v\n%s", domain, err, out)
+		}
+	}
+	if got := e.txt("_acme-challenge.www"); !slices.Equal(got, sortedOf(values...)) {
+		t.Fatalf("values %v", got)
+	}
+}
+
+// TestACMEDNSRealAcmeSh sources the unmodified dnsapi/dns_acmedns.sh of
+// acme.sh when DNS_GATE_TEST_ACMESH_DNSAPI names it, with the few acme.sh
+// helpers it uses (_post is curl, as in acme.sh).
+func TestACMEDNSRealAcmeSh(t *testing.T) {
+	dnsapi := os.Getenv("DNS_GATE_TEST_ACMESH_DNSAPI")
+	if dnsapi == "" {
+		t.Skip("DNS_GATE_TEST_ACMESH_DNSAPI not set")
+	}
+	e := newACMEEnv(t)
+	k := e.createKey(`{"name": "acme.sh", "team": "web", "role": "acme"}`)
+	shim := `
+_info() { :; }; _debug() { :; }; _err() { echo "$@" >&2; }
+_readaccountconf_mutable() { :; }; _clearaccountconf_mutable() { :; }
+_readdomainconf() { :; }; _savedomainconf() { :; }
+_post() { curl -sS -X "$4" -H "Content-Type: $5" -H "$_H1" -H "$_H2" --data "$1" "$2"; }
+. "$DNSAPI"
+dns_acmedns_add "_acme-challenge.example.com" "$V1" && dns_acmedns_add "_acme-challenge.example.com" "$V2"
+`
+	v1, v2 := challenge("acmesh-apex"), challenge("acmesh-wildcard")
+	cmd := exec.Command("sh", "-c", shim)
+	cmd.Env = append(os.Environ(), "DNSAPI="+dnsapi, "V1="+v1, "V2="+v2,
+		"ACMEDNS_BASE_URL="+e.gate.URL+"/acme/acme-dns", "ACMEDNS_USERNAME="+k.ID, "ACMEDNS_PASSWORD="+k.Key, "ACMEDNS_SUBDOMAIN=example.com")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("dns_acmedns_add: %v\n%s", err, out)
+	}
+	if got := e.txt("_acme-challenge"); !slices.Equal(got, sortedOf(v1, v2)) {
+		t.Fatalf("values %v", got)
+	}
+}
+
+// On AWS Lambda (API Gateway HTTP API, payload 2.0), the acme-dns and
+// httpreq requests reach the gate with their credential headers.
+func TestACMEOnLambda(t *testing.T) {
+	e := newACMEEnv(t)
+	k := e.createKey(`{"name": "lambda", "team": "web", "role": "acme"}`)
+	h := &lambdarun.Handler{HTTP: e.app.LambdaHandler(), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	v := challenge("lambda")
+	event := func(path string, headers map[string]string, body string) map[string]any {
+		return map[string]any{
+			"version": "2.0", "routeKey": "$default", "rawPath": path, "headers": headers, "body": body,
+			"requestContext": map[string]any{"domainName": "dns-gate.example.com", "requestId": "r",
+				"http": map[string]any{"method": "POST", "path": path, "protocol": "HTTP/1.1", "sourceIp": "198.51.100.7"}},
+		}
+	}
+	for _, ev := range []map[string]any{
+		event("/acme/acme-dns/update", map[string]string{"x-api-user": k.ID, "x-api-key": k.Key, "content-type": "application/json"},
+			`{"subdomain":"www.example.com", "txt": "`+v+`"}`),
+		event("/acme/httpreq/present", map[string]string{"authorization": basic(k.ID, k.Key)["Authorization"]},
+			`{"fqdn": "_acme-challenge.example.com.", "value": "`+v+`"}`),
+	} {
+		payload, _ := json.Marshal(ev)
+		out, err := h.Invoke(context.Background(), payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var resp struct {
+			StatusCode int    `json:"statusCode"`
+			Body       string `json:"body"`
+		}
+		_ = json.Unmarshal(out, &resp)
+		if resp.StatusCode != 200 {
+			t.Fatalf("%s: %d %s", ev["rawPath"], resp.StatusCode, resp.Body)
+		}
+	}
+	if !slices.Equal(e.txt("_acme-challenge.www"), []string{v}) || !slices.Equal(e.txt("_acme-challenge"), []string{v}) {
+		t.Fatalf("values %v %v", e.txt("_acme-challenge.www"), e.txt("_acme-challenge"))
+	}
+	_, b := e.do("GET", "/api/v1/api-keys/"+k.ID, e.bearer("admin"), "")
+	if !strings.Contains(string(b), `"last_used_ip":"198.51.100.7"`) {
+		t.Fatalf("source address of the Lambda event not used: %s", b)
+	}
+}
+
+// tamper changes one character of the secret part of a key.
+func tamper(key string) string {
+	i := len(key) - 10
+	c := byte('A')
+	if key[i] == 'A' {
+		c = 'B'
+	}
+	return key[:i] + string(c) + key[i+1:]
+}
