@@ -650,7 +650,7 @@ Tools:
 | `plan_rrset_change` | dry run | Desired state of RRsets, checked without writing; returns a `plan_id` bound to the caller, the zone, the changes, the zone version and the optional `team` (one of the caller's teams). |
 | `apply_rrset_change` | write | Applies a plan exactly as planned, for its team; refused when expired, used, owned by another caller, planned for another team (`team_mismatch`), or when the zone changed since (`precondition`). |
 | `adopt_preview`, `adopt_apply` | dry run, write | Adoption as above, with an optional `team`. |
-| `transfer_propose`, `transfer_approve`, `transfer_reject` | write | Ownership transfers with the REST rules: one owner team per request, approved by another person (a member of the owner team allowed to write in the zone, or a `dns.ownership.approve` holder); the requester may only reject (withdraw). |
+| `transfer_propose`, `transfer_approve`, `transfer_reject` | write | Ownership transfers with the REST rules ([transfers](#ownership)): one owner team per request, approved by another person who may write every RRset through the owner team or holds `dns.ownership.approve` on it (humans only unless `ownership.machine_approvers`); the requester may only reject (withdraw). An approval the gate cannot complete at once leaves the transfer `applying`, retried in the background. |
 
 There is no policy tool: policy changes stay with humans in the UI, with step-up. Plans are kept in the store, shared by every replica, and taken once: a plan made on one replica can be applied on another. The same plans back `POST /api/v1/zones/{zone}/plan` and `/apply` ([API.md](API.md)). Expired plans are purged every 15 minutes by the gate (SQL stores) or by the DynamoDB TTL.
 

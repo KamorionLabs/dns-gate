@@ -134,22 +134,56 @@ export function planTeam(me: Me | null, staged: StagedChange[], chosen?: string,
 
 export const isRequester = (t: Transfer, me: Me | null) => !!me && t.requester.subject === me.subject;
 
+/** The approval rule of a transfer of record sets of team from. */
+export const transferRule = (from: string) =>
+  `another person than the requester who, for every record set of the request, may write it through the roles of team ${from} or holds ${OWNERSHIP_APPROVE} on it`;
+
+/** The approval rule of a team rename. */
+export const renameRule = 'another person than the requester holding policy.approve, and ' + OWNERSHIP_APPROVE + ' on every record set of the team';
+
+const humansOnly = 'Pipelines and API keys do not approve unless the gate allows machine approvers.';
+
 /** Why the user can or cannot approve a transfer. */
 export function decisionRule(t: Transfer, me: Me | null): string {
+  if (t.status === 'applying') return 'Approved: the gate is applying it, and retries on its own while the zone is locked or the provider or store is unavailable.';
   if (t.status !== 'proposed') return '';
+  const machine = !!me && me.category !== 'human';
   if (t.kind === 'rename') {
-    if (t.can_decide) return 'You can approve it: you hold policy.approve and did not request it.';
-    if (isRequester(t, me)) return 'You requested this rename: another holder of policy.approve must approve it. You can withdraw it.';
-    return 'A team rename is approved by a holder of policy.approve other than the requester.';
+    if (t.can_decide) return `You can approve it: you hold policy.approve and did not request it. The gate also checks that you hold ${OWNERSHIP_APPROVE} on every record set of team ${t.from_team} when you approve.`;
+    if (isRequester(t, me)) return 'You requested this rename: ' + renameRule + ' must approve it. You can withdraw it.';
+    return `Approval needs ${renameRule}.` + (machine ? ' ' + humansOnly : '');
   }
-  const zone = t.zone ?? 'the zone';
   if (t.can_decide) {
     return me?.teams.includes(t.from_team)
-      ? `You can approve it as a member of team ${t.from_team} allowed to write in ${zone}.`
-      : `You can approve it as a holder of ${OWNERSHIP_APPROVE} on ${zone}.`;
+      ? `You can approve it: for every record set of the request, you may write it through team ${t.from_team} or hold ${OWNERSHIP_APPROVE} on it.`
+      : `You can approve it as a holder of ${OWNERSHIP_APPROVE} on every record set of the request.`;
   }
-  if (isRequester(t, me)) return 'You requested it: a second person must approve it. You can withdraw it.';
-  return `Approval needs a member of team ${t.from_team} allowed to write in ${zone}, or a holder of ${OWNERSHIP_APPROVE} on it, other than the requester.`;
+  if (isRequester(t, me)) return 'You requested it: ' + transferRule(t.from_team) + ' must approve it. You can withdraw it.';
+  const rule = `Approval needs ${transferRule(t.from_team)}.`;
+  if (machine) return `${rule} ${humansOnly}`;
+  if (me?.teams.includes(t.from_team) || hasAction(me, OWNERSHIP_APPROVE, t.zone ?? '')) {
+    return `${rule} You cannot approve it: you lack that right on one of its record sets, or you asked for it under another identity.`;
+  }
+  return rule;
+}
+
+/**
+ * What the user reads after an approval or a rejection the gate did not
+ * complete. A transfer still applying is approved: the gate retries it.
+ */
+export function decisionOutcome(e: { reason: string; message: string }, returned?: Transfer): { retrying: boolean; text: string } {
+  if (returned?.status === 'applying') {
+    return { retrying: true, text: `Approved, not applied yet: ${e.message}. The gate retries it on its own; nothing more to do.` };
+  }
+  if (returned?.status === 'failed') return { retrying: false, text: `Not applied: ${returned.error || e.message}. Nothing moved; ask for a new transfer if it is still needed.` };
+  switch (e.reason) {
+    case 'expired':
+      return { retrying: false, text: 'This request expired before it was decided: ask for a new one.' };
+    case 'precondition':
+      return { retrying: false, text: `${e.message}: it was decided meanwhile.` };
+    default:
+      return { retrying: false, text: e.message };
+  }
 }
 
 /** Whether the user may reject (or, as its requester, withdraw) a transfer. */
@@ -157,7 +191,7 @@ export const canReject = (t: Transfer, me: Me | null) => t.status === 'proposed'
 
 export const transferStatusLabel: Record<TransferStatus, string> = {
   proposed: 'Waiting for approval',
-  approved: 'Approved',
+  applying: 'Being applied',
   applied: 'Applied',
   rejected: 'Rejected',
   expired: 'Expired',
@@ -194,7 +228,7 @@ export function transferAllowed(me: Me | null, zone: string, from?: string): { o
     return { ok: false, text: `Requesting a transfer needs ${WRITE} or ${OWNERSHIP_APPROVE} on this zone.` };
   }
   if (from && !approver && !me?.teams.includes(from)) {
-    return { ok: true, text: `You are not a member of team ${from}: the record sets can only move to one of your teams.` };
+    return { ok: true, text: `You are not a member of team ${from}: the record sets can only move to one of your teams, through which you must be allowed to write them.` };
   }
   return { ok: true, text: '' };
 }

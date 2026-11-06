@@ -1491,6 +1491,11 @@ addTransfer({
   expires_at: ahead(3 * D), decided_by: alice, decided_at: ago(4 * D - 2 * H), decision_comment: 'Checked with the shop team.',
 });
 addTransfer({
+  id: 'tr-1762000000000-f6a7b8c9d0', kind: 'rrsets', zone: 'edge.example.org', from_team: 'platform', to_team: 'web', status: 'applying',
+  rrsets: [{ host: 'cdn', type: 'CNAME' }], comment: 'The CDN entry belongs to the web shop.', requester: carol, created_at: ago(2 * H),
+  expires_at: ahead(7 * D), decided_by: bob, decided_at: ago(20), error: 'zone edge.example.org is locked by another write',
+});
+addTransfer({
   id: 'tr-1761800000000-e5f6a7b8c9', kind: 'rrsets', zone: 'example.com', from_team: 'web', to_team: 'corporate', status: 'failed',
   rrsets: [{ host: 'www', type: 'CNAME' }], comment: 'Move the homepage to corporate.', requester: dave, created_at: ago(6 * D),
   expires_at: ahead(D), decided_by: bob, decided_at: ago(6 * D - H), error: 'www CNAME changed since the request',
@@ -1504,7 +1509,7 @@ function view(t: StoredTransfer): Transfer {
   const { requesterSubject, ...rest } = t;
   const mayDecide = t.kind === 'rename' ? policyApprover() : (me.teams.includes(t.from_team) && writes(t.zone)) || ownershipApprover(t.zone);
   const status = t.status === 'proposed' && new Date(t.expires_at).getTime() <= Date.now() ? 'expired' : t.status;
-  return { ...rest, status, can_decide: status === 'proposed' && requesterSubject !== me.subject && mayDecide };
+  return { ...rest, status, can_decide: status === 'proposed' && requesterSubject !== me.subject && me.category === 'human' && mayDecide };
 }
 
 function findTransfer(id: string): StoredTransfer {
@@ -1572,7 +1577,7 @@ function decideTransfer(id: string, approve: boolean, comment: string): Transfer
   if (v.status !== 'proposed') throw new ApiError(412, 'precondition', `transfer ${id} is ${v.status}`);
   const self = t.requesterSubject === me.subject;
   if (approve && self) throw new ApiError(403, 'forbidden', 'the requester cannot approve its own transfer: a second person must');
-  if (!self && !v.can_decide) throw new ApiError(403, 'forbidden', `a member of team ${t.from_team} allowed to write in ${t.zone}, or a dns.ownership.approve holder on it, must approve this transfer`);
+  if (!self && !v.can_decide) throw new ApiError(403, 'forbidden', `for every RRset, a member of team ${t.from_team} allowed to write it through that team, or a dns.ownership.approve holder on it, must approve this transfer`);
   Object.assign(t, { decided_by: { subject: me.subject, name: me.name, category: me.category }, decided_at: new Date().toISOString(), decision_comment: comment || undefined });
   if (!approve) {
     t.status = 'rejected';

@@ -4,9 +4,11 @@
   import { router } from '../lib/router.svelte';
   import TeamsNav from '../components/teams/TeamsNav.svelte';
   import TransferItem from '../components/teams/TransferItem.svelte';
+  import { renameRule } from '../lib/teams';
 
   const tabs: { key: TransferStatus | ''; label: string }[] = [
     { key: 'proposed', label: 'Waiting for approval' },
+    { key: 'applying', label: 'Being applied' },
     { key: 'applied', label: 'Applied' },
     { key: 'rejected', label: 'Rejected' },
     { key: 'failed', label: 'Failed' },
@@ -63,8 +65,9 @@
   <p class="eyebrow">Teams</p>
   <h1>Ownership transfers</h1>
   <p class="meta">
-    Moving record sets to another team takes two people: someone asks, then a member of the owner team allowed to write in the zone, or a holder of
-    dns.ownership.approve, approves. Never the person who asked. A team rename is approved by another policy approver.
+    Moving record sets to another team takes two people: someone asks, then another person approves who, for every record set of the request, may
+    write it through the roles of the owner team or holds dns.ownership.approve on it. Nobody approves their own request, even under another
+    identity, and only people approve, not pipelines. A team rename needs {renameRule}.
   </p>
 </header>
 

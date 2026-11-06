@@ -2,7 +2,8 @@
   import { api, ApiError } from '../lib/api';
   import type { Me, Transfer } from '../lib/types';
   import { teamHref, transfersHref, zoneHref } from '../lib/router.svelte';
-  import { canReject, decisionRule, isRequester } from '../lib/teams';
+  import { canReject, decisionOutcome, decisionRule, isRequester } from '../lib/teams';
+  import { transferOf } from '../lib/http';
   import { inbox } from '../lib/inbox.svelte';
   import TeamsNav from '../components/teams/TeamsNav.svelte';
   import TransferBadge from '../components/teams/TransferBadge.svelte';
@@ -19,6 +20,7 @@
   let note = $state('');
   let busy = $state<'approve' | 'reject' | null>(null);
   let actionError = $state<string | null>(null);
+  let retrying = $state(false);
 
   $effect(() => {
     api.transfer(id).then((x) => (t = x)).catch((e: Error) => (error = e.message));
@@ -36,32 +38,26 @@
     }
     busy = approve ? 'approve' : 'reject';
     actionError = null;
+    retrying = false;
     try {
       t = await api.decideTransfer(t.id, approve, note.trim());
       note = '';
     } catch (e) {
       if (e instanceof ApiError && e.reason === 'reauth_required') return;
-      actionError = decideError(e);
-      t = await api.transfer(id).catch(() => t);
+      if (!(e instanceof ApiError)) {
+        actionError = (e as Error).message;
+        return;
+      }
+      // a failed or applying transfer comes back with the refusal; otherwise it was decided meanwhile
+      const returned = transferOf(e);
+      if (returned) t = returned;
+      else if (e.status === 412 || e.status === 410) t = await api.transfer(id).catch(() => t);
+      const o = decisionOutcome(e, returned);
+      actionError = o.text;
+      retrying = o.retrying;
     } finally {
       busy = null;
       void inbox.load(true);
-    }
-  }
-
-  function decideError(e: unknown): string {
-    if (!(e instanceof ApiError)) return (e as Error).message;
-    switch (e.reason) {
-      case 'precondition':
-        return `Not applied: ${e.message}. Nothing moved; ask for a new transfer if it is still needed.`;
-      case 'expired':
-        return 'This request expired before it was decided: ask for a new one.';
-      case 'forbidden':
-        return e.message;
-      case 'zone_locked':
-        return 'Another change is being written to this zone: try again in a minute. The request is still waiting.';
-      default:
-        return e.message;
     }
   }
 </script>
@@ -133,6 +129,8 @@
           <li class="done"><span class="node"></span><div>Applied: {t.moved ?? 0} moved to team {t.to_team}</div></li>
         {:else if t.status === 'failed'}
           <li class="reject"><span class="node"></span><div>Not applied: {t.error ?? 'the record sets changed since the request'}</div></li>
+        {:else if t.status === 'applying'}
+          <li class="wait"><span class="node"></span><div>Being applied to team {t.to_team}{#if t.error}<p class="say retry">Last attempt: {t.error}</p>{/if}<p class="dim small">The gate retries on its own while the zone is locked or the provider or store is unavailable, for a day, then marks it failed.</p></div></li>
         {:else if t.status === 'expired'}
           <li class="reject"><span class="node"></span><div>Expired <RelTime iso={t.expires_at} /> without a decision</div></li>
         {:else if t.status === 'proposed'}
@@ -155,7 +153,7 @@
           </div>
         {/if}
       {/if}
-      {#if actionError}<p class="fail" role="alert">{actionError}</p>{/if}
+      {#if actionError}<p class={retrying ? 'retrying' : 'fail'} role={retrying ? 'status' : 'alert'}>{actionError}</p>{/if}
     </aside>
   </div>
 {/if}
@@ -370,6 +368,11 @@
   }
   .fail {
     color: var(--wax);
+    font-size: 13px;
+  }
+  .retrying,
+  .retry {
+    color: var(--brass);
     font-size: 13px;
   }
 </style>

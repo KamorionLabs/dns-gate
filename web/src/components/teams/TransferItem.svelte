@@ -26,8 +26,9 @@
     {#if t.decided_by}· <ActorChip actor={t.decided_by} quiet /> {t.status === 'rejected' ? 'rejected' : 'decided'} <RelTime iso={t.decided_at} />{/if}
     {#if t.status === 'proposed'}· expires <RelTime iso={t.expires_at} />{/if}
     {#if t.status === 'failed' && t.error}· <span class="err">{t.error}</span>{/if}
+    {#if t.status === 'applying' && t.error}· <span class="retry">retrying: {t.error}</span>{/if}
   </div>
-  {#if t.status === 'proposed'}<p class="rule" class:you={t.can_decide}>{decisionRule(t, me)}</p>{/if}
+  {#if t.status === 'proposed' || t.status === 'applying'}<p class="rule" class:you={t.can_decide}>{decisionRule(t, me)}</p>{/if}
 </li>
 
 <style>
@@ -88,6 +89,9 @@
   }
   .err {
     color: var(--wax);
+  }
+  .retry {
+    color: var(--brass);
   }
   .rule {
     color: var(--ink-3);

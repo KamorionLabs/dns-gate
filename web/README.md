@@ -56,7 +56,8 @@ team of the record sets it changes, or, for new record sets only, the one it pic
 in the review (its `default_team` first).
 
 Teams come from `GET /api/v1/teams[/{team}]`, transfers from
-`/api/v1/transfers` (`can_decide` marks those the user may approve) and
+`/api/v1/transfers` (`can_decide` marks those the user may approve; an approval
+answered `412`, `423` or `502` carries the transfer, `failed` or still `applying`) and
 `POST /api/v1/zones/{zone}/transfers`; a transfer selects record sets (or
 reservations) of one owner team in the zone view.
 

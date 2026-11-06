@@ -3,7 +3,7 @@
   import type { Me, TeamDetail, TeamInfo } from '../lib/types';
   import { teamsHref, transferHref, transfersHref, zoneHref } from '../lib/router.svelte';
   import { describePermissions } from '../lib/permissions';
-  import { concreteTeams, teamOrigin } from '../lib/teams';
+  import { concreteTeams, renameRule, teamOrigin } from '../lib/teams';
   import { policyState } from '../lib/policy.svelte';
   import { teamFromText } from '../lib/team';
   import TeamsNav from '../components/teams/TeamsNav.svelte';
@@ -33,7 +33,7 @@
     (d?.roles ?? []).map((r) => ({ role: r, allows: d?.permissions ? describePermissions(d.permissions.filter((p) => p.role === r)) : [] })),
   );
 
-  // Rename, for policy proposers: approved by another policy approver.
+  // Rename, for policy proposers: approved by another policy approver holding dns.ownership.approve on the team's record sets.
   const canRename = $derived(!!policyState.data?.me.can_propose);
   let renameOpen = $state(false);
   let renameTo = $state('');
@@ -162,8 +162,8 @@
         <section class="rename">
           <h2>Rename</h2>
           <p class="dim small">
-            Moves every record set and reservation of team {team}, in every managed zone, to another team. Another policy approver must approve it. The
-            policy still names {team}: change its bindings in a policy revision too.
+            Moves every record set and reservation of team {team}, in every zone, to another team. It must be approved by {renameRule}. The policy
+            still names {team}: change its bindings in a policy revision too.
           </p>
           {#if !renameOpen}
             <button class="btn" type="button" onclick={() => (renameOpen = true)}><Icon name="transfer" size={14} />Rename {team}…</button>

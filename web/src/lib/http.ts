@@ -7,12 +7,15 @@ export class ApiError extends Error {
   readonly reason: string;
   readonly errors: ValidationError[];
   readonly details?: unknown;
-  constructor(status: number, reason: string, message: string, errors: ValidationError[] = [], details?: unknown) {
+  /** The whole JSON error body, for the fields some endpoints add (the transfer of a failed approval). */
+  readonly body?: Record<string, unknown>;
+  constructor(status: number, reason: string, message: string, errors: ValidationError[] = [], details?: unknown, body?: Record<string, unknown>) {
     super(message);
     this.status = status;
     this.reason = reason;
     this.errors = errors;
     this.details = details;
+    this.body = body;
   }
 }
 
@@ -52,17 +55,19 @@ export function createRequest(deps: HttpDeps): Request {
       let message = res.statusText || `HTTP ${res.status}`;
       let errors: ValidationError[] = [];
       let details: unknown;
+      let body: Record<string, unknown> | undefined;
       try {
         const b = (await res.json()) as { reason?: string; message?: string; errors?: ValidationError[]; details?: unknown };
         reason = b.reason ?? reason;
         message = b.message ?? message;
         errors = b.errors ?? [];
         details = b.details;
+        body = b as Record<string, unknown>;
       } catch {
         // non-JSON error body
       }
       if (res.status === 403 && reason === 'reauth_required') deps.onReauth();
-      throw new ApiError(res.status, reason, message, errors, details);
+      throw new ApiError(res.status, reason, message, errors, details, body);
     }
     return (text ? await res.text() : await res.json()) as T;
   };
@@ -97,10 +102,21 @@ function query(q: object): string {
   return s ? '?' + s : '';
 }
 
+// the Go side may send null lists
+const normT = (t: Transfer): Transfer => ({ ...t, rrsets: t.rrsets ?? [] });
+
+/**
+ * The transfer an approval refusal carries: failed (412, its record sets
+ * changed) or still applying (423 zone locked, 502 provider or store
+ * unavailable, retried by the gate).
+ */
+export function transferOf(e: unknown): Transfer | undefined {
+  const t = e instanceof ApiError ? e.body?.transfer : undefined;
+  return t && typeof t === 'object' ? normT(t as Transfer) : undefined;
+}
+
 /** Teams and ownership transfers. */
 export function teamsApi(request: Request) {
-  // the Go side may send null lists
-  const normT = (t: Transfer): Transfer => ({ ...t, rrsets: t.rrsets ?? [] });
   const tr = '/api/v1/transfers/';
   return {
     teams: () => request<TeamList>('GET', '/api/v1/teams').then((l) => ({ ...l, teams: (l.teams ?? []).map((t) => ({ ...t, roles: t.roles ?? [] })) })),

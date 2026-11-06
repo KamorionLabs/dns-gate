@@ -18,7 +18,7 @@
     white-space: nowrap;
   }
   .proposed,
-  .approved {
+  .applying {
     color: var(--brass);
     background: var(--brass-wash);
   }

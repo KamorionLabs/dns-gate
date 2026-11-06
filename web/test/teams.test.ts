@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   canReject,
+  decisionOutcome,
   decisionRule,
   ownership,
   pickable,
@@ -15,7 +16,7 @@ import {
   transferTargets,
 } from '../src/lib/teams.ts';
 import type { StagedChange } from '../src/lib/staging.ts';
-import { createRequest, dnsWrites, teamsApi } from '../src/lib/http.ts';
+import { createRequest, dnsWrites, teamsApi, transferOf } from '../src/lib/http.ts';
 import type { Me, RRset, TeamInfo, Tombstone, Transfer } from '../src/lib/types.ts';
 
 const rr = (o: Partial<RRset> & { host: string; type: string }): RRset => ({
@@ -159,16 +160,23 @@ const transfer = (o: Partial<Transfer>): Transfer => ({
 });
 
 test('the approval rule is explained to whoever looks at a transfer', () => {
-  assert.equal(decisionRule(transfer({ can_decide: true }), me), 'You can approve it as a member of team web allowed to write in example.com.');
-  assert.equal(decisionRule(transfer({ can_decide: true, from_team: 'corporate' }), approver), 'You can approve it as a holder of dns.ownership.approve on example.com.');
+  assert.equal(
+    decisionRule(transfer({ can_decide: true }), me),
+    'You can approve it: for every record set of the request, you may write it through team web or hold dns.ownership.approve on it.',
+  );
+  assert.equal(decisionRule(transfer({ can_decide: true, from_team: 'corporate' }), approver), 'You can approve it as a holder of dns.ownership.approve on every record set of the request.');
   const mine = transfer({ requester: { subject: 'entra:alice', name: 'alice', category: 'human' } });
-  assert.match(decisionRule(mine, me), /^You requested it: a second person must approve it\. You can withdraw it\./);
+  assert.match(decisionRule(mine, me), /^You requested it: another person than the requester who, for every record set of the request, may write it through the roles of team web or holds dns.ownership.approve on it must approve it\. You can withdraw it\./);
   assert.equal(
     decisionRule(transfer({ from_team: 'corporate' }), reader),
-    'Approval needs a member of team corporate allowed to write in example.com, or a holder of dns.ownership.approve on it, other than the requester.',
+    'Approval needs another person than the requester who, for every record set of the request, may write it through the roles of team corporate or holds dns.ownership.approve on it.',
   );
-  assert.match(decisionRule(transfer({ kind: 'rename', zone: undefined, can_decide: true }), me), /policy.approve/);
-  assert.match(decisionRule(transfer({ kind: 'rename', zone: undefined }), reader), /approved by a holder of policy.approve other than the requester/);
+  // a member of the owner team who cannot decide: a record set outside its rights, or its own request under another identity
+  assert.match(decisionRule(transfer({}), me), /You cannot approve it: you lack that right on one of its record sets, or you asked for it under another identity\./);
+  assert.match(decisionRule(transfer({}), { ...me, category: 'pipeline' }), /Pipelines and API keys do not approve unless the gate allows machine approvers\./);
+  assert.match(decisionRule(transfer({ kind: 'rename', zone: undefined, can_decide: true }), me), /policy.approve.*dns.ownership.approve on every record set of team web/);
+  assert.match(decisionRule(transfer({ kind: 'rename', zone: undefined }), reader), /^Approval needs another person than the requester holding policy.approve, and dns.ownership.approve on every record set of the team\.$/);
+  assert.match(decisionRule(transfer({ status: 'applying' }), me), /retries on its own/);
   assert.equal(decisionRule(transfer({ status: 'applied' }), me), '');
 
   assert.equal(canReject(transfer({ can_decide: true }), me), true);
@@ -188,6 +196,18 @@ test('team and transfer lookups are reads in the journal, transfer decisions are
   assert.equal(isRead({ ...base, action: 'gate.transfer.apply', changes: [{ op: 'transfer', host: 'www', type: 'CNAME' }] }), false);
   assert.equal(actionLabel('gate.transfer.apply'), 'Ownership transfer');
   assert.equal(actionLabel('mcp.transfer_propose'), 'Transfer request (assistant)');
+});
+
+test('an approval the gate could not complete says whether it is retried or failed', () => {
+  const locked = { reason: 'zone_locked', message: 'zone example.com is locked' };
+  const retry = decisionOutcome(locked, transfer({ status: 'applying', error: 'zone example.com is locked' }));
+  assert.equal(retry.retrying, true);
+  assert.match(retry.text, /^Approved, not applied yet: zone example.com is locked\. The gate retries it on its own/);
+  const failed = decisionOutcome({ reason: 'precondition', message: 'www CNAME changed' }, transfer({ status: 'failed', error: 'www CNAME changed since the request' }));
+  assert.deepEqual(failed, { retrying: false, text: 'Not applied: www CNAME changed since the request. Nothing moved; ask for a new transfer if it is still needed.' });
+  assert.match(decisionOutcome({ reason: 'precondition', message: 'transfer tr-1 is applied' }).text, /decided meanwhile/);
+  assert.match(decisionOutcome({ reason: 'expired', message: 'x' }).text, /expired/);
+  assert.equal(decisionOutcome({ reason: 'forbidden', message: 'the requester cannot approve its own transfer' }).text, 'the requester cannot approve its own transfer');
 });
 
 test('team origins read as sentences', () => {
@@ -234,6 +254,8 @@ test('teams and transfers go to their endpoints, with the CSRF header on decisio
     { status: 200, body: { ...t, status: 'rejected' } },
     { status: 201, body: { ...t, kind: 'rename' } },
     { status: 412, body: { reason: 'precondition', message: 'www CNAME changed since the request', transfer: { ...t, status: 'failed' } } },
+    { status: 502, body: { reason: 'upstream', message: 'provider unavailable', transfer: { ...t, status: 'applying', error: 'provider unavailable' } } },
+    { status: 403, body: { reason: 'forbidden', message: 'no' } },
   ]);
   const a = teamsApi(createRequest(deps(m.fn)));
   const list = await a.teams();
@@ -256,5 +278,17 @@ test('teams and transfers go to their endpoints, with the CSRF header on decisio
   await a.renameTeam('data', 'platform', 'merged');
   assert.equal(m.calls[6]!.url, '/api/v1/teams/data/rename');
   assert.deepEqual(JSON.parse(m.calls[6]!.init.body as string), { to: 'platform', comment: 'merged' });
-  await assert.rejects(a.decideTransfer('tr-1', true, ''), (e: unknown) => (e as { reason: string }).reason === 'precondition');
+  await assert.rejects(a.decideTransfer('tr-1', true, ''), (e: unknown) => {
+    assert.equal((e as { reason: string }).reason, 'precondition');
+    assert.equal(transferOf(e)?.status, 'failed');
+    assert.deepEqual(transferOf(e)?.rrsets, []);
+    return true;
+  });
+  await assert.rejects(a.decideTransfer('tr-1', true, ''), (e: unknown) => {
+    const back = transferOf(e);
+    assert.equal(back?.status, 'applying');
+    assert.equal(back?.error, 'provider unavailable');
+    return true;
+  });
+  await assert.rejects(a.decideTransfer('tr-1', true, ''), (e: unknown) => transferOf(e) === undefined);
 });

@@ -602,7 +602,8 @@ export interface TeamDetail extends TeamInfo {
   permissions?: Permission[];
 }
 
-export type TransferStatus = 'proposed' | 'approved' | 'applied' | 'rejected' | 'expired' | 'failed';
+/** applying: approved, being applied or retried by the gate (error holds the last transient error). */
+export type TransferStatus = 'proposed' | 'applying' | 'applied' | 'rejected' | 'expired' | 'failed';
 
 export interface TransferRRset {
   host: string;
@@ -628,6 +629,7 @@ export interface Transfer {
   decided_at?: string;
   decision_comment?: string;
   moved?: number;
+  /** Why a failed transfer was not applied, or the last transient error of an applying one. */
   error?: string;
   can_decide: boolean;
 }

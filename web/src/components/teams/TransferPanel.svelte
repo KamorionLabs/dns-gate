@@ -2,7 +2,7 @@
   import { api, ApiError } from '../../lib/api';
   import type { Me, RRsetRef, TeamInfo, Transfer } from '../../lib/types';
   import { transferHref } from '../../lib/router.svelte';
-  import { OWNERSHIP_APPROVE, transferAllowed, transferTargets } from '../../lib/teams';
+  import { transferAllowed, transferRule, transferTargets } from '../../lib/teams';
   import SidePanel from '../SidePanel.svelte';
   import Icon from '../Icon.svelte';
 
@@ -71,8 +71,7 @@
     <section class="done">
       <p class="big"><Icon name="check" size={16} /> Request sent</p>
       <p>
-        Nothing moved yet. A member of team <b>{from}</b> allowed to write in {zone}, or a holder of {OWNERSHIP_APPROVE}, must approve it; not you. It expires
-        if nobody decides in time.
+        Nothing moved yet. It must be approved by {transferRule(from)}: not you, nor you under another identity. It expires if nobody decides in time.
       </p>
       <p><a href={transferHref(done.id)}>Open the request</a> to follow it or withdraw it.</p>
       <button class="btn" type="button" onclick={onclose}>Close</button>
@@ -110,8 +109,7 @@
         <textarea id="tr-why" class="in" rows="3" bind:value={comment} placeholder="The site moves to its own pipeline, records first adopted by the wrong team…"></textarea>
       </div>
       <p class="hint">
-        A second person approves: a member of team {from} allowed to write in this zone, or a holder of {OWNERSHIP_APPROVE}. On approval the record sets move at
-        once, if none changed since this request.
+        Approval comes from {transferRule(from)}. On approval the record sets move at once, if none changed since this request.
       </p>
       {#if error}<p class="err" role="alert">{error}</p>{/if}
       <div class="actions">
