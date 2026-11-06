@@ -66,7 +66,7 @@ not know.
 | `provider` | string | optional | Provider id (`providers[].id`) of the zone, on engine events. |
 | `decision` | string | always | `allow`, `deny` (refused by the gate) or `error` (accepted but failed: upstream, lock, validation). |
 | `reason` | string | optional | Machine-readable reason. It is set on `deny` and `error`, and on two kinds of `allow` (see [Reasons](#reasons)). |
-| `changes` | object[] | optional | RRset changes: `op` (`create`, `update`, `delete`, `adopt`, `taint`, `expire`, `transfer`), `host`, `type`, `old_ttl`, `old_values`, `old_alias`, `new_ttl`, `new_values`, `new_alias`. `host` is relative to the zone (`@` for the apex). |
+| `changes` | object[] | optional | RRset changes: `op` (`create`, `update`, `delete`, `adopt`, `taint`, `expire`, `transfer`), `host`, `type`, `old_ttl`, `old_values`, `old_alias`, `old_forward`, `new_ttl`, `new_values`, `new_alias`, `new_forward`. `host` is relative to the zone (`@` for the apex). URL forwards are changes of type `URLFWD` whose `old_forward`/`new_forward` hold `type` (`301`, `302`, `frame`), `url` and, for frames, `title`, `keywords`, `description`. |
 | `snapshot_id` | string | optional | Provider snapshot taken before a write (EuroDNS). It is a rollback pointer. |
 | `extra` | object | optional | Action-specific details, see [Extra](#extra). |
 | `instance_id`, `seq`, `prev_hash`, `hash_alg`, `hash` | | stdout, `hash_chain` | See [Tamper evidence](#tamper-evidence). |
@@ -130,6 +130,7 @@ Refused authentications on this API carry the operation id of the request.
 | `api.plan` | REST dry run (`POST /api/v1/zones/{zone}/plan`). `extra.allowed` false with a `reason` when the plan would be refused. | allow | yes |
 | `api.apply` | REST apply of a plan. | allow, deny, error | yes |
 | `api.rrset.put`, `api.rrset.delete` | REST single-RRset write refused before the engine (step-up). | deny | yes |
+| `api.forward.put`, `api.forward.delete` | REST URL forward write refused before the engine (step-up), with `extra.host` and `extra.type` (`URLFWD`). The write itself is `applyRRsets` with a `URLFWD` change. | deny | yes |
 | `adopt` | Adoption entry point refused (authentication, RBAC). | deny | yes |
 | `gate.adopt` | RRsets created outside the gate taken over. | allow, deny, error | yes |
 | `gate.taint` | The reconciler found an owned RRset changed or deleted outside the gate. | allow (reason `tainted`) | yes |
@@ -186,6 +187,7 @@ key, `api-key:<id>`, when the id was readable):
 | `plan_not_found`, `plan_expired`, `store_unavailable`, `team_mismatch` | deny | Plan apply refused. |
 | `not_team_member` | deny | Requested team is not one of the subject's teams. |
 | `invalid_zone` | error | Provider or validation refusal of the content. |
+| `https_unavailable` | error | `require_https` on a URL forward of a zone whose forwards answer plain HTTP only. |
 | `zone_locked` | error | Zone lock not acquired, or a previous write not settled. |
 | `upstream` | error | Provider or store failure. |
 | `not_found` | error | Zone, RRset or record absent. |
@@ -219,7 +221,8 @@ be refused, they carry the engine reason with `extra.allowed: false`.
 | `app_id`, `key_sha256` | `policy.generate_key` | Virtual key id and SHA-256 of its secret. |
 | `transfer_id`, `requester`, `requester_name`, `decided_by`, `decided_by_name`, `approval`, `moved`, `comment`, `status`, `apply` | `gate.transfer.*`, `mcp.transfer_*` | Transfer request, who decided it, `approval` `self` or `second`, RRsets moved. |
 | `comment`, `owner`, `adopted` | `gate.adopt`, `mcp.adopt_apply` | Adoption comment, owner team, count. |
-| `ignored_out_of_scope` | writes | Out-of-scope differences skipped by a rebase. |
+| `ignored_out_of_scope` | writes | Out-of-scope differences skipped by a rebase, and changes of forward fields the gate does not write (`id`, `updated`, unknown fields) in a full-zone PUT. |
+| `zone_admin_forwards` | writes (EuroDNS full-zone PUT) | Unowned URL forwards a `dns.zone.admin` holder changed or deleted (`<host> URLFWD`); they stay unowned. |
 | `folder` | writes, adoptions, transfers | EuroDNS folder whose role rule granted the action. |
 | `old`, `new`, `count`, `digest` | `gate.zone.folder_*` | Folder before and after; zone count and digest of a first listing. |
 

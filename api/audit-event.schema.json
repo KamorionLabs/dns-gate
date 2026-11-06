@@ -55,6 +55,17 @@
         "evaluate_target_health": { "type": "boolean" }
       }
     },
+    "forward": {
+      "type": "object",
+      "required": ["type", "url"],
+      "properties": {
+        "type": { "type": "string", "description": "301, 302 or frame." },
+        "url": { "type": "string" },
+        "title": { "type": "string" },
+        "keywords": { "type": "string" },
+        "description": { "type": "string" }
+      }
+    },
     "change": {
       "type": "object",
       "required": ["op", "host", "type"],
@@ -66,9 +77,11 @@
         "old_ttl": { "type": "integer" },
         "old_values": { "type": "array", "items": { "type": "string" } },
         "old_alias": { "$ref": "#/$defs/alias" },
+        "old_forward": { "$ref": "#/$defs/forward" },
         "new_ttl": { "type": "integer" },
         "new_values": { "type": "array", "items": { "type": "string" } },
-        "new_alias": { "$ref": "#/$defs/alias" }
+        "new_alias": { "$ref": "#/$defs/alias" },
+        "new_forward": { "$ref": "#/$defs/forward" }
       }
     }
   }

@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/jsonschema-go/jsonschema"
 
+	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 )
 
@@ -115,6 +116,11 @@ func sampleEvents() []Event {
 			Extra: map[string]any{"key_id": "k2", "team": "web", "role": "writer", "via": "api"}},
 		{RequestID: "r4", Subject: "idp:ci", SubjectCategory: "pipeline", Action: "policy.activate", Decision: "deny", Reason: "conflict"},
 		{RequestID: "r5", Subject: "gate:reconciler", SubjectCategory: "system", Action: "gate.expire", Zone: "example.org", Decision: "error", Reason: "upstream"},
+		{RequestID: "r6", Subject: "idp:alice", SubjectCategory: "human", Action: "applyRRsets", Zone: "example.com", Decision: "allow",
+			Changes: []uiapi.Change{{Op: "update", Host: "go", Type: dns.TypeURLForward,
+				OldForward: &dns.Forward{Mode: "301", URL: "https://example.net/"},
+				NewForward: &dns.Forward{Mode: "frame", URL: "https://example.net/", Title: "Example"}}},
+			Extra: map[string]any{"zone_admin_forwards": []string{"old URLFWD"}}},
 	}
 }
 
