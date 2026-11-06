@@ -75,11 +75,13 @@ const (
 )
 
 // Transfer statuses. Approval applies the transfer at once: a transfer is
-// applied, or failed when its RRsets changed since the request; approved
-// only lasts while it is applied.
+// applied, or failed when its RRsets changed since the request. It stays
+// applying while the apply cannot run (zone locked, store or provider
+// unavailable, gate restarted): the gate retries it in the background for
+// a day, then marks it failed.
 const (
 	TransferProposed = "proposed"
-	TransferApproved = "approved"
+	TransferApplying = "applying"
 	TransferApplied  = "applied"
 	TransferRejected = "rejected"
 	TransferExpired  = "expired"

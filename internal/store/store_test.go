@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -724,6 +725,10 @@ func reassignConformance(t *testing.T, s Store, clock *fakeClock) {
 	}
 	if cur, _ := s.GetTombstone(ctx, z, "c", "A"); cur.Team != "ops" {
 		t.Fatalf("tombstone not reassigned: %+v", cur)
+	}
+	zones, err := s.ListOwnedZones(ctx)
+	if err != nil || !slices.Contains(zones, z) || !slices.Contains(zones, "tomb.example.com") || !slices.IsSorted(zones) {
+		t.Fatalf("owned zones %v %v", zones, err)
 	}
 	if err := s.Reassign(ctx, "web", nil, []Tombstone{moved}); !errors.Is(err, ErrConflict) {
 		t.Fatalf("tombstone of another team: %v", err)

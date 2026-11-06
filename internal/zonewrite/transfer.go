@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -264,47 +265,112 @@ func (e *engine) DecideTransfer(ctx context.Context, s *identity.Subject, id str
 		e.emit(ctx, s, action, t.Zone, "allow", "", transferChanges(*t), "", transferExtra(*t))
 		return e.transferView(s, *t), nil
 	}
-	t.Status = uiapi.TransferApproved
+	t.Status = uiapi.TransferApplying
 	if err := e.updateTransfer(ctx, t); err != nil {
 		return nil, err
 	}
 	e.emit(ctx, s, action, t.Zone, "allow", "", transferChanges(*t), "", transferExtra(*t))
+	err = e.runApply(ctx, s, t)
+	return e.transferView(s, *t), err
+}
+
+// TransferRetrier retries the approved transfers whose apply did not run to
+// its end (the engine returned by New implements it).
+type TransferRetrier interface {
+	// RetryTransfers applies the transfers left applying, and fails those
+	// approved more than transferApplyDeadline ago. It returns how many
+	// were applied.
+	RetryTransfers(ctx context.Context) (int, error)
+}
+
+var _ TransferRetrier = (*engine)(nil)
+
+// transferApplyDeadline is how long an approved transfer is retried.
+const transferApplyDeadline = 24 * time.Hour
+
+func (e *engine) RetryTransfers(ctx context.Context) (int, error) {
+	list, _, err := e.cfg.Store.ListTransfers(ctx, store.TransferQuery{Status: uiapi.TransferApplying, Limit: 500})
+	if err != nil {
+		return 0, err
+	}
+	applied := 0
+	for i := range list {
+		t := &list[i]
+		if ctx.Err() != nil {
+			return applied, ctx.Err()
+		}
+		ctx := WithRequestID(ctx, newID())
+		if t.DecidedAt != nil && e.now().Sub(*t.DecidedAt) > transferApplyDeadline {
+			t.Status = uiapi.TransferFailed
+			if t.Error == "" {
+				t.Error = "not applied within " + transferApplyDeadline.String() + " of the approval"
+			} else {
+				t.Error = "not applied within " + transferApplyDeadline.String() + " of the approval: " + t.Error
+			}
+			if err := e.updateTransfer(ctx, t); err == nil {
+				e.emit(ctx, reconcilerSubject, actionTransferApply, t.Zone, "error", string(ReasonExpired), nil, "", withMessage(transferExtra(*t), errors.New(t.Error)))
+			}
+			continue
+		}
+		if err := e.runApply(ctx, reconcilerSubject, t); err == nil {
+			applied++
+		}
+	}
+	return applied, nil
+}
+
+// runApply applies an approved transfer and records the outcome: applied,
+// failed when its RRsets changed, still applying after a transient error
+// (retried by RetryTransfers). A concurrent run that finished first wins:
+// its outcome is kept and nothing is audited twice.
+func (e *engine) runApply(ctx context.Context, actor *identity.Subject, t *store.Transfer) error {
 	var moved int
 	var applyErr error
 	if t.Kind == uiapi.TransferKindRename {
-		moved, applyErr = e.applyRename(ctx, s, *t)
+		moved, applyErr = e.applyRename(ctx, actor, *t)
+		t.Moved += moved
 	} else {
-		moved, applyErr = e.applyTransfer(ctx, s, *t)
+		moved, applyErr = e.applyTransfer(ctx, actor, *t)
+		t.Moved = moved
 	}
-	t.Moved, t.Status = moved, uiapi.TransferApplied
-	if applyErr != nil {
-		t.Status, t.Error = uiapi.TransferFailed, applyErr.Error()
-		if ze, ok := AsError(applyErr); ok {
-			t.Error = ze.Message
-		}
-		if retryable(applyErr) && moved == 0 {
-			t.Status, t.Error = uiapi.TransferProposed, ""
-			t.DecidedBy, t.DecidedByName, t.DecidedByCategory, t.DecidedAt, t.DecisionComment = "", "", "", nil, ""
-		}
+	t.Error = ""
+	switch {
+	case applyErr == nil:
+		t.Status = uiapi.TransferApplied
+	case retryable(applyErr):
+		t.Error = errorText(applyErr)
+	default:
+		t.Status, t.Error = uiapi.TransferFailed, errorText(applyErr)
 	}
 	if err := e.updateTransfer(ctx, t); err != nil {
-		e.log.Error("transfer status update failed", "transfer", t.ID, "status", t.Status, "error", err)
-	}
-	if applyErr != nil {
-		if t.Kind == uiapi.TransferKindRRsets {
-			e.emit(ctx, s, actionTransferApply, t.Zone, "deny", reasonText(applyErr), nil, "", withMessage(transferExtra(*t), applyErr))
+		e.log.Warn("transfer status update failed", "transfer", t.ID, "status", t.Status, "error", err)
+		if applyErr == nil {
+			return err
 		}
-		return e.transferView(s, *t), applyErr
+		return applyErr
 	}
-	if t.Kind == uiapi.TransferKindRRsets {
-		e.emit(ctx, s, actionTransferApply, t.Zone, "allow", "", transferChanges(*t), "", transferExtra(*t))
+	switch {
+	case applyErr == nil && t.Kind == uiapi.TransferKindRRsets:
+		e.emit(ctx, actor, actionTransferApply, t.Zone, "allow", "", transferChanges(*t), "", transferExtra(*t))
+	case applyErr != nil && t.Kind == uiapi.TransferKindRRsets:
+		decision := "deny"
+		if retryable(applyErr) {
+			decision = "error"
+		}
+		e.emit(ctx, actor, actionTransferApply, t.Zone, decision, reasonText(applyErr), nil, "", withMessage(transferExtra(*t), applyErr))
 	}
-	return e.transferView(s, *t), nil
+	return applyErr
 }
 
-// retryable tells whether an apply failed before changing anything for a
-// transient reason (zone locked, store or provider unavailable): the
-// request then stays proposed.
+func errorText(err error) string {
+	if ze, ok := AsError(err); ok {
+		return ze.Message
+	}
+	return err.Error()
+}
+
+// retryable tells whether an apply failed for a transient reason (zone
+// locked, store or provider unavailable): the transfer stays applying.
 func retryable(err error) bool {
 	ze, ok := AsError(err)
 	return ok && (ze.Reason == ReasonLocked || ze.Reason == ReasonUpstream)
@@ -362,14 +428,20 @@ func (e *engine) applyTransfer(ctx context.Context, s *identity.Subject, t store
 		k := dns.Key{Host: it.Host, Type: it.Type}
 		if it.Tombstone {
 			tb, ok := tombs[k]
-			if !ok || tb.Team != t.FromTeam {
+			switch {
+			case ok && tb.Team == t.ToTeam:
+			case ok && tb.Team == t.FromTeam:
+				tb.Team = t.ToTeam
+				moveTombs = append(moveTombs, tb)
+			default:
 				return 0, fail(ReasonPrecondition, "%s is no longer reserved for team %s", keyString(k), t.FromTeam)
 			}
-			tb.Team = t.ToTeam
-			moveTombs = append(moveTombs, tb)
 			continue
 		}
 		o, ok := owns[k]
+		if ok && o.Owner == t.ToTeam && o.State == store.StateActive && o.ContentHash == it.ContentHash {
+			continue
+		}
 		set, _, present := findSet(sets, k)
 		switch {
 		case !ok || o.Owner != t.FromTeam:
@@ -383,13 +455,39 @@ func (e *engine) applyTransfer(ctx context.Context, s *identity.Subject, t store
 		setActor(&o, s, rid, now)
 		moveOwns = append(moveOwns, o)
 	}
-	if err := e.cfg.Store.Reassign(ctx, t.FromTeam, moveOwns, moveTombs); err != nil {
-		if errors.Is(err, store.ErrConflict) {
-			return 0, fail(ReasonPrecondition, "an RRset of the transfer changed during the apply")
-		}
-		return 0, &Error{Reason: ReasonUpstream, Message: "store reassign failed", Err: err}
+	if len(moveOwns)+len(moveTombs) == 0 {
+		return len(t.Items), nil
 	}
-	return len(moveOwns) + len(moveTombs), nil
+	err = e.cfg.Store.Reassign(ctx, t.FromTeam, moveOwns, moveTombs)
+	switch {
+	case err == nil:
+		return len(t.Items), nil
+	case errors.Is(err, store.ErrConflict):
+		return 0, fail(ReasonPrecondition, "an RRset of the transfer changed during the apply")
+	}
+	if e.transferDone(ctx, zone, t) {
+		return len(t.Items), nil
+	}
+	return 0, &Error{Reason: ReasonUpstream, Message: "store reassign failed: " + err.Error(), Err: err}
+}
+
+// transferDone reports whether every RRset of t already belongs to its
+// target team: a reassignment that returned an error may have committed.
+func (e *engine) transferDone(ctx context.Context, zone string, t store.Transfer) bool {
+	for _, it := range t.Items {
+		if it.Tombstone {
+			tb, err := e.cfg.Store.GetTombstone(ctx, zone, it.Host, it.Type)
+			if err != nil || tb.Team != t.ToTeam {
+				return false
+			}
+			continue
+		}
+		o, err := e.cfg.Store.Get(ctx, zone, it.Host, it.Type)
+		if err != nil || o.Owner != t.ToTeam {
+			return false
+		}
+	}
+	return true
 }
 
 // applyRename moves every RRset and tombstone of a team in every managed
@@ -399,7 +497,11 @@ func (e *engine) applyTransfer(ctx context.Context, s *identity.Subject, t store
 func (e *engine) applyRename(ctx context.Context, s *identity.Subject, t store.Transfer) (int, error) {
 	moved := 0
 	now, rid := e.now(), RequestID(ctx)
-	for _, zone := range e.zones.ManagedZones() {
+	zones, err := e.renameZones(ctx)
+	if err != nil {
+		return 0, err
+	}
+	for _, zone := range zones {
 		n, changes, err := e.renameZone(ctx, s, t, zone, now, rid)
 		moved += n
 		if len(changes) > 0 {
@@ -448,7 +550,7 @@ func (e *engine) renameZone(ctx context.Context, s *identity.Subject, t store.Tr
 		no := min(len(owns), store.MaxReassign)
 		nt := min(len(tombs), store.MaxReassign-no)
 		if err := e.cfg.Store.Reassign(ctx, t.FromTeam, owns[:no], tombs[:nt]); err != nil {
-			return moved, changes, &Error{Reason: ReasonPrecondition, Message: fmt.Sprintf("rename stopped in %s after %d RRsets: %v", zone, moved, err), Err: err}
+			return moved, changes, &Error{Reason: ReasonUpstream, Message: fmt.Sprintf("rename interrupted in %s after %d RRsets (retried): %v", zone, moved, err), Err: err}
 		}
 		for _, o := range owns[:no] {
 			changes = append(changes, uiapi.Change{Op: "transfer", Host: o.Host, Type: o.Type})
@@ -462,9 +564,25 @@ func (e *engine) renameZone(ctx context.Context, s *identity.Subject, t store.Tr
 	return moved, changes, nil
 }
 
-// renameZones returns the zones a rename covers.
+// renameZones returns the zones a rename covers: the managed zones and
+// every zone where the store holds ownership entries or tombstones.
 func (e *engine) renameZones(ctx context.Context) ([]string, error) {
-	return e.zones.ManagedZones(), nil
+	stored, err := e.cfg.Store.ListOwnedZones(ctx)
+	if err != nil {
+		return nil, &Error{Reason: ReasonUpstream, Message: "store zone listing failed", Err: err}
+	}
+	set := map[string]bool{}
+	var out []string
+	for _, list := range [][]string{e.zones.ManagedZones(), stored} {
+		for _, z := range list {
+			if !set[z] {
+				set[z] = true
+				out = append(out, z)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out, nil
 }
 
 // renameAllowed checks that the approver of a rename holds

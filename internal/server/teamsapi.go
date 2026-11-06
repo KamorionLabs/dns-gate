@@ -177,9 +177,9 @@ func (s *Server) handleTransfers(w http.ResponseWriter, r *http.Request, subj *i
 		}
 		tq := store.TransferQuery{Zone: dns.NormalizeZone(q.Get("zone")), Status: q.Get("status"), Cursor: q.Get("cursor"), Limit: 50}
 		switch tq.Status {
-		case "", uiapi.TransferProposed, uiapi.TransferApproved, uiapi.TransferApplied, uiapi.TransferRejected, uiapi.TransferExpired, uiapi.TransferFailed:
+		case "", uiapi.TransferProposed, uiapi.TransferApplying, uiapi.TransferApplied, uiapi.TransferRejected, uiapi.TransferExpired, uiapi.TransferFailed:
 		default:
-			writeError(w, http.StatusBadRequest, "bad_request", "status must be proposed, approved, applied, rejected, expired or failed")
+			writeError(w, http.StatusBadRequest, "bad_request", "status must be proposed, applying, applied, rejected, expired or failed")
 			return
 		}
 		if v := q.Get("limit"); v != "" {

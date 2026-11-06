@@ -111,6 +111,10 @@ type TransferStore interface {
 	// GCTransfers removes the requests whose expiry is before before and
 	// returns how many were removed. DynamoDB relies on its TTL attribute.
 	GCTransfers(ctx context.Context, before time.Time) (int, error)
+	// ListOwnedZones returns the zones holding ownership entries or
+	// tombstones, sorted, managed or not (team renames). On DynamoDB it
+	// scans the table.
+	ListOwnedZones(ctx context.Context) ([]string, error)
 	// Reassign changes, in one transaction, ownership entries (each Version
 	// must match the stored one, as for Put) and tombstones (each must
 	// still belong to from). ErrConflict when one of them changed; at most
@@ -355,6 +359,28 @@ func (m *memory) GCTransfers(_ context.Context, before time.Time) (int, error) {
 		}
 	}
 	return n, nil
+}
+
+func (m *memory) ListOwnedZones(context.Context) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	set := map[string]bool{}
+	for k := range m.entries {
+		set[k.zone] = true
+	}
+	for k := range m.tombstones {
+		set[k.zone] = true
+	}
+	return sortedSet(set), nil
+}
+
+func sortedSet(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for z := range set {
+		out = append(out, z)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (m *memory) Reassign(_ context.Context, from string, owns []Ownership, tombs []Tombstone) error {
@@ -603,6 +629,23 @@ func (s *sqlStore) GCTransfers(ctx context.Context, before time.Time) (int, erro
 		return 0, fmt.Errorf("store: gc transfers: %w", err)
 	}
 	return int(n), nil
+}
+
+func (s *sqlStore) ListOwnedZones(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT zone FROM ownership UNION SELECT zone FROM ownership_tombstone ORDER BY zone")
+	if err != nil {
+		return nil, fmt.Errorf("store: list owned zones: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var z string
+		if err := rows.Scan(&z); err != nil {
+			return nil, fmt.Errorf("store: list owned zones: %w", err)
+		}
+		out = append(out, z)
+	}
+	return out, rows.Err()
 }
 
 func (s *sqlStore) Reassign(ctx context.Context, from string, owns []Ownership, tombs []Tombstone) error {

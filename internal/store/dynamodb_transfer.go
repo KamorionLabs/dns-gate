@@ -278,6 +278,36 @@ func (d *dynamo) UpdateTransfer(ctx context.Context, t Transfer) error {
 
 func (d *dynamo) GCTransfers(context.Context, time.Time) (int, error) { return 0, nil }
 
+func (d *dynamo) ListOwnedZones(ctx context.Context) ([]string, error) {
+	set := map[string]bool{}
+	var start map[string]types.AttributeValue
+	for {
+		res, err := d.api.Scan(ctx, &dynamodb.ScanInput{
+			TableName:                aws.String(d.table),
+			ProjectionExpression:     aws.String("#z"),
+			FilterExpression:         aws.String("begins_with(pk, :zone) AND (begins_with(sk, :rrset) OR begins_with(sk, :tomb))"),
+			ExpressionAttributeNames: map[string]string{"#z": "zone"},
+			ExpressionAttributeValues: map[string]types.AttributeValue{
+				":zone": strAttr("ZONE#"), ":rrset": strAttr("RRSET#"), ":tomb": strAttr("TOMB#"),
+			},
+			ConsistentRead:    aws.Bool(true),
+			ExclusiveStartKey: start,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("store: list owned zones: %w", err)
+		}
+		for _, it := range res.Items {
+			if z, ok := it["zone"].(*types.AttributeValueMemberS); ok && z.Value != "" {
+				set[z.Value] = true
+			}
+		}
+		if len(res.LastEvaluatedKey) == 0 {
+			return sortedSet(set), nil
+		}
+		start = res.LastEvaluatedKey
+	}
+}
+
 func (d *dynamo) Reassign(ctx context.Context, from string, owns []Ownership, tombs []Tombstone) error {
 	if len(owns)+len(tombs) > MaxReassign {
 		return errReassignSize

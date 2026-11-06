@@ -219,6 +219,7 @@ func (a *App) Run(ctx context.Context) {
 		go a.runPlanGC(ctx, a.PlanGC)
 	}
 	go a.WarnUndeclaredOwners(ctx)
+	go a.runTransferRetry(ctx)
 }
 
 // WarnUndeclaredOwners logs a warning for each team owning RRsets in a
