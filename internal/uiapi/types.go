@@ -11,6 +11,8 @@
 //	GET /api/v1/audit?zone=&host=&type=&subject=&category=&decision=&since=&until=&limit=&cursor=
 //	                                       -> AuditPage
 //	POST /api/v1/tokens                    -> gate token of the UI session
+//	GET /api/v1/teams                      -> TeamList
+//	GET /api/v1/teams/{team}               -> TeamDetail
 package uiapi
 
 import (
@@ -31,6 +33,9 @@ type Me struct {
 	Teams       []string     `json:"teams"`
 	Groups      []string     `json:"groups"`
 	Permissions []Permission `json:"permissions"`
+	// DefaultTeam is the team the caller writes for unless it names
+	// another of its teams (X-DNS-Gate-Team header, team field).
+	DefaultTeam string `json:"default_team,omitempty"`
 }
 
 // Permission is one effective rule of a role of the subject (base and
@@ -175,7 +180,7 @@ func (s *SnapshotID) UnmarshalJSON(b []byte) error {
 
 // Change is one RRset change in an audit entry.
 type Change struct {
-	Op        string     `json:"op"` // create | update | delete | adopt | taint | expire
+	Op        string     `json:"op"` // create | update | delete | adopt | taint | expire | transfer
 	Host      string     `json:"host"`
 	Type      string     `json:"type"`
 	OldTTL    int        `json:"old_ttl,omitempty"`

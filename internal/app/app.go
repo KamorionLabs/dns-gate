@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -60,6 +61,9 @@ type App struct {
 
 // New builds every component; background loops start with Run.
 func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options) (*App, error) {
+	for _, w := range cfg.Warnings {
+		log.Warn("configuration accepted with a warning", "warning", w)
+	}
 	var sources []discovery.Source
 	hasEuroDNS := false
 	for _, pc := range cfg.Providers {
@@ -94,7 +98,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 	}
 	holder.SetDiscovery(disc)
 	if err := holder.Refresh(ctx, st); err != nil {
-		log.Error("managed policy not loaded, serving the base policy", "err", err)
+		log.Error("managed policy not loaded: serving the base policy only, the grants of the managed layer are missing", "err", err)
 	}
 	authz := policy.New(holder)
 	if opts.Holder == "" {
@@ -104,6 +108,14 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		opts.Holder, _ = os.Hostname()
 	}
 	keys, _ := st.(store.APIKeyStore)
+	an, err := authn.New(cfg, &http.Client{Timeout: 10 * time.Second}, holder)
+	if err != nil {
+		return nil, err
+	}
+	if keys != nil {
+		an.SetAPIKeys(keys, auditLog)
+	}
+	an.SetLogger(log)
 	eng, err := zonewrite.New(zonewrite.Config{
 		Guard:                   server.ACMEGuard(keys),
 		Providers:               disc,
@@ -117,6 +129,15 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		LockWait:                cfg.Lock.Wait.D(),
 		CheckOnWrite:            *cfg.CheckOnWrite,
 		EphemeralLifetimeFactor: cfg.Limits.EphemeralLifetimeFactor,
+		TombstoneTTL:            cfg.TombstoneTTL(),
+		TransferTTL:             cfg.Ownership.TransferTTL.D(),
+		Teams:                   authz,
+		Rebinder:                an,
+		PersonClaims:            cfg.Ownership.PersonClaims,
+		MachineApprovers:        cfg.Ownership.MachineApprovers,
+		PersonIssuers:           cfg.Ownership.PersonIssuers,
+		UntrustedEmail:          untrustedEmail(cfg),
+		RequireSecondApprover:   cfg.Ownership.RequireSecondApprover,
 		Now:                     time.Now,
 		Logger:                  log,
 	})
@@ -124,13 +145,6 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		return nil, fmt.Errorf("engine: %w", err)
 	}
 
-	an, err := authn.New(cfg, &http.Client{Timeout: 10 * time.Second}, holder)
-	if err != nil {
-		return nil, err
-	}
-	if keys != nil {
-		an.SetAPIKeys(keys, auditLog)
-	}
 	scfg := server.Config{
 		Config:      cfg,
 		Authn:       an,
@@ -146,9 +160,13 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		Plans:       st,
 		Versions:    st,
 		APIKeys:     keys,
+		Tombstones:  st,
 		UIFiles:     web.FS(),
 		Discovery:   disc,
 		Log:         log,
+	}
+	if tr, ok := eng.(zonewrite.Transfers); ok {
+		scfg.Transfers = tr
 	}
 	if hasEuroDNS {
 		scfg.EuroDNS = eurodnsapi.New(eurodnsapi.Config{Engine: eng, Authz: authz, Providers: disc, Log: log})
@@ -162,21 +180,77 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 	return a, nil
 }
 
-// GCPlans purges the expired RRset plans of the store, and the idle ACME
-// registrations.
+// untrustedEmail lists the issuers whose email claim must not identify a
+// person (issuers[].email_trusted: false).
+func untrustedEmail(cfg *config.Config) map[string]bool {
+	out := map[string]bool{}
+	for _, is := range cfg.AllIssuers() {
+		if is.EmailTrusted != nil && !*is.EmailTrusted {
+			out[is.Name] = true
+		}
+	}
+	return out
+}
+
+// CheckManagedPolicy validates the active managed revision of the store of
+// cfg against the base policy of cfg (dns-gate --check): it returns the
+// problems that would keep the gate from serving it, none when there is no
+// active revision. The error tells that the store could not be read.
+func CheckManagedPolicy(ctx context.Context, cfg *config.Config) ([]string, error) {
+	st, err := openStore(ctx, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		return nil, err
+	}
+	if c, ok := st.(io.Closer); ok {
+		defer c.Close()
+	}
+	rev, err := st.ActiveRevision(ctx)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	doc, err := policy.DecodeDocument(rev.Document)
+	if err != nil {
+		return []string{fmt.Sprintf("active revision %s: %v", rev.ID, err)}, nil
+	}
+	h, err := policy.NewHolder(cfg)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, e := range policy.ValidateManaged(cfg, h.Base(), doc) {
+		out = append(out, fmt.Sprintf("active revision %s: %s: %s", rev.ID, e.Path, e.Message))
+	}
+	return out, nil
+}
+
+// GCPlans purges the expired RRset plans, the idle ACME registrations, the
+// expired tombstones and the transfer requests expired for longer than
+// store.TransferRetention.
 func (a *App) GCPlans(ctx context.Context) error {
-	n, err := a.Store.GCPlans(ctx, a.now())
+	now := a.now()
+	n, err := a.Store.GCPlans(ctx, now)
 	if n > 0 {
 		a.log.Info("plan gc", "removed", n)
 	}
 	if keys, ok := a.Store.(store.APIKeyStore); ok {
-		m, perr := keys.PurgeACMERegistrations(ctx, a.now())
+		m, perr := keys.PurgeACMERegistrations(ctx, now)
 		if m > 0 {
 			a.log.Info("acme registration gc", "removed", m)
 		}
 		err = errors.Join(err, perr)
 	}
-	return err
+	nt, terr := a.Store.GCTombstones(ctx, now)
+	if nt > 0 {
+		a.log.Info("tombstone gc", "removed", nt)
+	}
+	nr, rerr := a.Store.GCTransfers(ctx, now.Add(-store.TransferRetention))
+	if nr > 0 {
+		a.log.Info("transfer gc", "removed", nr)
+	}
+	return errors.Join(err, terr, rerr)
 }
 
 // Handler is the HTTP handler of the gate.
@@ -194,6 +268,38 @@ func (a *App) Run(ctx context.Context) {
 	go zonewrite.RunReconciler(ctx, a.Engine, a.authz.ManagedZones, a.Config.ReconcileInterval.D(), a.log)
 	if a.PlanGC != nil {
 		go a.runPlanGC(ctx, a.PlanGC)
+	}
+	go a.WarnUndeclaredOwners(ctx)
+	go a.runTransferRetry(ctx)
+}
+
+// WarnUndeclaredOwners logs a warning for each team owning RRsets in a
+// managed zone that the policy neither declares nor names (migration to the
+// teams block): such a team is declared automatically until the block
+// exists, and owns RRsets nobody may change once it does.
+func (a *App) WarnUndeclaredOwners(ctx context.Context) {
+	snap := a.Policy.Current()
+	seen := map[string]bool{}
+	for _, z := range a.authz.ManagedZones() {
+		list, err := a.Store.List(ctx, z)
+		if err != nil {
+			a.log.Warn("ownership scan failed", "zone", z, "error", err)
+			continue
+		}
+		for _, o := range list {
+			if seen[o.Owner] {
+				continue
+			}
+			seen[o.Owner] = true
+			if _, known := snap.TeamInfo(o.Owner, nil, false); known {
+				continue
+			}
+			if snap.StrictTeams() {
+				a.log.Warn("team owns RRsets but is not declared: nobody can change them until it is declared or renamed", "team", o.Owner, "zone", z)
+			} else {
+				a.log.Warn("team owns RRsets but is not declared under teams: declared automatically for now", "team", o.Owner, "zone", z)
+			}
+		}
 	}
 }
 

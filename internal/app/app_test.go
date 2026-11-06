@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/store"
 )
 
 // The binary must expose adoption, the Terraform export and MCP writes:
@@ -179,5 +180,109 @@ roles:
 	}
 	if err := a.PlanGC(context.Background()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The transfer and team routes are wired, and undeclared store owners and
+// config teams are reported.
+func TestTeamsWiringAndWarnings(t *testing.T) {
+	sum := sha256.Sum256([]byte("secret"))
+	yaml := `
+providers:
+  - {id: eurodns, kind: eurodns, eurodns: {base_url: "http://127.0.0.1:1", app_id: app, max_retries: 0}}
+zones: [example.com]
+virtual_keys:
+  - {id: t, app_id: vk, key_sha256: ` + hex.EncodeToString(sum[:]) + `, roles: [reader], teams: [web], expires_at: 2099-01-01T00:00:00Z}
+roles:
+  reader:
+    rules: [{zones: [example.com], actions: [dns.read, ui.read]}]
+`
+	cfg, err := config.Parse([]byte(yaml), func(k string) string {
+		if k == "EURODNS_API_KEY" {
+			return "k"
+		}
+		return ""
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs strings.Builder
+	a, err := New(context.Background(), cfg, slog.New(slog.NewTextHandler(&logs, nil)), Options{Holder: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(logs.String(), `team \"web\" is not declared`) {
+		t.Fatalf("config warning not logged: %s", logs.String())
+	}
+	now := time.Now()
+	if err := a.Store.Put(context.Background(), store.Ownership{Zone: "example.com", Host: "old", Type: "A", Owner: "legacy", State: store.StateActive, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	a.WarnUndeclaredOwners(context.Background())
+	if !strings.Contains(logs.String(), "team=legacy") {
+		t.Fatalf("store owner warning not logged: %s", logs.String())
+	}
+	for _, path := range []string{"/api/v1/transfers", "/api/v1/teams"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		req.Header.Set("X-APP-ID", "vk")
+		req.Header.Set("X-API-KEY", "secret")
+		rec := httptest.NewRecorder()
+		a.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Errorf("GET %s: %d %s", path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+// A base file adding a teams block must be refused by --check while the
+// active managed revision names an undeclared team.
+func TestCheckManagedPolicy(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "g.db")
+	yaml := `
+providers:
+  - {id: eurodns, kind: eurodns, eurodns: {base_url: "http://127.0.0.1:1", app_id: app, max_retries: 0}}
+zones: [example.com]
+store: {type: sqlite, sqlite: {path: ` + db + `}}
+issuers:
+  - {name: ci, issuer: "https://token.example.net", audiences: [dns-gate]}
+roles:
+  reader:
+    rules: [{zones: [example.com], actions: [dns.read, ui.read]}]
+policy:
+  editable: true
+  bounds: {zones: [example.com], actions: [dns.read, ui.read]}
+`
+	parse := func(doc string) *config.Config {
+		cfg, err := config.Parse([]byte(doc), func(k string) string {
+			if k == "EURODNS_API_KEY" {
+				return "k"
+			}
+			return ""
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg
+	}
+	ctx := context.Background()
+	st, err := store.NewSQLite(ctx, store.SQLiteConfig{Path: db})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := `{"groups":{},"roles":{"r":{"rules":[{"zones":["example.com"],"actions":["dns.read"]}]}},` +
+		`"bindings":[{"role":"r","team":"web","subjects":[{"issuer":"ci","claims":{"sub":["repo:acme/*"]}}]}],"virtual_keys":[]}`
+	if err := st.CreateRevision(ctx, store.PolicyRevision{ID: "rev-00000001", Document: []byte(doc), Status: "proposed", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Activate(ctx, "rev-00000001", "", "test", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.(io.Closer).Close()
+	if problems, err := CheckManagedPolicy(ctx, parse(yaml)); err != nil || len(problems) != 0 {
+		t.Fatalf("valid revision: %v %v", problems, err)
+	}
+	problems, err := CheckManagedPolicy(ctx, parse(yaml+"teams: {}\n"))
+	if err != nil || len(problems) == 0 || !strings.Contains(strings.Join(problems, "\n"), `team "web" is not declared`) {
+		t.Fatalf("revision invalid against the new base not reported: %v %v", problems, err)
 	}
 }

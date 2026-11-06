@@ -37,6 +37,7 @@ type Ownership struct {
 	State             State
 	Adopted           bool
 	ExpiresAt         *time.Time // ephemeral records (ACME), GC after this time
+	TransferID        string     // last transfer request that moved the entry to Owner
 	Version           int64      // optimistic concurrency
 }
 
@@ -53,6 +54,8 @@ var (
 type Store interface {
 	PolicyStore
 	PlanStore
+	TombstoneStore
+	TransferStore
 
 	Get(ctx context.Context, zone, host, typ string) (*Ownership, error)
 	List(ctx context.Context, zone string) ([]Ownership, error)

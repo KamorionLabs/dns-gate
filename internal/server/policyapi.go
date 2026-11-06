@@ -233,7 +233,7 @@ func (s *Server) policyEffective(w http.ResponseWriter, r *http.Request, subj *i
 	if e := s.requireMeta(subj, uiapi.ActionPolicyRead); e != nil {
 		return e
 	}
-	out := uiapi.EffectivePolicy{Settings: s.settings(), Base: s.baseLayer(), Me: s.rights(subj)}
+	out := uiapi.EffectivePolicy{Settings: s.settings(), Base: s.baseLayer(), Me: s.rights(subj), LoadError: s.cfg.Policy.LoadError()}
 	rev, err := s.cfg.PolicyStore.ActiveRevision(r.Context())
 	switch {
 	case err == nil:
@@ -316,10 +316,20 @@ func (s *Server) detail(ctx context.Context, rev *store.PolicyRevision, doc uiap
 		RevisionSummary: summary(rev),
 		Document:        doc,
 		DiffYAML:        policy.UnifiedDiff(a, b, parentName, "revision "+rev.ID),
-		Impact:          policy.Impact(h.CompileUnchecked(parentDoc, rev.ParentID), h.CompileUnchecked(&doc, rev.ID), s.ownedCounter(ctx)),
+		Impact:          s.impact(ctx, h.CompileUnchecked(parentDoc, rev.ParentID), h.CompileUnchecked(&doc, rev.ID)),
 		Stale:           (rev.Status == uiapi.RevisionProposed || rev.Status == uiapi.RevisionApproved) && rev.ParentID != activeID,
 	}
 	return out, nil
+}
+
+// impact is the impact analysis of a revision, with the store teams a new
+// family would take over.
+func (s *Server) impact(ctx context.Context, prev, next *policy.Snapshot) []uiapi.ImpactItem {
+	all := map[string]bool{}
+	for _, z := range s.pol.ManagedZones() {
+		all[z] = true
+	}
+	return append(policy.FamilyTakeovers(prev, next, s.storeOwners(ctx, all)), policy.Impact(prev, next, s.ownedCounter(ctx))...)
 }
 
 func (s *Server) ownedCounter(ctx context.Context) policy.OwnedCounter {
@@ -481,6 +491,9 @@ func (s *Server) policyPropose(w http.ResponseWriter, r *http.Request, subj *ide
 	activeID := revID(active)
 	if req.ParentID != activeID {
 		return perr(http.StatusConflict, "stale_revision", "the policy changed since the edit started: reload and reapply")
+	}
+	if req.Document.Teams == nil {
+		req.Document.Teams = activeDoc.Teams
 	}
 	if e := s.carryDelegated(subj, &req.Document, activeDoc, req.TakeOver); e != nil {
 		s.policyAudit(r, subj, "policy.propose", "", "deny", e.reason, map[string]any{"take_over": req.TakeOver})

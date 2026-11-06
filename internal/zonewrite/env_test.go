@@ -28,14 +28,26 @@ import (
 const zoneName = "example.com"
 
 var (
-	alice = &identity.Subject{Issuer: "idp", ID: "alice", Name: "alice@example.com", Category: identity.CategoryHuman, Roles: []string{"writer"}, Teams: []string{"team-a"}}
-	bob   = &identity.Subject{Issuer: "idp", ID: "bob", Name: "bob@example.com", Category: identity.CategoryHuman, Roles: []string{"writer"}, Teams: []string{"team-b"}}
-	admin = &identity.Subject{Issuer: "idp", ID: "root", Name: "root@example.com", Category: identity.CategoryHuman, Roles: []string{"writer", "admin"}, Teams: []string{"team-a"}}
+	alice = bound(&identity.Subject{Issuer: "idp", ID: "alice", Name: "alice@example.com", Category: identity.CategoryHuman, Roles: []string{"writer"}, Teams: []string{"team-a"}})
+	bob   = bound(&identity.Subject{Issuer: "idp", ID: "bob", Name: "bob@example.com", Category: identity.CategoryHuman, Roles: []string{"writer"}, Teams: []string{"team-b"}})
+	admin = bound(&identity.Subject{Issuer: "idp", ID: "root", Name: "root@example.com", Category: identity.CategoryHuman, Roles: []string{"writer", "admin"}, Teams: []string{"team-a"}})
 )
 
 // fakeAuthz: writer = any RRset; acme = TXT under _acme-challenge (rebase,
 // ephemeral); admin = adopt and zone admin; protected = NS/MX at apex.
 type fakeAuthz struct{ max int }
+
+// bound grants every role of a test subject through each of its teams.
+func bound(s *identity.Subject) *identity.Subject {
+	if s.Claims == nil && s.Name != "" && s.Category == identity.CategoryHuman {
+		s.Claims = map[string]any{"email": s.Name}
+	}
+	s.TeamRoles = map[string][]string{}
+	for _, t := range s.Teams {
+		s.TeamRoles[t] = s.Roles
+	}
+	return s
+}
 
 func has(s *identity.Subject, role string) bool { return slices.Contains(s.Roles, role) }
 
@@ -49,6 +61,12 @@ func (f *fakeAuthz) Allow(s *identity.Subject, action, _ string) bool {
 		return true
 	case policy.ActionRecordWrite:
 		return has(s, "writer") || has(s, "acme")
+	case policy.ActionRecordAdopt:
+		return has(s, "admin") || has(s, "adopter")
+	case "policy.propose", "policy.approve", "policy.read":
+		return has(s, "admin") || has(s, "policy-admin")
+	case policy.ActionOwnershipApprove:
+		return has(s, "admin") || has(s, "approver-www")
 	default:
 		return has(s, "admin")
 	}
@@ -63,6 +81,12 @@ func (f *fakeAuthz) AllowRRset(s *identity.Subject, action, zone string, k dns.K
 			return true
 		}
 		return has(s, "acme") && k.Type == "TXT" && strings.HasPrefix(k.Host, "_acme-challenge")
+	}
+	if action == policy.ActionRecordAdopt && has(s, "adopter") {
+		return true
+	}
+	if action == policy.ActionOwnershipApprove && has(s, "approver-www") && k.Host == "www" {
+		return true
 	}
 	return has(s, "admin")
 }
@@ -156,6 +180,11 @@ func newEnv(t *testing.T, opts eurodnstest.Options) *env {
 
 func newEnvWith(t *testing.T, opts eurodnstest.Options, st store.Store) *env {
 	t.Helper()
+	return newEnvConfig(t, opts, st, nil)
+}
+
+func newEnvConfig(t *testing.T, opts eurodnstest.Options, st store.Store, mut func(*Config)) *env {
+	t.Helper()
 	opts.AppID, opts.APIKey = "app", "key"
 	srv := eurodnstest.NewServer(opts)
 	t.Cleanup(srv.Close)
@@ -166,8 +195,12 @@ func newEnvWith(t *testing.T, opts eurodnstest.Options, st store.Store) *env {
 	}
 	e := &env{t: t, srv: srv, prov: newProvider(t, srv.URL), st: st, authz: &fakeAuthz{}, audit: &recorder{}, clock: c}
 	var err error
-	e.eng, err = New(Config{Providers: provider.Single(e.prov), Store: e.st, Authz: e.authz, Audit: e.audit, Zones: []string{zoneName},
-		Holder: "test", LockWait: 2 * time.Second, CheckOnWrite: true, Now: c.Now})
+	cfg := Config{Providers: provider.Single(e.prov), Store: e.st, Authz: e.authz, Audit: e.audit, Zones: []string{zoneName},
+		Holder: "test", LockWait: 2 * time.Second, CheckOnWrite: true, Now: c.Now}
+	if mut != nil {
+		mut(&cfg)
+	}
+	e.eng, err = New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

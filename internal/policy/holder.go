@@ -35,6 +35,17 @@ type Holder struct {
 	now  func() time.Time
 	// checkedAt is the start of the last Refresh, successful or not.
 	checkedAt time.Time
+	// loadErr is why the last Refresh failed, nil after a success.
+	loadErr atomic.Pointer[string]
+}
+
+// LoadError tells why the active managed revision is not served (the last
+// refresh failed), "" when the policy is up to date.
+func (h *Holder) LoadError() string {
+	if p := h.loadErr.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 // NewHolder compiles the base layer.
@@ -108,7 +119,14 @@ func (h *Holder) RefreshIfStale(ctx context.Context, src ActiveSource, maxAge ti
 
 func (h *Holder) refreshLocked(ctx context.Context, src ActiveSource) error {
 	h.checkedAt = h.now()
-	return h.load(ctx, src)
+	err := h.load(ctx, src)
+	if err != nil {
+		msg := err.Error()
+		h.loadErr.Store(&msg)
+	} else {
+		h.loadErr.Store(nil)
+	}
+	return err
 }
 
 func (h *Holder) load(ctx context.Context, src ActiveSource) error {
@@ -172,6 +190,9 @@ func DecodeDocument(b []byte) (uiapi.PolicyDocument, error) {
 
 // Normalize replaces nil collections with empty ones.
 func Normalize(d *uiapi.PolicyDocument) {
+	if d.Teams == nil {
+		d.Teams = map[string]uiapi.Team{}
+	}
 	if d.Groups == nil {
 		d.Groups = map[string]uiapi.Group{}
 	}

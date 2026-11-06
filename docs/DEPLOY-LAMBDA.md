@@ -47,7 +47,8 @@ front of EuroDNS** (see [below](#why-not-in-front-of-eurodns)).
 | Policy reload (active managed revision) | every 10 s | before a request when the last check is older than 10 s; every maintenance pass |
 | Zone discovery (`providers[].zones`) | each provider every `refresh`, 5 min after a failure | before a request and in the maintenance pass, for the providers listed longer than `refresh` ago (5 min after a failure) |
 | Reconcile of the managed zones (drift, expired ACME challenges) | every `reconcile_interval` | every maintenance pass (5 min) |
-| Expired RRset plans (MCP and REST) | every 15 min (DynamoDB: the table TTL) | every maintenance pass (DynamoDB: the table TTL) |
+| Expired RRset plans (MCP and REST), tombstones and old transfer requests | every 15 min (DynamoDB: the table TTL) | every maintenance pass (DynamoDB: the table TTL) |
+| Approved ownership transfers left `applying` | every minute | every maintenance pass |
 
 The maintenance pass runs every step even when one fails and returns the joined errors:
 the invocation then fails, which shows in the `Errors` metric and the logs. The next
@@ -105,7 +106,7 @@ zone; API Gateway still cuts HTTP requests at 30 s).
 IAM permissions of the function role:
 
 - DynamoDB on the table: `GetItem`, `PutItem`, `UpdateItem`, `DeleteItem`, `Query`,
-  `TransactWriteItems`;
+  `TransactWriteItems`, and `Scan` (team renames list the zones of the store);
 - `secretsmanager:GetSecretValue` on the secret, `s3:GetObject` on the configuration
   object or `ssm:GetParameter` on the parameter (plus `kms:Decrypt` for a customer key);
 - the provider permissions (Route 53: read and change the managed hosted zones, see

@@ -39,9 +39,52 @@ type Config struct {
 	EphemeralLifetimeFactor int
 	// Guard, when set, may refuse a change of one RRset by a subject, after
 	// RBAC and before ownership; a non-*Error refusal is forbidden.
-	Guard  func(ctx context.Context, s *identity.Subject, zone string, key dns.Key) error
+	Guard func(ctx context.Context, s *identity.Subject, zone string, key dns.Key) error
+	// TombstoneTTL is how long a deleted RRset stays reserved for its team
+	// (0 disables tombstones). Ephemeral RRsets leave no tombstone.
+	TombstoneTTL time.Duration
+	// TransferTTL is how long a transfer request waits for approval
+	// (default 7 days).
+	TransferTTL time.Duration
+	// RequireSecondApprover makes transfers and renames need the approval
+	// of a second person (PersonClaims, PersonIssuers); without it the
+	// requester may approve its own request, every other check applying.
+	RequireSecondApprover bool
+	// MachineApprovers lets pipelines and virtual keys approve transfers;
+	// by default only humans may.
+	MachineApprovers bool
+	// PersonClaims identify the person behind a token: requester and
+	// approver of a transfer must share none of their values ("tid+oid"
+	// joins several claims; default tid+oid, email, preferred_username,
+	// upn).
+	PersonClaims []string
+	// PersonIssuers, when set, are the issuers whose human subjects may
+	// request and approve transfers; the subject itself then identifies the
+	// person too.
+	PersonIssuers []string
+	// UntrustedEmail lists the issuers whose email claim does not identify
+	// a person.
+	UntrustedEmail map[string]bool
+	// Rebinder binds the approver of a transfer again with the current
+	// policy before a retried apply; without it the subject recorded at
+	// the approval is used.
+	Rebinder Rebinder
+	// Teams tells which teams may own RRsets; any valid team name when nil.
+	Teams  TeamDirectory
 	Now    func() time.Time
 	Logger *slog.Logger
+}
+
+// Rebinder binds a subject recorded earlier with the current policy
+// (authn.Authenticator implements it).
+type Rebinder interface {
+	Rebind(s *identity.Subject) (*identity.Subject, error)
+}
+
+// TeamDirectory knows the teams of the policy (policy.Engine implements it).
+type TeamDirectory interface {
+	// KnownTeam reports whether a team may own RRsets.
+	KnownTeam(name string) bool
 }
 
 // ZoneSet tells which zones the engine serves (policy.Engine implements it).

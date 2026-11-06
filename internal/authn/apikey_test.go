@@ -301,3 +301,40 @@ func grantOf(a *Authenticator, role string) string {
 	b, _ := json.Marshal(g)
 	return string(b)
 }
+
+// Once a teams block exists, a key bound to an undeclared team is refused,
+// like a virtual key in the file.
+func TestAPIKeyTeamMustBeDeclared(t *testing.T) {
+	scope := &config.RecordScope{Hosts: []string{"_acme-challenge"}, Types: []string{"TXT"}}
+	c := &config.Config{
+		Zones:  []string{"example.com"},
+		Limits: config.Limits{MaxChangesPerRequest: 20},
+		Roles: map[string]config.Role{
+			"acme": {EphemeralTTL: config.Duration(time.Hour), Rules: []config.Rule{{Zones: []string{"example.com"}, Actions: []string{"dns.record.write"}, Records: scope}}},
+		},
+		Teams: map[string]config.Team{"web": {}},
+	}
+	a, err := New(c, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := store.NewMemory().(store.APIKeyStore)
+	a.SetAPIKeys(st, &auditLog{})
+	try := func(team string) (*identity.Subject, error) {
+		id := apikey.NewID()
+		key := apikey.NewSecret(id)
+		if err := st.CreateAPIKey(context.Background(), store.APIKey{ID: id, Team: team, Role: "acme", RoleGrant: grantOf(a, "acme"), SecretHash: apikey.Hash(key), CreatedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+		r := httptest.NewRequest("GET", "/", nil)
+		r.Header.Set("Authorization", "Bearer "+key)
+		return a.Authenticate(r)
+	}
+	s, err := try("web")
+	if err != nil || s.TeamRoles["web"][0] != "acme" {
+		t.Fatalf("declared team: %+v %v", s, err)
+	}
+	if _, err := try("legacy"); status(err) != 403 {
+		t.Fatalf("a key of an undeclared team must be refused once teams are declared: %v", err)
+	}
+}

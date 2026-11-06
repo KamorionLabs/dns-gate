@@ -38,12 +38,18 @@ type Config struct {
 	Protected         []Protected      `yaml:"protected"`
 	UI                UI               `yaml:"ui"`
 	Groups            map[string]Group `yaml:"groups"`
+	Teams             map[string]Team  `yaml:"teams"`
+	Ownership         Ownership        `yaml:"ownership"`
 	Policy            Policy           `yaml:"policy"`
 	MCP               MCP              `yaml:"mcp"`
 	ACME              ACME             `yaml:"acme"`
 
 	Hash     string    `yaml:"-"` // sha256 of the file
 	LoadedAt time.Time `yaml:"-"`
+	// Warnings are the problems the configuration is still accepted with
+	// (teams referenced but not declared, during the migration to the
+	// teams block).
+	Warnings []string `yaml:"-"`
 }
 
 // Provider kinds.
@@ -113,6 +119,75 @@ type Group struct {
 	Description string    `yaml:"description"`
 	Members     []Subject `yaml:"members"`
 }
+
+// Team is the unit of RRset ownership: the people and pipelines of a
+// project, declared together. A binding naming the team without groups or
+// subjects of its own grants its role to the members of the team.
+type Team struct {
+	Description string      `yaml:"description"`
+	Members     TeamMembers `yaml:"members"`
+}
+
+// TeamMembers are the groups and the subject matchers of a team.
+type TeamMembers struct {
+	Groups   []string  `yaml:"groups"`
+	Subjects []Subject `yaml:"subjects"`
+}
+
+// Ownership tunes the RRset ownership rules.
+type Ownership struct {
+	// TombstoneTTL is how long a deleted RRset stays reserved for the team
+	// that owned it: only that team may create it again meanwhile, other
+	// teams go through a transfer. Default 7 days, "0s" disables it.
+	TombstoneTTL *Duration `yaml:"tombstone_ttl"`
+	// TransferTTL is how long a transfer request waits for its approval
+	// (default 7 days).
+	TransferTTL Duration `yaml:"transfer_ttl"`
+	// RequireSecondApprover makes ownership transfers and renames need the
+	// approval of a second person, as policy.require_approval does for
+	// policy revisions. Default false: the requester may approve its own
+	// request (audited as self-approved), every other check applying.
+	RequireSecondApprover bool `yaml:"require_second_approver"`
+	// MachineApprovers lets pipelines and virtual keys approve transfers
+	// and renames, and lets transfers requested by identities the person
+	// claims do not identify be approved: it weakens the two-person rule.
+	// By default only humans approve, after a recent login.
+	MachineApprovers bool `yaml:"machine_approvers"`
+	// PersonClaims identify the person behind a token across issuers: the
+	// requester and the approver of a transfer must share none of their
+	// values, compared case-insensitively whatever the claim ("tid+oid"
+	// joins claims). Default tid+oid, email, preferred_username, upn.
+	PersonClaims []string `yaml:"person_claims"`
+	// PersonIssuers, when set (recommended), are the issuers whose human
+	// subjects alone may request and approve transfers and renames, e.g.
+	// the SAML or OIDC issuer of the UI login; the subject id then also
+	// identifies the person.
+	PersonIssuers []string `yaml:"person_issuers"`
+}
+
+// DefaultPersonClaims are the default ownership.person_claims.
+var DefaultPersonClaims = []string{"tid+oid", "email", "preferred_username", "upn"}
+
+// Default ownership durations.
+const (
+	DefaultTombstoneTTL = 7 * 24 * time.Hour
+	DefaultTransferTTL  = 7 * 24 * time.Hour
+)
+
+// TombstoneTTL returns ownership.tombstone_ttl with its default.
+func (c *Config) TombstoneTTL() time.Duration {
+	if c.Ownership.TombstoneTTL == nil {
+		return DefaultTombstoneTTL
+	}
+	return c.Ownership.TombstoneTTL.D()
+}
+
+// TeamsDeclared reports whether the configuration has a teams block. Team
+// references are then strict: every team a binding, virtual key or
+// delegation names must be declared, in the base file or the managed layer.
+// Without the block, the referenced teams are declared automatically with a
+// warning (migration).
+func (c *Config) TeamsDeclared() bool { return c.Teams != nil }
 
 // Policy configures the managed (UI-editable) policy layer.
 type Policy struct {
@@ -287,8 +362,16 @@ type Issuer struct {
 	Audiences   []string              `yaml:"audiences"`
 	BoundClaims map[string]StringList `yaml:"bound_claims"`
 	TeamClaim   string                `yaml:"team_claim"`
-	NameClaim   string                `yaml:"name_claim"` // display name claim (default: the subject)
-	Category    string                `yaml:"category"`   // human | pipeline (default pipeline)
+	// TeamClaimPrefix is prepended to every team_claim value: the teams of
+	// the claim form the family <prefix>* of this issuer. Required once a
+	// teams block exists.
+	TeamClaimPrefix string `yaml:"team_claim_prefix"`
+	NameClaim       string `yaml:"name_claim"` // display name claim (default: the subject)
+	// EmailTrusted tells whether the email claim of this issuer identifies
+	// a person for the two-person rule of transfers (default true; an
+	// email_verified claim set to false always excludes it).
+	EmailTrusted *bool  `yaml:"email_trusted"`
+	Category     string `yaml:"category"` // human | pipeline (default pipeline)
 
 	// SubjectClaim is the claim used as subject id (default "sub").
 	// SubjectTemplate builds a composite id instead, e.g. "{{tid}}/{{oid}}".
@@ -400,16 +483,17 @@ var ReservedIssuers = map[string]bool{"api-key": true, "virtual-key": true, "gat
 
 // Known actions.
 var knownActions = map[string]bool{
-	"dns.read":           true,
-	"dns.record.write":   true,
-	"dns.record.adopt":   true,
-	"dns.zone.admin":     true,
-	"ui.read":            true,
-	"policy.read":        true,
-	"policy.propose":     true,
-	"policy.approve":     true,
-	"domain.read":        true,
-	"gate.apikey.manage": true,
+	"dns.read":              true,
+	"dns.record.write":      true,
+	"dns.record.adopt":      true,
+	"dns.zone.admin":        true,
+	"ui.read":               true,
+	"policy.read":           true,
+	"policy.propose":        true,
+	"policy.approve":        true,
+	"domain.read":           true,
+	"gate.apikey.manage":    true,
+	"dns.ownership.approve": true,
 }
 
 var asymmetricAlgs = map[string]bool{
@@ -605,6 +689,12 @@ func (c *Config) defaults() {
 	if c.Policy.EditMaxAge == 0 {
 		c.Policy.EditMaxAge = Duration(15 * time.Minute)
 	}
+	if c.Ownership.TransferTTL == 0 {
+		c.Ownership.TransferTTL = Duration(DefaultTransferTTL)
+	}
+	if c.Ownership.PersonClaims == nil {
+		c.Ownership.PersonClaims = DefaultPersonClaims
+	}
 	for i := range c.Policy.Delegations {
 		if c.Policy.Delegations[i].Allow.MaxObjects == 0 {
 			c.Policy.Delegations[i].Allow.MaxObjects = DefaultDelegationMaxObjects
@@ -798,6 +888,9 @@ func (c *Config) Validate() error {
 				add("%s.subject_template: %v", at, err)
 			}
 		}
+		if is.TeamClaimPrefix != "" && (is.TeamClaim == "" || !teamPrefixRe.MatchString(is.TeamClaimPrefix)) {
+			add("%s.team_claim_prefix: %q needs team_claim and up to 32 characters [a-z0-9._-], starting with a letter or digit", at, is.TeamClaimPrefix)
+		}
 		if len(is.CategoryMap) > 0 && is.CategoryClaim == "" {
 			add("%s.category_map: category_claim required", at)
 		}
@@ -860,6 +953,30 @@ func (c *Config) Validate() error {
 	}
 
 	teamRe := nameRe
+	ref := c.teamRefChecker(add)
+	for _, name := range sortedNames(c.Teams) {
+		t := c.Teams[name]
+		at := "teams." + name
+		if !nameRe.MatchString(name) {
+			add("%s: team name must be a lowercase identifier", at)
+		}
+		if len(t.Description) > 500 {
+			add("%s.description: at most 500 characters", at)
+		}
+		for j, g := range t.Members.Groups {
+			if _, ok := c.Groups[g]; !ok {
+				add("%s.members.groups[%d]: unknown group %q", at, j, g)
+			}
+		}
+		for j, m := range t.Members.Subjects {
+			if !issuers[m.Issuer] {
+				add("%s.members.subjects[%d].issuer: unknown issuer %q", at, j, m.Issuer)
+			}
+			if len(m.Claims) == 0 {
+				add("%s.members.subjects[%d].claims: at least one claim is required", at, j)
+			}
+		}
+	}
 	for i, b := range c.Bindings {
 		at := fmt.Sprintf("bindings[%d]", i)
 		if _, ok := c.Roles[b.Role]; !ok {
@@ -877,7 +994,15 @@ func (c *Config) Validate() error {
 			}
 		}
 		if len(b.Subjects) == 0 && len(b.Groups) == 0 {
-			add("%s: groups or subjects required", at)
+			switch {
+			case b.TeamFrom != nil:
+				add("%s: groups or subjects required with team_from", at)
+			case b.Team == "" || !c.teamHasMembers(b.Team):
+				add("%s: groups or subjects required (or a team declared with members)", at)
+			}
+		}
+		if b.Team != "" {
+			ref(at+".team", b.Team)
 		}
 		for j, g := range b.Groups {
 			if _, ok := c.Groups[g]; !ok {
@@ -934,6 +1059,40 @@ func (c *Config) Validate() error {
 		add("policy.edit_max_age: must be between 1m and 24h")
 	}
 	errs = append(errs, validateDelegations(c, issuers)...)
+	for i, d := range c.Policy.Delegations {
+		for _, n := range d.Allow.Teams.Names {
+			if !strings.Contains(n, "*") && teamRe.MatchString(n) {
+				ref(fmt.Sprintf("policy.delegations[%d].allow.teams.names", i), n)
+			}
+		}
+	}
+	c.validateTeamFamilies(add)
+	if t := c.Ownership.TombstoneTTL; t != nil && (t.D() < 0 || t.D() > 365*24*time.Hour) {
+		add("ownership.tombstone_ttl: must be between 0s (disabled) and 8760h")
+	}
+	for i, pc := range c.Ownership.PersonClaims {
+		if strings.TrimSpace(pc) == "" || strings.Contains(pc, "++") || strings.HasPrefix(pc, "+") || strings.HasSuffix(pc, "+") {
+			add("ownership.person_claims[%d]: %q is not a claim name or a + composite of claim names", i, pc)
+		}
+	}
+	if len(c.Ownership.PersonIssuers) > 0 && !c.Ownership.RequireSecondApprover {
+		add("ownership.person_issuers: only used with require_second_approver: true")
+	}
+	if len(c.Ownership.PersonIssuers) > 0 && c.Ownership.MachineApprovers {
+		add("ownership: person_issuers and machine_approvers are exclusive (person issuers only admit humans)")
+	}
+	known := map[string]bool{}
+	for _, is := range c.AllIssuers() {
+		known[is.Name] = !is.Self
+	}
+	for i, n := range c.Ownership.PersonIssuers {
+		if !known[n] {
+			add("ownership.person_issuers[%d]: unknown issuer %q (the gate issuer binds as the issuer of the session: name that one)", i, n)
+		}
+	}
+	if d := c.Ownership.TransferTTL.D(); d < time.Hour || d > 90*24*time.Hour {
+		add("ownership.transfer_ttl: must be between 1h and 2160h")
+	}
 
 	vkIDs, vkApps := map[string]bool{}, map[string]bool{}
 	for i, vk := range c.VirtualKeys {
@@ -974,7 +1133,9 @@ func (c *Config) Validate() error {
 		for _, t := range vk.Teams {
 			if !teamRe.MatchString(t) {
 				add("%s.teams: %q must be a lowercase identifier", at, t)
+				continue
 			}
+			ref(at+".teams", t)
 		}
 		for _, p := range vk.AllowedCIDRs {
 			if _, err := netip.ParsePrefix(p); err != nil {
@@ -1051,6 +1212,166 @@ func (c *Config) Validate() error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// teamHasMembers reports whether team is declared with at least one member.
+func (c *Config) teamHasMembers(team string) bool {
+	t, ok := c.Teams[team]
+	return ok && (len(t.Members.Groups) > 0 || len(t.Members.Subjects) > 0)
+}
+
+// teamRefChecker returns the check of a team reference: an error for an
+// undeclared team once the teams block exists, otherwise a warning (once per
+// team) and the team is declared automatically.
+func (c *Config) teamRefChecker(add func(string, ...any)) func(at, team string) {
+	c.Warnings = nil
+	warned := map[string]bool{}
+	return func(at, team string) {
+		if _, ok := c.Teams[team]; ok {
+			return
+		}
+		if c.TeamsDeclared() {
+			add("%s: team %q is not declared under teams", at, team)
+			return
+		}
+		if !warned[team] {
+			warned[team] = true
+			c.Warnings = append(c.Warnings, fmt.Sprintf("%s: team %q is not declared under teams; it is declared automatically for now, declare it (validation becomes strict once a teams block exists)", at, team))
+		}
+	}
+}
+
+// TeamFamily is a source of teams derived from claims: Key identifies the
+// derivation (the same team_from used by several bindings is one family),
+// Prefix starts every team it derives.
+type TeamFamily struct {
+	Key    string
+	Prefix string
+	At     string
+}
+
+// TeamFromKey identifies a team_from derivation.
+func TeamFromKey(claim, regex, prefix string) string {
+	return "team_from " + claim + " ~ " + regex + " prefix " + prefix
+}
+
+// TeamFamilyList returns the families of the file: bindings[].team_from,
+// policy.delegations[].allow.teams.from_subject and issuers[].team_claim.
+func (c *Config) TeamFamilyList() []TeamFamily {
+	var out []TeamFamily
+	for i, b := range c.Bindings {
+		if t := b.TeamFrom; t != nil {
+			out = append(out, TeamFamily{TeamFromKey(t.Claim, t.Regex, t.Prefix), t.Prefix, fmt.Sprintf("bindings[%d].team_from", i)})
+		}
+	}
+	for i, d := range c.Policy.Delegations {
+		if t := d.Allow.Teams.FromSubject; t != nil {
+			out = append(out, TeamFamily{TeamFromKey(t.Claim, t.Regex, t.Prefix), t.Prefix, fmt.Sprintf("policy.delegations[%d].allow.teams.from_subject", i)})
+		}
+	}
+	for _, is := range c.AllIssuers() {
+		if is.TeamClaim != "" {
+			out = append(out, TeamFamily{"team_claim of issuer " + is.Name, is.TeamClaimPrefix, "issuer " + is.Name + " team_claim_prefix"})
+		}
+	}
+	return out
+}
+
+// TeamFamilies returns the prefixes of the families of TeamFamilyList.
+func (c *Config) TeamFamilies() []string {
+	var out []string
+	for _, f := range c.TeamFamilyList() {
+		out = append(out, f.Prefix)
+	}
+	return out
+}
+
+// OverlappingFamilies reports two families of different derivations whose
+// prefixes overlap (one starts with the other): a claim value could then
+// produce a team of the other family.
+func OverlappingFamilies(fams []TeamFamily) (TeamFamily, TeamFamily, bool) {
+	for i, a := range fams {
+		for _, b := range fams[i+1:] {
+			if a.Key != b.Key && (strings.HasPrefix(a.Prefix, b.Prefix) || strings.HasPrefix(b.Prefix, a.Prefix)) {
+				return a, b, true
+			}
+		}
+	}
+	return TeamFamily{}, TeamFamily{}, false
+}
+
+// InTeamFamily reports whether a team name could be derived by a family
+// with one of the prefixes.
+func InTeamFamily(prefixes []string, team string) bool {
+	for _, p := range prefixes {
+		if len(team) > len(p) && strings.HasPrefix(team, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// validateTeamFamilies keeps derived teams apart from the fixed ones once
+// the teams block exists: every family needs a prefix, and no declared or
+// fixed team may carry the prefix of a family, so that a claim value can
+// never produce the name of a declared team.
+func (c *Config) validateTeamFamilies(add func(string, ...any)) {
+	if !c.TeamsDeclared() {
+		return
+	}
+	for i, b := range c.Bindings {
+		if b.TeamFrom != nil && b.TeamFrom.Prefix == "" {
+			add("bindings[%d].team_from.prefix: required once a teams block exists (a derived team must not take the name of a declared team)", i)
+		}
+	}
+	for i, d := range c.Policy.Delegations {
+		if fs := d.Allow.Teams.FromSubject; fs != nil && fs.Prefix == "" {
+			add("policy.delegations[%d].allow.teams.from_subject.prefix: required once a teams block exists (a derived team must not take the name of a declared team)", i)
+		}
+	}
+	for _, is := range c.AllIssuers() {
+		if is.TeamClaim != "" && is.TeamClaimPrefix == "" {
+			add("issuer %s: team_claim_prefix is required with team_claim once a teams block exists (the teams of a claim form their own family)", is.Name)
+		}
+	}
+	if a, b, ok := OverlappingFamilies(c.TeamFamilyList()); ok {
+		add("%s: prefix %q overlaps the prefix %q of %s: families of teams derived from claims must not overlap", a.At, a.Prefix, b.Prefix, b.At)
+	}
+	fams := c.TeamFamilies()
+	check := func(at, team string) {
+		if InTeamFamily(fams, team) {
+			add("%s: team %q carries the prefix of a team derived from claims (team_from or from_subject): choose another name or prefix", at, team)
+		}
+	}
+	for _, name := range sortedNames(c.Teams) {
+		check("teams."+name, name)
+	}
+	for i, b := range c.Bindings {
+		if b.Team != "" {
+			check(fmt.Sprintf("bindings[%d].team", i), b.Team)
+		}
+	}
+	for i, vk := range c.VirtualKeys {
+		for _, t := range vk.Teams {
+			check(fmt.Sprintf("virtual_keys[%d].teams", i), t)
+		}
+	}
+	for i, d := range c.Policy.Delegations {
+		for _, n := range d.Allow.Teams.Names {
+			if !strings.Contains(n, "*") {
+				check(fmt.Sprintf("policy.delegations[%d].allow.teams.names", i), n)
+			}
+		}
+	}
+}
+
+func sortedNames[T any](m map[string]T) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // decodeKey accepts a 32-byte key encoded as hex or base64.

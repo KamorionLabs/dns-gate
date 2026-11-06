@@ -9,11 +9,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
@@ -63,6 +65,24 @@ type Authenticator struct {
 	audit   audit.Logger
 	noise   noiseCounter
 	now     func() time.Time
+	log     *slog.Logger
+	warned  sync.Map
+}
+
+// SetLogger sets the logger of the warnings about refused team names
+// (slog.Default by default).
+func (a *Authenticator) SetLogger(l *slog.Logger) { a.log = l }
+
+// warnOnce logs a warning once per key and process.
+func (a *Authenticator) warnOnce(key, msg string, args ...any) {
+	if _, seen := a.warned.LoadOrStore(key, true); seen {
+		return
+	}
+	l := a.log
+	if l == nil {
+		l = slog.Default()
+	}
+	l.Warn(msg, args...)
 }
 
 // New builds an Authenticator. client is used for discovery and JWKS.
@@ -264,6 +284,53 @@ func (a *Authenticator) verify(ctx context.Context, is *issuer, raw string, audi
 	return claims, nil
 }
 
+// Rebind binds a subject authenticated earlier again with the current
+// policy (the approver of an ownership transfer whose apply is retried):
+// a virtual key must still exist and be valid, an OIDC or SAML subject is
+// bound from its recorded claims.
+func (a *Authenticator) Rebind(s *identity.Subject) (*identity.Subject, error) {
+	if s.Kind == identity.KindVirtualKey {
+		for _, vk := range a.policy.Current().VirtualKeys() {
+			if vk.ID != s.ID {
+				continue
+			}
+			if vk.ExpiresAt != nil && !a.now().Before(*vk.ExpiresAt) {
+				return nil, unauthorized("virtual key expired")
+			}
+			roles := append([]string(nil), vk.Roles...)
+			sort.Strings(roles)
+			teamRoles := map[string][]string{}
+			for _, t := range vk.Teams {
+				teamRoles[t] = roles
+			}
+			return &identity.Subject{Kind: identity.KindVirtualKey, Issuer: "virtual-key", ID: vk.ID, Claims: map[string]any{},
+				Roles: roles, Teams: append([]string(nil), vk.Teams...), TeamRoles: teamRoles, Name: vk.ID, Category: identity.CategoryKey}, nil
+		}
+		return nil, unauthorized("virtual key removed")
+	}
+	if s.Kind == identity.KindAPIKey {
+		if a.keys == nil {
+			return nil, unauthorized("API keys are not enabled")
+		}
+		k, err := a.keys.GetAPIKey(context.Background(), s.ID)
+		if err != nil {
+			return nil, unauthorized("API key not found")
+		}
+		snap := a.policy.Current()
+		switch {
+		case k.RevokedAt != nil:
+			return nil, unauthorized("API key revoked")
+		case k.ExpiresAt != nil && !a.now().Before(*k.ExpiresAt):
+			return nil, unauthorized("API key expired")
+		case !snap.HasRole(k.Role) || snap.RoleReserved(k.Role) || (snap.StrictTeams() && !snap.TeamDeclared(k.Team)):
+			return nil, unauthorized("the role or the team of this API key is no longer valid")
+		}
+		return &identity.Subject{Kind: identity.KindAPIKey, Issuer: APIKeyIssuer, ID: k.ID, Claims: map[string]any{}, Roles: []string{k.Role},
+			Teams: []string{k.Team}, TeamRoles: map[string][]string{k.Team: {k.Role}}, Name: s.Name, Category: identity.CategoryKey}, nil
+	}
+	return a.SubjectFromClaims(s.Issuer, s.Claims, s.Category)
+}
+
 // SubjectFromClaims binds verified claims of the named issuer. category
 // overrides the issuer category when not empty (UI sessions are human).
 func (a *Authenticator) SubjectFromClaims(issuerName string, claims map[string]any, category string) (*identity.Subject, error) {
@@ -318,6 +385,15 @@ func (a *Authenticator) bind(is *issuer, claims map[string]any) (*identity.Subje
 func (a *Authenticator) resolve(snap *policy.Snapshot, is *issuer, s *identity.Subject, claims map[string]any) (*identity.Subject, error) {
 	res := snap.Resolve(is.cfg.Name, claims)
 	s.Roles, s.Teams, s.Groups, s.Delegations = res.Roles, res.Teams, res.Groups, res.Delegations
+	s.TeamRoles = map[string][]string{}
+	for team, roles := range res.TeamRoles {
+		if team != "" {
+			s.TeamRoles[team] = roles
+		}
+	}
+	for _, ig := range res.Ignored {
+		a.warnOnce("derived:"+is.cfg.Name+":"+ig, "binding ignored: its team derived from a claim is the name of a declared team", "issuer", is.cfg.Name, "binding", ig, "subject", s.ID)
+	}
 	teams := map[string]bool{}
 	for _, t := range s.Teams {
 		teams[t] = true
@@ -325,9 +401,17 @@ func (a *Authenticator) resolve(snap *policy.Snapshot, is *issuer, s *identity.S
 	if is.cfg.TeamClaim != "" {
 		for _, t := range policy.ClaimStrings(claims[is.cfg.TeamClaim]) {
 			t = strings.ToLower(t)
+			if t != "" {
+				t = is.cfg.TeamClaimPrefix + t
+			}
+			if t != "" && !teams[t] && !snap.ClaimTeamAllowed(is.cfg.Name, t) {
+				a.warnOnce("claim:"+is.cfg.Name+":"+t, "team claim value ignored: not a member of a team_from family, or the name of a declared team", "issuer", is.cfg.Name, "team", t)
+				continue
+			}
 			if t != "" && !teams[t] {
 				teams[t] = true
 				s.Teams = append(s.Teams, t)
+				s.TeamRoles[t] = res.TeamRoles[""]
 			}
 		}
 	}
@@ -417,15 +501,20 @@ func (a *Authenticator) authenticateVirtualKey(appID, apiKey string, ip netip.Ad
 	}
 	roles := append([]string(nil), match.Roles...)
 	sort.Strings(roles)
+	teamRoles := map[string][]string{}
+	for _, t := range match.Teams {
+		teamRoles[t] = roles
+	}
 	return &identity.Subject{
-		Kind:     identity.KindVirtualKey,
-		Issuer:   "virtual-key",
-		ID:       match.ID,
-		Claims:   map[string]any{},
-		Roles:    roles,
-		Teams:    append([]string(nil), match.Teams...),
-		Name:     match.ID,
-		Category: identity.CategoryKey,
+		Kind:      identity.KindVirtualKey,
+		Issuer:    "virtual-key",
+		ID:        match.ID,
+		Claims:    map[string]any{},
+		Roles:     roles,
+		Teams:     append([]string(nil), match.Teams...),
+		TeamRoles: teamRoles,
+		Name:      match.ID,
+		Category:  identity.CategoryKey,
 	}, nil
 }
 

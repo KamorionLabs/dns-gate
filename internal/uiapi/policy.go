@@ -132,14 +132,30 @@ type VirtualKey struct {
 	AllowedCIDRs []string   `json:"allowed_cidrs,omitempty"`
 }
 
+// Team declares the members of a team (teams block). A binding naming the
+// team without groups or subjects of its own grants its role to them.
+type Team struct {
+	Description string      `json:"description,omitempty"`
+	Members     TeamMembers `json:"members"`
+}
+
+// TeamMembers are the groups and subject matchers of a team.
+type TeamMembers struct {
+	Groups   []string         `json:"groups,omitempty"`
+	Subjects []SubjectMatcher `json:"subjects,omitempty"`
+}
+
 // PolicyDocument is the managed (editable) layer. Zones are brought under
 // management in addition to the base zones; each must match
 // policy.bounds.zones and exist in a provider account (zone discovery).
 // Delegated holds the roles and bindings owned by policy delegations: they
 // are changed only through the delegation API, and a proposal that omits
-// the section keeps the delegated objects of the active revision.
+// the section keeps the delegated objects of the active revision. Teams
+// declares teams besides the base ones; a proposal that omits it keeps the
+// teams of the active revision ({} removes them).
 type PolicyDocument struct {
 	Zones       []string          `json:"zones,omitempty"`
+	Teams       map[string]Team   `json:"teams,omitempty"`
 	Groups      map[string]Group  `json:"groups"`
 	Roles       map[string]Role   `json:"roles"`
 	Bindings    []Binding         `json:"bindings"`
@@ -302,7 +318,7 @@ type BaseLayer struct {
 	Issuers    []Issuer       `json:"issuers"`
 	Protected  []Protected    `json:"protected"`
 	Bounds     Bounds         `json:"bounds"`
-	Document   PolicyDocument `json:"document"` // base groups, roles, bindings, keys
+	Document   PolicyDocument `json:"document"` // base teams, groups, roles, bindings, keys
 	// Delegations are the policy.delegations of the file.
 	Delegations []Delegation `json:"delegations,omitempty"`
 	// Discovery is the state of the zone listing of the provider accounts.
@@ -358,6 +374,9 @@ type EffectivePolicy struct {
 	Active   *RevisionSummary `json:"active,omitempty"`  // nil when no managed revision is active
 	Managed  *PolicyDocument  `json:"managed,omitempty"` // document of the active revision
 	Me       MyPolicyRights   `json:"me"`
+	// LoadError tells why this replica does not serve the active managed
+	// revision (the last policy refresh failed); empty when it does.
+	LoadError string `json:"load_error,omitempty"`
 }
 
 // Approval is one decision on a revision.
@@ -454,13 +473,16 @@ type ExplainResponse struct {
 
 // WhoCanEntry is one grant on a record.
 type WhoCanEntry struct {
-	Role     string           `json:"role"`
-	Team     string           `json:"team"`
-	TeamFrom *TeamFrom        `json:"team_from,omitempty"`
-	Layer    string           `json:"layer"`
-	Groups   []string         `json:"groups,omitempty"`
-	Subjects []SubjectMatcher `json:"subjects,omitempty"`
-	Keys     []string         `json:"virtual_keys,omitempty"`
+	Role     string    `json:"role"`
+	Team     string    `json:"team"`
+	TeamFrom *TeamFrom `json:"team_from,omitempty"`
+	Layer    string    `json:"layer"`
+	// TeamMembers are the members of Team when the binding has no groups
+	// or subjects of its own.
+	TeamMembers *TeamMembers     `json:"team_members,omitempty"`
+	Groups      []string         `json:"groups,omitempty"`
+	Subjects    []SubjectMatcher `json:"subjects,omitempty"`
+	Keys        []string         `json:"virtual_keys,omitempty"`
 }
 
 // WhoCanResponse lists who may perform an action on an RRset.

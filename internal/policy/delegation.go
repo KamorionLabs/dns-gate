@@ -272,7 +272,7 @@ func ObjectETag(v any) string {
 // validateDelegated checks the delegated section of a managed document: the
 // same rules as the other managed objects, plus the limits of the owning
 // delegation. roleOK, groupOK and matcher are the checks of ValidateManaged.
-func validateDelegated(v *verrs, c *config.Config, base uiapi.PolicyDocument, d uiapi.PolicyDocument, roleOK func(path, name string), groupOK func(path, g string), matcher func(path string, m uiapi.SubjectMatcher)) {
+func validateDelegated(v *verrs, c *config.Config, base uiapi.PolicyDocument, d uiapi.PolicyDocument, roleOK func(path, name string), groupOK func(path, g string), matcher func(path string, m uiapi.SubjectMatcher), teams *teamRefs) {
 	ds := d.Delegated
 	if ds == nil {
 		return
@@ -326,7 +326,7 @@ func validateDelegated(v *verrs, c *config.Config, base uiapi.PolicyDocument, d 
 		if !nameRe.MatchString(name) {
 			v.add(at, "binding name must be a lowercase identifier")
 		}
-		validateBinding(v, at, b.Binding, groupOK, matcher)
+		validateBinding(v, at, b.Binding, groupOK, matcher, &teamRefs{})
 		dl := owner(at, b.Owner)
 		if dl == nil {
 			continue
@@ -342,7 +342,7 @@ func validateDelegated(v *verrs, c *config.Config, base uiapi.PolicyDocument, d 
 				v.add(fmt.Sprintf("%s.subjects[%d]", at, j), "subject %s is not covered by the allow.binding_subjects of delegation %q", MatcherString(m), dl.Name)
 			}
 		}
-		validateDelegatedTeam(v, dl, at, b.Binding)
+		validateDelegatedTeam(v, dl, at, b.Binding, teams)
 	}
 
 	for _, name := range sortedKeys(count) {
@@ -426,8 +426,10 @@ func validateDelegatedBindingRole(v *verrs, c *config.Config, base, d uiapi.Poli
 }
 
 // validateDelegatedTeam checks the team of a delegated binding against
-// allow.teams.
-func validateDelegatedTeam(v *verrs, dl *config.Delegation, at string, b uiapi.Binding) {
+// allow.teams. A team listed in allow.teams.names must also be declared
+// once team references are strict; a team derived from the subject belongs
+// to the from_subject family.
+func validateDelegatedTeam(v *verrs, dl *config.Delegation, at string, b uiapi.Binding, teams *teamRefs) {
 	fs := dl.Allow.Teams.FromSubject
 	switch {
 	case b.TeamFrom != nil:
@@ -437,6 +439,7 @@ func validateDelegatedTeam(v *verrs, dl *config.Delegation, at string, b uiapi.B
 	case b.Team == "":
 		v.add(at+".team", "a delegated binding needs a team or team_from")
 	case glob.Any(dl.Allow.Teams.Names, b.Team):
+		teams.check(v, at+".team", b.Team)
 	case fs != nil:
 		if len(b.Groups) > 0 {
 			v.add(at+".team", "team %q is not in allow.teams.names, and a team derived from the subject cannot apply to groups", b.Team)
@@ -450,6 +453,8 @@ func validateDelegatedTeam(v *verrs, dl *config.Delegation, at string, b uiapi.B
 			}
 			if t, ok := DeriveTeamFromValue(fs, vals[0]); !ok || t != b.Team {
 				v.add(at+".team", "team %q is not the team derived from %s %q (%s)", b.Team, fs.Claim, vals[0], derivedOrNone(t, ok))
+			} else if _, declared := teams.declared(t); declared && teams.strict {
+				v.add(at+".team", "team %q derived from the subject is the name of a declared team", t)
 			}
 		}
 	default:

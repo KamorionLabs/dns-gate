@@ -23,7 +23,7 @@ var (
 var knownActions = map[string]bool{
 	ActionDNSRead: true, ActionRecordWrite: true, ActionRecordAdopt: true,
 	ActionZoneAdmin: true, ActionDomainRead: true, ActionUIRead: true,
-	ActionAPIKeyManage: true,
+	ActionAPIKeyManage: true, ActionOwnershipApprove: true,
 }
 
 func bytesReader(b []byte) io.Reader { return bytes.NewReader(b) }
@@ -104,6 +104,35 @@ func ValidateManaged(c *config.Config, base uiapi.PolicyDocument, d uiapi.Policy
 		}
 	}
 
+	groupKnown := func(g string) bool {
+		_, inBase := base.Groups[g]
+		_, inDoc := d.Groups[g]
+		return inBase || inDoc
+	}
+	for _, name := range sortedKeys(d.Teams) {
+		t := d.Teams[name]
+		at := "teams." + name
+		if !nameRe.MatchString(name) {
+			v.add(at, "team name must be a lowercase identifier")
+		}
+		if _, ok := base.Teams[name]; ok {
+			v.add(at, "team %q is defined by the base policy", name)
+		}
+		if len(t.Description) > 500 {
+			v.add(at+".description", "at most 500 characters")
+		}
+		for i, g := range t.Members.Groups {
+			if !groupKnown(g) {
+				v.add(fmt.Sprintf("%s.members.groups[%d]", at, i), "unknown group %q", g)
+			}
+		}
+		for i, m := range t.Members.Subjects {
+			matcher(fmt.Sprintf("%s.members.subjects[%d]", at, i), m)
+		}
+	}
+	teams := teamRefs{strict: c.TeamsDeclared(), base: base.Teams, doc: d.Teams}
+	validateManagedFamilies(&v, c, d, &teams)
+
 	for _, name := range sortedKeys(d.Roles) {
 		r := d.Roles[name]
 		at := "roles." + name
@@ -148,16 +177,14 @@ func ValidateManaged(c *config.Config, base uiapi.PolicyDocument, d uiapi.Policy
 	}
 
 	groupOK := func(path, g string) {
-		_, inBase := base.Groups[g]
-		_, inDoc := d.Groups[g]
-		if !inBase && !inDoc {
+		if !groupKnown(g) {
 			v.add(path, "unknown group %q", g)
 		}
 	}
 	for i, b := range d.Bindings {
 		at := fmt.Sprintf("bindings[%d]", i)
 		roleOK(at+".role", b.Role)
-		validateBinding(&v, at, b, groupOK, matcher)
+		validateBinding(&v, at, b, groupOK, matcher, &teams)
 	}
 
 	ids, apps := map[string]bool{}, map[string]bool{}
@@ -190,7 +217,9 @@ func ValidateManaged(c *config.Config, base uiapi.PolicyDocument, d uiapi.Policy
 		for j, t := range k.Teams {
 			if !nameRe.MatchString(t) {
 				v.add(fmt.Sprintf("%s.teams[%d]", at, j), "team must be a lowercase identifier")
+				continue
 			}
+			teams.check(&v, fmt.Sprintf("%s.teams[%d]", at, j), t)
 		}
 		if k.ExpiresAt == nil {
 			v.add(at+".expires_at", "managed virtual keys must expire")
@@ -201,8 +230,104 @@ func ValidateManaged(c *config.Config, base uiapi.PolicyDocument, d uiapi.Policy
 			}
 		}
 	}
-	validateDelegated(&v, c, base, d, roleOK, groupOK, matcher)
+	validateDelegated(&v, c, base, d, roleOK, groupOK, matcher, &teams)
 	return v
+}
+
+// teamRefs checks the team references of a managed document: once the base
+// file has a teams block, a team must be declared in the base file or in the
+// document.
+type teamRefs struct {
+	strict    bool
+	base, doc map[string]uiapi.Team
+}
+
+func (t *teamRefs) declared(team string) (uiapi.Team, bool) {
+	if dt, ok := t.base[team]; ok {
+		return dt, true
+	}
+	dt, ok := t.doc[team]
+	return dt, ok
+}
+
+func (t *teamRefs) check(v *verrs, path, team string) {
+	if _, ok := t.declared(team); !ok && t.strict {
+		v.add(path, "team %q is not declared under teams", team)
+	}
+}
+
+// validateManagedFamilies applies the family rules of the base file to a
+// managed document once team references are strict: managed team_from
+// bindings need a prefix that no declared team carries, and no managed
+// team, binding team or virtual key team may carry the prefix of a family.
+func validateManagedFamilies(v *verrs, c *config.Config, d uiapi.PolicyDocument, teams *teamRefs) {
+	if !teams.strict {
+		return
+	}
+	fams := c.TeamFamilies()
+	known := c.TeamFamilyList()
+	for i, b := range d.Bindings {
+		t := b.TeamFrom
+		if t == nil || t.Prefix == "" {
+			continue
+		}
+		fams = append(fams, t.Prefix)
+		f := config.TeamFamily{Key: config.TeamFromKey(t.Claim, t.Regex, t.Prefix), Prefix: t.Prefix, At: fmt.Sprintf("bindings[%d].team_from", i)}
+		for _, o := range known {
+			if _, _, overlap := config.OverlappingFamilies([]config.TeamFamily{o, f}); overlap {
+				v.add(f.At, "prefix %q overlaps the prefix %q of %s: families of teams derived from claims must not overlap", f.Prefix, o.Prefix, o.At)
+				break
+			}
+		}
+		known = append(known, f)
+	}
+	if d.Delegated != nil {
+		for _, b := range d.Delegated.Bindings {
+			if b.TeamFrom != nil && b.TeamFrom.Prefix != "" {
+				fams = append(fams, b.TeamFrom.Prefix)
+			}
+		}
+	}
+	for i, b := range d.Bindings {
+		if b.TeamFrom == nil {
+			continue
+		}
+		at := fmt.Sprintf("bindings[%d].team_from", i)
+		if b.TeamFrom.Prefix == "" {
+			v.add(at, "a prefix is required once a teams block exists (a derived team must not take the name of a declared team)")
+			continue
+		}
+		for _, declared := range [](map[string]uiapi.Team){teams.base, teams.doc} {
+			for name := range declared {
+				if config.InTeamFamily([]string{b.TeamFrom.Prefix}, name) {
+					v.add(at, "prefix %q is carried by the declared team %q", b.TeamFrom.Prefix, name)
+				}
+			}
+		}
+	}
+	inFamily := func(path, team string) {
+		if config.InTeamFamily(fams, team) {
+			v.add(path, "team %q carries the prefix of a team derived from claims", team)
+		}
+	}
+	for _, name := range sortedKeys(d.Teams) {
+		inFamily("teams."+name, name)
+	}
+	for i, b := range d.Bindings {
+		if b.Team != "" {
+			inFamily(fmt.Sprintf("bindings[%d].team", i), b.Team)
+		}
+	}
+	for i, k := range d.VirtualKeys {
+		for j, t := range k.Teams {
+			inFamily(fmt.Sprintf("virtual_keys[%d].teams[%d]", i, j), t)
+		}
+	}
+}
+
+func (t *teamRefs) hasMembers(team string) bool {
+	dt, ok := t.declared(team)
+	return ok && (len(dt.Members.Groups) > 0 || len(dt.Members.Subjects) > 0)
 }
 
 // validateRole checks the rules and options of a managed role.
@@ -249,10 +374,13 @@ func validateRole(v *verrs, c *config.Config, at string, r uiapi.Role) {
 }
 
 // validateBinding checks the team, groups and subjects of a managed binding
-// (the role is checked by the caller).
-func validateBinding(v *verrs, at string, b uiapi.Binding, groupOK func(path, g string), matcher func(path string, m uiapi.SubjectMatcher)) {
+// (the role is checked by the caller). Without groups and subjects, the
+// binding applies to the members of its team.
+func validateBinding(v *verrs, at string, b uiapi.Binding, groupOK func(path, g string), matcher func(path string, m uiapi.SubjectMatcher), teams *teamRefs) {
 	if b.Team != "" && !nameRe.MatchString(b.Team) {
 		v.add(at+".team", "team must be a lowercase identifier")
+	} else if b.Team != "" && b.TeamFrom == nil {
+		teams.check(v, at+".team", b.Team)
 	}
 	if b.TeamFrom != nil {
 		if b.Team != "" {
@@ -262,8 +390,8 @@ func validateBinding(v *verrs, at string, b uiapi.Binding, groupOK func(path, g 
 			v.add(at+".team_from", "%v", err)
 		}
 	}
-	if len(b.Groups) == 0 && len(b.Subjects) == 0 {
-		v.add(at, "groups or subjects required")
+	if len(b.Groups) == 0 && len(b.Subjects) == 0 && (b.TeamFrom != nil || b.Team == "" || !teams.hasMembers(b.Team)) {
+		v.add(at, "groups or subjects required (or a team declared with members)")
 	}
 	for j, g := range b.Groups {
 		groupOK(fmt.Sprintf("%s.groups[%d]", at, j), g)

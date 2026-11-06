@@ -111,7 +111,7 @@ func TestRoutesDispatched(t *testing.T) {
 	approval := true
 	e := newEnvWith(t, func(c *config.Config) { c.Policy.RequireApproval = &approval })
 	tok := e.token("writer")
-	sample := strings.NewReplacer("{zone}", "example.com", "{host}", "www", "{type}", "A", "{id}", "rev-00000001", "{name}", "web")
+	sample := strings.NewReplacer("{zone}", "example.com", "{host}", "www", "{type}", "A", "{id}", "rev-00000001", "{name}", "web", "{team}", "web")
 	for _, rt := range apiRoutes {
 		body := ""
 		if rt.Method == http.MethodPost || rt.Method == http.MethodPut {

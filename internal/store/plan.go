@@ -18,6 +18,7 @@ type Plan struct {
 	ID          string
 	Subject     string // issuer:id
 	Zone        string
+	Team        string // team the subject selected for the plan, "" for its default team
 	Changes     []uiapi.RRsetChange
 	ZoneVersion int64
 	CreatedAt   time.Time
@@ -140,8 +141,8 @@ func (s *sqlStore) PutPlan(ctx context.Context, p Plan) error {
 	if err != nil {
 		return err
 	}
-	n, err := s.exec(ctx, "INSERT INTO rrset_plan (id, subject, zone, changes, zone_version, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
-		p.ID, p.Subject, p.Zone, changes, p.ZoneVersion, micros(p.CreatedAt), micros(p.ExpiresAt))
+	n, err := s.exec(ctx, "INSERT INTO rrset_plan (id, subject, zone, team, changes, zone_version, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
+		p.ID, p.Subject, p.Zone, p.Team, changes, p.ZoneVersion, micros(p.CreatedAt), micros(p.ExpiresAt))
 	if err != nil {
 		return fmt.Errorf("store: put plan: %w", err)
 	}
@@ -155,8 +156,8 @@ func (s *sqlStore) TakePlan(ctx context.Context, id, subject string, now time.Ti
 	p := Plan{ID: id}
 	var changes string
 	var created, expires int64
-	err := s.db.QueryRowContext(ctx, s.rebind("DELETE FROM rrset_plan WHERE id = ? AND subject = ? RETURNING subject, zone, changes, zone_version, created_at, expires_at"), id, subject).
-		Scan(&p.Subject, &p.Zone, &changes, &p.ZoneVersion, &created, &expires)
+	err := s.db.QueryRowContext(ctx, s.rebind("DELETE FROM rrset_plan WHERE id = ? AND subject = ? RETURNING subject, zone, team, changes, zone_version, created_at, expires_at"), id, subject).
+		Scan(&p.Subject, &p.Zone, &p.Team, &changes, &p.ZoneVersion, &created, &expires)
 	if errors.Is(err, sql.ErrNoRows) {
 		var owner string
 		err := s.db.QueryRowContext(ctx, s.rebind("SELECT subject FROM rrset_plan WHERE id = ?"), id).Scan(&owner)

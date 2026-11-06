@@ -114,7 +114,7 @@ func TestAdoptCandidateRelativeTarget(t *testing.T) {
 	e := newEnv(t, eurodnstest.Options{})
 	eng := e.eng.(*engine)
 	cur := eurodnsprov.FromNative("eurodns", zoneName, &eurodns.Zone{Name: zoneName, Records: []eurodns.Record{rec("MX", "sub", "10 mail"), rec("CNAME", "ok", "t.example.net.")}})
-	cands := eng.adoptCandidates(admin, e.prov, zoneName, cur, nil, nil, nil, nil)
+	cands := eng.adoptCandidates(admin, e.prov, zoneName, "team-a", cur, nil, nil, nil, nil, nil)
 	if len(cands) != 2 || cands[0].Host != "ok" || !cands[0].Adoptable || cands[1].Reason != eurodnsprov.CodeRelativeTarget {
 		t.Fatalf("%+v", cands)
 	}

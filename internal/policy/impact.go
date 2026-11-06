@@ -65,6 +65,8 @@ func bindingWho(b uiapi.Binding) string {
 	switch {
 	case b.TeamFrom != nil:
 		who = "team from " + TeamFromString(b.TeamFrom) + " (" + who + ")"
+	case b.Team != "" && who == "":
+		who = "team " + b.Team + " (members)"
 	case b.Team != "":
 		who = "team " + b.Team + " (" + who + ")"
 	}
@@ -171,6 +173,29 @@ func Impact(old, new *Snapshot, owned OwnedCounter) []uiapi.ImpactItem {
 		}
 	}
 
+	// Team declarations and their members.
+	for _, name := range unionKeys(old.teams, new.teams) {
+		ot, nt := old.teams[name], new.teams[name]
+		switch {
+		case ot == nil:
+			items = append(items, uiapi.ImpactItem{Kind: "gain", Who: "team " + name, Message: fmt.Sprintf("team %s is declared with %s", name, teamMembersText(nt.team.Members))})
+		case nt == nil:
+			items = append(items, uiapi.ImpactItem{Kind: "loss", Who: "team " + name, Message: fmt.Sprintf("team %s is no longer declared: bindings naming it without groups or subjects bind nobody", name)})
+		case teamMembersText(ot.team.Members) != teamMembersText(nt.team.Members):
+			items = append(items, uiapi.ImpactItem{Kind: "warning", Who: "team " + name, Message: fmt.Sprintf("members of team %s change: %s -> %s", name, teamMembersText(ot.team.Members), teamMembersText(nt.team.Members))})
+		}
+	}
+	oldUndeclared := map[string]bool{}
+	for _, t := range old.UndeclaredTeams() {
+		oldUndeclared[t] = true
+	}
+	for _, t := range new.UndeclaredTeams() {
+		if !oldUndeclared[t] {
+			items = append(items, uiapi.ImpactItem{Kind: "warning", Who: "team " + t,
+				Message: fmt.Sprintf("team %s is not declared under teams: it is declared automatically during the migration to the teams block", t)})
+		}
+	}
+
 	// Zones brought under management or released.
 	for _, zone := range unionKeys(old.zones, new.zones) {
 		switch {
@@ -223,6 +248,21 @@ func Impact(old, new *Snapshot, owned OwnedCounter) []uiapi.ImpactItem {
 		items = []uiapi.ImpactItem{}
 	}
 	return items
+}
+
+func teamMembersText(m uiapi.TeamMembers) string {
+	parts := []string{}
+	for _, g := range m.Groups {
+		parts = append(parts, "group "+g)
+	}
+	if t := membersText(m.Subjects); t != "" {
+		parts = append(parts, t)
+	}
+	sort.Strings(parts)
+	if len(parts) == 0 {
+		return "no members"
+	}
+	return strings.Join(parts, "; ")
 }
 
 func membersText(ms []uiapi.SubjectMatcher) string {
@@ -279,10 +319,16 @@ func (s *Snapshot) WhoCan(action, zone, host, typ string) uiapi.WhoCanResponse {
 		if !decide(b.binding.Role) {
 			continue
 		}
-		resp.Entries = append(resp.Entries, uiapi.WhoCanEntry{
+		e := uiapi.WhoCanEntry{
 			Role: b.binding.Role, Team: b.binding.Team, TeamFrom: b.binding.TeamFrom, Layer: b.layer,
 			Groups: b.binding.Groups, Subjects: b.binding.Subjects,
-		})
+		}
+		if len(b.binding.Groups) == 0 && len(b.binding.Subjects) == 0 {
+			if m, ok := s.TeamMembers(b.binding.Team); ok {
+				e.TeamMembers = &m
+			}
+		}
+		resp.Entries = append(resp.Entries, e)
 	}
 	for _, k := range s.keys {
 		for _, r := range k.key.Roles {

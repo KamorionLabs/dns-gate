@@ -84,6 +84,12 @@ func newEngine(cfg Config) (*engine, error) {
 	if cfg.UnmanagedTTL <= 0 {
 		cfg.UnmanagedTTL = 15 * time.Minute
 	}
+	if cfg.TransferTTL <= 0 {
+		cfg.TransferTTL = 7 * 24 * time.Hour
+	}
+	if cfg.PersonClaims == nil {
+		cfg.PersonClaims = []string{"tid+oid", "email", "preferred_username", "upn"}
+	}
 	e := &engine{
 		cfg: cfg, zones: cfg.ZoneSet, now: cfg.Now, log: cfg.Logger,
 		cache: map[string]*cachedZone{}, locals: map[string]chan struct{}{}, writes: map[string]journalWrite{},
@@ -391,7 +397,7 @@ func (e *engine) resolvePending(ctx context.Context, zone string, sets map[dns.K
 		case o.ContentHash == "" && present, o.PendingHash != pendingDelete && present && hash == o.PendingHash:
 			next.State, next.ContentHash = store.StateActive, hash
 		case o.ContentHash == "" || (o.PendingHash == pendingDelete && !present):
-			if err := e.cfg.Store.Delete(ctx, zone, o.Host, o.Type, o.Version); err != nil {
+			if err := e.deleteOwned(ctx, o); err != nil {
 				e.log.Warn("pending cleanup failed", "zone", zone, "rrset", keyString(key), "error", err)
 				continue
 			}
@@ -455,6 +461,7 @@ type claim struct {
 	change dns.Change
 	prev   *store.Ownership
 	cur    store.Ownership
+	tomb   bool // re-creates an RRset reserved by a tombstone of its team
 }
 
 // Write runs the common write pipeline; build turns the request into RRset changes.
@@ -650,6 +657,7 @@ func (e *engine) validate(ctx context.Context, s *identity.Subject, p provider.P
 
 	now := e.now()
 	claims := make([]claim, 0, len(plan.Changes))
+	var tombs map[dns.Key]store.Tombstone
 	for i := range plan.Changes {
 		c := &plan.Changes[i]
 		if !e.cfg.Authz.AllowRRset(s, policy.ActionRecordWrite, zone, c.Key) {
@@ -696,6 +704,19 @@ func (e *engine) validate(ctx context.Context, s *identity.Subject, p provider.P
 				team, ok := e.cfg.Authz.OwnerTeam(s, zone)
 				if !ok {
 					return nil, fail(ReasonForbidden, "no owner team for %s in %s", s.String(), zone)
+				}
+				if tombs == nil {
+					var err error
+					if tombs, err = e.liveTombstones(ctx, zone); err != nil {
+						return nil, err
+					}
+				}
+				if tb, reserved := tombs[c.Key]; reserved {
+					if !slices.Contains(s.Teams, tb.Team) {
+						return nil, fail(ReasonNotOwner, "%s was deleted by team %s and stays reserved for it until %s: ask for a transfer",
+							keyString(c.Key), tb.Team, tb.ExpiresAt.UTC().Format(time.RFC3339))
+					}
+					team, cl.tomb = tb.Team, true
 				}
 				cl.cur = store.Ownership{
 					Zone: zone, Host: c.Key.Host, Type: c.Key.Type, Owner: team,
@@ -772,10 +793,13 @@ func (e *engine) confirm(ctx context.Context, zone string, claims []claim, after
 		var err error
 		switch {
 		case cl.change.New == nil && !present:
-			err = e.cfg.Store.Delete(ctx, zone, o.Host, o.Type, o.Version)
+			err = e.deleteOwned(ctx, o)
 		case cl.change.New != nil && present:
 			o.State, o.ContentHash = store.StateActive, dns.ContentHash(set)
 			err = e.cfg.Store.Put(ctx, o)
+			if err == nil && cl.tomb {
+				e.dropTombstone(ctx, zone, cl.change.Key)
+			}
 		default:
 			var cur *dns.RRset
 			if present {
@@ -858,6 +882,10 @@ func (e *engine) Adopt(ctx context.Context, s *identity.Subject, zoneIn string, 
 		return e.deny(ctx, s, action, zone, err)
 	}
 	e.resolvePending(ctx, zone, sets, owns)
+	tombs, err := e.liveTombstones(ctx, zone)
+	if err != nil {
+		return e.deny(ctx, s, action, zone, err)
+	}
 
 	now := e.now()
 	rid := RequestID(ctx)
@@ -893,6 +921,12 @@ func (e *engine) Adopt(ctx context.Context, s *identity.Subject, zoneIn string, 
 			if err != nil {
 				return e.deny(ctx, s, action, zone, err)
 			}
+			if reserved(team, tombs, key) {
+				return e.deny(ctx, s, action, zone, fail(ReasonNotOwner, "%s was deleted by team %s and stays reserved for it: ask for a transfer", keyString(key), tombs[key].Team))
+			}
+			if !e.adoptsFor(s, zone, team, key) {
+				return e.deny(ctx, s, action, zone, fail(ReasonForbidden, "adopting %s for team %s requires %s on it", keyString(key), team, policy.ActionOwnershipApprove))
+			}
 			o = store.Ownership{
 				Zone: zone, Host: key.Host, Type: key.Type, Owner: team, State: store.StateActive,
 				ContentHash: hash, Adopted: true, CreatedAt: now,
@@ -907,6 +941,9 @@ func (e *engine) Adopt(ctx context.Context, s *identity.Subject, zoneIn string, 
 	for _, o := range writes {
 		if err := e.cfg.Store.Put(ctx, o); err != nil {
 			return e.deny(ctx, s, action, zone, &Error{Reason: ReasonUpstream, Message: "store adopt failed", Err: err})
+		}
+		if k := (dns.Key{Host: o.Host, Type: o.Type}); tombs[k].Team != "" {
+			e.dropTombstone(ctx, zone, k)
 		}
 	}
 	if len(writes) > 0 {

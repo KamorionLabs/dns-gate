@@ -69,6 +69,12 @@ type Config struct {
 	// Versions reads zone versions: ETag of the REST inventory, disabled
 	// when nil.
 	Versions ZoneVersions
+	// Transfers serves the ownership transfer requests and team renames;
+	// their routes answer 501 when nil.
+	Transfers zonewrite.Transfers
+	// Tombstones feeds the team views with the RRsets reserved for each
+	// team; optional.
+	Tombstones TombstoneLister
 	// HTTPClient is used for the UI OIDC login (discovery, token exchange)
 	// and the SAML IdP metadata.
 	HTTPClient *http.Client
@@ -121,6 +127,7 @@ type Server struct {
 	log     *slog.Logger
 	now     func() time.Time
 	delegMu sync.Mutex // serializes delegated policy writes in this replica
+	owners  ownerCounts
 }
 
 // New builds the server.
@@ -193,7 +200,11 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case p == "/healthz" || p == "/readyz":
 		w.Header().Set("Content-Type", "text/plain")
-		_, _ = w.Write([]byte("ok\n"))
+		body := "ok\n"
+		if s.cfg.Policy.LoadError() != "" {
+			body += "policy: managed policy not served, its grants may be missing (see the logs or GET /api/v1/policy)\n"
+		}
+		_, _ = w.Write([]byte(body))
 	case p == mcpPath && s.mcp != nil:
 		s.mcp.ServeHTTP(w, r)
 	case (p == resourceMetaPath || p == resourceMetaPath+mcpPath) && s.mcp != nil:
@@ -379,6 +390,8 @@ func reasonStatus(r zonewrite.Reason) int {
 		return http.StatusNotFound
 	case zonewrite.ReasonUpstream:
 		return http.StatusBadGateway
+	case zonewrite.ReasonExpired:
+		return http.StatusGone
 	default:
 		return http.StatusInternalServerError
 	}

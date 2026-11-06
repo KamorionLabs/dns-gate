@@ -170,7 +170,9 @@ Configuration and details: [CONFIG.md](CONFIG.md#token-exchange).
 
 API keys are issued by the gate at runtime, for third parties that have no OIDC
 identity: a hosting provider renewing certificates, an appliance. A key is bound
-to one team (the owner of the RRsets it creates) and one role, with an optional
+to one team (the owner of the RRsets it creates; a declared team once a
+[`teams`](CONFIG.md#teams) block exists, otherwise the key is refused at creation and
+in use) and one role, with an optional
 expiry and source CIDRs. Only its SHA-256 is stored; the key is shown once, at
 creation and at each rotation. The same key works on this API, on the
 [ACME endpoints](ACME.md) and on the EuroDNS-compatible API (`X-App-Id: <id>`,
@@ -238,6 +240,78 @@ create, change or rotate keys. Refused key uses are audited
 (`apikey.authenticate`, with the key id, never the key), as are creations,
 changes, rotations and revocations (`apikey.*`).
 
+## Teams
+
+Every RRset written or adopted through the gate is owned by a team, and only the
+team's members may change or delete it. A caller bound to several teams writes
+for its **default team** (the first one, `default_team` in `GET /api/v1/me`) and may
+change the RRsets of all its teams. To act for one of them only, send the
+`X-DNS-Gate-Team` header on any `/api/v1` write, or the `team` field of a plan:
+
+```sh
+curl -sS "${auth[@]}" -X PUT "$GATE/api/v1/zones/example.com/rrsets/app/CNAME" \
+  -H "X-DNS-Gate-Team: corporate" -H "Content-Type: application/json" \
+  -d '{"ttl": 3600, "values": ["site.example.net."]}'
+
+curl -sS "${auth[@]}" -X POST "$GATE/api/v1/zones/example.com/plan" \
+  -H "Content-Type: application/json" -d '{"team": "corporate", "changes": [...]}'
+```
+
+A team the caller is not a member of is `403 not_team_member`. A plan keeps its
+team: the apply writes for it (`400 team_mismatch` if the apply names another one).
+The EuroDNS-compatible API always writes for the default team.
+
+`GET /api/v1/teams` lists the teams: declared in the `teams` block (with their
+members for `policy.read` holders), referenced without being declared (migration),
+derived from claims (`team_from` families, issuer `team_claim`), and the owners
+found in the store that nothing declares. `GET /api/v1/teams/{team}` adds what the
+team owns in the zones the caller can read and its pending transfers.
+
+A deleted RRset stays reserved for its team for `ownership.tombstone_ttl` (7 days):
+another team creating or adopting it gets `403 not_owner` and must ask for a
+transfer, whoever the caller is.
+
+### Ownership transfers
+
+```sh
+# a member of either team allowed to write the RRsets through it (or a dns.ownership.approve holder) asks
+curl -sS "${auth[@]}" -X POST "$GATE/api/v1/zones/example.com/transfers" \
+  -H "Content-Type: application/json" -d '{
+  "rrsets": [{"host": "www", "type": "CNAME"}, {"host": "@", "type": "TXT"}],
+  "to_team": "corporate", "comment": "the corporate site moves to its own pipeline"}'
+
+# someone allowed to write every RRset through the owner team, or holding dns.ownership.approve on it, approves it
+curl -sS "${auth[@]}" -X POST "$GATE/api/v1/transfers/tr-1780000000000-0a1b2c3d4e/approve" \
+  -H "Content-Type: application/json" -d '{"comment": "ok"}'
+```
+
+The RRsets of a request belong to one team. The approver is a human (unless
+`ownership.machine_approvers`) with a recent login. With
+`ownership.require_second_approver: true` it must be another person than the
+requester, under any identity (`ownership.person_issuers`, `ownership.person_claims`);
+with the default `false` the requester may approve its own request, or propose and
+apply it at once with `"apply": true` (`self_approved` in the answer, `approval:
+self` in the audit). The requester can always withdraw it (`/reject`).
+
+Approval applies it at once, under the zone lock, if every RRset still belongs to the
+team with the content hash it had when requested (store and provider); otherwise the
+transfer is `failed` and the answer is `412 precondition` with the transfer. When the
+zone is locked or the store or the provider is unavailable, the transfer stays
+`applying` (`423` or `502` with the transfer) and the gate retries it in the
+background for 24 hours, checking the rights of the approver again. A request not
+decided within `ownership.transfer_ttl` (7 days) expires (`410 expired`).
+`GET /api/v1/transfers?status=proposed` is the inbox: `can_decide` marks the requests
+the caller may approve. Every step is audited (`gate.transfer.propose`, `.approve`,
+`.reject`, `.apply`, with the requester, the approver and `approval`).
+
+`POST /api/v1/teams/{team}/rename` (`policy.propose`; approved by a `policy.approve`
+holder, another person with `require_second_approver`, or `"apply": true`) moves
+every RRset and tombstone of a team, in every zone of the store, for migrations. The
+approval answers `applying`: the gate applies the rename in the background within a
+few minutes, the approver needing `dns.ownership.approve` on every RRset of the team.
+The policy itself still names the old team: change the bindings in a policy revision
+too.
+
 ## Errors
 
 Errors are JSON, with a stable `reason` for programs:
@@ -248,13 +322,13 @@ Errors are JSON, with a stable `reason` for programs:
 
 | Status | Reasons |
 |---|---|
-| 400 | `invalid` (request or provider validation), `relative_target` (single-label target), `bad_request` |
+| 400 | `invalid` (request or provider validation), `relative_target` (single-label target), `bad_request`, `team_mismatch` |
 | 401 | `unauthenticated` (also an unknown, revoked, expired or rotated API key) |
-| 403 | `forbidden` (RBAC, protected record, plan of another caller), `not_owner` (another team), `too_many_changes`, `reauth_required`, `csrf`, `session_required`, `source_ip` (key used outside its CIDRs), `role_widened` (API key whose role grew), `ephemeral_required` (ACME endpoints) |
+| 403 | `forbidden` (RBAC, protected record, plan of another caller), `not_owner` (another team), `too_many_changes`, `reauth_required`, `csrf`, `session_required`, `source_ip` (key used outside its CIDRs), `role_widened` (API key whose role grew), `ephemeral_required` (ACME endpoints), `not_team_member` |
 | 404 | `not_found` (zone not managed, RRset unknown), `plan_not_found`, `zone_not_eurodns` (EuroDNS-compatible API on a zone of another provider) |
 | 409 | `foreign_rrset` (created outside the gate: adopt it first), `tainted` (changed outside the gate), `adopt_conflict`, `immutable`, `revoked` (API keys), `too_many_values`, `too_many_registrations`, `value_taken` (ACME endpoints) |
-| 410 | `plan_expired` |
-| 412 | `precondition` (If-Match, If-None-Match, `expected_hash`, `must_not_exist`, zone changed since the plan) |
+| 410 | `plan_expired`, `expired` (transfer request) |
+| 412 | `precondition` (If-Match, If-None-Match, `expected_hash`, `must_not_exist`, zone changed since the plan, transfer already decided or RRsets changed since the request) |
 | 423 | `zone_locked`, with `Retry-After` |
 | 502 | `upstream` (provider error) |
 

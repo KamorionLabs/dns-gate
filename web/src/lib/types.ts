@@ -3,7 +3,7 @@
 export type Category = 'human' | 'pipeline' | 'key' | 'system';
 export type Status = 'managed' | 'tainted' | 'pending' | 'foreign' | 'missing';
 export type Decision = 'allow' | 'deny' | 'error';
-export type ChangeOp = 'create' | 'update' | 'delete' | 'adopt' | 'taint' | 'expire';
+export type ChangeOp = 'create' | 'update' | 'delete' | 'adopt' | 'taint' | 'expire' | 'transfer';
 
 export interface Me {
   subject: string;
@@ -13,6 +13,8 @@ export interface Me {
   teams: string[];
   groups?: string[];
   permissions?: Permission[];
+  /** Team the caller writes for unless it selects another of its teams. */
+  default_team?: string;
 }
 
 /** One effective rule of one of the subject's roles. */
@@ -225,6 +227,12 @@ export interface Group {
   members: SubjectMatcher[];
 }
 
+/** A team declared in the teams block (members of the bindings naming it without groups or subjects). */
+export interface Team {
+  description?: string;
+  members: { groups?: string[]; subjects?: SubjectMatcher[] };
+}
+
 export interface RecordScope {
   hosts?: string[];
   types?: string[];
@@ -274,6 +282,8 @@ export interface VirtualKey {
 export interface PolicyDocument {
   /** Zones the managed layer brings under management, merged with the base zones. */
   zones?: string[];
+  /** Teams declared besides the base ones; omitted in a proposal, the active ones are kept. */
+  teams?: Record<string, Team>;
   groups: Record<string, Group>;
   roles: Record<string, Role>;
   bindings: Binding[];

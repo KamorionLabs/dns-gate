@@ -361,3 +361,123 @@ func TestReservedIssuerNames(t *testing.T) {
 		}
 	}
 }
+
+func TestTeamsMigration(t *testing.T) {
+	e := env(map[string]string{"EURODNS_API_KEY": "k"})
+	c, err := Parse([]byte(base), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.TeamsDeclared() || len(c.Warnings) != 1 || !strings.Contains(c.Warnings[0], `team "web" is not declared`) {
+		t.Fatalf("migration warning: declared=%v %q", c.TeamsDeclared(), c.Warnings)
+	}
+	if c.TombstoneTTL() != DefaultTombstoneTTL || c.Ownership.TransferTTL.D() != DefaultTransferTTL {
+		t.Fatalf("ownership defaults: %v %v", c.TombstoneTTL(), c.Ownership.TransferTTL)
+	}
+}
+
+func TestTeamsBlock(t *testing.T) {
+	e := env(map[string]string{"EURODNS_API_KEY": "k"})
+	teams := "teams:\n  web:\n    description: Web shop\n    members:\n      groups: [devs]\n      subjects:\n        - issuer: ci\n          claims: {sub: \"repo:acme/web:*\"}\n" +
+		"groups:\n  devs:\n    members:\n      - issuer: ci\n        claims: {sub: \"user:*\"}\n"
+	byTeam := strings.Replace(base, "    subjects:\n      - issuer: ci\n        claims: {sub: \"repo:acme/web:*\"}\n", "", 1) + teams
+	c, err := Parse([]byte(byTeam), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.TeamsDeclared() || len(c.Warnings) != 0 || c.Teams["web"].Description != "Web shop" {
+		t.Fatalf("teams: %+v %q", c.Teams, c.Warnings)
+	}
+	off, err := Parse([]byte(byTeam+"ownership: {tombstone_ttl: 0s, transfer_ttl: 48h}\n"), e)
+	if err != nil || off.TombstoneTTL() != 0 || off.Ownership.TransferTTL.D() != 48*time.Hour {
+		t.Fatalf("ownership settings: %v", err)
+	}
+	for name, doc := range map[string]string{
+		"undeclared binding team": strings.Replace(byTeam, "    team: web\n", "    team: wbe\n", 1),
+		"undeclared key team":     byTeam + "virtual_keys:\n  - {id: k, app_id: vk-k, key_sha256: " + strings.Repeat("0", 64) + ", roles: [writer], teams: [other]}\n",
+		"team without members":    strings.Replace(byTeam, "    members:\n      groups: [devs]\n      subjects:\n        - issuer: ci\n          claims: {sub: \"repo:acme/web:*\"}\n", "", 1),
+		"unknown member group":    strings.Replace(byTeam, "groups: [devs]", "groups: [ghost]", 1),
+		"unknown member issuer":   strings.Replace(byTeam, "        - issuer: ci\n          claims", "        - issuer: nope\n          claims", 1),
+		"bad team name":           strings.Replace(byTeam, "teams:\n  web:", "teams:\n  web:\n    description: x\n  Web:", 1),
+		"negative tombstone ttl":  byTeam + "ownership: {tombstone_ttl: -1h}\n",
+		"short transfer ttl":      byTeam + "ownership: {transfer_ttl: 1m}\n",
+	} {
+		if _, err := Parse([]byte(doc), e); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+	empty := base + "teams: {}\n"
+	if _, err := Parse([]byte(empty), e); err == nil || !strings.Contains(err.Error(), `team "web" is not declared`) {
+		t.Fatalf("an empty teams block must make references strict: %v", err)
+	}
+}
+
+func TestTeamFamiliesStrict(t *testing.T) {
+	e := env(map[string]string{"EURODNS_API_KEY": "k"})
+	family := strings.Replace(base, "    team: web\n", "    team_from: {claim: sub, regex: \"^repo:acme/([a-z0-9-]+):.*$\", prefix: gh-}\n", 1) +
+		"teams:\n  corporate: {description: Corporate}\n"
+	if _, err := Parse([]byte(family), e); err != nil {
+		t.Fatal(err)
+	}
+	vk := "virtual_keys:\n  - {id: k, app_id: vk-k, key_sha256: " + strings.Repeat("0", 64) + ", roles: [writer], teams: [gh-site]}\n"
+	for name, doc := range map[string]string{
+		"family without prefix":      strings.Replace(family, ", prefix: gh-}", "}", 1),
+		"declared team in family":    family + "  gh-corporate: {description: x}\n",
+		"virtual key team in family": strings.Replace(family, "teams:\n  corporate:", "teams:\n  gh-site: {}\n  corporate:", 1) + vk,
+	} {
+		if _, err := Parse([]byte(doc), e); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+	mig := strings.Replace(family, ", prefix: gh-}", "}", 1)
+	mig = mig[:strings.Index(mig, "teams:")]
+	if _, err := Parse([]byte(mig), e); err != nil {
+		t.Fatalf("an empty prefix stays accepted without a teams block: %v", err)
+	}
+}
+
+func TestTeamClaimFamilies(t *testing.T) {
+	e := env(map[string]string{"EURODNS_API_KEY": "k"})
+	strict := base + "teams:\n  web: {}\n"
+	withClaim := strings.Replace(strict, "    audiences: [dns-gate]\n", "    audiences: [dns-gate]\n    team_claim: teams\n    team_claim_prefix: idp-\n", 1)
+	if _, err := Parse([]byte(withClaim), e); err != nil {
+		t.Fatal(err)
+	}
+	fam := func(prefix string) string {
+		return "  - role: writer\n    team_from: {claim: sub, regex: \"^repo:acme/([a-z0-9-]+):.*$\", prefix: " + prefix + "}\n    subjects:\n      - issuer: ci\n        claims: {sub: \"repo:acme/*\"}\n"
+	}
+	addBinding := func(doc, b string) string { return strings.Replace(doc, "\nteams:", "\n"+b+"teams:", 1) }
+	ok := addBinding(withClaim, fam("gh-")+fam("gh-"))
+	if _, err := Parse([]byte(ok), e); err != nil {
+		t.Fatalf("two bindings of one family: %v", err)
+	}
+	for name, doc := range map[string]string{
+		"claim without prefix":          strings.Replace(withClaim, "    team_claim_prefix: idp-\n", "", 1),
+		"claim family = binding family": addBinding(withClaim, fam("idp-")),
+		"nested prefixes":               addBinding(withClaim, fam("gh-")+strings.Replace(fam("gh-web-"), "acme/", "acme2/", 1)),
+		"bad claim prefix":              strings.Replace(withClaim, "team_claim_prefix: idp-", "team_claim_prefix: \"IDP \"", 1),
+	} {
+		if _, err := Parse([]byte(doc), e); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+}
+
+func TestPersonIssuers(t *testing.T) {
+	e := env(map[string]string{"EURODNS_API_KEY": "k"})
+	ok := base + "ownership: {require_second_approver: true, person_issuers: [ci], person_claims: [tid+oid, email]}\n"
+	c, err := Parse([]byte(ok), e)
+	if err != nil || c.Ownership.PersonIssuers[0] != "ci" {
+		t.Fatalf("%v %+v", err, c)
+	}
+	for name, doc := range map[string]string{
+		"unknown person issuer":   base + "ownership: {require_second_approver: true, person_issuers: [nope]}\n",
+		"with machine approvers":  base + "ownership: {require_second_approver: true, person_issuers: [ci], machine_approvers: true}\n",
+		"without second approver": base + "ownership: {person_issuers: [ci]}\n",
+		"broken composite claim":  base + "ownership: {person_claims: [tid+]}\n",
+	} {
+		if _, err := Parse([]byte(doc), e); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+}

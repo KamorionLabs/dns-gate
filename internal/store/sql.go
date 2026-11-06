@@ -235,7 +235,7 @@ func fromMicros(v int64) time.Time {
 	return time.UnixMicro(v).UTC()
 }
 
-const ownershipColumns = "zone, host, type, owner, created_by, created_by_name, created_by_category, updated_by, updated_by_name, updated_by_category, created_at, updated_at, request_id, content_hash, pending_hash, state, adopted, expires_at, version"
+const ownershipColumns = "zone, host, type, owner, created_by, created_by_name, created_by_category, updated_by, updated_by_name, updated_by_category, created_at, updated_at, request_id, content_hash, pending_hash, state, adopted, expires_at, version, transfer_id"
 
 func ownershipArgs(o Ownership, version int64) []any {
 	var expires any
@@ -248,7 +248,7 @@ func ownershipArgs(o Ownership, version int64) []any {
 	}
 	return []any{o.Zone, o.Host, o.Type, o.Owner, o.CreatedBy, o.CreatedByName, o.CreatedByCategory,
 		o.UpdatedBy, o.UpdatedByName, o.UpdatedByCategory, micros(o.CreatedAt), micros(o.UpdatedAt),
-		o.RequestID, o.ContentHash, o.PendingHash, string(o.State), adopted, expires, version}
+		o.RequestID, o.ContentHash, o.PendingHash, string(o.State), adopted, expires, version, o.TransferID}
 }
 
 type scanner interface{ Scan(dest ...any) error }
@@ -261,7 +261,7 @@ func scanOwnership(r scanner) (Ownership, error) {
 	var adopted int
 	err := r.Scan(&o.Zone, &o.Host, &o.Type, &o.Owner, &o.CreatedBy, &o.CreatedByName, &o.CreatedByCategory,
 		&o.UpdatedBy, &o.UpdatedByName, &o.UpdatedByCategory, &created, &updated, &o.RequestID,
-		&o.ContentHash, &o.PendingHash, &state, &adopted, &expires, &o.Version)
+		&o.ContentHash, &o.PendingHash, &state, &adopted, &expires, &o.Version, &o.TransferID)
 	if err != nil {
 		return o, err
 	}
@@ -306,14 +306,14 @@ func (s *sqlStore) Put(ctx context.Context, o Ownership) error {
 	var n int64
 	var err error
 	if o.Version == 0 {
-		n, err = s.exec(ctx, "INSERT INTO ownership ("+ownershipColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (zone, host, type) DO NOTHING",
+		n, err = s.exec(ctx, "INSERT INTO ownership ("+ownershipColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (zone, host, type) DO NOTHING",
 			ownershipArgs(o, 1)...)
 	} else {
 		args := ownershipArgs(o, o.Version+1)[3:]
 		args = append(args, o.Zone, o.Host, o.Type, o.Version)
 		n, err = s.exec(ctx, `UPDATE ownership SET owner = ?, created_by = ?, created_by_name = ?, created_by_category = ?,
 			updated_by = ?, updated_by_name = ?, updated_by_category = ?, created_at = ?, updated_at = ?, request_id = ?,
-			content_hash = ?, pending_hash = ?, state = ?, adopted = ?, expires_at = ?, version = ?
+			content_hash = ?, pending_hash = ?, state = ?, adopted = ?, expires_at = ?, version = ?, transfer_id = ?
 			WHERE zone = ? AND host = ? AND type = ? AND version = ?`, args...)
 	}
 	if err != nil {
