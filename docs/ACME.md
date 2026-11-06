@@ -593,6 +593,11 @@ OIDC token) and certbot acme-dns hook run against the gate in CI, at pinned vers
   `DELETE /api/v1/api-keys/{id}`.
 - Whatever the credential, the role limits it to `_acme-challenge` TXT records of
   the zones you list: enough to obtain certificates for those names, nothing else.
+- Value ownership (`value_taken`, cleanup of one's own values) and the per-author
+  and per-RRset caps apply to the `/acme` endpoints. The RRset itself is owned by a
+  team: any identity of the same team whose role covers `_acme-challenge` TXT can
+  still rewrite it through the RRset API or the EuroDNS-compatible API. Give each
+  third party its own team.
   A key never outgrows its issuer (rights, ephemeral TTL, change limit), and stops
   working if its role later grants more than at issuance (`403 role_widened`).
 - Exchanges (`gate.token.exchange`), refused API keys (`apikey.authenticate`; unknown
