@@ -787,3 +787,32 @@ func TestRefusedSelfApprovalLeavesNoRequest(t *testing.T) {
 		t.Fatalf("a refused self approval left requests behind: %+v", list)
 	}
 }
+
+func TestTransferedTombstoneConsumedBeforeRetry(t *testing.T) {
+	e, fs := newRaceEnv(t, nil)
+	ctx := context.Background()
+	if _, err := e.eng.ApplyRRsets(ctx, alice, zoneName, put("old", "192.0.2.1"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.eng.ApplyRRsets(ctx, alice, zoneName, del("old"), 0); err != nil {
+		t.Fatal(err)
+	}
+	tr := e.eng.(Transfers)
+	v, err := tr.ProposeTransfer(ctx, alice, zoneName, uiapi.TransferProposal{RRsets: adoptRefs("old A"), ToTeam: "team-b", Comment: "move"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs.failApplied = true
+	_, _ = tr.DecideTransfer(ctx, teamMate, v.ID, true, "")
+	fs.failApplied = false
+	if _, err := e.eng.ApplyRRsets(ctx, bob, zoneName, put("old", "192.0.2.5"), 0); err != nil {
+		t.Fatalf("the new team re-creates the RRset: %v", err)
+	}
+	e.clock.Add(10 * time.Minute)
+	if _, err := e.eng.(TransferRetrier).RetryTransfers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := e.st.GetTransfer(ctx, v.ID); got.Status != uiapi.TransferApplied {
+		t.Fatalf("an applied transfer whose tombstone was consumed by its new team failed: %+v", got)
+	}
+}

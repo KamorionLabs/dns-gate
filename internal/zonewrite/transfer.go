@@ -556,6 +556,7 @@ func (e *engine) applyTransfer(ctx context.Context, s *identity.Subject, t store
 			case ok && tb.Team == t.FromTeam:
 				tb.Team = t.ToTeam
 				moveTombs = append(moveTombs, tb)
+			case !ok && owns[k].Owner == t.ToTeam:
 			default:
 				return 0, fail(ReasonPrecondition, "%s is no longer reserved for team %s", keyString(k), t.FromTeam)
 			}
@@ -602,7 +603,10 @@ func (e *engine) transferDone(ctx context.Context, zone string, t store.Transfer
 	for _, it := range t.Items {
 		if it.Tombstone {
 			tb, err := e.cfg.Store.GetTombstone(ctx, zone, it.Host, it.Type)
-			if err != nil || tb.Team != t.ToTeam {
+			if err == nil && tb.Team == t.ToTeam {
+				continue
+			}
+			if o, oerr := e.cfg.Store.Get(ctx, zone, it.Host, it.Type); err == nil || oerr != nil || o.Owner != t.ToTeam {
 				return false
 			}
 			continue
