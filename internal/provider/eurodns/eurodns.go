@@ -23,8 +23,10 @@
 //     the RRset of key {host, URLFWD} carrying a dns.Forward; a write
 //     changes only the entries of the forwards it targets, every other
 //     entry is saved back byte for byte. URL and MAIL pseudo records, if
-//     EuroDNS lists any, are read-only ("forward_record"). Mail forwards are
-//     kept as read and are not modelled.
+//     EuroDNS lists any (not verified against the live API), are read-only
+//     ("forward_record"), and the URL ones of a host are left out of the
+//     save that deletes its forward. Mail forwards are kept as read and are
+//     not modelled.
 //   - A forward answers HTTPS requests only with an HTTPS redirect
 //     subscription on the domain (a paid EuroDNS product, see
 //     HTTPSRedirect); the forward entry itself has no HTTPS setting.
@@ -300,6 +302,7 @@ func Desired(zone string, cur *dns.Zone, changes []dns.Change) (*api.Zone, error
 	out := zonediff.Apply(zone, n, diff)
 	if len(forwards) > 0 {
 		out.URLForwards = applyForwards(zone, n.URLForwards, forwards)
+		out.Records = dropForwardRecords(zone, out.Records, forwards)
 	}
 	return out, nil
 }

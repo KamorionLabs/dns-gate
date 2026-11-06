@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/provider"
@@ -206,5 +207,105 @@ func TestHTTPSRedirect(t *testing.T) {
 	}
 	if st, err := newP().HTTPSRedirect(ctx, "denied.example"); err != nil || st.Status != provider.HTTPSUnknown || !strings.Contains(st.Message, "403") {
 		t.Fatalf("denied: %+v %v", st, err)
+	}
+}
+
+func TestForwardFieldsArePlainAndCanonical(t *testing.T) {
+	p := &Provider{}
+	k := dns.ForwardKey("go")
+	frame := func(title, kw, desc string) dns.RRset {
+		return dns.RRset{Key: k, Forward: &dns.Forward{Mode: "frame", URL: "https://example.net/", Title: title, Keywords: kw, Description: desc}}
+	}
+	redirect := func(u string) dns.RRset { return dns.RRset{Key: k, Forward: &dns.Forward{Mode: "301", URL: u}} }
+	bad := []dns.RRset{
+		frame(`<script>x</script>`, "", ""), frame("a\"b", "", ""), frame("", "a`b", ""), frame("", "", "it's"), frame("a\x07b", "", ""),
+		frame(strings.Repeat("t", MaxTitle+1), "", ""), frame("", strings.Repeat("k", MaxKeywords+1), ""), frame("", "", strings.Repeat("d", MaxDescription+1)),
+		redirect("https://user:pass@example.net/"), redirect("https://example.net/" + strings.Repeat("a", MaxURL)),
+		redirect("https://example.net/a b"), redirect("https://example.net/%zz"), redirect("javascript:alert(1)"),
+		redirect("https://example.net/a%2fb?x=<y>"), redirect("HTTPS://example.net/"), redirect("https:example.net"),
+	}
+	for _, s := range bad {
+		var ie *provider.InvalidError
+		if _, err := p.Normalize("example.com", s); !errors.As(err, &ie) {
+			t.Errorf("accepted %+v", s.Forward)
+		}
+	}
+	for _, s := range []dns.RRset{frame(strings.Repeat("é", MaxTitle), "a b c", "Shop & co."), redirect("https://example.net/a/b?x=1&y=2#top"), redirect("http://example.net:8080/")} {
+		if _, err := p.Normalize("example.com", s); err != nil {
+			t.Errorf("refused %+v: %v", s.Forward, err)
+		}
+	}
+}
+
+func TestForwardUpdateKeepsRawFields(t *testing.T) {
+	native := &api.Zone{URLForwards: []json.RawMessage{json.RawMessage(`{"id":9007199254740993,"host":"go","forwardType":"HTTP301","url":"https://example.net/","x":{"n":12345678901234567890}}`)}}
+	z := FromNative("eurodns", "example.com", native)
+	old, _ := z.Set(dns.ForwardKey("go"))
+	desired, err := Desired("example.com", z, []dns.Change{{Op: dns.OpUpdate, Key: old.Key, Old: &old, New: &dns.RRset{Key: old.Key, Forward: &dns.Forward{Mode: "302", URL: "https://example.org/"}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(desired.URLForwards[0])
+	if !strings.Contains(got, `"id":9007199254740993`) || !strings.Contains(got, `"n":12345678901234567890`) {
+		t.Fatalf("numbers altered: %s", got)
+	}
+}
+
+func TestForwardDeleteDropsURLPseudoRecord(t *testing.T) {
+	z := FromNative("eurodns", "example.com", forwardZone())
+	goSet, _ := z.Set(dns.ForwardKey("go"))
+	shop, _ := z.Set(dns.ForwardKey("shop"))
+	desired, err := Desired("example.com", z, []dns.Change{{Op: dns.OpUpdate, Key: shop.Key, Old: &shop, New: &dns.RRset{Key: shop.Key, Forward: &dns.Forward{Mode: "301", URL: "https://example.org/"}}}})
+	if err != nil || len(desired.Records) != 2 {
+		t.Fatalf("update must keep the records: %+v %v", desired.Records, err)
+	}
+	desired, err = Desired("example.com", z, []dns.Change{{Op: dns.OpDelete, Key: goSet.Key, Old: &goSet}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range desired.Records {
+		if r.Type == "URL" {
+			t.Fatalf("URL pseudo record of a deleted forward saved back: %+v", desired.Records)
+		}
+	}
+	if len(desired.Records) != 1 {
+		t.Fatalf("records %+v", desired.Records)
+	}
+}
+
+func TestHTTPSRedirectErrorsExpireAndRequestsDoNotCancel(t *testing.T) {
+	var fail atomic.Bool
+	var calls atomic.Int32
+	fail.Store(true)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		switch {
+		case fail.Load():
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		case r.URL.Path == "/subscriptions":
+			_, _ = w.Write([]byte(`[{"id":12,"subscriptionType":"HTTPS_REDIRECT","active":true,"domainName":"example.com","expirationDate":"2020-01-01T00:00:00Z"}]`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	p := &Provider{id: "eurodns", baseURL: srv.URL, transport: http.DefaultTransport}
+	cancelled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if st, _ := p.HTTPSRedirect(cancelled, "example.com"); st.Status != provider.HTTPSUnknown || strings.Contains(st.Message, "canceled") {
+		t.Fatalf("lookup tied to the request: %+v", st)
+	}
+	fail.Store(false)
+	if st, _ := p.HTTPSRedirect(context.Background(), "example.com"); st.Status != provider.HTTPSUnknown || calls.Load() != 1 {
+		t.Fatalf("failure not cached briefly: %+v %d", st, calls.Load())
+	}
+	p.https.mu.Lock()
+	e := p.https.zones["example.com"]
+	e.at = e.at.Add(-httpsErrorTTL - time.Second)
+	p.https.zones["example.com"] = e
+	p.https.mu.Unlock()
+	st, _ := p.HTTPSRedirect(context.Background(), "example.com")
+	if st.Status != provider.HTTPSInactive || !strings.Contains(st.Message, "expired") {
+		t.Fatalf("failure cached too long or expiry ignored: %+v", st)
 	}
 }

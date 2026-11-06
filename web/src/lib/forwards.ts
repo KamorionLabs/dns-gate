@@ -59,18 +59,36 @@ const norm = (f?: Forward | null) =>
 /** Whether two forwards are the same (mode, URL and frame fields). */
 export const sameForward = (a?: Forward | null, b?: Forward | null) => norm(a) === norm(b);
 
-/** Why a target URL is refused, null when it is an absolute http:// or https:// URL. */
+/** Limits of the gate: frame fields in characters, the URL in bytes. */
+export const MAX_TITLE = 200;
+export const MAX_KEYWORDS = 500;
+export const MAX_DESCRIPTION = 1000;
+export const MAX_URL = 2048;
+
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
+
+/** Why a target URL is refused, null when the gate accepts it: an absolute http:// or https:// URL, without user information nor characters to percent-encode. */
 export function urlError(raw: string): string | null {
   const s = raw.trim();
   if (!s) return 'The target URL is required';
-  if (/\s/.test(s)) return 'A URL has no spaces';
-  if (!/^https?:\/\//i.test(s)) return 'Type the URL in full, starting with https:// or http://';
+  if (/\s/.test(s) || CONTROL.test(s)) return 'A URL has no spaces';
+  if (new TextEncoder().encode(s).length > MAX_URL) return `A URL has at most ${MAX_URL} bytes`;
+  if (!/^https?:\/\//.test(s)) return 'Type the URL in full, starting with https:// or http://';
+  if (/[<>"'`\\{}|^]/.test(s)) return 'Percent-encode < > " \' ` \\ { } | ^ in the URL';
   try {
     const u = new URL(s);
     if (!u.hostname) return 'The URL has no host name';
+    if (u.username || u.password) return 'The URL must not hold a user name or a password';
   } catch {
     return 'Not a valid URL (for example https://www.example.com/)';
   }
+  return null;
+}
+
+/** Why a frame field is refused, null when it is plain text within max characters. */
+export function textError(label: string, v: string, max: number): string | null {
+  if ([...v].length > max) return `${label} has at most ${max} characters`;
+  if (CONTROL.test(v) || /[<>"'`]/.test(v)) return `${label} is plain text, without < > " ' \``;
   return null;
 }
 
@@ -130,6 +148,12 @@ export function checkForward(d: ForwardDraft, zone: string, existing: { host: st
   const u = urlError(d.url);
   if (u) c.url = u;
   if (!isKnownMode(d.mode)) c.form.push('Choose a permanent redirect, a temporary redirect or a frame');
+  if (d.mode === 'frame') {
+    for (const [label, v, max] of [['The title', d.title, MAX_TITLE], ['The keywords', d.keywords, MAX_KEYWORDS], ['The description', d.description, MAX_DESCRIPTION]] as const) {
+      const e = textError(label, v.trim(), max);
+      if (e) c.form.push(e);
+    }
+  }
   if (!c.host && editing === undefined && existing.some((n) => isForward(n) && n.host === host)) {
     c.form.push(`${displayName(host, zone)} already has a URL forward: a name has one, open it in the list to change it`);
   }
@@ -143,7 +167,7 @@ export const forwardPreview = (host: string, zone: string, f: Forward) => `http:
 /** Whether require_https would pass for this status (undefined: not known, the gate decides). */
 export function httpsServes(status?: HTTPSStatus): boolean | undefined {
   if (!status || status === 'unknown') return undefined;
-  return status === 'active' || status === 'pending' || status === 'no_forward';
+  return status === 'active' || status === 'no_forward';
 }
 
 export type Tone = 'ok' | 'warn' | 'muted';

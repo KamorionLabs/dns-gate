@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/provider"
@@ -78,6 +80,55 @@ func forwardRRsets(zone string, raws []json.RawMessage) []dns.RRset {
 	return out
 }
 
+// Limits of the frame fields (characters) and of the URL (bytes) of a
+// forward. EuroDNS serves the frame fields in the page it shows on the
+// forward host, so they are plain text only.
+const (
+	MaxTitle       = 200
+	MaxKeywords    = 500
+	MaxDescription = 1000
+	MaxURL         = 2048
+)
+
+// URLProblem tells why a forward URL is refused ("" when accepted): an
+// absolute http or https URL with a host, no user information, at most
+// MaxURL bytes, without control characters, spaces nor characters to
+// percent-encode (< > " ' ` \ { } | ^), and written exactly
+// as Go's net/url prints it back (no ambiguous encoding).
+func URLProblem(raw string) string {
+	if len(raw) > MaxURL {
+		return fmt.Sprintf("is longer than %d bytes", MaxURL)
+	}
+	if strings.IndexFunc(raw, func(r rune) bool { return unicode.IsControl(r) || unicode.IsSpace(r) }) >= 0 {
+		return "has spaces or control characters"
+	}
+	if strings.ContainsAny(raw, "<>\"'`\\{}|^") {
+		return "has characters to percent-encode (< > \" ' ` \\ { } | ^)"
+	}
+	u, err := url.Parse(raw)
+	switch {
+	case err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.Opaque != "":
+		return "must be an absolute http:// or https:// URL"
+	case u.User != nil:
+		return "must not hold user information"
+	case u.String() != raw:
+		return fmt.Sprintf("is not in canonical form (%q)", u.String())
+	}
+	return ""
+}
+
+// TextProblem tells why a frame field is refused ("" when accepted): more
+// than max characters, control characters, or one of < > " ' `.
+func TextProblem(v string, max int) string {
+	if utf8.RuneCountInString(v) > max {
+		return fmt.Sprintf("is longer than %d characters", max)
+	}
+	if strings.IndexFunc(v, unicode.IsControl) >= 0 || strings.ContainsAny(v, "<>\"'`") {
+		return "must be plain text, without control characters nor < > \" ' `"
+	}
+	return ""
+}
+
 // normalizeForward validates a desired forward: a known mode, an absolute
 // http or https URL, frame fields only on a frame forward. TTL is 0.
 func normalizeForward(s dns.RRset) (dns.RRset, error) {
@@ -97,12 +148,19 @@ func normalizeForward(s dns.RRset) (dns.RRset, error) {
 	if typeOf[f.Mode] == "" {
 		return invalid("type %q is not one of %s", f.Mode, strings.Join(dns.ForwardModes, ", "))
 	}
-	u, err := url.Parse(f.URL)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || strings.ContainsAny(f.URL, " \t\r\n") {
-		return invalid("url %q must be an absolute http:// or https:// URL", f.URL)
+	if msg := URLProblem(f.URL); msg != "" {
+		return invalid("url %q %s", f.URL, msg)
 	}
 	if f.Mode != dns.ForwardFrame && (f.Title != "" || f.Keywords != "" || f.Description != "") {
 		return invalid("title, keywords and description only apply to frame forwards")
+	}
+	for _, fld := range []struct {
+		name, v string
+		max     int
+	}{{"title", f.Title, MaxTitle}, {"keywords", f.Keywords, MaxKeywords}, {"description", f.Description, MaxDescription}} {
+		if msg := TextProblem(fld.v, fld.max); msg != "" {
+			return invalid("%s %s", fld.name, msg)
+		}
 	}
 	s.Forward, s.TTL = &f, 0
 	return s, nil
@@ -112,27 +170,55 @@ func normalizeForward(s dns.RRset) (dns.RRset, error) {
 // of the old forward (id and unknown fields kept) with the forward fields
 // replaced, or a new entry.
 func forwardEntry(host string, old json.RawMessage, f dns.Forward) json.RawMessage {
-	m := map[string]any{}
+	m := map[string]json.RawMessage{}
 	if len(old) > 0 {
-		var prev map[string]any
+		var prev map[string]json.RawMessage
 		if json.Unmarshal(old, &prev) == nil && prev != nil {
 			m = prev
 		}
 	}
+	str := func(v string) json.RawMessage {
+		b, _ := json.Marshal(v)
+		return b
+	}
 	if _, ok := m["host"]; !ok {
-		m["host"] = host
+		m["host"] = str(host)
 	}
 	delete(m, "updated")
-	m["forwardType"], m["url"] = typeOf[f.Mode], f.URL
+	m["forwardType"], m["url"] = str(typeOf[f.Mode]), str(f.URL)
 	for k, v := range map[string]string{"title": f.Title, "keywords": f.Keywords, "description": f.Description} {
 		if v == "" {
 			delete(m, k)
 		} else {
-			m[k] = v
+			m[k] = str(v)
 		}
 	}
 	b, _ := json.Marshal(m)
 	return b
+}
+
+// dropForwardRecords removes the URL pseudo records of the hosts whose
+// forward a write deletes: EuroDNS may list them with the records, and
+// saving one back could keep the deleted forward alive. Not verified
+// against the live API.
+func dropForwardRecords(zone string, recs []api.Record, changes []dns.Change) []api.Record {
+	deleted := map[string]bool{}
+	for _, c := range changes {
+		if c.New == nil {
+			deleted[c.Key.Host] = true
+		}
+	}
+	if len(deleted) == 0 {
+		return recs
+	}
+	out := make([]api.Record, 0, len(recs))
+	for _, r := range recs {
+		if strings.EqualFold(strings.TrimSpace(r.Type), "URL") && deleted[dns.NormalizeHost(r.Host, zone)] {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
 }
 
 // applyForwards returns the URL forwards of a zone with changes applied,

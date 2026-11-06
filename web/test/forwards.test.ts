@@ -17,6 +17,9 @@ import {
   splitForwards,
   typeLabel,
   urlError,
+  textError,
+  MAX_TITLE,
+  MAX_URL,
 } from '../src/lib/forwards.ts';
 import { shownPlanChange, shownStaged, stage, toRequest, valuesOf, type StagedChange } from '../src/lib/staging.ts';
 import { mergeTypeChanges } from '../src/lib/journal.ts';
@@ -44,6 +47,12 @@ test('target URLs must be absolute http or https URLs', () => {
   assert.match(urlError('ftp://example.com/')!, /https:\/\//);
   assert.match(urlError('https:example.com')!, /https:\/\//);
   assert.match(urlError('https://exa mple.com/')!, /spaces/);
+  assert.match(urlError('https://user:pw@example.com/')!, /user name/);
+  assert.match(urlError('https://example.com/?q=<x>')!, /Percent-encode/);
+  assert.match(urlError('https://example.com/' + 'a'.repeat(MAX_URL))!, /at most/);
+  assert.equal(textError('The title', 'Shop & co.', MAX_TITLE), null);
+  assert.match(textError('The title', '<b>x</b>', MAX_TITLE)!, /plain text/);
+  assert.match(textError('The title', 'x'.repeat(MAX_TITLE + 1), MAX_TITLE)!, /at most/);
   assert.match(urlError('https://')!, /valid URL|host/);
 });
 
@@ -213,7 +222,7 @@ test('the HTTPS status of the forwards reads in one sentence', () => {
   assert.equal(httpsNote({ status: 'no_forward' })!.tone, 'ok');
   assert.match(httpsNote({ status: 'unknown', message: 'timeout' })!.text, /could not be read \(timeout\)/);
   assert.equal(httpsServes('active'), true);
-  assert.equal(httpsServes('pending'), true);
+  assert.equal(httpsServes('pending'), false);
   assert.equal(httpsServes('no_forward'), true);
   assert.equal(httpsServes('inactive'), false);
   assert.equal(httpsServes('unknown'), undefined);
