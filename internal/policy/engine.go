@@ -77,6 +77,13 @@ func (e *Engine) AllowRRset(s *identity.Subject, action, zone string, key dns.Ke
 	return e.snap().Decide(roles(s), action, zone, &key).Allowed
 }
 
+// AllowRRsetFolder is AllowRRset with the folder of the zone when the rule
+// granting the action applies through its folders.
+func (e *Engine) AllowRRsetFolder(s *identity.Subject, action, zone string, key dns.Key) (bool, string) {
+	d := e.snap().Decide(roles(s), action, zone, &key)
+	return d.Allowed, d.Folder
+}
+
 // IsProtected reports whether an RRset is in the protected list.
 func (e *Engine) IsProtected(zone string, key dns.Key) bool {
 	_, ok := e.snap().protectedBy(normZone(zone), normKey(key))

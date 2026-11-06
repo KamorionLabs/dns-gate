@@ -590,3 +590,86 @@ func TestEuroDNSZoneProfilesOptIn(t *testing.T) {
 		t.Fatalf("zone_profiles: %v", err)
 	}
 }
+
+func TestFolders(t *testing.T) {
+	e := env(map[string]string{"EURODNS_API_KEY": "k"})
+	groups := "\ngroups:\n  admins:\n    members:\n      - issuer: ci\n        claims: {roles: [Gate.PolicyAdmin]}\n"
+	ok := strings.Replace(base, "      - zones: [example.com]\n", "      - folders: [\"/ES\", \"/ES/**\"]\n", 1)
+	ok = strings.Replace(ok, "    kind: eurodns\n", "    kind: eurodns\n    zones: {folders: [\"/ES/**\", \"/\"]}\n", 1) + groups + `policy:
+  editable: true
+  bounds: {zones: ["*"], folders: ["/ES/**"], actions: [dns.read, dns.record.write]}
+  delegations:
+    - name: es
+      subjects: [{issuer: ci, claims: {sub: "repo:acme/gate:*"}}]
+      allow: {zones: ["*"], folders: ["/ES/Madrid/**"], actions: [dns.record.write], binding_subjects: [{issuer: ci, claims: {sub: "repo:acme/*"}}], teams: {names: [web]}}
+`
+	c, err := Parse([]byte(ok), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(c.Roles["writer"].Rules[0].Folders, ","); got != "/ES,/ES/**" || strings.Join(c.Providers[0].Zones.Folders, ",") != "/ES/**,/" {
+		t.Fatalf("folders: %q %+v", got, c.Providers[0].Zones)
+	}
+	if z := c.Providers[0].Zones; z.FolderExpiry != DefaultFolderExpiry || z.FolderMaxAge() != 3*time.Hour {
+		t.Fatalf("folder expiry: %+v", z)
+	}
+	route53 := `  - id: r53
+    kind: route53
+    zones: {include: ["*.fr"], folders: ["/ES"]}
+    route53: {region: eu-west-3}
+`
+	for name, doc := range map[string]string{
+		"rule without zones nor folders": strings.Replace(ok, "      - folders: [\"/ES\", \"/ES/**\"]\n        actions", "      - actions", 1),
+		"relative folder":                strings.Replace(ok, "folders: [\"/ES\", \"/ES/**\"]", "folders: [\"ES\"]", 1),
+		"partial double star":            strings.Replace(ok, "folders: [\"/ES\", \"/ES/**\"]", "folders: [\"/ES/a**\"]", 1),
+		"bad provider folder":            strings.Replace(ok, "zones: {folders: [\"/ES/**\", \"/\"]}", "zones: {folders: [\"/ES/\"]}", 1),
+		"route53 folders":                strings.Replace(ok, "providers:\n", "providers:\n"+route53, 1),
+		"bad folder expiry":              strings.Replace(ok, "zones: {folders: [\"/ES/**\", \"/\"]}", "zones: {folders: [\"/ES/**\", \"/\"], folder_expiry: 1}", 1),
+		"bad bounds folder":              strings.Replace(ok, "folders: [\"/ES/**\"], actions", "folders: [\"/ES?\"], actions", 1),
+		"allow outside bounds":           strings.Replace(ok, "folders: [\"/ES/Madrid/**\"]", "folders: [\"/FR\"]", 1),
+		"bounds folders without zones":   strings.Replace(ok, "bounds: {zones: [\"*\"], ", "bounds: {", 1),
+		"allow folders without zones":    strings.Replace(ok, "allow: {zones: [\"*\"], ", "allow: {", 1),
+	} {
+		if _, err := Parse([]byte(doc), e); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+}
+
+func TestFolderWarnings(t *testing.T) {
+	e := env(map[string]string{"EURODNS_API_KEY": "k"})
+	fw := func(c *Config) []string {
+		var out []string
+		for _, w := range c.Warnings {
+			if strings.Contains(w, "folder") {
+				out = append(out, w)
+			}
+		}
+		return out
+	}
+	rules := strings.Replace(base, "      - zones: [example.com]\n", "      - zones: [example.com]\n        folders: [\"/IT/**\"]\n", 1)
+	c, err := Parse([]byte(rules), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fw(c)) != 0 {
+		t.Fatalf("every folder is reachable without a folder filter: %q", fw(c))
+	}
+	filtered := strings.Replace(rules, "    kind: eurodns\n", "    kind: eurodns\n    zones: {folders: [\"/ES\", \"/ES/**\"]}\n", 1)
+	if c, err = Parse([]byte(filtered), e); err != nil {
+		t.Fatal(err)
+	}
+	if len(fw(c)) != 1 || !strings.Contains(fw(c)[0], `roles.writer.rules[0].folders: "/IT/**" is outside the zones.folders`) {
+		t.Fatalf("unreachable folder: %q", fw(c))
+	}
+	if c, err = Parse([]byte(strings.Replace(filtered, `"/IT/**"`, `"/ES/Madrid"`, 1)), e); err != nil || len(fw(c)) != 0 {
+		t.Fatalf("reachable folder: %v %q", err, fw(c))
+	}
+	r53 := strings.Replace(rules, "    kind: eurodns\n    eurodns: {app_id: app}\n", "    kind: route53\n    route53: {region: eu-west-3}\n", 1)
+	if c, err = Parse([]byte(r53), env(nil)); err != nil {
+		t.Fatal(err)
+	}
+	if len(fw(c)) != 1 || !strings.Contains(fw(c)[0], "no EuroDNS provider") {
+		t.Fatalf("no EuroDNS provider: %q", fw(c))
+	}
+}

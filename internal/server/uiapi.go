@@ -13,6 +13,7 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/audit"
 	"github.com/KamorionLabs/dns-gate/internal/authn"
 	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/glob"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/mcpb"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
@@ -147,19 +148,20 @@ func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
 	case rest == claudeDesktopExtensionPath:
 		s.serveClaudeDesktopExtension(w, r)
 	case rest == "/zones":
+		folder := r.URL.Query().Get("folder")
+		if folder != "" {
+			if err := glob.ValidFolderPattern(folder); err != nil {
+				writeError(w, http.StatusBadRequest, "bad_request", "folder: "+err.Error())
+				return
+			}
+		}
 		zs, err := s.cfg.Engine.Zones(ctx, subj)
 		if err != nil {
 			s.log.Error("ui zones", "err", err)
 			writeError(w, http.StatusBadGateway, "upstream", "inventory unavailable")
 			return
 		}
-		out := make([]uiapi.ZoneSummary, 0, len(zs))
-		for _, z := range zs {
-			if readable[z.Zone] {
-				out = append(out, z)
-			}
-		}
-		writeJSON(w, http.StatusOK, out)
+		writeJSON(w, http.StatusOK, readableZones(s.cfg.Policy.Current(), zs, readable, folder))
 	case len(parts) == 3 && parts[0] == "zones" && parts[2] == "rrsets":
 		zone := strings.ToLower(parts[1])
 		if !config.ValidFQDN(zone) {
@@ -187,6 +189,7 @@ func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
 		if inv.RRsets == nil {
 			inv.RRsets = []uiapi.RRset{}
 		}
+		inv.Folder = s.cfg.Policy.Current().Folder(zone)
 		fillHashes(inv.RRsets)
 		if s.cfg.Versions != nil {
 			if v, err := s.cfg.Versions.ZoneVersion(ctx, zone); err == nil {

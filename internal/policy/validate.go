@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/glob"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 )
 
@@ -170,6 +171,12 @@ func ValidateManaged(c *config.Config, base uiapi.PolicyDocument, d uiapi.Policy
 			for _, z := range rule.Zones {
 				if !ZoneCovered(c.Policy.Bounds.Zones, z) {
 					v.add(path, "base role %q covers zone %q, outside the managed bounds", name, z)
+					return
+				}
+			}
+			for _, f := range rule.Folders {
+				if !glob.FolderCovered(c.Policy.Bounds.Folders, f) {
+					v.add(path, "base role %q covers folder %q, outside the managed bounds", name, f)
 					return
 				}
 			}
@@ -365,12 +372,19 @@ func validateRole(v *verrs, c *config.Config, at string, r uiapi.Role) {
 	}
 	for i, rule := range r.Rules {
 		rat := fmt.Sprintf("%s.rules[%d]", at, i)
-		if len(rule.Zones) == 0 {
-			v.add(rat+".zones", "at least one zone is required")
+		if len(rule.Zones) == 0 && len(rule.Folders) == 0 {
+			v.add(rat+".zones", "at least one zone or folder is required")
 		}
 		for j, z := range rule.Zones {
 			if !ZoneCovered(c.Policy.Bounds.Zones, strings.ToLower(z)) {
 				v.add(fmt.Sprintf("%s.zones[%d]", rat, j), "zone %q is outside policy.bounds.zones", z)
+			}
+		}
+		for j, f := range rule.Folders {
+			if err := glob.ValidFolderPattern(f); err != nil {
+				v.add(fmt.Sprintf("%s.folders[%d]", rat, j), "folder %q: %v", f, err)
+			} else if !glob.FolderCovered(c.Policy.Bounds.Folders, f) {
+				v.add(fmt.Sprintf("%s.folders[%d]", rat, j), "folder %q is outside policy.bounds.folders", f)
 			}
 		}
 		if len(rule.Actions) == 0 {

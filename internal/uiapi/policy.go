@@ -83,9 +83,11 @@ type RecordScope struct {
 	Types []string `json:"types,omitempty"`
 }
 
-// Rule grants actions on zones.
+// Rule grants actions on zones: the zones matching Zones and the zones whose
+// provider folder matches Folders.
 type Rule struct {
 	Zones   []string     `json:"zones"`
+	Folders []string     `json:"folders,omitempty"`
 	Actions []string     `json:"actions"`
 	Records *RecordScope `json:"records,omitempty"`
 }
@@ -222,6 +224,7 @@ type Delegation struct {
 // DelegationAllow are the limits of a delegation (see config.DelegationAllow).
 type DelegationAllow struct {
 	Zones           []string         `json:"zones"`
+	Folders         []string         `json:"folders,omitempty"`
 	Actions         []string         `json:"actions"`
 	Records         *RecordScope     `json:"records,omitempty"`
 	BindingSubjects []SubjectMatcher `json:"binding_subjects"`
@@ -306,8 +309,9 @@ type Protected struct {
 
 // Bounds limit what the managed layer may grant.
 type Bounds struct {
-	Zones   []string `json:"zones"`   // globs a managed rule may target
-	Actions []string `json:"actions"` // actions a managed rule may grant
+	Zones   []string `json:"zones"`             // globs a managed rule may target
+	Folders []string `json:"folders,omitempty"` // folder globs a managed rule may target
+	Actions []string `json:"actions"`           // actions a managed rule may grant
 }
 
 // BaseLayer is the read-only file layer.
@@ -342,11 +346,17 @@ type ZonesDiscovery struct {
 
 // ProviderDiscovery is the zone listing of one provider account.
 type ProviderDiscovery struct {
-	ID            string     `json:"id"`
-	Kind          string     `json:"kind"`
-	Include       []string   `json:"include"`
-	Exclude       []string   `json:"exclude"`
-	Refresh       string     `json:"refresh"`
+	ID      string   `json:"id"`
+	Kind    string   `json:"kind"`
+	Include []string `json:"include"`
+	Exclude []string `json:"exclude"`
+	Folders []string `json:"folders,omitempty"` // folder filter (EuroDNS)
+	Refresh string   `json:"refresh"`
+	// FolderMaxAge is how long folders are trusted while listings fail
+	// (EuroDNS); FoldersStale tells that they are older, so that folder
+	// rules match no zone of the provider.
+	FolderMaxAge  string     `json:"folder_max_age,omitempty"`
+	FoldersStale  bool       `json:"folders_stale,omitempty"`
 	Loaded        bool       `json:"loaded"`
 	Count         int        `json:"count"`
 	LastRefreshAt *time.Time `json:"last_refresh_at,omitempty"`
@@ -469,6 +479,9 @@ type ExplainResponse struct {
 	Matched  string   `json:"matched,omitempty"` // rule that granted, e.g. "roles.web-writer.rules[0]"
 	Denied   string   `json:"denied,omitempty"`  // e.g. "protected: zones=* hosts=@ types=NS"
 	Layer    string   `json:"layer,omitempty"`   // base | managed
+	// Folder is the provider folder of the zone at decision time (EuroDNS),
+	// set when the matched rule applied through its folders.
+	Folder string `json:"folder,omitempty"`
 }
 
 // WhoCanEntry is one grant on a record.
@@ -483,10 +496,16 @@ type WhoCanEntry struct {
 	Groups      []string         `json:"groups,omitempty"`
 	Subjects    []SubjectMatcher `json:"subjects,omitempty"`
 	Keys        []string         `json:"virtual_keys,omitempty"`
+	// ByFolder: the role grants the action through a folder selector (the
+	// folder of the zone), not its zone list.
+	ByFolder bool `json:"by_folder,omitempty"`
 }
 
 // WhoCanResponse lists who may perform an action on an RRset.
 type WhoCanResponse struct {
+	// Folder is the provider folder of the zone (EuroDNS), "" when it has
+	// none or is not listed.
+	Folder    string        `json:"folder,omitempty"`
 	Protected bool          `json:"protected"`
 	Entries   []WhoCanEntry `json:"entries"`
 }

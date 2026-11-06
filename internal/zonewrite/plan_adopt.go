@@ -199,7 +199,7 @@ type adoptCandidate struct {
 // filter matches over the RRsets that are not server-managed (everything
 // when nothing is selected); other read-only RRsets are listed with their
 // reason.
-func (e *engine) adoptCandidates(s *identity.Subject, p provider.Provider, zone, owner string, cur *dns.Zone, owns map[dns.Key]store.Ownership,
+func (e *engine) adoptCandidates(g *grants, s *identity.Subject, p provider.Provider, zone, owner string, cur *dns.Zone, owns map[dns.Key]store.Ownership,
 	tombs map[dns.Key]store.Tombstone, refs []uiapi.RRsetRef, hosts, types []string) []adoptCandidate {
 	all := index(cur)
 	var keys []dns.Key
@@ -256,7 +256,7 @@ func (e *engine) adoptCandidates(s *identity.Subject, p provider.Provider, zone,
 			c.Reason = adoptReserved
 		case !owned && !e.adoptsFor(s, zone, owner, k):
 			c.Reason = adoptForbidden
-		case !e.cfg.Authz.AllowRRset(s, policy.ActionRecordAdopt, zone, k):
+		case !e.allowRRset(g, s, policy.ActionRecordAdopt, zone, k):
 			c.Reason = adoptForbidden
 		case invalidReason(p, zone, set) != "":
 			c.Reason = invalidReason(p, zone, set)
@@ -359,7 +359,7 @@ func reserved(owner string, tombs map[dns.Key]store.Tombstone, k dns.Key) bool {
 // adoptsFor reports whether s may adopt an RRset for owner: one of its
 // teams, or another team with dns.ownership.approve on that RRset.
 func (e *engine) adoptsFor(s *identity.Subject, zone, owner string, k dns.Key) bool {
-	return slices.Contains(s.Teams, owner) || e.approves(s, zone, k)
+	return slices.Contains(s.Teams, owner) || e.approves(nil, s, zone, k)
 }
 
 func (e *engine) PreviewAdopt(ctx context.Context, s *identity.Subject, zoneIn string, sel uiapi.AdoptSelection) (*uiapi.AdoptPreview, error) {
@@ -390,7 +390,7 @@ func (e *engine) PreviewAdopt(ctx context.Context, s *identity.Subject, zoneIn s
 	if err != nil {
 		return nil, err
 	}
-	cands := e.adoptCandidates(s, p, zone, owner, cur, owns, tombs, sel.RRsets, sel.Hosts, sel.Types)
+	cands := e.adoptCandidates(nil, s, p, zone, owner, cur, owns, tombs, sel.RRsets, sel.Hosts, sel.Types)
 	out := &uiapi.AdoptPreview{Zone: zone, Owner: owner, Candidates: make([]uiapi.AdoptCandidate, 0, len(cands)),
 		PreviewToken: previewToken(zone, owner, cands)}
 	for _, c := range cands {
@@ -447,7 +447,8 @@ func (e *engine) AdoptMany(ctx context.Context, s *identity.Subject, zoneIn stri
 	if err != nil {
 		return nil, e.deny(ctx, s, action, zone, err)
 	}
-	cands := e.adoptCandidates(s, p, zone, owner, cur, owns, tombs, req.RRsets, nil, nil)
+	var g grants
+	cands := e.adoptCandidates(&g, s, p, zone, owner, cur, owns, tombs, req.RRsets, nil, nil)
 	var conflicts []string
 	for _, c := range cands {
 		switch {
@@ -514,6 +515,6 @@ func (e *engine) AdoptMany(ctx context.Context, s *identity.Subject, zoneIn stri
 		res.Adopted = append(res.Adopted, uiapi.RRsetRef{Host: c.key.Host, Type: c.key.Type})
 		changes = append(changes, uiChange("adopt", c.key, nil, &set))
 	}
-	e.emit(ctx, s, action, zone, "allow", "", changes, "", map[string]any{"comment": req.Comment, "owner": owner})
+	e.emit(ctx, s, action, zone, "allow", "", changes, "", g.extra(map[string]any{"comment": req.Comment, "owner": owner}))
 	return res, nil
 }

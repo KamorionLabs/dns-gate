@@ -20,11 +20,15 @@ function list(items: string[]): string {
   return items.slice(0, -1).join(', ') + ' and ' + items[items.length - 1];
 }
 
-function where(zones: string[]): string {
+function where(zones: string[], folders: string[] = []): string {
   if (zones.includes('*')) return 'every zone';
   const exact = zones.filter((z) => !/[*?]/.test(z));
   const globs = zones.filter((z) => /[*?]/.test(z));
-  return list([...exact, ...(globs.length ? ['zones matching ' + globs.join(', ')] : [])]);
+  return list([
+    ...exact,
+    ...(globs.length ? ['zones matching ' + globs.join(', ')] : []),
+    ...(folders.length ? ['the zones in folder' + (folders.length > 1 ? 's ' : ' ') + folders.join(', ')] : []),
+  ]);
 }
 
 function what(p: Permission): string {
@@ -40,7 +44,7 @@ export function describePermissions(perms: Permission[]): string[] {
   for (const p of perms) {
     const scoped = p.hosts.length > 0 || p.types.some((t) => t !== '*');
     const verbs = recordVerbs.filter(([a]) => p.actions.includes(a)).map(([, v]) => v);
-    const at = where(p.zones);
+    const at = where(p.zones ?? [], p.folders);
     if (verbs.length === 1 && verbs[0] === 'read' && !scoped) zone.push(`Read ${at}`);
     else if (verbs.length) zone.push(`${capital(list(verbs))} ${what(p)} in ${at}`);
     else if (p.actions.includes('ui.read')) zone.push(`Browse ${at} in this console`);

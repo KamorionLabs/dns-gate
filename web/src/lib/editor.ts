@@ -18,6 +18,7 @@ export interface EGroup {
 }
 export interface ERule {
   zones: string[];
+  folders: string[];
   actions: string[];
   hosts: string[];
   types: string[];
@@ -87,7 +88,13 @@ export function fromDoc(d: PolicyDocument | undefined): EModel {
       uid: nextUid(),
       name,
       description: r.description ?? '',
-      rules: r.rules.map((x) => ({ zones: [...x.zones], actions: [...x.actions], hosts: [...(x.records?.hosts ?? [])], types: [...(x.records?.types ?? [])] })),
+      rules: r.rules.map((x) => ({
+        zones: [...(x.zones ?? [])],
+        folders: [...(x.folders ?? [])],
+        actions: [...x.actions],
+        hosts: [...(x.records?.hosts ?? [])],
+        types: [...(x.records?.types ?? [])],
+      })),
       rebase_on_save: !!r.rebase_on_save,
       ephemeral_ttl: r.ephemeral_ttl ?? '',
       max_changes: r.max_changes_per_request ? String(r.max_changes_per_request) : '',
@@ -132,6 +139,7 @@ export function toDoc(m: EModel): PolicyDocument {
       ...(r.description.trim() ? { description: r.description.trim() } : {}),
       rules: r.rules.map((x) => ({
         zones: x.zones,
+        ...(x.folders.length ? { folders: x.folders } : {}),
         actions: x.actions,
         ...(x.hosts.length || x.types.length
           ? { records: { ...(x.hosts.length ? { hosts: x.hosts } : {}), ...(x.types.length ? { types: x.types } : {}) } }

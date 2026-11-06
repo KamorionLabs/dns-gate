@@ -18,10 +18,12 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/config"
 	"github.com/KamorionLabs/dns-gate/internal/discovery"
 	"github.com/KamorionLabs/dns-gate/internal/eurodnsapi"
+	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
 	"github.com/KamorionLabs/dns-gate/internal/provider"
 	eurodnsprov "github.com/KamorionLabs/dns-gate/internal/provider/eurodns"
 	route53prov "github.com/KamorionLabs/dns-gate/internal/provider/route53"
+	"github.com/KamorionLabs/dns-gate/internal/requestid"
 	"github.com/KamorionLabs/dns-gate/internal/server"
 	"github.com/KamorionLabs/dns-gate/internal/store"
 	"github.com/KamorionLabs/dns-gate/internal/version"
@@ -80,9 +82,9 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		if pc.EuroDNS != nil && pc.EuroDNS.ZoneProfiles {
 			profiles[pc.ID] = true
 		}
-		sources = append(sources, discovery.Source{Provider: p, Include: pc.Zones.Include, Exclude: pc.Zones.Exclude, Refresh: pc.Zones.Refresh.D()})
+		sources = append(sources, discovery.Source{Provider: p, Include: pc.Zones.Include, Exclude: pc.Zones.Exclude,
+			Folders: pc.Zones.Folders, Refresh: pc.Zones.Refresh.D(), FolderMaxAge: pc.Zones.FolderMaxAge()})
 	}
-	disc := discovery.New(discovery.Config{Sources: sources, Logger: log})
 
 	if cfg.SingleReplicaStore() {
 		if n, err := strconv.Atoi(os.Getenv("DNS_GATE_REPLICAS")); err == nil && n > 1 {
@@ -100,6 +102,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		out = os.Stdout
 	}
 	auditLog := &audit.Tee{Primary: audit.NewJSON(out), Store: st, ErrorLog: log}
+	disc := discovery.New(discovery.Config{Sources: sources, Logger: log, OnFolderChange: folderChangeAudit(auditLog, time.Now)})
 	holder, err := policy.NewHolder(cfg)
 	if err != nil {
 		return nil, err
@@ -186,6 +189,43 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 	a := &App{Config: cfg, Store: st, Engine: eng, Policy: holder, Discovery: disc, authz: authz, handler: srv.Handler(), opts: opts, log: log, now: time.Now}
 	a.PlanGC = a.GCPlans
 	return a, nil
+}
+
+// Audit actions of the provider folders found by discovery: the rules
+// selecting zones by folder follow them.
+const (
+	// ActionZoneFolderChanged: the zone is in another folder than at the
+	// previous listing.
+	ActionZoneFolderChanged = "gate.zone.folder_changed"
+	// ActionZoneFoldersListed: first listing of a provider by this process,
+	// one summary (extra.count, extra.digest: discovery.FolderDigest).
+	ActionZoneFoldersListed = "gate.zone.folders_listed"
+	// ActionZoneFolderSeen: a zone found by a later listing.
+	ActionZoneFolderSeen = "gate.zone.folder_seen"
+	// ActionZoneFolderGone: the zone is no longer listed.
+	ActionZoneFolderGone = "gate.zone.folder_gone"
+)
+
+var folderActions = map[string]string{
+	discovery.FolderChanged: ActionZoneFolderChanged,
+	discovery.FolderSeen:    ActionZoneFolderSeen,
+	discovery.FolderListed:  ActionZoneFoldersListed,
+	discovery.FolderGone:    ActionZoneFolderGone,
+}
+
+// folderChangeAudit records the folders found by discovery.
+func folderChangeAudit(l audit.Logger, now func() time.Time) func(context.Context, discovery.FolderChange) {
+	return func(ctx context.Context, c discovery.FolderChange) {
+		extra := map[string]any{"old": c.Old, "new": c.New}
+		if c.Kind == discovery.FolderListed {
+			extra = map[string]any{"count": c.Count, "digest": c.Digest}
+		}
+		l.Log(ctx, audit.Event{
+			Time: now().UTC(), RequestID: requestid.From(ctx), Subject: "gate:discovery", SubjectName: "gate:discovery",
+			SubjectCategory: identity.CategorySystem, Action: folderActions[c.Kind], Zone: c.Zone, Provider: c.Provider,
+			Decision: "allow", Extra: extra,
+		})
+	}
 }
 
 // untrustedEmail lists the issuers whose email claim must not identify a

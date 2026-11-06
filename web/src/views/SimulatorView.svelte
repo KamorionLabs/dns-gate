@@ -125,6 +125,7 @@
             </div>
             {#if result.allowed && result.matched}
               <div class="why"><span class="lbl">Granted by</span><span class="mono">{result.matched}</span>{#if result.layer}<LayerTag layer={result.layer} />{/if}</div>
+              {#if result.folder}<div class="why"><span class="lbl">Through the folder</span><span class="mono">{result.folder}</span><span class="dim">the zone is in this EuroDNS folder, which the rule selects</span></div>{/if}
             {/if}
             {#if result.denied}
               <div class="why deny"><span class="lbl">Reason</span><span class="mono">{result.denied}</span>{#if result.layer}<LayerTag layer={result.layer} />{/if}</div>
