@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { api, onBeforeReauth } from '../lib/api';
-  import type { AdoptResult, Me, RRset, RRsetRef, Status, Tombstone, Transfer, ZoneInventory } from '../lib/types';
+  import type { AdoptResult, HTTPSRedirect, Me, RRset, RRsetRef, Status, Tombstone, Transfer, ZoneInventory } from '../lib/types';
   import { takeAdopt, type StoredAdopt } from '../lib/adoptDraft';
   import AdoptPanel from '../components/AdoptPanel.svelte';
   import TerraformPanel from '../components/TerraformPanel.svelte';
@@ -27,7 +27,10 @@
   import RecordForm from '../components/RecordForm.svelte';
   import ReviewPanel from '../components/ReviewPanel.svelte';
   import ProviderBadge from '../components/ProviderBadge.svelte';
-  import { blockerText, canChange, canWriteZone, readOnlyLabel } from '../lib/rights';
+  import ForwardsSection from '../components/ForwardsSection.svelte';
+  import ForwardForm from '../components/ForwardForm.svelte';
+  import { canChange, canWriteForwards, canWriteZone, readOnlyLabel } from '../lib/rights';
+  import { URLFWD, filterForwards, forwardsVisible, isForward, splitForwards, typeLabel } from '../lib/forwards';
   import { keysAfter, rebase, stage, stagedFor, stagedKey, unstage, valuesOf, type StagedChange } from '../lib/staging';
   import { saveStaged, takeStaged } from '../lib/stagedDraft';
   import { providerLabel } from '../lib/labels';
@@ -54,8 +57,17 @@
   // DNS changes staged in this zone, reviewed and applied together.
   let staged = $state<StagedChange[]>([]);
   let formFor = $state<{ rr?: RRset; staged?: StagedChange } | null>(null);
+  let fwdFormFor = $state<{ rr?: RRset; staged?: StagedChange } | null>(null);
   let reviewOpen = $state(false);
   let provider = $state<string | undefined>(undefined);
+  // Whether the URL forwards of the zone answer HTTPS (GET /forwards), when known.
+  let https = $state<HTTPSRedirect | undefined>(undefined);
+
+  const loadHTTPS = () =>
+    api
+      .forwards(zone)
+      .then((l) => (https = l.https))
+      .catch(() => (https = undefined));
 
   const load = () =>
     api
@@ -65,6 +77,7 @@
         // a zone that is not managed has nothing to adopt, export or change
         if (z.unmanaged) tfOpen = adoptOpen = selecting = false;
         if (z.unmanaged) staged = [];
+        if (!z.unmanaged && z.provider?.toLowerCase() !== 'route53') void loadHTTPS();
         if (z.provider) provider = z.provider;
         else if (!provider)
           api
@@ -106,19 +119,24 @@
   $effect(() => onBeforeReauth(() => saveStaged(zone, staged)));
 
   const canAdd = $derived(!!inv && !unmanaged && canWriteZone(me, zone));
+  const canAddForward = $derived(!!inv && !unmanaged && https?.status !== 'unsupported' && canWriteForwards(me, zone));
   const verdict = (r: RRset) => canChange(me, zone, r, unmanaged);
   const tombstones = $derived<Tombstone[]>(inv?.tombstones ?? []);
   const reservedFor = (r: RRset) => (r.status === 'foreign' ? reservation(tombstones, r.host, r.type) : undefined);
   const owns = (r: RRset) => ownership(me, zone, r, unmanaged, reservedFor(r));
-  const existingAfter = $derived(keysAfter(inv?.rrsets ?? [], staged));
+  const split = $derived(splitForwards(inv?.rrsets ?? []));
+  const existingAfter = $derived(keysAfter(split.records, staged.filter((c) => !isForward(c))));
+  const forwardsAfter = $derived(keysAfter(split.forwards, staged.filter(isForward)));
 
   function onstage(c: StagedChange) {
     staged = stage(staged, c);
-    formFor = null;
+    formFor = fwdFormFor = null;
   }
   function edit(r: RRset) {
     router.setParams({ rr: undefined });
-    formFor = { rr: r, staged: stagedFor(staged, r.host, r.type) };
+    const f = { rr: r, staged: stagedFor(staged, r.host, r.type) };
+    if (isForward(r)) fwdFormFor = f;
+    else formFor = f;
   }
   function remove(r: RRset) {
     staged = stage(staged, { kind: 'delete', host: r.host, type: r.type, before: r });
@@ -128,9 +146,14 @@
     router.setParams({ rr: undefined });
     formFor = {};
   }
+  function openForwardForm() {
+    router.setParams({ rr: undefined });
+    fwdFormFor = {};
+  }
   function editStaged(c: StagedChange) {
     const rr = c.kind === 'create' ? undefined : inv?.rrsets.find((r) => r.host === c.host && r.type === c.type);
-    formFor = { rr, staged: c };
+    if (isForward(c)) fwdFormFor = { rr, staged: c };
+    else formFor = { rr, staged: c };
   }
   async function reloadForReview(): Promise<StagedChange[]> {
     const z = await api.inventory(zone);
@@ -206,7 +229,10 @@
 
   // Zone-file order: sort by reversed labels so children sit under their parents.
   const sortKey = (r: RRset) => (r.host === '@' ? '' : r.host.split('.').reverse().join('.')) + ' ' + r.type;
-  const rrsets = $derived(inv ? [...inv.rrsets].sort((a, b) => sortKey(a).localeCompare(sortKey(b))) : []);
+  const sorted = (l: RRset[]) => [...l].sort((a, b) => sortKey(a).localeCompare(sortKey(b)));
+  // The record table holds the record sets; the URL forwards have their own section.
+  const rrsets = $derived(sorted(split.records));
+  const forwardSets = $derived(sorted(split.forwards));
 
   const bucket = (s: Status) => (s === 'missing' ? 'tainted' : s);
   const counts = $derived(
@@ -214,7 +240,10 @@
   );
   const attentionCount = $derived((counts.tainted ?? 0) + (counts.pending ?? 0));
   const types = $derived([...new Set(rrsets.map((r) => r.type))].sort());
-  const owners = $derived([...new Set(rrsets.map((r) => r.owner).filter((o): o is string => !!o))].sort());
+  const owners = $derived([...new Set((inv?.rrsets ?? []).map((r) => r.owner).filter((o): o is string => !!o))].sort());
+  const foreignAll = $derived((inv?.rrsets ?? []).filter((r) => r.status === 'foreign').length);
+  const managedAll = $derived((inv?.rrsets ?? []).filter((r) => r.status === 'managed').length);
+  const adoptTypes = $derived(forwardSets.length ? [...types, URLFWD] : types);
 
   // Status filter, always visible in the URL: when absent, the zone's needs
   // decide (attention, then managed, then all) and the URL is updated.
@@ -253,7 +282,7 @@
   const setFilter = (u: Record<string, string | undefined>) => router.setParams({ ...u, page: undefined });
   const goPage = (n: number) => router.setParams({ page: n > 1 ? String(n) : undefined });
 
-  const selected = $derived(rrsets.find((r) => `${r.host}/${r.type}` === selectedKey) ?? null);
+  const selected = $derived((inv?.rrsets ?? []).find((r) => `${r.host}/${r.type}` === selectedKey) ?? null);
   const selectedVerdict = $derived(selected ? verdict(selected) : null);
 
   const tabs = $derived(
@@ -286,6 +315,21 @@
     router.setParams({ rr: `${r.host}/${r.type}` }, true);
   };
   const shownForeign = $derived(shown.filter((r) => r.status === 'foreign' && !r.protected));
+
+  const showForwards = $derived(!!inv && forwardsVisible({ count: forwardSets.length, provider, https, unmanaged }));
+  const shownForwards = $derived(filterForwards(forwardSets, q, ownerF));
+  // While selecting for an adoption or a transfer, forwards are picked like record sets.
+  const forwardPick = $derived.by(() => {
+    if (selecting)
+      return (r: RRset) => ({ show: r.status === 'foreign' && !r.protected, checked: picked.includes(keyOf(r)), inert: r.status !== 'foreign' || r.protected });
+    if (transferring)
+      return (r: RRset) => {
+        const on = tpicked.includes(keyOf(r));
+        const ok = pickable(r, transferFrom);
+        return { show: ok || on, checked: on, inert: !ok && !on };
+      };
+    return undefined;
+  });
   const shownTransferable = $derived(shown.filter((r) => pickable(r, transferFrom ?? (ownerF || undefined))));
   const close = () => router.setParams({ rr: undefined });
   const rowKey = (e: KeyboardEvent, r: RRset) => {
@@ -333,7 +377,7 @@
     <p class="meta">
       {#if provider}<ProviderBadge {provider} />{/if}
       {#if inv}
-        <span class="num">{rrsets.length.toLocaleString('en')}</span> record sets · synced <RelTime iso={inv.last_synced_at} /> ·
+        <span class="num">{rrsets.length.toLocaleString('en')}</span> record sets{#if forwardSets.length}{' '}· <span class="num">{forwardSets.length.toLocaleString('en')}</span> URL forward{forwardSets.length === 1 ? '' : 's'}{/if} · synced <RelTime iso={inv.last_synced_at} /> ·
         <a href={journalHref({ zone })}>journal</a>
       {:else if !error}loading…{/if}
     </p>
@@ -420,7 +464,7 @@
           <span class="chev"><Icon name="chevron" size={12} /></span>
         </label>
       {/if}
-      {#if inv && !unmanaged && (counts.foreign ?? 0) > 0}
+      {#if inv && !unmanaged && foreignAll > 0}
         <button
           class="btn"
           class:on={selecting}
@@ -438,7 +482,7 @@
           <Seal status="managed" size={13} />{selecting ? 'Selecting…' : 'Adopt…'}
         </button>
       {/if}
-      {#if inv && !unmanaged && (counts.managed ?? 0) + tombstones.length > 0 && transferGate.ok}
+      {#if inv && !unmanaged && managedAll + tombstones.length > 0 && transferGate.ok}
         <button
           class="btn"
           class:on={transferring}
@@ -461,7 +505,7 @@
     </div>
   </div>
 
-  {#if inv && !unmanaged && !adoptAllowed && (counts.foreign ?? 0) > 0 && (statusF === 'foreign' || statusF === 'all')}
+  {#if inv && !unmanaged && !adoptAllowed && foreignAll > 0 && (statusF === 'foreign' || statusF === 'all')}
     <p class="note"><Icon name="lock" size={12} /> {adoptWhyNot}</p>
   {/if}
   {#if sentTransfer}
@@ -637,6 +681,33 @@
       <button class="btn" type="button" disabled={page >= pages} onclick={() => goPage(page + 1)}>Next</button>
     </nav>
   {/if}
+
+  {#if showForwards}
+    <ForwardsSection
+      {zone}
+      forwards={shownForwards}
+      total={forwardSets.length}
+      {https}
+      loading={!inv}
+      {unmanaged}
+      canAdd={canAddForward}
+      filtered={!!q || !!ownerF}
+      {staged}
+      {selectedKey}
+      {verdict}
+      {owns}
+      {reservedFor}
+      {adoptAllowed}
+      pick={forwardPick}
+      onopen={open}
+      onadd={openForwardForm}
+      onedit={edit}
+      onremove={remove}
+      onundo={undo}
+      onadopt={adoptOne}
+      onclearfilter={() => setFilter({ q: undefined, owner: undefined })}
+    />
+  {/if}
 {/if}
 
 {#if inv && !unmanaged && tombstones.length}
@@ -696,7 +767,7 @@
       {#each staged as c (stagedKey(c))}
         <li class={c.kind}>
           <button class="pick-staged" type="button" disabled={c.kind === 'delete'} onclick={() => editStaged(c)} title={c.kind === 'delete' ? 'Will be deleted' : 'Edit this change'}>
-            <span class="sign" aria-hidden="true">{stageSign[c.kind]}</span><span class="mono">{c.host}</span><span class="mono t">{c.type}</span>
+            <span class="sign" aria-hidden="true">{stageSign[c.kind]}</span><span class="mono">{c.host}</span><span class="t" class:mono={!isForward(c)}>{typeLabel(c.type)}</span>
           </button>
           <button class="x" type="button" aria-label="Remove the change of {c.host} {c.type}" title="Remove this change" onclick={() => undo(stagedKey(c))}><Icon name="x" size={12} /></button>
         </li>
@@ -710,6 +781,10 @@
 
 {#if formFor && inv && !unmanaged}
   <RecordForm {zone} {me} existing={existingAfter} editing={formFor.rr} staged={formFor.staged} {tombstones} {onstage} onclose={() => (formFor = null)} />
+{/if}
+
+{#if fwdFormFor && inv && !unmanaged}
+  <ForwardForm {zone} {me} existing={forwardsAfter} editing={fwdFormFor.rr} staged={fwdFormFor.staged} {tombstones} {https} {onstage} onclose={() => (fwdFormFor = null)} />
 {/if}
 
 {#if reviewOpen && inv && !unmanaged}
@@ -730,7 +805,7 @@
     {zone}
     selected={pickedRefs}
     teams={me?.teams ?? []}
-    types={types}
+    types={adoptTypes}
     initialComment={restored?.comment ?? ''}
     initialFilter={restored ? { hosts: restored.selection.hosts ?? [], types: restored.selection.types ?? [], owner: restored.selection.owner } : undefined}
     onclose={() => { adoptOpen = false; restored = null; if (!selecting) picked = []; }}
@@ -747,7 +822,7 @@
   <TransferPanel {zone} picked={transferRefs} from={transferFrom} {me} onclose={closeTransfer} ondone={onTransferSent} />
 {/if}
 
-{#if selected && !selecting && !transferring && !adoptOpen && !formFor && !reviewOpen && !transferOpen}
+{#if selected && !selecting && !transferring && !adoptOpen && !formFor && !fwdFormFor && !reviewOpen && !transferOpen}
   {#key selectedKey}
     <RRsetDrawer
       {zone}

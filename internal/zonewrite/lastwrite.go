@@ -35,7 +35,7 @@ func isWrite(ev audit.Event) bool {
 		case dns.OpCreate, dns.OpUpdate, dns.OpDelete:
 			return true
 		case "expire":
-			if len(c.OldValues) > 0 || c.OldAlias != nil {
+			if len(c.OldValues) > 0 || c.OldAlias != nil || c.OldForward != nil {
 				return true
 			}
 		}

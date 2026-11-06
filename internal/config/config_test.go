@@ -705,3 +705,14 @@ func TestAuditChainKey(t *testing.T) {
 		t.Fatal("key in the file accepted")
 	}
 }
+
+func TestForwardWriteWithoutHostsWarns(t *testing.T) {
+	c := &Config{Roles: map[string]Role{
+		"wide":   {Rules: []Rule{{Zones: []string{"example.com"}, Actions: []string{"dns.forward.write"}, Records: &RecordScope{Types: []string{"CNAME"}}}}},
+		"scoped": {Rules: []Rule{{Zones: []string{"example.com"}, Actions: []string{"dns.forward.write"}, Records: &RecordScope{Hosts: []string{"go"}, Types: []string{"CNAME"}}}}},
+	}}
+	w := c.forwardWarnings()
+	if len(w) != 1 || !strings.Contains(w[0], "roles.wide.rules[0]") {
+		t.Fatalf("warnings %q", w)
+	}
+}

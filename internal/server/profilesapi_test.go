@@ -589,3 +589,29 @@ func TestZoneProfilesProtectedForwards(t *testing.T) {
 		t.Fatalf("profiles: %d", fake.Len())
 	}
 }
+
+func TestZoneProfilesForwardChecks(t *testing.T) {
+	e, fake := profileEnvTweak(t, false, func(c *config.Config) {
+		c.Protected = append(c.Protected,
+			config.Protected{Zones: []string{"example.com"}, Hosts: []string{"promo"}, Types: []string{"URLFWD"}},
+			config.Protected{Zones: []string{"example.com"}, Hosts: []string{"shop"}, Types: []string{"APEX"}})
+	})
+	tok := e.token("profiler")
+	fwd := func(f string) string { return `{"name":"p","records":[],"urlForwards":[` + f + `]}` }
+	for body, want := range map[string]string{
+		fwd(`{"forwardType":"HTTP301","host":"promo","url":"https://example.net/"}`):                         "protected",
+		fwd(`{"forwardType":"HTTP301","host":"shop","url":"https://example.net/"}`):                          "protected",
+		fwd(`{"forwardType":"HTTP301","host":"go","url":"javascript:alert(1)"}`):                             "invalid",
+		fwd(`{"forwardType":"HTTP301","host":"go","url":"https://user:pw@example.net/"}`):                    "invalid",
+		fwd(`{"forwardType":"FRAME","host":"go","url":"https://example.net/","title":"<script>x</script>"}`): "invalid",
+		fwd(`{"forwardType":"MAGIC","host":"go","url":"https://example.net/"}`):                              "invalid",
+	} {
+		r := e.do(t, "POST", "/api/v1/providers/eurodns/zone-profiles", tok, body, nil)
+		if got := reason(t, r); got != want {
+			t.Errorf("%s: %d %s, want %s", body, r.StatusCode, got, want)
+		}
+	}
+	if fake.Len() != 0 {
+		t.Fatalf("a refused profile reached EuroDNS: %d", fake.Len())
+	}
+}

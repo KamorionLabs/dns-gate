@@ -1,6 +1,6 @@
 // JSON client of /api/v1, independent of the browser globals so it can be
 // tested with a mock fetch.
-import type { IssuedToken, PlanResult, RRsetChange, TeamDetail, TeamList, Transfer, TransferPage, TransferProposal, TransferQuery, ValidationError } from './types';
+import type { ForwardList, IssuedToken, PlanResult, RRsetChange, TeamDetail, TeamList, Transfer, TransferPage, TransferProposal, TransferQuery, ValidationError } from './types';
 
 export class ApiError extends Error {
   readonly status: number;
@@ -90,6 +90,17 @@ export function dnsWrites(request: Request) {
       request<PlanResult>('POST', zonePath(zone) + '/plan', team ? { changes, team } : { changes }).then(norm),
     apply: (zone: string, planId: string, team?: string) =>
       request<PlanResult>('POST', zonePath(zone) + '/apply', team ? { plan_id: planId, team } : { plan_id: planId }).then(norm),
+  };
+}
+
+/** URL forwards of a zone with the HTTPS status of its forwards (the Go side may send null lists). */
+export function forwardsApi(request: Request) {
+  return {
+    forwards: (zone: string) =>
+      request<ForwardList>('GET', zonePath(zone) + '/forwards').then((l) => ({
+        ...l,
+        forwards: (l.forwards ?? []).map((r) => ({ ...r, values: r.values ?? [] })),
+      })),
   };
 }
 

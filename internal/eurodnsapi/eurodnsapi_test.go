@@ -38,7 +38,8 @@ var (
 )
 
 // fakeAuthz: writer = any RRset; acme = TXT under _acme-challenge (rebase,
-// ephemeral); admin = adopt and zone admin; protected = NS/MX at apex.
+// ephemeral); forwarder = any URL forward; admin = adopt and zone admin;
+// protected = NS/MX at apex.
 type fakeAuthz struct{ max int }
 
 func has(s *identity.Subject, role string) bool { return slices.Contains(s.Roles, role) }
@@ -53,6 +54,8 @@ func (f *fakeAuthz) Allow(s *identity.Subject, action, _ string) bool {
 		return true
 	case policy.ActionRecordWrite:
 		return has(s, "writer") || has(s, "acme")
+	case policy.ActionForwardWrite:
+		return has(s, "forwarder")
 	default:
 		return has(s, "admin")
 	}
@@ -61,6 +64,9 @@ func (f *fakeAuthz) Allow(s *identity.Subject, action, _ string) bool {
 func (f *fakeAuthz) AllowRRset(s *identity.Subject, action, zone string, k dns.Key) bool {
 	if f.IsProtected(zone, k) {
 		return false
+	}
+	if action == policy.ActionForwardWrite {
+		return has(s, "forwarder")
 	}
 	if action == policy.ActionRecordWrite {
 		if has(s, "writer") {
@@ -138,7 +144,7 @@ func baseZone() *eurodns.Zone {
 			{Type: "CNAME", Host: "legacy", TTL: 3600, RData: "old.example.net."},
 			{Type: "TXT", Host: "@", TTL: 3600, RData: "\"v=spf1 -all\""},
 		},
-		URLForwards:  []json.RawMessage{json.RawMessage(`{"host":"go","target":"https://example.net/","type":"PERMANENT"}`)},
+		URLForwards:  []json.RawMessage{json.RawMessage(`{"id":41,"host":"go","forwardType":"HTTP301","url":"https://example.net/","updated":false}`)},
 		MailForwards: []json.RawMessage{},
 	}
 }
@@ -494,17 +500,51 @@ func TestMaxChanges(t *testing.T) {
 	e.mustAdd(alice, rec("A", "a", "192.0.2.1"))
 }
 
-func TestForwardsRequireZoneAdmin(t *testing.T) {
+func TestForwardsThroughFullZonePut(t *testing.T) {
 	e := newEnv(t, eurodnstest.Options{})
 	ctx := context.Background()
+	fa := &identity.Subject{Issuer: "idp", ID: "fa", Name: "fa@example.com", Category: identity.CategoryHuman, Roles: []string{"writer", "forwarder"}, Teams: []string{"team-a"}}
+	fb := &identity.Subject{Issuer: "idp", ID: "fb", Name: "fb@example.com", Category: identity.CategoryHuman, Roles: []string{"writer", "forwarder"}, Teams: []string{"team-b"}}
+	with := func(raws ...string) *eurodns.Zone {
+		z := e.srv.Zone(zoneName)
+		z.URLForwards = []json.RawMessage{}
+		for _, r := range raws {
+			z.URLForwards = append(z.URLForwards, json.RawMessage(r))
+		}
+		return z
+	}
+	goRaw := string(e.srv.Zone(zoneName).URLForwards[0])
+	www := `{"host":"www","forwardType":"HTTP302","url":"https://example.org/"}`
+
+	e.wantReason(e.api.SaveZone(ctx, alice, zoneName, with(), ""), zonewrite.ReasonForbidden)
+	e.wantReason(e.api.SaveZone(ctx, fa, zoneName, with(), ""), zonewrite.ReasonForeignRRset)
+	if err := e.api.SaveZone(ctx, fa, zoneName, with(goRaw, www), ""); err != nil {
+		t.Fatal(err)
+	}
+	if o := e.own("www", dns.TypeURLForward); o == nil || o.Owner != "team-a" {
+		t.Fatalf("created forward not owned: %+v", o)
+	}
+	if got := e.srv.Zone(zoneName).URLForwards; len(got) != 2 || string(got[0]) != goRaw {
+		t.Fatalf("forwards %s", got)
+	}
+	e.wantReason(e.api.SaveZone(ctx, fb, zoneName, with(goRaw), ""), zonewrite.ReasonNotOwner)
+	e.wantReason(e.api.SaveZone(ctx, fa, zoneName, with(goRaw, www, www), ""), zonewrite.ReasonInvalid)
+
+	if err := e.api.SaveZone(ctx, admin, zoneName, with(string(e.srv.Zone(zoneName).URLForwards[1])), ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.srv.Zone(zoneName).URLForwards; len(got) != 1 || e.own("go", dns.TypeURLForward) != nil {
+		t.Fatalf("admin delete of a foreign forward: %s", got)
+	}
+
 	z := e.srv.Zone(zoneName)
-	z.URLForwards = []json.RawMessage{}
-	e.wantReason(e.api.SaveZone(ctx, alice, zoneName, z, ""), zonewrite.ReasonForbidden)
+	z.MailForwards = []json.RawMessage{json.RawMessage(`{"source":"info","destination":"x@example.net"}`)}
+	e.wantReason(e.api.SaveZone(ctx, fa, zoneName, z, ""), zonewrite.ReasonForbidden)
 	if err := e.api.SaveZone(ctx, admin, zoneName, z, ""); err != nil {
 		t.Fatal(err)
 	}
-	if len(e.srv.Zone(zoneName).URLForwards) != 0 {
-		t.Fatal("admin forwards change not applied")
+	if len(e.srv.Zone(zoneName).MailForwards) != 1 {
+		t.Fatal("admin mail forwards change not applied")
 	}
 }
 
@@ -723,7 +763,7 @@ func TestInventoryAndZones(t *testing.T) {
 		t.Fatal("protected flag")
 	}
 	// Tainted counts the missing RRset "api A".
-	if len(sums) != 1 || sums[0].Managed != 1 || sums[0].Tainted != 1 || sums[0].Foreign != 5 || sums[0].RRsets != 6 || sums[0].LastWriteAt == nil {
+	if len(sums) != 1 || sums[0].Managed != 1 || sums[0].Tainted != 1 || sums[0].Foreign != 6 || sums[0].RRsets != 7 || sums[0].LastWriteAt == nil {
 		t.Fatalf("summary %+v", sums)
 	}
 
@@ -946,5 +986,85 @@ func TestOtherProviderZonesRefused(t *testing.T) {
 	}
 	if _, err := f.Do(ctx, alice, Call{Op: "addDnsRecords", Zone: zoneName, Body: json.RawMessage(`[]`)}); err == nil {
 		t.Fatal("empty add accepted")
+	}
+}
+
+func TestFullZonePutWithDuplicateForwards(t *testing.T) {
+	e := newEnv(t, eurodnstest.Options{})
+	ctx := context.Background()
+	z := baseZone()
+	z.URLForwards = append(z.URLForwards,
+		json.RawMessage(`{"host":"@","forwardType":"HTTP301","url":"https://a.example.net/"}`),
+		json.RawMessage(`{"host":"example.com.","forwardType":"HTTP302","url":"https://b.example.net/"}`),
+		json.RawMessage(`{"forwardType":"HTTP302","url":"https://c.example.net/"}`))
+	e.srv.Seed(z)
+	fa := &identity.Subject{Issuer: "idp", ID: "fa", Name: "fa@example.com", Category: identity.CategoryHuman, Roles: []string{"writer", "forwarder"}, Teams: []string{"team-a"}}
+
+	cur := e.srv.Zone(zoneName)
+	cur.Records = append(cur.Records, eurodns.Record{Type: "A", Host: "www", TTL: 600, RData: "192.0.2.1"})
+	if err := e.api.SaveZone(ctx, alice, zoneName, cur, ""); err != nil {
+		t.Fatalf("unchanged duplicate forwards block the save: %v", err)
+	}
+	stale := e.srv.Zone(zoneName)
+	stale.URLForwards = stale.URLForwards[:1]
+	stale.Records = append(stale.Records, eurodns.Record{Type: "TXT", Host: "_acme-challenge", TTL: 600, RData: "token"})
+	if err := e.api.SaveZone(ctx, acme, zoneName, stale, ""); err != nil {
+		t.Fatalf("rebase with stale duplicate forwards: %v", err)
+	}
+	if len(e.srv.Zone(zoneName).URLForwards) != 4 {
+		t.Fatal("rebase changed the duplicate forwards")
+	}
+	changed := e.srv.Zone(zoneName)
+	changed.URLForwards[1] = json.RawMessage(`{"host":"@","forwardType":"HTTP301","url":"https://evil.example.net/"}`)
+	e.wantReason(e.api.SaveZone(ctx, fa, zoneName, changed, ""), zonewrite.ReasonInvalid)
+}
+
+func TestZoneAdminDoesNotCreateOwnedForwards(t *testing.T) {
+	e := newEnv(t, eurodnstest.Options{})
+	ctx := context.Background()
+	fa := &identity.Subject{Issuer: "idp", ID: "fa", Name: "fa@example.com", Category: identity.CategoryHuman, Roles: []string{"writer", "forwarder"}, Teams: []string{"team-a"}}
+	with := func(raws ...string) *eurodns.Zone {
+		z := e.srv.Zone(zoneName)
+		z.URLForwards = nil
+		for _, r := range raws {
+			z.URLForwards = append(z.URLForwards, json.RawMessage(r))
+		}
+		return z
+	}
+	goRaw := string(e.srv.Zone(zoneName).URLForwards[0])
+	promo := `{"host":"promo","forwardType":"HTTP301","url":"https://example.org/"}`
+	e.wantReason(e.api.SaveZone(ctx, admin, zoneName, with(goRaw, promo), ""), zonewrite.ReasonForbidden)
+	if e.own("promo", dns.TypeURLForward) != nil || len(e.srv.Zone(zoneName).URLForwards) != 1 {
+		t.Fatal("zone admin created a forward")
+	}
+	if err := e.api.SaveZone(ctx, fa, zoneName, with(goRaw, promo), ""); err != nil {
+		t.Fatal(err)
+	}
+	e.wantReason(e.api.SaveZone(ctx, admin, zoneName, with(goRaw, `{"host":"promo","forwardType":"HTTP302","url":"https://example.org/"}`), ""), zonewrite.ReasonForbidden)
+	if err := e.api.SaveZone(ctx, admin, zoneName, with(`{"id":41,"host":"go","forwardType":"HTTP302","url":"https://example.org/"}`, promo), ""); err != nil {
+		t.Fatalf("zone admin change of an unowned forward: %v", err)
+	}
+	ev := e.audit.find("saveDnsZone", "allow")
+	last := ev[len(ev)-1]
+	if fmt.Sprint(last.Extra["zone_admin_forwards"]) != "[go URLFWD]" || e.own("go", dns.TypeURLForward) != nil {
+		t.Fatalf("zone admin change not marked or owned: %+v", last.Extra)
+	}
+}
+
+func TestUnwrittenForwardFieldsAreAudited(t *testing.T) {
+	e := newEnv(t, eurodnstest.Options{})
+	ctx := context.Background()
+	before := string(e.srv.Zone(zoneName).URLForwards[0])
+	z := e.srv.Zone(zoneName)
+	z.URLForwards = []json.RawMessage{json.RawMessage(`{"id":99,"host":"go","forwardType":"HTTP301","url":"https://example.net/","updated":true,"x":1}`)}
+	if err := e.api.SaveZone(ctx, alice, zoneName, z, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(e.srv.Zone(zoneName).URLForwards[0]); got != before {
+		t.Fatalf("unwritten fields saved: %s", got)
+	}
+	ev := e.audit.find("saveDnsZone", "allow")
+	if len(ev) != 1 || !strings.Contains(fmt.Sprint(ev[0].Extra["ignored_out_of_scope"]), "forward go") {
+		t.Fatalf("ignored change not audited: %+v", ev)
 	}
 }

@@ -126,7 +126,7 @@ Main packages of the gate:
 |---|---|
 | `internal/identity` | `Subject` (issuer, id, claims, roles, teams). |
 | `internal/authn` | Authentication: OIDC issuers (JWKS), gate-issued tokens and the token exchange, API keys (format in `internal/apikey`), virtual keys. |
-| `internal/dns` | Provider-neutral model: `Zone`, `RRset` (values or alias, read-only reason), `Change`, `ContentHash`. |
+| `internal/dns` | Provider-neutral model: `Zone`, `RRset` (values, alias or URL forward, read-only reason), `Change`, `ContentHash`. |
 | `internal/provider` | Provider contract (`Provider`, `Checker`, `Snapshotter`, `Resolver`, capabilities, errors); `provider/eurodns` and `provider/route53` adapters. |
 | `internal/eurodnsapi` | EuroDNS-compatible API facade (full-zone PUT, record ids, forwards, passthrough) over the neutral engine, for EuroDNS zones only. |
 | `internal/policy` | RBAC engine implementing `Authorizer`. |
@@ -156,7 +156,9 @@ converts its records to RRsets and back:
 whole zone), `AtomicBatch` (a failed write known not applied rolls the claims back;
 otherwise the claims are settled against a fresh read at once), `ConditionalWrite`
 (the provider fails with `ErrConflict` when an RRset changed since the read, mapped to
-`412 precondition`), `Alias` (alias RRsets are refused elsewhere), types and TTLs.
+`412 precondition`), `Alias` (alias RRsets are refused elsewhere), `Forwards` (URL
+forwards are refused elsewhere), types and TTLs. A provider whose forwards answer
+HTTPS only with a separate subscription implements `HTTPSRedirecter` (EuroDNS).
 
 A zone is served by exactly one provider: the only one whose `zones` include/exclude
 globs select it, or, when several do, the only one of them whose account lists it
@@ -179,6 +181,17 @@ meaning. Writes are a full-zone save of the current zone with the changes applie
 (`zonediff.Apply`), forwards and unknown fields kept byte for byte. Desired targets of
 several labels without an ending dot are written absolute, like Route53 and the
 dnsgate Terraform provider read them; a single label is refused as ambiguous.
+Each entry of `urlForwards` is the RRset `{host, URLFWD}` (see 6.1.1): a write
+replaces only the entries of the forwards it changes, keeping their `id` and
+unknown fields (as raw JSON, numbers untouched), every other entry byte for byte; a
+host with several entries, or an entry of unknown `forwardType`, is read-only
+(`duplicate_forward`, `unsupported_forward`), and so are `URL`/`MAIL` pseudo records
+if EuroDNS lists any (`forward_record`). The EuroDNS spec lists `URL` and `MAIL` as
+pseudo record types of forwards; whether `GET` returns them is **not verified
+against the live API**: a write deleting a forward leaves out the `URL` pseudo
+records of its host, so that the save neither resurrects nor refuses it. Forward errors of the `check` report are mapped to the
+forward key. Mail forwards are not modelled: kept as read, changed only by a
+full-zone PUT with `dns.zone.admin`.
 
 **Route53 adapter.** One AWS client per account (default credential chain,
 optionally an assumed role); see [providers/route53.md](providers/route53.md).
@@ -241,7 +254,7 @@ Guide: [API.md](API.md).
 |---|---|---|
 | `getDnsZone` | `dns.read` | engine (adds ETag) |
 | `checkDnsZone` | `dns.read` | engine |
-| `saveDnsZone` | `dns.record.write` | engine (delta) |
+| `saveDnsZone` | `dns.record.write` (`dns.forward.write` for URL forwards, `dns.zone.admin` for mail forwards and zone settings) | engine (delta) |
 | `addDnsRecords` | `dns.record.write` | engine |
 | `deleteDnsRecord` | `dns.record.write` | engine |
 | `listDnsZoneSnapshots`, `getSnapShot`, `getDnssecStatus` | `dns.read` | passthrough |
@@ -321,6 +334,41 @@ An ownership entry (`store.Ownership`):
 | `Adopted` | true when the RRset pre-existed and was adopted |
 | `ExpiresAt` | ephemeral RRsets (ACME challenges), garbage-collected after this time |
 | `Version` | optimistic concurrency on the entry |
+
+### 6.1.1 URL forwards
+
+A URL forward (HTTP redirect) is owned like an RRset: it is modelled as the RRset of
+the pseudo type `URLFWD` (never a DNS type) of its host, with `TTL` 0, no values and
+a `dns.Forward` (`type` 301, 302 or frame, `url`, and `title`, `keywords`,
+`description` for frames). Ownership entries, tombstones, transfers, adoption,
+reconcile (drift taints it), plans, audit (`old_forward`/`new_forward`), the UI and
+MCP all reuse the RRset machinery with that key. Its content hash is
+`dns.ContentHash` of TTL 0 and the single value
+`forward <type> <n>:<url> <n>:<title> <n>:<keywords> <n>:<description>` (each field
+prefixed by its length in bytes, so no field can bleed into another); hashes of
+other RRsets are unchanged. Writing requires `dns.forward.write`, scoped by
+`records.hosts` (`policy.WriteAction`); providers without forwards (Route53) report
+`Capabilities.Forwards` false and the engine refuses forward changes. A forward
+shadows the `A`, `AAAA`, `CNAME` and `APEX` records of its host
+(`policy.ForwardShadowTypes`): the engine creates one only where those records are
+absent or owned by the caller's teams, and the reverse; a protected entry listing
+one of those types protects the forward. Through the full-zone PUT,
+`dns.zone.admin` only changes or deletes unowned forwards (audited as
+`zone_admin_forwards`), never creates one. Frame fields are plain text with length
+limits and URLs must be canonical http(s) URLs: EuroDNS serves frame forwards as a
+page on the customer host.
+
+HTTPS: a EuroDNS forward entry has no HTTPS setting; the forward host answers HTTPS
+only with an *HTTPS redirect* subscription on the domain (a paid product: a
+certificate for the forward hosts, state ACTIVE, PENDING or NO_FORWARD). The
+adapter reads it (`GET /subscriptions?subscription-types=HTTPS_REDIRECT&domain-name=`
+then `GET /https-redirect-subscriptions/{id}`, cached 10 minutes per zone, a failure
+30 seconds; one lookup per zone at a time, with its own timeout, before the zone
+lock) and the API reports it, an expired subscription as inactive;
+`require_https` on a forward write is refused (`https_unavailable`) unless it is
+active or no_forward. The gate never
+orders, renews nor deletes subscriptions (orders are paid, and the passthrough
+keeps denying the subscription operations).
 
 ### 6.2 Rules
 

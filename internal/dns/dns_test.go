@@ -39,3 +39,22 @@ func TestNormalizeHost(t *testing.T) {
 		}
 	}
 }
+
+func TestForwardContentHash(t *testing.T) {
+	f := RRset{Key: ForwardKey("go"), Forward: &Forward{Mode: ForwardPermanent, URL: "https://example.net/"}}
+	if got := ContentHash(f); got != "a5df29b0fe2e36e66de490cd3dd44e3997fa76fa19194790e245bbd9eac2a796" {
+		t.Fatalf("forward hash changed: %s", got)
+	}
+	g := f
+	g.Forward = &Forward{Mode: ForwardPermanent, URL: "https://example.net/", Title: "t"}
+	if ContentHash(g) == ContentHash(f) {
+		t.Fatal("title ignored")
+	}
+	g.Forward = &Forward{Mode: ForwardPermanent, URL: "https://example.net/ 0:"}
+	if ContentHash(g) == ContentHash(f) {
+		t.Fatal("field boundaries ambiguous")
+	}
+	if !ForwardKey("x").IsForward() || (Key{Host: "x", Type: "urlfwd"}).IsForward() != true || (Key{Host: "x", Type: "URL"}).IsForward() {
+		t.Fatal("IsForward")
+	}
+}

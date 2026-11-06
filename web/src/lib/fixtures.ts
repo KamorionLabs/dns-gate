@@ -13,6 +13,9 @@ import type {
   Connect,
   EffectivePolicy,
   ExplainRequest,
+  Forward,
+  ForwardList,
+  HTTPSRedirect,
   ExplainResponse,
   GeneratedKey,
   ImpactItem,
@@ -44,6 +47,7 @@ import { ApiError } from './api';
 import { toYAML } from './yaml';
 import { claimMatch, hostMatch, zoneMatch } from './glob';
 import { rbacAllows } from './rights';
+import { URLFWD, isForward, urlError } from './forwards';
 
 const now = Date.now();
 const ago = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
@@ -81,7 +85,7 @@ const me: Me = asReader
       subject: 'entra:alice@example.com',
       name: 'alice@example.com',
       category: 'human',
-      roles: ['viewer', 'policy-admin', 'app-cname-writer', 'edge-writer', 'adopter'],
+      roles: ['viewer', 'policy-admin', 'app-cname-writer', 'edge-writer', 'adopter', 'redirect-writer'],
       teams: ['web', 'platform'],
       default_team: 'web',
       groups: ['policy-admins', 'web-humans'],
@@ -95,6 +99,7 @@ const me: Me = asReader
         },
         { role: 'edge-writer', zones: ['edge.example.org'], actions: ['dns.read', 'dns.record.write'], hosts: [], types: ['A', 'AAAA', 'CNAME', 'TXT', 'MX', 'SRV', 'CAA'] },
         { role: 'adopter', zones: ['example.com', 'acme.example', 'cloud.example'], actions: ['dns.record.adopt'], hosts: [], types: [] },
+        { role: 'redirect-writer', zones: ['example.com', 'brand.example'], actions: ['dns.forward.write'], hosts: [], types: [] },
         { role: 'policy-admin', zones: ['*'], actions: ['policy.read', 'policy.propose', 'policy.approve'], hosts: [], types: [] },
         { role: 'viewer', zones: ['*'], actions: ['dns.read', 'ui.read', 'policy.read'], hosts: [], types: [] },
       ],
@@ -122,6 +127,16 @@ const connect: Connect = {
 const foreign = (host: string, type: string, ttl: number, values: string[], prot = false): RRset => ({
   host, type, ttl, values, status: 'foreign', protected: prot, adopted: false,
 });
+
+/** A URL forward: not managed unless the overrides say otherwise. */
+const fwd = (host: string, forward: Forward, o: Partial<RRset> = {}): RRset => ({ ...foreign(host, URLFWD, 0, []), forward, ...o });
+
+/** Whether the forwards of each zone answer HTTPS (GET /forwards); the zones not listed have no subscription. */
+const httpsOf: Record<string, HTTPSRedirect> = {
+  'example.com': { status: 'inactive' },
+  'acme.example': { status: 'active', subscription: '771204', expires_at: ahead(200 * D) },
+  'brand.example': { status: 'pending', subscription: '771388' },
+};
 
 const inventories: ZoneInventory[] = [
   {
@@ -185,6 +200,21 @@ const inventories: ZoneInventory[] = [
       foreign('vpn', 'A', 3600, ['198.51.100.21', '198.51.100.22']),
       foreign('crm', 'CNAME', 1800, ['acme.crm.example.net.']),
       foreign('crm', 'TXT', 3600, ['"crm-domain-verification=6c1f0b"']),
+      { ...foreign('@', 'URL', 0, ['https://www.example.com/']), read_only: 'forward_record' },
+      fwd('@', { type: '301', url: 'https://www.example.com/' }, {
+        status: 'managed', owner: 'web', created_by: ghWeb, created_at: ago(20 * D), updated_by: alice, updated_at: ago(3 * D), last_request_id: 'req_01JBF0FWD1',
+      }),
+      fwd('go', { type: '302', url: 'https://www.example.com/autumn-sale?utm_source=go' }, {
+        status: 'managed', owner: 'platform', created_by: alice, created_at: ago(5 * H), last_request_id: 'req_01JBXF0WD2',
+      }),
+      fwd('careers', { type: '301', url: 'https://careers.example.org/acme' }, {
+        status: 'managed', owner: 'corporate', created_by: ciCorp, created_at: ago(11 * D), last_request_id: 'req_01JB4F0WD3',
+      }),
+      fwd('old-shop', { type: '301', url: 'http://shop-old.hosting.example.org/' }, {
+        status: 'tainted', owner: 'web', created_by: bob, created_at: ago(60 * D), updated_by: bob, updated_at: ago(9 * D), last_request_id: 'req_01J8F0WD4',
+      }),
+      fwd('boutique', { type: 'frame', url: 'https://shop.example.net/fr/', title: 'Example boutique', keywords: 'gifts, shop', description: 'Gifts delivered in 48 hours' }),
+      fwd('deals', { type: 'http307', url: 'https://www.example.com/deals' }, { read_only: 'unsupported_forward' }),
     ],
   },
   {
@@ -511,6 +541,19 @@ const audit: AuditEntry[] = [
     }],
   },
   {
+    time: ago(5 * H), request_id: 'req_01JBXF0WD2', actor: alice, teams: ['web', 'platform'], action: 'applyRRsets', zone: 'example.com',
+    decision: 'allow', snapshot_id: '884199',
+    changes: [{ op: 'create', host: 'go', type: 'URLFWD', new_forward: { type: '302', url: 'https://www.example.com/autumn-sale?utm_source=go' } }],
+  },
+  {
+    time: ago(3 * D), request_id: 'req_01JBF0FWD1', actor: alice, teams: ['web', 'platform'], action: 'api.forward.put', zone: 'example.com',
+    decision: 'allow', snapshot_id: '883907',
+    changes: [{
+      op: 'update', host: '@', type: 'URLFWD',
+      old_forward: { type: 'frame', url: 'https://www.example.com/', title: 'Example' }, new_forward: { type: '301', url: 'https://www.example.com/' },
+    }],
+  },
+  {
     time: ago(1), request_id: 'req_01JBXA0003', actor: ciCorp, teams: ['corporate', 'platform'], action: 'addDnsRecords',
     zone: 'example.com', decision: 'allow',
     changes: [{ op: 'create', host: 'status', type: 'CNAME', new_ttl: 600, new_values: ['status.statuspage.example.net.'] }],
@@ -725,7 +768,7 @@ const base: EffectivePolicy['base'] = {
   ],
   bounds: {
     zones: ['example.com', 'acme.example', 'brand.example', 'cloud.example', 'mail.example', 'internal.example', 'shop.example', '*.example', '*.example.net', '*.example.org'],
-    actions: ['dns.read', 'ui.read', 'dns.record.write', 'dns.record.adopt'],
+    actions: ['dns.read', 'ui.read', 'dns.record.write', 'dns.forward.write', 'dns.record.adopt'],
   },
   delegations: [
     {
@@ -822,6 +865,10 @@ const activeDoc: PolicyDocument = {
       description: 'Web team records of the edge zone (Route53)',
       rules: [{ zones: ['edge.example.org'], actions: ['dns.read', 'dns.record.write'], records: { types: ['A', 'AAAA', 'CNAME', 'TXT', 'MX', 'SRV', 'CAA'] } }],
     },
+    'redirect-writer': {
+      description: 'URL forwards of the marketing names',
+      rules: [{ zones: ['example.com', 'brand.example'], actions: ['dns.read', 'dns.forward.write'] }],
+    },
     'shop-pipeline': {
       description: 'Shop deployment pipelines, each one in its own team',
       rules: [{ zones: ['shop.example'], actions: ['dns.read', 'dns.record.write'], records: { types: ['A', 'AAAA', 'CNAME', 'TXT'] } }],
@@ -834,6 +881,7 @@ const activeDoc: PolicyDocument = {
     { role: 'adopter', team: 'web', subjects: [{ issuer: ENTRA, claims: { preferred_username: ['bob@example.com', 'alice@example.com'] } }] },
     { role: 'platform-writer', team: 'platform', groups: ['platform-pipelines'] },
     { role: 'edge-writer', team: 'web', groups: ['web-humans'] },
+    { role: 'redirect-writer', team: 'web', groups: ['web-humans'] },
     {
       role: 'shop-pipeline',
       team: '',
@@ -1099,7 +1147,7 @@ function ruleCovers(role: Role, action: string, zone: string, host?: string, typ
       r.actions.includes(action) &&
       r.zones.some((z) => zoneMatch(z, zone)) &&
       (!host || !r.records?.hosts?.length || r.records.hosts.some((h) => hostMatch(h, host))) &&
-      (!type || !r.records?.types?.length || r.records.types.includes(type)),
+      (!type || action === 'dns.forward.write' || !r.records?.types?.length || r.records.types.includes(type)),
   );
 }
 
@@ -1195,9 +1243,10 @@ const isProtected = (zone: string, r: RRset) =>
   r.protected || base.protected.some((p) => p.zones.some((z) => zoneMatch(z, zone)) && p.hosts.some((h) => hostMatch(h, r.host)) && p.types.includes(r.type));
 
 function candidate(zone: string, r: RRset, owner: string): AdoptCandidate {
-  const c: AdoptCandidate = { host: r.host, type: r.type, ttl: r.ttl, values: [...r.values], status: r.status, adoptable: false };
+  const c: AdoptCandidate = { host: r.host, type: r.type, ttl: r.ttl, values: [...r.values], forward: r.forward, status: r.status, adoptable: false };
   if (r.status !== 'foreign') c.reason = r.owner === owner ? 'already_owned' : 'owned_by_other_team';
   else if (r.type === 'SOA') c.reason = 'server_managed';
+  else if (r.read_only) c.reason = r.read_only;
   else if (isProtected(zone, r)) c.reason = 'protected';
   else if (r.type === 'CNAME' && r.values.some((v) => !v.endsWith('.'))) c.reason = 'relative_target';
   else c.adoptable = true;
@@ -1240,7 +1289,7 @@ function adoptApply(zone: string, req: AdoptApply): AdoptResult {
   for (const r of rrs) Object.assign(r, { status: 'managed', owner, adopted: true, created_by: actor, created_at: now, last_request_id: requestId });
   audit.unshift({
     time: now, request_id: requestId, actor, teams: [owner], action: 'adopt', zone, decision: 'allow',
-    changes: rrs.map((r) => ({ op: 'adopt' as const, host: r.host, type: r.type, new_ttl: r.ttl, new_values: [...r.values] })),
+    changes: rrs.map((r) => ({ op: 'adopt' as const, host: r.host, type: r.type, new_ttl: r.ttl, new_values: r.forward ? undefined : [...r.values], new_forward: r.forward })),
   });
   zoneVersion[zone] = v + 1;
   return { zone, owner, adopted: rrs.map((r) => ({ host: r.host, type: r.type })), request_id: requestId };
@@ -1266,6 +1315,27 @@ function terraform(zone: string, q: TerraformQuery): string {
   ];
   for (const r of rrs) {
     const n = tfName(r);
+    if (r.forward) {
+      const f = r.forward;
+      lines.push(
+        'import {',
+        `  to = dnsgate_url_forward.${n}`,
+        `  id = "${zone}/${r.host}"`,
+        '}',
+        '',
+        `resource "dnsgate_url_forward" "${n}" {`,
+        `  zone = "${zone}"`,
+        `  name = "${r.host}"`,
+        `  type = "${f.type}"`,
+        `  url  = ${JSON.stringify(f.url)}`,
+        ...(f.title ? [`  title = ${JSON.stringify(f.title)}`] : []),
+        ...(f.keywords ? [`  keywords = ${JSON.stringify(f.keywords)}`] : []),
+        ...(f.description ? [`  description = ${JSON.stringify(f.description)}`] : []),
+        '}',
+        '',
+      );
+      continue;
+    }
     lines.push(
       'import {',
       `  to = dnsgate_record_set.${n}`,
@@ -1289,8 +1359,13 @@ function terraform(zone: string, q: TerraformQuery): string {
 // ---------------------------------------------------------------- DNS writes
 
 // Content hash of a record set (stands in for dns.ContentHash).
-function contentHash(r: Pick<RRset, 'ttl' | 'values' | 'alias'>): string {
-  const vals = r.alias ? [`alias ${r.alias.hosted_zone_id} ${r.alias.target}`] : [...r.values].sort();
+function contentHash(r: Pick<RRset, 'ttl' | 'values' | 'alias' | 'forward'>): string {
+  const f = r.forward;
+  const vals = f
+    ? [`forward ${f.type} ${f.url} ${f.title ?? ''} ${f.keywords ?? ''} ${f.description ?? ''}`]
+    : r.alias
+      ? [`alias ${r.alias.hosted_zone_id} ${r.alias.target}`]
+      : [...r.values].sort();
   let h = 0x811c9dc5;
   for (const ch of `ttl=${r.ttl}\n${vals.join('\n')}`) h = Math.imul(h ^ ch.charCodeAt(0), 0x01000193) >>> 0;
   return h.toString(16).padStart(8, '0');
@@ -1315,6 +1390,31 @@ interface StoredPlan {
 const plans = new Map<string, StoredPlan>();
 // ?writeconflict=1 makes the first apply fail as if the zone changed meanwhile.
 let writeConflict = new URLSearchParams(window.location.search).get('writeconflict') === '1';
+
+/** Whether the forwards of a zone answer HTTPS, as GET /forwards tells it. */
+function httpsStatus(zone: string): HTTPSRedirect | undefined {
+  const inv = findInv(zone);
+  if (!inv || !managedZones().has(zone)) return undefined;
+  if ((inv.provider ?? 'eurodns') === 'route53') return { status: 'unsupported' };
+  const h = httpsOf[zone];
+  if (h?.status === 'no_forward' || (h?.status === 'active' && !inv.rrsets.some(isForward))) return { ...h, status: 'no_forward' };
+  return h ?? { status: 'inactive' };
+}
+
+function forwardRefusal(zone: string, c: RRsetChange): { reason: string; message: string } | null {
+  if (!isForward(c) || c.delete) return null;
+  if (httpsStatus(zone)?.status === 'unsupported') return { reason: 'invalid', message: 'the DNS provider of this zone has no URL forwards' };
+  const f = c.forward;
+  if (!f) return { reason: 'invalid_forward', message: 'a forward is required' };
+  if (!['301', '302', 'frame'].includes(f.type)) return { reason: 'invalid_forward', message: `type "${f.type}" is not one of 301, 302, frame` };
+  if (urlError(f.url)) return { reason: 'invalid_forward', message: `url "${f.url}" must be an absolute http:// or https:// URL` };
+  if (f.type !== 'frame' && (f.title || f.keywords || f.description)) return { reason: 'invalid_forward', message: 'title, keywords and description only apply to frame forwards' };
+  const st = httpsStatus(zone)?.status;
+  if (c.require_https && st !== 'active' && st !== 'pending' && st !== 'no_forward') {
+    return { reason: 'https_unavailable', message: `the forwards of ${zone} answer plain HTTP only (no HTTPS redirect subscription)` };
+  }
+  return null;
+}
 
 function refusal(c: RRsetChange, cur: RRset | undefined): { reason: string; message: string } | null {
   const fail = (reason: string, message: string) => ({ reason, message });
@@ -1344,17 +1444,20 @@ function planChanges(zone: string, input: RRsetChange[], team?: string): PlanRes
     const op = c.delete ? 'delete' : cur ? 'update' : 'create';
     const tomb = !cur ? (inv.tombstones ?? []).find((t) => t.host === c.host && t.type === c.type) : undefined;
     const why =
+      forwardRefusal(zone, c) ??
       refusal(c, cur) ??
       (cur?.owner && team && cur.owner !== team ? { reason: 'not_owner', message: `${c.host} ${c.type} is owned by team ${cur.owner}, not ${team}` } : null) ??
       (tomb && !(team ? [team] : me.teams).includes(tomb.team) ? { reason: 'not_owner', message: `${c.host} ${c.type} was deleted recently and is reserved for team ${tomb.team}` } : null) ??
-      (rbacAllows(me, zone, c.host, c.type) ? null : { reason: 'forbidden', message: `dns.record.write not granted on ${c.host} ${c.type}` });
+      (rbacAllows(me, zone, c.host, c.type)
+        ? null
+        : { reason: 'forbidden', message: `${isForward(c) ? 'dns.forward.write' : 'dns.record.write'} not granted on ${c.host} ${c.type}` });
     first ??= why;
     out.push({
       op,
       host: c.host,
       type: c.type,
-      old: cur ? { ttl: cur.ttl, values: [...cur.values], alias: cur.alias } : null,
-      new: c.delete ? null : { ttl: c.ttl ?? cur?.ttl ?? 3600, values: c.values ?? [], alias: c.alias },
+      old: cur ? { ttl: cur.ttl, values: [...cur.values], alias: cur.alias, forward: cur.forward } : null,
+      new: c.delete ? null : c.forward ? { ttl: 0, values: [], forward: c.forward } : { ttl: c.ttl ?? cur?.ttl ?? 3600, values: c.values ?? [], alias: c.alias },
       ...(why ?? {}),
     });
   }
@@ -1401,11 +1504,11 @@ function applyPlan(zone: string, planId: string, team?: string): PlanResult {
         inv.rrsets.splice(i, 1);
       }
     } else if (i >= 0) {
-      Object.assign(inv.rrsets[i]!, { ttl: c.ttl, values: c.values ?? [], updated_by: actor, updated_at: now, last_request_id: requestId, status: 'managed' });
+      Object.assign(inv.rrsets[i]!, { ttl: c.forward ? 0 : c.ttl, values: c.values ?? [], forward: c.forward, updated_by: actor, updated_at: now, last_request_id: requestId, status: 'managed' });
     } else {
       inv.tombstones = (inv.tombstones ?? []).filter((t) => t.host !== c.host || t.type !== c.type);
       inv.rrsets.push({
-        host: c.host, type: c.type, ttl: c.ttl ?? 3600, values: c.values ?? [], status: 'managed', protected: false, owner,
+        host: c.host, type: c.type, ttl: c.forward ? 0 : (c.ttl ?? 3600), values: c.values ?? [], forward: c.forward, status: 'managed', protected: false, owner,
         created_by: actor, created_at: now, adopted: false, last_request_id: requestId,
       });
     }
@@ -1417,7 +1520,8 @@ function applyPlan(zone: string, planId: string, team?: string): PlanResult {
     time: now, request_id: requestId, actor, teams: me.teams, action: 'applyRRsets', zone, decision: 'allow',
     changes: p.result.changes.map((c) => ({
       op: c.op, host: c.host, type: c.type,
-      old_ttl: c.old?.ttl, old_values: c.old?.values, new_ttl: c.new?.ttl, new_values: c.new?.values,
+      old_ttl: c.old?.ttl, old_values: c.old?.forward ? undefined : c.old?.values, old_forward: c.old?.forward ?? undefined,
+      new_ttl: c.new?.ttl, new_values: c.new?.forward ? undefined : c.new?.values, new_forward: c.new?.forward ?? undefined,
     })),
   });
   return { ...p.result, request_id: requestId };
@@ -1675,6 +1779,12 @@ export const fixtureBackend = {
     if (!inv.last_synced_at) inv.last_synced_at = new Date().toISOString();
     readZones.add(zone);
     return delay({ ...inv, unmanaged: true });
+  },
+  forwards: (zone: string): Promise<ForwardList> => {
+    const inv = findInv(zone);
+    if (!inv) return Promise.reject(new ApiError(404, 'not_found', `zone ${zone} is not managed`));
+    decorate(inv);
+    return delay({ zone, https: httpsStatus(zone), forwards: inv.rrsets.filter(isForward) });
   },
   audit: (q: AuditQuery): Promise<AuditPage> => {
     const all = audit.filter((e) => matches(e, q) && (!calm || e.decision === 'allow'));

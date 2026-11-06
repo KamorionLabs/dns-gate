@@ -600,7 +600,7 @@ func (s *Snapshot) Decide(roles []string, action, zone string, key *dns.Key) Dec
 			if !s.ruleEffective(cr, r, action) {
 				continue
 			}
-			if key != nil && !meta && r.Records != nil && !scopeMatches(*r.Records, *key) {
+			if key != nil && !meta && r.Records != nil && !scopeMatches(*r.Records, *key, action) {
 				continue
 			}
 			return Decision{Allowed: true, Matched: fmt.Sprintf("roles.%s.rules[%d]", name, i), Layer: cr.layer, Folder: via}
@@ -685,20 +685,60 @@ func ZoneCovered(bounds []string, pattern string) bool {
 
 func (s *Snapshot) protectedBy(zone string, key dns.Key) (config.Protected, bool) {
 	for _, p := range s.protected {
-		if glob.Any(p.Zones, zone) && hostMatches(p.Hosts, key.Host) && typeMatches(p.Types, key.Type) {
+		if glob.Any(p.Zones, zone) && hostMatches(p.Hosts, key.Host) && protectedType(p.Types, key.Type) {
 			return p, true
 		}
 	}
 	return config.Protected{}, false
 }
 
+// ForwardShadowTypes are the record types a URL forward replaces on its
+// host: a protected entry listing one of them also protects the forward.
+var ForwardShadowTypes = []string{"A", "AAAA", "CNAME", "APEX"}
+
+// protectedType reports whether a protected entry listing types covers an
+// RRset of type t; a URL forward is covered by the types it shadows too.
+func protectedType(types []string, t string) bool {
+	if typeMatches(types, t) {
+		return true
+	}
+	if !strings.EqualFold(t, dns.TypeURLForward) {
+		return false
+	}
+	for _, s := range ForwardShadowTypes {
+		if typeMatches(types, s) {
+			return true
+		}
+	}
+	return false
+}
+
+// ForwardWithoutHosts lists the rules granting dns.forward.write with a
+// records.types scope but no records.hosts: records.types does not apply
+// to forwards, so such a rule grants the forwards of every host.
+func (s *Snapshot) ForwardWithoutHosts(layer string) []string {
+	var out []string
+	for name, cr := range s.roles {
+		if layer != "" && cr.layer != layer {
+			continue
+		}
+		for i, r := range cr.role.Rules {
+			if contains(r.Actions, ActionForwardWrite) && r.Records != nil && len(r.Records.Types) > 0 && len(r.Records.Hosts) == 0 {
+				out = append(out, fmt.Sprintf("%s.rules[%d]", name, i))
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 func (s *Snapshot) role(name string) *compiledRole { return s.roles[name] }
 
-func scopeMatches(sc uiapi.RecordScope, key dns.Key) bool {
+func scopeMatches(sc uiapi.RecordScope, key dns.Key, action string) bool {
 	if len(sc.Hosts) > 0 && !hostMatches(sc.Hosts, key.Host) {
 		return false
 	}
-	if len(sc.Types) > 0 && !typeMatches(sc.Types, key.Type) {
+	if len(sc.Types) > 0 && action != ActionForwardWrite && !typeMatches(sc.Types, key.Type) {
 		return false
 	}
 	return true

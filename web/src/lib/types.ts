@@ -91,8 +91,20 @@ export interface Alias {
   evaluate_target_health: boolean;
 }
 
-/** Why the gate never writes an RRset: server_managed, routing_policy, locked, or another provider reason. */
-export type ReadOnlyReason = 'server_managed' | 'routing_policy' | 'locked' | (string & {});
+/** 301 or 302 redirect, or a frame showing the URL; another value for a forward the gate cannot read. */
+export type ForwardMode = '301' | '302' | 'frame' | (string & {});
+
+/** URL forward of a host (an RRset of type URLFWD, TTL 0, no values). Title, keywords and description: frame only. */
+export interface Forward {
+  type: ForwardMode;
+  url: string;
+  title?: string;
+  keywords?: string;
+  description?: string;
+}
+
+/** Why the gate never writes an RRset: server_managed, routing_policy, locked, unsupported_forward, duplicate_forward, forward_record, or another provider reason. */
+export type ReadOnlyReason = 'server_managed' | 'routing_policy' | 'locked' | 'unsupported_forward' | 'duplicate_forward' | 'forward_record' | (string & {});
 
 export interface RRset {
   host: string;
@@ -100,8 +112,10 @@ export interface RRset {
   ttl: number;
   values: string[];
   alias?: Alias;
+  /** The URL forward of the host (type URLFWD), with no values. */
+  forward?: Forward;
   read_only?: ReadOnlyReason;
-  /** Content hash (TTL and values), the precondition of a change. */
+  /** Content hash (TTL and values, alias or forward), the precondition of a change. */
   hash?: string;
   status: Status;
   protected: boolean;
@@ -128,6 +142,25 @@ export interface ZoneInventory {
   folder?: string;
 }
 
+/** active, pending and no_forward answer HTTPS; inactive answers plain HTTP only; unsupported: the provider has no forwards. */
+export type HTTPSStatus = 'active' | 'pending' | 'no_forward' | 'inactive' | 'unsupported' | 'unknown';
+
+/** Whether the forwards of a zone answer HTTPS (an HTTPS redirect subscription at the provider). */
+export interface HTTPSRedirect {
+  status: HTTPSStatus;
+  subscription?: string;
+  expires_at?: string;
+  message?: string;
+}
+
+/** GET /api/v1/zones/{zone}/forwards: the URL forwards of a zone with their ownership. */
+export interface ForwardList {
+  zone: string;
+  /** Absent when it could not be read or the zone is not managed. */
+  https?: HTTPSRedirect;
+  forwards: RRset[];
+}
+
 /** Until expires_at, only this team may create or adopt the record set again; others ask for a transfer. */
 export interface Tombstone {
   host: string;
@@ -145,9 +178,11 @@ export interface Change {
   old_ttl?: number;
   old_values?: string[];
   old_alias?: Alias;
+  old_forward?: Forward;
   new_ttl?: number;
   new_values?: string[];
   new_alias?: Alias;
+  new_forward?: Forward;
 }
 
 export interface AuditEntry {
@@ -193,6 +228,10 @@ export interface RRsetChange {
   ttl?: number;
   values?: string[];
   alias?: Alias;
+  /** A URL forward (type URLFWD): no TTL nor values. */
+  forward?: Forward;
+  /** Forwards only: refused (https_unavailable) unless the forwards of the zone answer HTTPS; not stored. */
+  require_https?: boolean;
   delete?: boolean;
   /** The RRset must still have this content hash upstream. */
   expected_hash?: string;
@@ -205,6 +244,7 @@ export interface PlanSide {
   ttl?: number;
   values?: string[];
   alias?: Alias;
+  forward?: Forward;
 }
 
 /** A change of a plan: the journal shape, or old/new objects; reason when this change alone is refused. */
@@ -214,8 +254,12 @@ export interface PlanChange {
   type: string;
   old_ttl?: number;
   old_values?: string[];
+  old_alias?: Alias;
+  old_forward?: Forward;
   new_ttl?: number;
   new_values?: string[];
+  new_alias?: Alias;
+  new_forward?: Forward;
   old?: PlanSide | null;
   new?: PlanSide | null;
   reason?: string;
@@ -544,13 +588,19 @@ export type AdoptReason =
   | 'owned_by_other_team'
   | 'already_owned'
   | 'forbidden'
-  | 'relative_target';
+  | 'relative_target'
+  | 'unsupported_forward'
+  | 'duplicate_forward'
+  | 'forward_record'
+  | 'invalid_forward';
 
 export interface AdoptCandidate {
   host: string;
   type: string;
   ttl: number;
   values: string[];
+  alias?: Alias;
+  forward?: Forward;
   status: Status;
   adoptable: boolean;
   reason?: AdoptReason | string;

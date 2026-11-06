@@ -34,7 +34,7 @@ func (s *Snapshot) IneffectiveProfileGrants(layer string) []string {
 func (s *Snapshot) ProtectedRecord(host, typ string) (config.Protected, bool) {
 	k := normKey(dns.Key{Host: host, Type: typ})
 	for _, p := range s.protected {
-		if hostMatches(p.Hosts, k.Host) && typeMatches(p.Types, k.Type) {
+		if hostMatches(p.Hosts, k.Host) && protectedType(p.Types, k.Type) {
 			return p, true
 		}
 	}

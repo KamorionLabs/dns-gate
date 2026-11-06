@@ -60,6 +60,10 @@ Also included:
 - **one binding for many pipelines**: the owner team derived from a claim
   (`team_from`), so each pipeline matched by a glob owns its own records — see
   [docs/CONFIG.md](docs/CONFIG.md#team-derived-from-a-claim);
+- **URL forwards** (EuroDNS HTTP redirects) as owned objects like RRsets: a team
+  creates, changes and deletes its own redirects with `dns.forward.write`, from the
+  API, the UI, the MCP server or the `dnsgate_url_forward` Terraform resource —
+  see [docs/API.md](docs/API.md#url-forwards);
 - an **MCP server** at `/mcp` for LLM agents, with the same authentication, RBAC and
   ownership: read tools by default, writes only if enabled and always through a plan
   then an apply bound to that plan. Claude Desktop users install it from the Connect

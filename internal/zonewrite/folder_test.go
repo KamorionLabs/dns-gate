@@ -22,7 +22,7 @@ type folderAuthz struct {
 
 func (a *folderAuthz) AllowRRsetFolder(s *identity.Subject, action, zone string, k dns.Key) (bool, string) {
 	ok := a.AllowRRset(s, action, zone, k)
-	if ok && s.ID == "alice" && action == policy.ActionRecordWrite && !a.moved {
+	if ok && (s.ID == "alice" && action == policy.ActionRecordWrite || s.ID == "fa" && action == policy.ActionForwardWrite) && !a.moved {
 		a.moved = a.moveAfter
 		return true, "/ES"
 	}
@@ -74,5 +74,17 @@ func TestTransferEventsCarryTheGrantingFolder(t *testing.T) {
 	evs := e.audit.find("gate.transfer.propose", "allow")
 	if len(evs) != 1 || evs[0].Extra["folder"] != "/ES" {
 		t.Fatalf("transfer event: %+v", evs)
+	}
+}
+
+func TestForwardWriteEventCarriesTheGrantingFolder(t *testing.T) {
+	az := &folderAuthz{}
+	e := newEnvConfig(t, eurodnstest.Options{}, nil, func(c *Config) { c.Authz = az })
+	if _, err := e.eng.ApplyRRsets(context.Background(), fwdA, zoneName, []uiapi.RRsetChange{fwd("promo", "301", "https://example.net/")}, 0); err != nil {
+		t.Fatal(err)
+	}
+	evs := e.audit.find("applyRRsets", "allow")
+	if len(evs) != 1 || evs[0].Extra["folder"] != "/ES" {
+		t.Fatalf("forward write event: %+v", evs)
 	}
 }

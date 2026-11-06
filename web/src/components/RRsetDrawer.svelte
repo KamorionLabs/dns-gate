@@ -17,7 +17,8 @@
   import Icon from './Icon.svelte';
   import { teamFromText, teamLabel } from '../lib/team';
   import HclBlock from './HclBlock.svelte';
-  import { readOnlyLabel } from '../lib/rights';
+  import { readOnlyLabel, writeAction } from '../lib/rights';
+  import { isForward, modeLabel, typeLabel } from '../lib/forwards';
   import type { StagedKind } from '../lib/staging';
 
   let {
@@ -54,6 +55,7 @@
     ontransfer?: () => void;
   } = $props();
   const roTag = $derived(readOnlyLabel(rr));
+  const isFwd = $derived(isForward(rr));
   const owned = $derived(rr.status !== 'foreign');
 
   let dialog: HTMLDialogElement;
@@ -87,7 +89,7 @@
       return;
     }
     api
-      .whoCan({ zone, host: rr.host, type: rr.type, action: 'dns.record.write' })
+      .whoCan({ zone, host: rr.host, type: rr.type, action: writeAction(rr.type) })
       .then((w) => (whoCan = w))
       .catch((e: unknown) => {
         // without policy.read the section is simply not shown
@@ -121,7 +123,7 @@
       <div class="title">
         <h2 id="rr-title"><Host host={rr.host} {zone} /></h2>
         <div class="sub">
-          <span class="type mono">{rr.type}</span>
+          <span class="type" class:mono={!isFwd}>{typeLabel(rr.type)}</span>
           <StatusBadge status={rr.status} />
           {#if rr.protected}<span class="flag" title="Protected by the base policy: no role can change it through the gate, even after adoption."><Icon name="lock" size={12} /> Protected</span>{/if}
           {#if rr.adopted}<span class="flag">Adopted</span>{/if}
@@ -163,7 +165,19 @@
         </div>
       {/if}
 
-      {#if rr.alias}
+      {#if rr.forward}
+        <section>
+          <h3 class="eyebrow">Redirect</h3>
+          <dl class="fwd">
+            <dt>Kind</dt><dd>{modeLabel(rr.forward.type)}</dd>
+            <dt>Target URL</dt><dd><CopyText text={rr.forward.url} label="target URL" /></dd>
+            {#if rr.forward.title}<dt>Title</dt><dd>{rr.forward.title}</dd>{/if}
+            {#if rr.forward.keywords}<dt>Keywords</dt><dd>{rr.forward.keywords}</dd>{/if}
+            {#if rr.forward.description}<dt>Description</dt><dd>{rr.forward.description}</dd>{/if}
+          </dl>
+          <p class="dim small">Answered by the DNS provider for <span class="mono">http://{rr.host === '@' ? zone : `${rr.host}.${zone}`}/</span>; HTTPS needs a redirect subscription on the domain.</p>
+        </section>
+      {:else if rr.alias}
         <section>
           <h3 class="eyebrow">Alias target</h3>
           <ul class="values">
@@ -188,7 +202,7 @@
       {/if}
 
       <section class="facts">
-        <div><span class="eyebrow">TTL</span><span class="mono num">{fmtTTL(rr.ttl)} <span class="dim">({rr.ttl}s)</span></span></div>
+        {#if !isFwd}<div><span class="eyebrow">TTL</span><span class="mono num">{fmtTTL(rr.ttl)} <span class="dim">({rr.ttl}s)</span></span></div>{/if}
         <div>
           <span class="eyebrow">Owner team</span>
           {#if rr.owner}<a class="team" href={teamHref(rr.owner)}>{rr.owner}</a>{#if ownership?.mine}<span class="dim small">your team</span>{/if}
@@ -234,7 +248,7 @@
 
       {#if !whoCanHidden}
         <section>
-          <h3 class="eyebrow">Who can change this record</h3>
+          <h3 class="eyebrow">Who can change this {isFwd ? 'forward' : 'record'}</h3>
           {#if !whoCan}
             <div class="skeleton line"></div>
           {:else if whoCan.protected}
@@ -469,6 +483,31 @@
   }
   .values :global(.copy) {
     color: var(--ink);
+    font-size: 13px;
+    word-break: break-all;
+    text-align: left;
+  }
+  .fwd {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: var(--s1) var(--s3);
+    margin: 0;
+    padding: var(--s2) var(--s3);
+    border-radius: var(--r-md);
+    background: var(--well);
+  }
+  .fwd dt {
+    color: var(--ink-3);
+    font-size: 12px;
+    line-height: 20px;
+  }
+  .fwd dd {
+    margin: 0;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    color: var(--ink);
+  }
+  .fwd :global(.copy) {
     font-size: 13px;
     word-break: break-all;
     text-align: left;

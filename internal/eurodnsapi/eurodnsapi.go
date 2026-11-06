@@ -325,8 +325,11 @@ func newSet(key rrset.Key, ttl int, recs []api.Record) rrset.Set {
 
 // SaveZone handles a full-zone PUT: delta computed against the current zone
 // under lock; out-of-scope differences are refused, except for subjects
-// whose role sets rebase (ACME clients), where they are ignored. Forwards
-// and zone settings changes require dns.zone.admin.
+// whose role sets rebase (ACME clients), where they are ignored. URL
+// forward changes are forward writes (dns.forward.write, ownership); a
+// dns.zone.admin holder may also change the forwards the gate does not own,
+// as before forwards were owned. Mail forwards and other zone settings
+// require dns.zone.admin.
 func (f *Facade) SaveZone(ctx context.Context, s *identity.Subject, zone string, z *api.Zone, ifMatch string) error {
 	if z == nil {
 		return fail(zonewrite.ReasonInvalid, "empty zone")
@@ -334,7 +337,7 @@ func (f *Facade) SaveZone(ctx context.Context, s *identity.Subject, zone string,
 	rebase := f.cfg.Authz.RebaseOnSave(s)
 	_, err := f.write(ctx, s, zone, ifMatch, "saveDnsZone", func(name string, cur *api.Zone) (*zonewrite.Plan, error) {
 		d := zonediff.Diff(name, cur, z)
-		plan := &zonewrite.Plan{Settings: d.ForwardsChanged || d.OtherChanged}
+		plan := &zonewrite.Plan{Settings: d.OtherChanged || !sameRawList(cur.MailForwards, z.MailForwards), ForeignForwards: true}
 		for _, c := range d.Changes {
 			if f.cfg.Authz.AllowRRset(s, policy.ActionRecordWrite, name, dns.Key{Host: c.Key.Host, Type: c.Key.Type}) {
 				plan.Changes = append(plan.Changes, toChange(c))
@@ -345,19 +348,140 @@ func (f *Facade) SaveZone(ctx context.Context, s *identity.Subject, zone string,
 			}
 			plan.Ignored = append(plan.Ignored, string(c.Op)+" "+keyString(c.Key))
 		}
+		fwd := forwardChanges(name, cur, z)
+		for _, h := range fwd.Duplicates {
+			if !rebase {
+				return nil, fail(zonewrite.ReasonInvalid, "several URL forwards for host %s: the gate does not change a host holding several forwards, send them unchanged or fix them at the provider", h)
+			}
+			plan.Ignored = append(plan.Ignored, "forwards of "+h+" (several entries)")
+		}
+		for _, h := range fwd.Unwritten {
+			plan.Ignored = append(plan.Ignored, "forward "+h+": fields the gate does not write (id, updated, unknown fields)")
+		}
+		for _, c := range fwd.Changes {
+			if f.cfg.Authz.AllowRRset(s, policy.ActionForwardWrite, name, c.Key) || f.cfg.Authz.AllowRRset(s, policy.ActionZoneAdmin, name, c.Key) {
+				plan.Changes = append(plan.Changes, c)
+				continue
+			}
+			if !rebase {
+				return nil, fail(zonewrite.ReasonForbidden, "not allowed to write %s in %s", c.Key.Host+" "+c.Key.Type, name)
+			}
+			plan.Ignored = append(plan.Ignored, string(c.Op)+" "+c.Key.Host+" "+c.Key.Type)
+		}
 		if rebase && plan.Settings {
-			plan.Ignored = append(plan.Ignored, "forwards/zone settings")
+			plan.Ignored = append(plan.Ignored, "mail forwards/zone settings")
 			plan.Settings = false
 		}
 		if plan.Settings {
 			nb := *cur
-			nb.URLForwards, nb.MailForwards = z.URLForwards, z.MailForwards
+			nb.MailForwards = z.MailForwards
 			nb.DomainConnect, nb.Extra = z.DomainConnect, z.Extra
 			plan.Base = eurodnsprov.FromNative("", name, &nb)
 		}
 		return plan, nil
 	})
 	return err
+}
+
+// forwardDelta is the URL forward part of a full-zone PUT.
+type forwardDelta struct {
+	// Changes are the neutral changes of the forward RRsets.
+	Changes []dns.Change
+	// Unwritten lists the hosts whose entries differ only in fields the
+	// gate does not write (id, updated, unknown fields, formatting).
+	Unwritten []string
+	// Duplicates lists the hosts the client changes while they hold, or
+	// would hold, several forwards.
+	Duplicates []string
+}
+
+// forwardChanges compares the URL forwards of cur and desired host by host.
+// A host whose entries are the same (canonical JSON, order kept) is no
+// change, duplicates included; otherwise its forward RRsets are compared
+// by content hash.
+func forwardChanges(zone string, cur, desired *api.Zone) forwardDelta {
+	group := func(raws []json.RawMessage) map[string][]string {
+		out := map[string][]string{}
+		for _, raw := range raws {
+			var e struct {
+				Host *string `json:"host"`
+			}
+			_ = json.Unmarshal(raw, &e)
+			host := "@"
+			if e.Host != nil {
+				host = dns.NormalizeHost(*e.Host, zone)
+			}
+			out[host] = append(out[host], canonical(raw))
+		}
+		return out
+	}
+	forwards := func(z *api.Zone) map[dns.Key]dns.RRset {
+		out := map[dns.Key]dns.RRset{}
+		for _, s := range eurodnsprov.FromNative("", zone, &api.Zone{URLForwards: z.URLForwards}).RRsets {
+			if s.Key.IsForward() {
+				out[s.Key] = s
+			}
+		}
+		return out
+	}
+	oldRaw, newRaw := group(cur.URLForwards), group(desired.URLForwards)
+	old, next := forwards(cur), forwards(desired)
+	hosts := make([]string, 0, len(oldRaw)+len(newRaw))
+	for h := range oldRaw {
+		hosts = append(hosts, h)
+	}
+	for h := range newRaw {
+		if _, ok := oldRaw[h]; !ok {
+			hosts = append(hosts, h)
+		}
+	}
+	sort.Strings(hosts)
+	var d forwardDelta
+	for _, h := range hosts {
+		if slices.Equal(oldRaw[h], newRaw[h]) {
+			continue
+		}
+		if len(oldRaw[h]) > 1 || len(newRaw[h]) > 1 {
+			d.Duplicates = append(d.Duplicates, h)
+			continue
+		}
+		k := dns.ForwardKey(h)
+		o, hasOld := old[k]
+		n, hasNew := next[k]
+		switch {
+		case hasOld && hasNew && dns.ContentHash(o) == dns.ContentHash(n):
+			d.Unwritten = append(d.Unwritten, h)
+		case hasOld && hasNew:
+			d.Changes = append(d.Changes, dns.Change{Op: dns.OpUpdate, Key: k, Old: &o, New: &n})
+		case hasOld:
+			d.Changes = append(d.Changes, dns.Change{Op: dns.OpDelete, Key: k, Old: &o})
+		default:
+			d.Changes = append(d.Changes, dns.Change{Op: dns.OpCreate, Key: k, New: &n})
+		}
+	}
+	return d
+}
+
+func canonical(raw json.RawMessage) string {
+	var v any
+	if json.Unmarshal(raw, &v) != nil {
+		return string(raw)
+	}
+	out, _ := json.Marshal(v)
+	return string(out)
+}
+
+// sameRawList compares two lists of JSON values, ignoring formatting.
+func sameRawList(a, b []json.RawMessage) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if canonical(a[i]) != canonical(b[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // AddRecords adds records to their RRsets (POST dns-records).

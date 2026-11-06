@@ -370,9 +370,9 @@ A map of named roles. Deny by default: an action is allowed only if a rule of on
 |---|---|
 | `rules[].zones` | Zone globs (`*` matches any sequence, `*` alone any managed zone, and for `dns.read` and `ui.read` any [discovered](#zone-discovery) zone). |
 | `rules[].folders` | [EuroDNS folder](#eurodns-folders) globs: the rule also applies to the zones whose folder matches one (`/ES`, `/ES/**`, `/` for the domains in no folder), with the folder known at decision time. A rule needs `zones`, `folders` or both. |
-| `rules[].actions` | `dns.read`, `dns.record.write`, `dns.record.adopt`, `dns.zone.admin`, `dns.zone.profile` ([zone profiles](#zone-profiles), on `*` only), `dns.ownership.approve`, `domain.read`, `ui.read`, `gate.apikey.manage` (manage the [API keys](API.md#api-keys) of the subject's teams whose role zones it covers). |
+| `rules[].actions` | `dns.read`, `dns.record.write`, `dns.forward.write` ([URL forwards](#url-forwards)), `dns.record.adopt`, `dns.zone.admin`, `dns.zone.profile` ([zone profiles](#zone-profiles), on `*` only), `dns.ownership.approve`, `domain.read`, `ui.read`, `gate.apikey.manage` (manage the [API keys](API.md#api-keys) of the subject's teams whose role zones it covers). |
 | `rules[].records.hosts` | Host patterns relative to the zone, `@` is the apex. `*` matches one label, `**` one or more labels (a bare `**` matches every host, apex included). |
-| `rules[].records.types` | Record types, `*` for any. Omit `records` to cover the whole zone. |
+| `rules[].records.types` | Record types, `*` for any. Omit `records` to cover the whole zone. URL forwards have the type `URLFWD`; `records.types` does not apply to `dns.forward.write`. |
 | `rebase_on_save` | On a full-zone PUT, ignore differences outside the role's scope instead of refusing them (stale zones sent by ACME clients). Granted if any role of the subject enables it. |
 | `ephemeral_ttl` | RRsets created by the role expire and are garbage-collected after this duration (ACME challenges); a write adding a value pushes the expiry back, never beyond the creation plus `limits.ephemeral_lifetime_factor` TTLs. Applies only if every write role of the subject is ephemeral. Required by the [ACME endpoints](ACME.md). |
 | `max_changes_per_request` | `0` = global default, `-1` = unlimited, otherwise a limit. The most permissive role of the subject wins. |
@@ -387,6 +387,21 @@ roles:
 ```
 
 `dns.record.write` and `dns.record.adopt` are further limited by ownership: the gate only modifies or deletes RRsets it created or adopted, owned by one of the subject's teams. `dns.ownership.approve` lets a subject adopt RRsets for a team it is not a member of and approve the [ownership transfers](#ownership) of the zone: give it to the people who arbitrate between teams.
+
+### URL forwards
+
+`dns.forward.write` creates, changes and deletes the [URL forwards](API.md#url-forwards) (HTTP redirects) of the zones whose provider has them (EuroDNS), under the same ownership rules (tombstones, transfers, audit). It is scoped by `records.hosts` only, and is separate from `dns.record.write`: a role writing records does not write forwards. Forwards are adopted with `dns.record.adopt` on the host and type `URLFWD` (`types` empty, `*` or listing `URLFWD`). Through the EuroDNS-compatible full-zone PUT, forward changes are forward writes as well. A `dns.zone.admin` holder may also change or delete the forwards the gate does not own, which stay unowned (the event lists them under `zone_admin_forwards`), as before forwards were owned; creating a forward, or changing one owned by a team, always requires `dns.forward.write`. Mail forwards, DomainConnect and the other zone settings changed by a full-zone PUT still require `dns.zone.admin`. A host holding several forwards is read-only: sent back unchanged it is no change, changed it is refused (ignored for `rebase_on_save` roles). Changes of fields the gate does not write (`id`, `updated`, unknown fields) are ignored and listed under `ignored_out_of_scope` in the audit.
+
+A forward replaces the `A`, `AAAA`, `CNAME` and `APEX` records of its host: a forward is created only where those records are absent or owned by one of the caller's teams, and such a record only where the forward of the host is absent or owned by one of the caller's teams (`409 foreign_rrset` or `403 not_owner` otherwise). An RRset owned by another team but missing at the provider, or reserved for another team by a tombstone, counts as present: a deleted record cannot be taken over through a forward on its host, nor the reverse. A [protected entry](#protected-records) listing one of those types protects the forward of its hosts too. Since `records.types` does not apply to `dns.forward.write`, a rule granting it with `records.types` and no `records.hosts` grants the forwards of every host: the gate warns at load and in the impact analysis of managed revisions.
+
+```yaml
+roles:
+  marketing-redirects:
+    rules:
+      - zones: [example.com]
+        actions: [dns.read, dns.forward.write, ui.read]
+        records: {hosts: [go, "*.go", promo]}
+```
 
 ### Zone profiles
 

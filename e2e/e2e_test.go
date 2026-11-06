@@ -81,7 +81,8 @@ func TestEndToEnd(t *testing.T) {
 	t.Run("14_dnsgate_provider", e.scenarioDNSGateProvider)
 	t.Run("15_zone_profiles", e.scenarioZoneProfiles)
 	t.Run("16_eurodns_folders", e.scenarioFolders)
-	t.Run("17_audit_hash_chain", e.scenarioAuditChain)
+	t.Run("17_url_forwards", e.scenarioURLForwards)
+	t.Run("18_audit_hash_chain", e.scenarioAuditChain)
 }
 
 func setup(t *testing.T) *env {
@@ -187,6 +188,11 @@ roles:
       - zones: ["*"]
         actions: [dns.read, dns.record.write]
         records: {hosts: ["_acme-challenge", "_acme-challenge.**"], types: [TXT]}
+  forward-writer:
+    rules:
+      - zones: [%[3]s]
+        actions: [dns.read, dns.forward.write, ui.read]
+        records: {hosts: ["fwd-*", legacy-go]}
   policy-admin:
     rules:
       - zones: ["*"]
@@ -216,6 +222,9 @@ bindings:
     team_from: {claim: sub, regex: "^pipeline:([a-z0-9-]+)$", prefix: p-}
     subjects: [{issuer: ci, claims: {sub: ["pipeline:*"]}}]
   - role: web-writer
+    team: web
+    subjects: [{issuer: ci, claims: {sub: [ci-web]}}]
+  - role: forward-writer
     team: web
     subjects: [{issuer: ci, claims: {sub: [ci-web]}}]
   - role: dns-admin

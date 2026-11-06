@@ -8,6 +8,9 @@
 // gate, alias RRsets included. ProviderEuroDNS targets the
 // kamorionlabs/eurodns provider (eurodns_record_set) through the
 // EuroDNS-compatible API; it has no alias RRsets.
+//
+// URL forwards (dns.TypeURLForward) are exported for the dnsgate provider
+// only, as dnsgate_url_forward resources imported by "<zone>/<host>".
 package tfexport
 
 import (
@@ -96,22 +99,28 @@ func Render(zone string, sets []dns.RRset, opts Options) string {
 		}
 	}
 
-	rtype := prov.resourceType()
 	used := map[string]bool{}
 	for _, s := range kept {
+		rtype, id := prov.resourceType(), zone+"/"+s.Key.Host+"/"+s.Key.Type
+		if s.Forward != nil {
+			rtype, id = "dnsgate_url_forward", zone+"/"+s.Key.Host
+		}
 		name := uniqueName(resourceName(opts.ResourcePrefix, s.Key), used)
 		b.WriteString("\n")
 		fmt.Fprintf(&b, "resource %q %s {\n", rtype, quote(name))
-		if prov == ProviderEuroDNS {
+		switch {
+		case s.Forward != nil:
+			writeForward(&b, zone, s)
+		case prov == ProviderEuroDNS:
 			writeEuroDNS(&b, zone, s)
-		} else {
+		default:
 			writeDNSGate(&b, zone, s)
 		}
 		b.WriteString("}\n")
 		if !opts.SkipImports {
 			b.WriteString("\nimport {\n")
 			fmt.Fprintf(&b, "  to = %s.%s\n", rtype, name)
-			fmt.Fprintf(&b, "  id = %s\n", quote(zone+"/"+s.Key.Host+"/"+s.Key.Type))
+			fmt.Fprintf(&b, "  id = %s\n", quote(id))
 			b.WriteString("}\n")
 		}
 	}
@@ -154,6 +163,16 @@ func writeDNSGate(b *strings.Builder, zone string, s dns.RRset) {
 	attrs(b, "  ", kv)
 }
 
+func writeForward(b *strings.Builder, zone string, s dns.RRset) {
+	kv := [][2]string{{"zone", quote(zone)}, {"name", quote(s.Key.Host)}, {"type", quote(s.Forward.Mode)}, {"url", quote(s.Forward.URL)}}
+	for _, f := range [][2]string{{"title", s.Forward.Title}, {"keywords", s.Forward.Keywords}, {"description", s.Forward.Description}} {
+		if f[1] != "" {
+			kv = append(kv, [2]string{f[0], quote(f[1])})
+		}
+	}
+	attrs(b, "  ", kv)
+}
+
 func writeEuroDNS(b *strings.Builder, zone string, s dns.RRset) {
 	attrs(b, "  ", [][2]string{
 		{"zone", quote(zone)}, {"host", quote(s.Key.Host)}, {"type", quote(s.Key.Type)},
@@ -173,6 +192,8 @@ func exportable(s dns.RRset, p Provider) bool {
 		return false
 	case s.Alias != nil:
 		return p != ProviderEuroDNS
+	case s.Forward != nil:
+		return p == ProviderDNSGate
 	}
 	return len(s.Values) > 0
 }

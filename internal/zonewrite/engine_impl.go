@@ -317,18 +317,23 @@ func readOnly(k dns.Key, s *dns.RRset) string {
 	return ""
 }
 
-func setValues(s *dns.RRset) (int, []string, *dns.Alias) {
+func setValues(s *dns.RRset) (int, []string, *dns.Alias, *dns.Forward) {
 	if s == nil {
-		return 0, nil, nil
+		return 0, nil, nil, nil
 	}
-	return s.TTL, slices.Clone(s.Values), s.Alias
+	return s.TTL, slices.Clone(s.Values), s.Alias, s.Forward
 }
 
 func uiChange(op string, key dns.Key, old, new *dns.RRset) uiapi.Change {
 	c := uiapi.Change{Op: op, Host: key.Host, Type: key.Type}
-	c.OldTTL, c.OldValues, c.OldAlias = setValues(old)
-	c.NewTTL, c.NewValues, c.NewAlias = setValues(new)
+	c.OldTTL, c.OldValues, c.OldAlias, c.OldForward = setValues(old)
+	c.NewTTL, c.NewValues, c.NewAlias, c.NewForward = setValues(new)
 	return c
+}
+
+// writesIn reports whether s may write records or URL forwards in zone.
+func (e *engine) writesIn(s *identity.Subject, zone string) bool {
+	return e.cfg.Authz.Allow(s, policy.ActionRecordWrite, zone) || e.cfg.Authz.Allow(s, policy.ActionForwardWrite, zone)
 }
 
 func uiChanges(changes []dns.Change) []uiapi.Change {
@@ -471,7 +476,7 @@ func (e *engine) Write(ctx context.Context, s *identity.Subject, zoneIn, ifMatch
 	if err != nil {
 		return nil, 0, e.deny(ctx, s, action, zone, err)
 	}
-	if !e.cfg.Authz.Allow(s, policy.ActionRecordWrite, zone) {
+	if !e.writesIn(s, zone) {
 		return nil, 0, e.deny(ctx, s, action, zone, fail(ReasonForbidden, "not allowed to write in zone %s", zone))
 	}
 	p, err := e.provider(zone)
@@ -513,6 +518,9 @@ func (e *engine) Write(ctx context.Context, s *identity.Subject, zoneIn, ifMatch
 		e.log.Info("rebase ignored out-of-scope differences", "zone", zone, "subject", s.String(), "ignored", plan.Ignored)
 	}
 	if len(plan.Changes) == 0 && !plan.Settings {
+		if len(plan.Ignored) > 0 {
+			e.emit(ctx, s, action, zone, "allow", "", nil, "", map[string]any{"ignored_out_of_scope": plan.Ignored})
+		}
 		return cur, version, nil
 	}
 	claims, err := e.validate(ctx, s, p, zone, sets, owns, plan, false)
@@ -586,9 +594,15 @@ func (e *engine) Write(ctx context.Context, s *identity.Subject, zoneIn, ifMatch
 		e.log.Warn("zone version bump failed", "zone", zone, "error", err)
 		newVersion = version
 	}
-	var extra map[string]any
+	extra := map[string]any{}
 	if len(plan.Ignored) > 0 {
-		extra = map[string]any{"ignored_out_of_scope": plan.Ignored}
+		extra["ignored_out_of_scope"] = plan.Ignored
+	}
+	if len(plan.zoneAdminForwards) > 0 {
+		extra["zone_admin_forwards"] = plan.zoneAdminForwards
+	}
+	if len(extra) == 0 {
+		extra = nil
 	}
 	e.emit(ctx, s, action, zone, "allow", "", uiChanges(plan.Changes), snapshot, plan.grants.extra(extra))
 	e.committed(ctx, zone, plan)
@@ -651,7 +665,7 @@ func (e *engine) validate(ctx context.Context, s *identity.Subject, p provider.P
 		return nil, fail(ReasonTooMany, "%d RRset changes exceed the limit of %d", len(plan.Changes), max)
 	}
 	if plan.Settings && !e.cfg.Authz.Allow(s, policy.ActionZoneAdmin, zone) {
-		return nil, fail(ReasonForbidden, "zone settings (EuroDNS URL/mail forwards) require %s", policy.ActionZoneAdmin)
+		return nil, fail(ReasonForbidden, "zone settings (EuroDNS mail forwards, DomainConnect) require %s", policy.ActionZoneAdmin)
 	}
 	caps := p.Capabilities()
 
@@ -660,8 +674,14 @@ func (e *engine) validate(ctx context.Context, s *identity.Subject, p provider.P
 	var tombs map[dns.Key]store.Tombstone
 	for i := range plan.Changes {
 		c := &plan.Changes[i]
-		if !e.allowRRset(&plan.grants, s, policy.ActionRecordWrite, zone, c.Key) {
+		writes := e.allowRRset(&plan.grants, s, policy.WriteAction(c.Key), zone, c.Key)
+		legacy := c.Key.IsForward() && plan.ForeignForwards
+		zoneAdmin := legacy && !writes && e.allowRRset(&plan.grants, s, policy.ActionZoneAdmin, zone, c.Key)
+		if !writes && !zoneAdmin {
 			return nil, fail(ReasonForbidden, "not allowed to write %s in %s", keyString(c.Key), zone)
+		}
+		if c.Key.IsForward() && !caps.Forwards {
+			return nil, fail(ReasonInvalid, "%s: provider %s has no URL forwards", keyString(c.Key), p.ID())
 		}
 		if e.cfg.Guard != nil {
 			if err := e.cfg.Guard(ctx, s, zone, c.Key); err != nil {
@@ -691,7 +711,20 @@ func (e *engine) validate(ctx context.Context, s *identity.Subject, p provider.P
 			c.New = &n
 		}
 		o, owned := owns[c.Key]
+		if (c.Old == nil || owned) && !writes {
+			return nil, fail(ReasonForbidden, "%s requires %s: %s only changes or deletes the forwards the gate does not own",
+				keyString(c.Key), policy.ActionForwardWrite, policy.ActionZoneAdmin)
+		}
 		if c.Old == nil {
+			if tombs == nil {
+				var err error
+				if tombs, err = e.liveTombstones(ctx, zone); err != nil {
+					return nil, err
+				}
+			}
+			if err := e.interference(s, c.Key, sets, owns, tombs); err != nil {
+				return nil, err
+			}
 			cl := claim{change: *c}
 			if owned {
 				if !slices.Contains(s.Teams, o.Owner) {
@@ -733,6 +766,13 @@ func (e *engine) validate(ctx context.Context, s *identity.Subject, p provider.P
 			claims = append(claims, cl)
 			continue
 		}
+		if !owned && legacy && !zoneAdmin {
+			zoneAdmin = e.allowRRset(&plan.grants, s, policy.ActionZoneAdmin, zone, c.Key)
+		}
+		if !owned && zoneAdmin {
+			plan.zoneAdminForwards = append(plan.zoneAdminForwards, keyString(c.Key))
+			continue
+		}
 		if !owned {
 			return nil, fail(ReasonForeignRRset, "%s exists and is not managed by the gate", keyString(c.Key))
 		}
@@ -765,6 +805,41 @@ func (e *engine) validate(ctx context.Context, s *identity.Subject, p provider.P
 		claims = append(claims, cl)
 	}
 	return claims, nil
+}
+
+// interference refuses the creation of an RRset that would take a host from
+// another team: a URL forward replaces the A, AAAA, CNAME and APEX records
+// of its host (policy.ForwardShadowTypes), so a forward is created only
+// where those records are absent or owned by one of s's teams, and such a
+// record only where the forward of the host is absent or owned by one of
+// s's teams. A competing RRset owned by another team but missing upstream,
+// or reserved for another team by a tombstone, refuses the creation too.
+func (e *engine) interference(s *identity.Subject, k dns.Key, sets map[dns.Key]dns.RRset, owns map[dns.Key]store.Ownership,
+	tombs map[dns.Key]store.Tombstone) error {
+	var others []dns.Key
+	switch {
+	case k.IsForward():
+		for _, t := range policy.ForwardShadowTypes {
+			others = append(others, dns.Key{Host: k.Host, Type: t})
+		}
+	case slices.ContainsFunc(policy.ForwardShadowTypes, func(t string) bool { return strings.EqualFold(t, k.Type) }):
+		others = []dns.Key{dns.ForwardKey(k.Host)}
+	}
+	for _, other := range others {
+		_, key, present := findSet(sets, other)
+		o, owned := owns[key]
+		tb, reserved := tombs[key]
+		switch {
+		case present && !owned:
+			return fail(ReasonForeignRRset, "%s exists and is not managed by the gate: %s would replace it; adopt it first", keyString(key), keyString(k))
+		case owned && !slices.Contains(s.Teams, o.Owner):
+			return fail(ReasonNotOwner, "%s is owned by team %s: %s would replace it", keyString(key), o.Owner, keyString(k))
+		case !owned && reserved && !slices.Contains(s.Teams, tb.Team):
+			return fail(ReasonNotOwner, "%s was deleted by team %s and stays reserved for it until %s: %s would take its host; ask for a transfer",
+				keyString(key), tb.Team, tb.ExpiresAt.UTC().Format(time.RFC3339), keyString(k))
+		}
+	}
+	return nil
 }
 
 // DefaultEphemeralLifetimeFactor is the default of
@@ -897,7 +972,7 @@ func (e *engine) Adopt(ctx context.Context, s *identity.Subject, zoneIn string, 
 		set, key, ok := findSet(sets, want)
 		o, owned := owns[key]
 		if ok && owned && o.State == store.StateActive && o.ContentHash == dns.ContentHash(set) && slices.Contains(s.Teams, o.Owner) {
-			if !e.allowRRset(&g, s, policy.ActionRecordWrite, zone, key) && !e.allowRRset(&g, s, policy.ActionRecordAdopt, zone, key) {
+			if !e.allowRRset(&g, s, policy.WriteAction(key), zone, key) && !e.allowRRset(&g, s, policy.ActionRecordAdopt, zone, key) {
 				return e.deny(ctx, s, action, zone, fail(ReasonForbidden, "not allowed to manage %s in %s", keyString(key), zone))
 			}
 			continue

@@ -1,4 +1,4 @@
-import { ApiError, createRequest, dnsWrites, issueToken, teamsApi } from './http';
+import { ApiError, createRequest, dnsWrites, forwardsApi, issueToken, teamsApi } from './http';
 import { rememberFolders } from './folders';
 import type {
   AdoptApply,
@@ -9,6 +9,7 @@ import type {
   AuditQuery,
   Connect,
   EffectivePolicy,
+  ForwardList,
   GateInfo,
   ExplainRequest,
   ExplainResponse,
@@ -40,6 +41,7 @@ export interface Backend {
   connect(): Promise<Connect>;
   zones(): Promise<ZoneSummary[]>;
   inventory(zone: string): Promise<ZoneInventory>;
+  forwards(zone: string): Promise<ForwardList>;
   audit(q: AuditQuery): Promise<AuditPage>;
   policy(): Promise<EffectivePolicy>;
   revisions(q: { status?: string; limit?: number; cursor?: string }): Promise<RevisionPage>;
@@ -98,6 +100,7 @@ const request = createRequest({
 });
 const writes = dnsWrites(request);
 const teamCalls = teamsApi(request);
+const forwardCalls = forwardsApi(request);
 
 function query(q: object): string {
   const p = new URLSearchParams();
@@ -133,7 +136,12 @@ const http: Backend = {
   explain: (req) => request('POST', '/api/v1/policy/explain', req),
   whoCan: (q) => request('GET', '/api/v1/policy/who-can' + query(q)),
   generateKey: () => request('POST', '/api/v1/policy/virtual-keys/generate', {}),
-  adoptPreview: (zone, sel) => request('POST', `/api/v1/zones/${encodeURIComponent(zone)}/adopt/preview`, sel),
+  // A forward candidate has no values: the Go side may send null.
+  adoptPreview: (zone, sel) =>
+    request<AdoptPreview>('POST', `/api/v1/zones/${encodeURIComponent(zone)}/adopt/preview`, sel).then((p) => ({
+      ...p,
+      candidates: (p.candidates ?? []).map((c) => ({ ...c, values: c.values ?? [] })),
+    })),
   adopt: (zone, req) => request('POST', `/api/v1/zones/${encodeURIComponent(zone)}/adopt`, req),
   terraform: (zone, q) =>
     request(
@@ -147,6 +155,7 @@ const http: Backend = {
   apply: writes.apply,
   issueToken: () => issueToken(request),
   ...teamCalls,
+  ...forwardCalls,
 };
 
 export const usingFixtures = import.meta.env.VITE_FIXTURES === '1';

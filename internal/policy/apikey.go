@@ -240,14 +240,14 @@ func (s *Snapshot) RoleReserved(name string) bool {
 	return false
 }
 
-// writes reports whether a role grants dns.record.write.
+// writes reports whether a role grants dns.record.write or dns.forward.write.
 func (s *Snapshot) writes(role string) bool {
 	cr := s.roles[role]
 	if cr == nil {
 		return false
 	}
 	for _, r := range cr.role.Rules {
-		if contains(r.Actions, ActionRecordWrite) {
+		if contains(r.Actions, ActionRecordWrite) || contains(r.Actions, ActionForwardWrite) {
 			return true
 		}
 	}
@@ -288,7 +288,7 @@ func (g RoleGrant) Within(limit RoleGrant) bool {
 	writes := false
 	for _, r := range g.Rules {
 		for _, a := range r.Actions {
-			writes = writes || a == ActionRecordWrite
+			writes = writes || a == ActionRecordWrite || a == ActionForwardWrite
 			for _, sel := range selectors(r) {
 				if !rulesCover(limit.Rules, a, sel, r.Records) {
 					return false

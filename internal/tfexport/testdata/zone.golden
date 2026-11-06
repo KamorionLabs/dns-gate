@@ -69,6 +69,19 @@ import {
   id = "example.com/@/TXT"
 }
 
+resource "dnsgate_url_forward" "apex_urlfwd" {
+  zone  = "example.com"
+  name  = "@"
+  type  = "frame"
+  url   = "https://shop.example.net/"
+  title = "Shop \"x\""
+}
+
+import {
+  to = dnsgate_url_forward.apex_urlfwd
+  id = "example.com/@"
+}
+
 resource "dnsgate_record_set" "acme-challenge_www_txt" {
   zone   = "example.com"
   name   = "_acme-challenge.www"
@@ -123,6 +136,18 @@ resource "dnsgate_record_set" "cdn_aaaa" {
 import {
   to = dnsgate_record_set.cdn_aaaa
   id = "example.com/cdn/AAAA"
+}
+
+resource "dnsgate_url_forward" "go_urlfwd" {
+  zone = "example.com"
+  name = "go"
+  type = "301"
+  url  = "https://example.net/"
+}
+
+import {
+  to = dnsgate_url_forward.go_urlfwd
+  id = "example.com/go"
 }
 
 resource "dnsgate_record_set" "lb_a" {
