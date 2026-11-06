@@ -1008,9 +1008,12 @@ policy.
   matches `folders` (`glob.MatchFolder`: segments as host patterns, `/ES` exact,
   `/ES/**` below, `/` the root, case-sensitive). The decision records the folder when
   the rule applied through it (`Decision.Folder`), shown by `explain` (`folder`) and
-  `who-can` (`by_folder`). Zones without folder (Route53, or not listed yet) never
-  match a folder selector: folder rules fail closed while discovery has not listed
-  the account.
+  `who-can` (`by_folder`), and in the audit of the writes and adoptions it granted
+  (`policy.FolderGrants`, `extra.folder`). Zones without a known folder never match
+  a folder selector, so folder rules fail closed: Route53 zones, zones not listed yet,
+  a `folderFullPath` absent from the listing (a `null` one is the root), a zone listed
+  by two providers, and the zones of a provider whose last successful listing is
+  older than `zones.folder_expiry` refresh periods.
 - **Management**: a folder selector never makes a zone managed. Managed zones stay
   the base and managed `zones`; a discovered zone in a selected folder is only
   readable, as any unmanaged zone. `zones.folders` of a provider narrows what the
@@ -1018,14 +1021,25 @@ policy.
 - **Bounds**: `policy.bounds.folders` and delegation `allow.folders` bound the
   `folders` of managed and delegated rules by static coverage
   (`glob.FolderCovered`), as zone globs; a zone glob of a managed rule is never
-  covered by a folder bound, nor the reverse. API keys and their recorded grants
-  compare folders the same way; a rule on every zone (`*`) covers any folder.
-- **Changes**: a listing that finds a zone in another folder than the previous one
-  calls `discovery.Config.OnFolderChange`; the app records it as
-  `gate.zone.folder_changed` (old and new folder). The previous folders are only in
-  memory: a process started after a move records nothing. Folder-based rights are
-  therefore delegated to whoever can move domains in the EuroDNS account
-  ([THREAT-MODEL.md](THREAT-MODEL.md)).
+  covered by a folder bound, nor the reverse. At decision time, a managed rule that
+  applies through a folder also needs the zone to match `policy.bounds.zones`, and a
+  delegated one the `allow.zones` of its delegation (`Snapshot.ruleApplies`):
+  folders narrow the bounds, never widen them, so moving a base zone kept out of the
+  bounds into a selected folder grants the managed layer nothing. API keys and their
+  recorded grants compare folders statically; a rule on every zone (`*`) covers any
+  folder.
+- **Changes**: each listing calls `discovery.Config.OnFolderChange` for the zones it
+  sees for the first time in this process, finds in another folder, or no longer
+  lists, with a context detached from the listing and one request id per listing;
+  the app records `gate.zone.folder_seen`, `gate.zone.folder_changed` and
+  `gate.zone.folder_gone` (old and new folder). The previous folders are only in
+  memory: instances do not compare their views, a new one records the folders it
+  starts from. Folder-based rights are therefore delegated to whoever can move
+  domains in the EuroDNS account ([THREAT-MODEL.md](THREAT-MODEL.md)).
+- **Review**: the impact analysis lists every new or changed folder rule as a
+  dynamic rule with the zones it reaches currently, and warns while discovery has
+  not listed the accounts. Loading the configuration warns about folder selectors
+  without a EuroDNS provider or outside every provider's `zones.folders`.
 
 ## 16. Onboarding and adoption
 

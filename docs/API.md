@@ -53,7 +53,8 @@ curl -sS -i "${auth[@]}" "$GATE/api/v1/zones/example.com/rrsets/www/CNAME"
 A zone summary carries the provider `folder` of the zone for EuroDNS accounts
 (`"/ES/Madrid"`, `"/"` for a domain in no folder; absent for Route53), and
 `?folder=` keeps the zones whose folder matches a folder glob (`/ES` the folder
-ES, `/ES/**` every folder below it), see
+ES only, `/ES/**` every folder below it, not ES itself; the Zones view filters
+the same way), see
 [EuroDNS folders](CONFIG.md#eurodns-folders).
 
 Hosts are relative to the zone, `@` is the apex, `*` is allowed as the first label
