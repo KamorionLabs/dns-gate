@@ -12,6 +12,7 @@
   import Icon from '../components/Icon.svelte';
   import ProviderBadge from '../components/ProviderBadge.svelte';
   import { providerLabel } from '../lib/labels';
+  import { folderOptions, inFolder } from '../lib/folders';
 
   let all = $state<ZoneSummary[] | null>(null);
   let error = $state<string | null>(null);
@@ -61,7 +62,10 @@
   const filter = $derived<ZoneFilter>(
     (zoneFilters as readonly string[]).includes(router.params.get('filter') ?? '') ? (router.params.get('filter') as ZoneFilter) : 'all',
   );
-  const match = (z: ZoneSummary) => !q || z.zone.includes(q);
+  // EuroDNS folders: a folder shows its zones and those of its subfolders.
+  const folders = $derived(folderOptions(all ?? []));
+  const folderSel = $derived(router.params.get('folder') ?? '');
+  const match = (z: ZoneSummary) => (!q || z.zone.includes(q)) && inFolder(folderSel, z.folder);
   const shownManaged = $derived(filter === 'unmanaged' ? [] : (filter === 'attention' ? attention : managed).filter(match));
   const shownUnmanaged = $derived(filter === 'all' || filter === 'unmanaged' ? unmanaged.filter(match) : []);
 
@@ -78,6 +82,7 @@
   $effect(() => {
     void q;
     void filter;
+    void folderSel;
     limit = STEP;
   });
   const pageUnmanaged = $derived(shownUnmanaged.slice(0, limit));
@@ -155,6 +160,17 @@
       <span class="sr-only">Search zones</span>
       <input type="search" placeholder="Search zones" value={searchInput} oninput={(e) => onSearch(e.currentTarget.value)} />
     </label>
+    {#if folders.length || folderSel}
+      <label class="field folder">
+        <Icon name="folder" size={14} />
+        <span class="sr-only">Folder</span>
+        <select value={folderSel} onchange={(e) => router.setParams({ folder: e.currentTarget.value || undefined })}>
+          <option value="">All folders</option>
+          {#each folders.includes(folderSel) || !folderSel ? folders : [folderSel, ...folders] as f (f)}<option value={f}>{f === '/' ? '/ (no folder)' : f}</option>{/each}
+        </select>
+        <span class="chev"><Icon name="chevron" size={12} /></span>
+      </label>
+    {/if}
     <div class="tabs" role="radiogroup" aria-label="Show zones">
       {#each tabs as t (t.key)}
         <button
@@ -183,7 +199,7 @@
         </h2>
         {#if shownManaged.length === 0}
           <p class="none">
-            {#if q}No managed zone matches “{q}”.
+            {#if q || folderSel}No managed zone matches {q ? `“${q}”` : ''}{q && folderSel ? ' in ' : ''}{folderSel ? `folder ${folderSel}` : ''}.
             {:else if filter === 'attention'}Nothing needs attention: no drifted or pending record set.
             {:else if unmanaged.length}No zone is managed yet. Bring a zone of the account under management below, or add it to the gate configuration.
             {:else}No zone is managed yet. Add zones to the gate configuration to see them here.{/if}
@@ -195,7 +211,7 @@
                 <a class="cover" href={zoneHref(z.zone)} aria-label="Open {z.zone}"></a>
                 <div class="ident">
                   <h3 class="mono">{z.zone} <ProviderBadge provider={z.provider} /></h3>
-                  <span class="meta"><span class="num">{z.rrsets.toLocaleString('en')}</span> record sets · synced <RelTime iso={z.last_synced_at} /></span>
+                  <span class="meta"><span class="num">{z.rrsets.toLocaleString('en')}</span> record sets · synced <RelTime iso={z.last_synced_at} />{#if z.folder} · <span class="fold mono" title="Folder at the DNS provider"><Icon name="folder" size={12} />{z.folder}</span>{/if}</span>
                 </div>
                 <div class="state">
                   <span class="splitz">{managedSplit(z)}</span>
@@ -227,13 +243,14 @@
           </p>
         </div>
         {#if shownUnmanaged.length === 0}
-          <p class="none">No zone matches “{q}”.</p>
+          <p class="none">No zone matches {q ? `“${q}”` : ''}{q && folderSel ? ' in ' : ''}{folderSel ? `folder ${folderSel}` : ''}.</p>
         {:else}
           <ul class="compact">
             {#each pageUnmanaged as z (z.zone)}
               <li class="mini" class:open={managing === z.zone}>
                 <a class="zname mono" href={zoneHref(z.zone)}>{z.zone}</a>
                 {#if multiProvider}<ProviderBadge provider={z.provider} />{/if}
+                {#if z.folder}<span class="mmeta fold mono" title="Folder at the DNS provider"><Icon name="folder" size={12} />{z.folder}</span>{/if}
                 {#if z.last_synced_at}<span class="mmeta">{plural(z.rrsets, 'record set')}</span>{/if}
                 {#if admin && managing !== z.zone}
                   <button class="btn quiet small manage" type="button" onclick={() => (managing = z.zone)} aria-label="Manage {z.zone}…">Manage…</button>
@@ -391,6 +408,14 @@
   }
   .search input {
     width: 260px;
+  }
+  .folder select {
+    max-width: 220px;
+  }
+  .fold {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
   }
   .tabs {
     display: inline-flex;

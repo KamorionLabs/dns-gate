@@ -1,4 +1,5 @@
 import { ApiError, createRequest, dnsWrites, issueToken, teamsApi } from './http';
+import { rememberFolders } from './folders';
 import type {
   AdoptApply,
   AdoptPreview,
@@ -157,12 +158,16 @@ if (usingFixtures) {
 
 export const exportURL = (id: string) => rev(id) + '/export';
 
-// Every method forwards to the selected backend (HTTP or fixtures).
+// Every method forwards to the selected backend (HTTP or fixtures). The
+// folders of the zones read are remembered for the folder selectors of rules.
 export const api = new Proxy({} as Backend, {
   get:
     (_t, name: keyof Backend) =>
     async (...args: unknown[]) => {
       const b = await backend;
-      return (b[name] as (...a: unknown[]) => Promise<unknown>)(...args);
+      const out = await (b[name] as (...a: unknown[]) => Promise<unknown>)(...args);
+      if (name === 'zones') rememberFolders(out as ZoneSummary[]);
+      if (name === 'inventory') rememberFolders([out as ZoneInventory]);
+      return out;
     },
 });

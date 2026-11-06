@@ -2,7 +2,7 @@
 // resolved from the policy documents (base and managed layers).
 import type { Binding, DelegatedOwner, EffectivePolicy, Permission, Role } from './types';
 import { describePermissions } from './permissions';
-import { zoneMatch } from './glob';
+import { ruleCovers } from './folders';
 
 /** base: configuration file; managed: reviewed revisions; delegated: owned by a policy delegation. */
 export type Layer = 'base' | 'managed' | 'delegated';
@@ -37,10 +37,11 @@ export function bindingsOf(p: EffectivePolicy): LayeredBinding[] {
 export function rolePermissions(roleName: string, role: Role | undefined, zone?: string): Permission[] {
   if (!role) return [];
   return role.rules
-    .filter((r) => !zone || r.zones.some((z) => zoneMatch(z, zone)))
+    .filter((r) => !zone || ruleCovers(r, zone))
     .map((r) => ({
       role: roleName,
-      zones: zone ? [zone] : r.zones,
+      zones: zone ? [zone] : (r.zones ?? []),
+      ...(!zone && r.folders?.length ? { folders: r.folders } : {}),
       actions: r.actions,
       hosts: r.records?.hosts ?? [],
       types: r.records?.types ?? [],

@@ -171,7 +171,8 @@
                   {#if d.description}<p class="desc">{d.description}</p>{/if}
                   <dl>
                     <dt>Used by</dt><dd>{#each d.subjects as m, k (k)}<Matcher {m} />{/each}</dd>
-                    <dt>Zones</dt><dd class="chips">{#each d.allow.zones as z (z)}<span class="chip mono">{z}</span>{/each}</dd>
+                    <dt>Zones</dt><dd class="chips">{#each d.allow.zones ?? [] as z (z)}<span class="chip mono">{z}</span>{/each}</dd>
+                    {#if d.allow.folders?.length}<dt>Folders</dt><dd class="chips">{#each d.allow.folders as f (f)}<span class="chip mono">{f}</span>{/each}</dd>{/if}
                     <dt>Actions</dt><dd class="chips">{#each d.allow.actions as a (a)}<span class="chip mono">{a}</span>{/each}</dd>
                     {#if d.allow.records}
                       <dt>Records</dt><dd class="mono">{(d.allow.records.hosts ?? []).join(', ') || 'any host'} · {(d.allow.records.types ?? []).join(', ') || 'any type'}</dd>
@@ -218,6 +219,7 @@
           <p class="hint">A managed rule may only target these zones and grant these actions.</p>
           <div class="bounds">
             <div><span class="eyebrow">Zones</span><div class="chips">{#each p.base.bounds.zones as z (z)}<span class="chip mono">{z}</span>{/each}</div></div>
+            {#if p.base.bounds.folders?.length}<div><span class="eyebrow">Folders</span><div class="chips">{#each p.base.bounds.folders as f (f)}<span class="chip mono">{f}</span>{/each}</div></div>{/if}
             <div><span class="eyebrow">Actions</span><div class="chips">{#each p.base.bounds.actions as a (a)}<span class="chip mono">{a}</span>{/each}</div></div>
           </div>
         </section>

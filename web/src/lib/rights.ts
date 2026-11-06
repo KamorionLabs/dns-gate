@@ -2,7 +2,8 @@
 // the inventory so the console only offers what the gate would accept. The
 // gate stays the authority: it checks everything again at plan and apply.
 import type { Me, RRset } from './types';
-import { hostMatch, zoneMatch } from './glob';
+import { hostMatch } from './glob';
+import { ruleCovers } from './folders';
 
 export const WRITE = 'dns.record.write';
 
@@ -33,7 +34,7 @@ export function rbacAllows(me: Me | null, zone: string, host: string, type: stri
   return me.permissions.some(
     (p) =>
       p.actions.includes(WRITE) &&
-      p.zones.some((z) => zoneMatch(z, zone)) &&
+      ruleCovers(p, zone) &&
       (p.hosts.length === 0 || p.hosts.some((h) => hostMatch(h, host))) &&
       (p.types.length === 0 || p.types.includes('*') || p.types.includes(type)),
   );
@@ -43,13 +44,13 @@ export function rbacAllows(me: Me | null, zone: string, host: string, type: stri
 export function canWriteZone(me: Me | null, zone: string): boolean {
   if (!me) return false;
   if (!me.permissions) return true;
-  return me.permissions.some((p) => p.actions.includes(WRITE) && p.zones.some((z) => zoneMatch(z, zone)));
+  return me.permissions.some((p) => p.actions.includes(WRITE) && ruleCovers(p, zone));
 }
 
 /** Record types the user may create in the zone (some rule may restrict hosts further). */
 export function writableTypes(me: Me | null, zone: string): string[] {
   if (!me?.permissions) return EDITABLE_TYPES;
-  const rules = me.permissions.filter((p) => p.actions.includes(WRITE) && p.zones.some((z) => zoneMatch(z, zone)));
+  const rules = me.permissions.filter((p) => p.actions.includes(WRITE) && ruleCovers(p, zone));
   return EDITABLE_TYPES.filter((t) => rules.some((p) => p.types.length === 0 || p.types.includes('*') || p.types.includes(t)));
 }
 
@@ -57,7 +58,7 @@ export function writableTypes(me: Me | null, zone: string): string[] {
 export function writableHosts(me: Me | null, zone: string, type: string): string[] {
   if (!me?.permissions) return [];
   const rules = me.permissions.filter(
-    (p) => p.actions.includes(WRITE) && p.zones.some((z) => zoneMatch(z, zone)) && (p.types.length === 0 || p.types.includes('*') || p.types.includes(type)),
+    (p) => p.actions.includes(WRITE) && ruleCovers(p, zone) && (p.types.length === 0 || p.types.includes('*') || p.types.includes(type)),
   );
   if (rules.some((p) => p.hosts.length === 0)) return [];
   return [...new Set(rules.flatMap((p) => p.hosts))];

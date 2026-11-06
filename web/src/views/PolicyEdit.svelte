@@ -215,7 +215,7 @@
 
             <!-- Roles -->
             <section>
-              <div class="sh"><h2>Roles</h2><button class="btn" type="button" onclick={() => model!.roles.push({ uid: nextUid(), name: '', description: '', rules: [{ zones: [], actions: ['dns.read'], hosts: [], types: [] }], rebase_on_save: false, ephemeral_ttl: '', max_changes: '' })}><Icon name="plus" size={14} />Role</button></div>
+              <div class="sh"><h2>Roles</h2><button class="btn" type="button" onclick={() => model!.roles.push({ uid: nextUid(), name: '', description: '', rules: [{ zones: [], folders: [], actions: ['dns.read'], hosts: [], types: [] }], rebase_on_save: false, ephemeral_ttl: '', max_changes: '' })}><Icon name="plus" size={14} />Role</button></div>
               {#each model.roles as r, ri (r.uid)}
                 {@const path = `roles.${r.name.trim()}`}
                 <article class="card" class:bad={has(path)}>
@@ -231,6 +231,11 @@
                       <span class="lbl">Zones</span>
                       <ToggleChips options={p.base.bounds.zones} bind:values={rule.zones} label="Zones" invalid={has(rp + '.zones')} />
                       <FieldError {errors} path="{rp}.zones" prefix />
+                      {#if p.base.bounds.folders?.length || rule.folders.length}
+                        <span class="lbl">Folders <span class="dim">(EuroDNS folders: the rule also applies to the zones in them)</span></span>
+                        <ToggleChips options={[...new Set([...(p.base.bounds.folders ?? []), ...rule.folders])]} bind:values={rule.folders} label="Folders" invalid={has(rp + '.folders')} />
+                        <FieldError {errors} path="{rp}.folders" prefix />
+                      {/if}
                       <span class="lbl">Actions</span>
                       <ToggleChips options={p.base.bounds.actions} bind:values={rule.actions} label="Actions" danger={['dns.record.adopt']} invalid={has(rp + '.actions')} />
                       <FieldError {errors} path="{rp}.actions" prefix />
@@ -240,7 +245,7 @@
                       </div>
                     </div>
                   {/each}
-                  <button class="link" type="button" onclick={() => r.rules.push({ zones: [], actions: [], hosts: [], types: [] })}><Icon name="plus" size={12} /> rule</button>
+                  <button class="link" type="button" onclick={() => r.rules.push({ zones: [], folders: [], actions: [], hosts: [], types: [] })}><Icon name="plus" size={12} /> rule</button>
                   <div class="opts">
                     <label class="check"><input type="checkbox" bind:checked={r.rebase_on_save} /> Rebase full-zone saves <span class="dim">(ACME clients)</span></label>
                     <label class="inline"><span class="lbl">Ephemeral TTL</span><input class="in mono short" bind:value={r.ephemeral_ttl} placeholder="24h" />{#if r.ephemeral_ttl && humanDuration(r.ephemeral_ttl) !== r.ephemeral_ttl}<span class="dim">{humanDuration(r.ephemeral_ttl)}</span>{/if}</label>

@@ -5,7 +5,7 @@
 import type { Me, RRset, RRsetRef, TeamInfo, TeamKind, Tombstone, Transfer, TransferStatus } from './types';
 import type { StagedChange } from './staging';
 import { canChange, WRITE } from './rights';
-import { zoneMatch } from './glob';
+import { ruleCovers } from './folders';
 
 export const OWNERSHIP_APPROVE = 'dns.ownership.approve';
 
@@ -46,7 +46,7 @@ export const concreteTeams = (teams: TeamInfo[]) => teams.filter((t) => t.kind !
 
 /** Whether a rule of the user grants an action on the zone (unknown permissions: no). */
 export function hasAction(me: Me | null, action: string, zone: string): boolean {
-  return !!me?.permissions?.some((p) => p.actions.includes(action) && p.zones.some((z) => zoneMatch(z, zone)));
+  return !!me?.permissions?.some((p) => p.actions.includes(action) && ruleCovers(p, zone));
 }
 
 const list = (items: string[]) => (items.length < 2 ? items.join('') : items.slice(0, -1).join(', ') + ' and ' + items[items.length - 1]);

@@ -4,11 +4,13 @@ import type { Binding, EffectivePolicy, Issuer, Role, SubjectMatcher } from './t
 import { bindingsOf, rolesOf, type Layer } from './access';
 import { serviceConnectionName, pipelineName } from './identity';
 import { zoneMatch } from './glob';
+import { ruleCovers } from './folders';
 
 export type AudienceKind = 'people' | 'pipeline' | 'key';
 
 /** One write grant: which records, where, with which verbs. */
 export interface WriteGrant {
+  /** Zone globs, and the folder globs of the rules as "folder /ES/**". */
   zones: string[];
   hosts: string[];
   types: string[];
@@ -27,7 +29,7 @@ export interface Audience {
   subtitle: string;
   /** Who is in it, in plain words (members of a group, the identity itself). */
   members: string[];
-  /** Zones it can see ("*" for all). */
+  /** Zones it can see ("*" for all), folder globs as "folder /ES/**". */
   read: string[];
   writes: WriteGrant[];
   /** Policy rights in plain words. */
@@ -100,15 +102,18 @@ function mergeWrites(ws: WriteGrant[]): WriteGrant[] {
   return [...by.values()];
 }
 
+const FOLDER = 'folder ';
+
 function grant(a: Audience, b: Binding, role: Role | undefined, layer: Layer) {
   a.roles.push(b.role);
   a.teams.push(b.team || (b.team_from ? `per ${b.team_from.claim}` : ''));
   a.layers.push(layer);
   for (const r of role?.rules ?? []) {
-    if (r.actions.includes('dns.read') || r.actions.includes('ui.read')) a.read.push(...r.zones);
+    const where = [...(r.zones ?? []), ...(r.folders ?? []).map((f) => FOLDER + f)];
+    if (r.actions.includes('dns.read') || r.actions.includes('ui.read')) a.read.push(...where);
     const write = r.actions.includes('dns.record.write');
     const adopt = r.actions.includes('dns.record.adopt');
-    if (write || adopt) a.writes.push({ zones: r.zones, hosts: r.records?.hosts ?? [], types: r.records?.types ?? [], write, adopt });
+    if (write || adopt) a.writes.push({ zones: where, hosts: r.records?.hosts ?? [], types: r.records?.types ?? [], write, adopt });
     for (const [act, verb] of policyVerbs) if (r.actions.includes(act)) a.policy.push(verb);
   }
 }
@@ -160,10 +165,14 @@ export function audiencesOf(p: EffectivePolicy): Audience[] {
   return [...out.values()].map(finish).sort((x, y) => kindOrder[x.kind] - kindOrder[y.kind] || x.title.localeCompare(y.title));
 }
 
+/** Whether a zone glob, or a folder glob written "folder /ES/**", selects the zone. */
+const selects = (sel: string, zone: string) =>
+  sel.startsWith(FOLDER) ? ruleCovers({ folders: [sel.slice(FOLDER.length)] }, zone) : zoneMatch(sel, zone);
+
 /** The audience restricted to one zone; undefined when it can do nothing there. */
 export function inZone(a: Audience, zone: string): Audience | undefined {
-  const writes = a.writes.filter((w) => w.zones.some((z) => zoneMatch(z, zone))).map((w) => ({ ...w, zones: [zone] }));
-  const read = a.read.some((z) => zoneMatch(z, zone)) ? [zone] : [];
+  const writes = a.writes.filter((w) => w.zones.some((z) => selects(z, zone))).map((w) => ({ ...w, zones: [zone] }));
+  const read = a.read.some((z) => selects(z, zone)) ? [zone] : [];
   if (!writes.length && !read.length) return undefined;
   return { ...a, read, writes };
 }
