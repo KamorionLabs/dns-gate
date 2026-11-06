@@ -361,3 +361,53 @@ func TestReservedIssuerNames(t *testing.T) {
 		}
 	}
 }
+
+func TestTeamsMigration(t *testing.T) {
+	e := env(map[string]string{"EURODNS_API_KEY": "k"})
+	c, err := Parse([]byte(base), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.TeamsDeclared() || len(c.Warnings) != 1 || !strings.Contains(c.Warnings[0], `team "web" is not declared`) {
+		t.Fatalf("migration warning: declared=%v %q", c.TeamsDeclared(), c.Warnings)
+	}
+	if c.TombstoneTTL() != DefaultTombstoneTTL || c.Ownership.TransferTTL.D() != DefaultTransferTTL {
+		t.Fatalf("ownership defaults: %v %v", c.TombstoneTTL(), c.Ownership.TransferTTL)
+	}
+}
+
+func TestTeamsBlock(t *testing.T) {
+	e := env(map[string]string{"EURODNS_API_KEY": "k"})
+	teams := "teams:\n  web:\n    description: Web shop\n    members:\n      groups: [devs]\n      subjects:\n        - issuer: ci\n          claims: {sub: \"repo:acme/web:*\"}\n" +
+		"groups:\n  devs:\n    members:\n      - issuer: ci\n        claims: {sub: \"user:*\"}\n"
+	byTeam := strings.Replace(base, "    subjects:\n      - issuer: ci\n        claims: {sub: \"repo:acme/web:*\"}\n", "", 1) + teams
+	c, err := Parse([]byte(byTeam), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.TeamsDeclared() || len(c.Warnings) != 0 || c.Teams["web"].Description != "Web shop" {
+		t.Fatalf("teams: %+v %q", c.Teams, c.Warnings)
+	}
+	off, err := Parse([]byte(byTeam+"ownership: {tombstone_ttl: 0s, transfer_ttl: 48h}\n"), e)
+	if err != nil || off.TombstoneTTL() != 0 || off.Ownership.TransferTTL.D() != 48*time.Hour {
+		t.Fatalf("ownership settings: %v", err)
+	}
+	for name, doc := range map[string]string{
+		"undeclared binding team": strings.Replace(byTeam, "    team: web\n", "    team: wbe\n", 1),
+		"undeclared key team":     byTeam + "virtual_keys:\n  - {id: k, app_id: vk-k, key_sha256: " + strings.Repeat("0", 64) + ", roles: [writer], teams: [other]}\n",
+		"team without members":    strings.Replace(byTeam, "    members:\n      groups: [devs]\n      subjects:\n        - issuer: ci\n          claims: {sub: \"repo:acme/web:*\"}\n", "", 1),
+		"unknown member group":    strings.Replace(byTeam, "groups: [devs]", "groups: [ghost]", 1),
+		"unknown member issuer":   strings.Replace(byTeam, "        - issuer: ci\n          claims", "        - issuer: nope\n          claims", 1),
+		"bad team name":           strings.Replace(byTeam, "teams:\n  web:", "teams:\n  web:\n    description: x\n  Web:", 1),
+		"negative tombstone ttl":  byTeam + "ownership: {tombstone_ttl: -1h}\n",
+		"short transfer ttl":      byTeam + "ownership: {transfer_ttl: 1m}\n",
+	} {
+		if _, err := Parse([]byte(doc), e); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+	empty := base + "teams: {}\n"
+	if _, err := Parse([]byte(empty), e); err == nil || !strings.Contains(err.Error(), `team "web" is not declared`) {
+		t.Fatalf("an empty teams block must make references strict: %v", err)
+	}
+}

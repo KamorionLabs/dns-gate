@@ -25,7 +25,10 @@ type AdoptSelection struct {
 	RRsets []RRsetRef `json:"rrsets,omitempty"`
 	Hosts  []string   `json:"hosts,omitempty"` // globs, combined with Types
 	Types  []string   `json:"types,omitempty"`
-	Owner  string     `json:"owner,omitempty"` // team; defaults to the caller's team
+	// Owner is the team the RRsets are adopted for, the caller's team by
+	// default. Another team than the caller's requires
+	// dns.ownership.approve on the zone.
+	Owner string `json:"owner,omitempty"`
 }
 
 // AdoptCandidate is one RRset in a preview.
@@ -93,4 +96,7 @@ type PlanResult struct {
 	Changes     []Change `json:"changes"`
 	ZoneVersion int64    `json:"zone_version"`
 	PlanID      string   `json:"plan_id,omitempty"` // set by the MCP layer, binds apply to this plan
+	// Team is the team the caller writes for when it selected one (team
+	// field or X-DNS-Gate-Team header); empty for its default team.
+	Team string `json:"team,omitempty"`
 }

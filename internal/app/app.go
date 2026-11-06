@@ -60,6 +60,9 @@ type App struct {
 
 // New builds every component; background loops start with Run.
 func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options) (*App, error) {
+	for _, w := range cfg.Warnings {
+		log.Warn("configuration accepted with a warning", "warning", w)
+	}
 	var sources []discovery.Source
 	hasEuroDNS := false
 	for _, pc := range cfg.Providers {

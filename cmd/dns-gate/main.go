@@ -61,6 +61,9 @@ func run() error {
 		return err
 	}
 	if *checkOnly {
+		for _, w := range cfg.Warnings {
+			fmt.Fprintln(os.Stderr, "warning:", w)
+		}
 		fmt.Println("configuration OK")
 		return nil
 	}

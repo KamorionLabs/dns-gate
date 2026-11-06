@@ -325,7 +325,7 @@ func (a *Authenticator) resolve(snap *policy.Snapshot, is *issuer, s *identity.S
 	if is.cfg.TeamClaim != "" {
 		for _, t := range policy.ClaimStrings(claims[is.cfg.TeamClaim]) {
 			t = strings.ToLower(t)
-			if t != "" && !teams[t] {
+			if t != "" && !teams[t] && (!snap.StrictTeams() || snap.KnownTeam(t)) {
 				teams[t] = true
 				s.Teams = append(s.Teams, t)
 			}

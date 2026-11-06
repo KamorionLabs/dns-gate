@@ -38,12 +38,18 @@ type Config struct {
 	Protected         []Protected      `yaml:"protected"`
 	UI                UI               `yaml:"ui"`
 	Groups            map[string]Group `yaml:"groups"`
+	Teams             map[string]Team  `yaml:"teams"`
+	Ownership         Ownership        `yaml:"ownership"`
 	Policy            Policy           `yaml:"policy"`
 	MCP               MCP              `yaml:"mcp"`
 	ACME              ACME             `yaml:"acme"`
 
 	Hash     string    `yaml:"-"` // sha256 of the file
 	LoadedAt time.Time `yaml:"-"`
+	// Warnings are the problems the configuration is still accepted with
+	// (teams referenced but not declared, during the migration to the
+	// teams block).
+	Warnings []string `yaml:"-"`
 }
 
 // Provider kinds.
@@ -113,6 +119,52 @@ type Group struct {
 	Description string    `yaml:"description"`
 	Members     []Subject `yaml:"members"`
 }
+
+// Team is the unit of RRset ownership: the people and pipelines of a
+// project, declared together. A binding naming the team without groups or
+// subjects of its own grants its role to the members of the team.
+type Team struct {
+	Description string      `yaml:"description"`
+	Members     TeamMembers `yaml:"members"`
+}
+
+// TeamMembers are the groups and the subject matchers of a team.
+type TeamMembers struct {
+	Groups   []string  `yaml:"groups"`
+	Subjects []Subject `yaml:"subjects"`
+}
+
+// Ownership tunes the RRset ownership rules.
+type Ownership struct {
+	// TombstoneTTL is how long a deleted RRset stays reserved for the team
+	// that owned it: only that team may create it again meanwhile, other
+	// teams go through a transfer. Default 7 days, "0s" disables it.
+	TombstoneTTL *Duration `yaml:"tombstone_ttl"`
+	// TransferTTL is how long a transfer request waits for its approval
+	// (default 7 days).
+	TransferTTL Duration `yaml:"transfer_ttl"`
+}
+
+// Default ownership durations.
+const (
+	DefaultTombstoneTTL = 7 * 24 * time.Hour
+	DefaultTransferTTL  = 7 * 24 * time.Hour
+)
+
+// TombstoneTTL returns ownership.tombstone_ttl with its default.
+func (c *Config) TombstoneTTL() time.Duration {
+	if c.Ownership.TombstoneTTL == nil {
+		return DefaultTombstoneTTL
+	}
+	return c.Ownership.TombstoneTTL.D()
+}
+
+// TeamsDeclared reports whether the configuration has a teams block. Team
+// references are then strict: every team a binding, virtual key or
+// delegation names must be declared, in the base file or the managed layer.
+// Without the block, the referenced teams are declared automatically with a
+// warning (migration).
+func (c *Config) TeamsDeclared() bool { return c.Teams != nil }
 
 // Policy configures the managed (UI-editable) policy layer.
 type Policy struct {
@@ -400,16 +452,17 @@ var ReservedIssuers = map[string]bool{"api-key": true, "virtual-key": true, "gat
 
 // Known actions.
 var knownActions = map[string]bool{
-	"dns.read":           true,
-	"dns.record.write":   true,
-	"dns.record.adopt":   true,
-	"dns.zone.admin":     true,
-	"ui.read":            true,
-	"policy.read":        true,
-	"policy.propose":     true,
-	"policy.approve":     true,
-	"domain.read":        true,
-	"gate.apikey.manage": true,
+	"dns.read":              true,
+	"dns.record.write":      true,
+	"dns.record.adopt":      true,
+	"dns.zone.admin":        true,
+	"ui.read":               true,
+	"policy.read":           true,
+	"policy.propose":        true,
+	"policy.approve":        true,
+	"domain.read":           true,
+	"gate.apikey.manage":    true,
+	"dns.ownership.approve": true,
 }
 
 var asymmetricAlgs = map[string]bool{
@@ -604,6 +657,9 @@ func (c *Config) defaults() {
 	}
 	if c.Policy.EditMaxAge == 0 {
 		c.Policy.EditMaxAge = Duration(15 * time.Minute)
+	}
+	if c.Ownership.TransferTTL == 0 {
+		c.Ownership.TransferTTL = Duration(DefaultTransferTTL)
 	}
 	for i := range c.Policy.Delegations {
 		if c.Policy.Delegations[i].Allow.MaxObjects == 0 {
@@ -860,6 +916,30 @@ func (c *Config) Validate() error {
 	}
 
 	teamRe := nameRe
+	ref := c.teamRefChecker(add)
+	for _, name := range sortedNames(c.Teams) {
+		t := c.Teams[name]
+		at := "teams." + name
+		if !nameRe.MatchString(name) {
+			add("%s: team name must be a lowercase identifier", at)
+		}
+		if len(t.Description) > 500 {
+			add("%s.description: at most 500 characters", at)
+		}
+		for j, g := range t.Members.Groups {
+			if _, ok := c.Groups[g]; !ok {
+				add("%s.members.groups[%d]: unknown group %q", at, j, g)
+			}
+		}
+		for j, m := range t.Members.Subjects {
+			if !issuers[m.Issuer] {
+				add("%s.members.subjects[%d].issuer: unknown issuer %q", at, j, m.Issuer)
+			}
+			if len(m.Claims) == 0 {
+				add("%s.members.subjects[%d].claims: at least one claim is required", at, j)
+			}
+		}
+	}
 	for i, b := range c.Bindings {
 		at := fmt.Sprintf("bindings[%d]", i)
 		if _, ok := c.Roles[b.Role]; !ok {
@@ -877,7 +957,15 @@ func (c *Config) Validate() error {
 			}
 		}
 		if len(b.Subjects) == 0 && len(b.Groups) == 0 {
-			add("%s: groups or subjects required", at)
+			switch {
+			case b.TeamFrom != nil:
+				add("%s: groups or subjects required with team_from", at)
+			case b.Team == "" || !c.teamHasMembers(b.Team):
+				add("%s: groups or subjects required (or a team declared with members)", at)
+			}
+		}
+		if b.Team != "" {
+			ref(at+".team", b.Team)
 		}
 		for j, g := range b.Groups {
 			if _, ok := c.Groups[g]; !ok {
@@ -934,6 +1022,19 @@ func (c *Config) Validate() error {
 		add("policy.edit_max_age: must be between 1m and 24h")
 	}
 	errs = append(errs, validateDelegations(c, issuers)...)
+	for i, d := range c.Policy.Delegations {
+		for _, n := range d.Allow.Teams.Names {
+			if !strings.Contains(n, "*") && teamRe.MatchString(n) {
+				ref(fmt.Sprintf("policy.delegations[%d].allow.teams.names", i), n)
+			}
+		}
+	}
+	if t := c.Ownership.TombstoneTTL; t != nil && (t.D() < 0 || t.D() > 365*24*time.Hour) {
+		add("ownership.tombstone_ttl: must be between 0s (disabled) and 8760h")
+	}
+	if d := c.Ownership.TransferTTL.D(); d < time.Hour || d > 90*24*time.Hour {
+		add("ownership.transfer_ttl: must be between 1h and 2160h")
+	}
 
 	vkIDs, vkApps := map[string]bool{}, map[string]bool{}
 	for i, vk := range c.VirtualKeys {
@@ -974,7 +1075,9 @@ func (c *Config) Validate() error {
 		for _, t := range vk.Teams {
 			if !teamRe.MatchString(t) {
 				add("%s.teams: %q must be a lowercase identifier", at, t)
+				continue
 			}
+			ref(at+".teams", t)
 		}
 		for _, p := range vk.AllowedCIDRs {
 			if _, err := netip.ParsePrefix(p); err != nil {
@@ -1051,6 +1154,42 @@ func (c *Config) Validate() error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// teamHasMembers reports whether team is declared with at least one member.
+func (c *Config) teamHasMembers(team string) bool {
+	t, ok := c.Teams[team]
+	return ok && (len(t.Members.Groups) > 0 || len(t.Members.Subjects) > 0)
+}
+
+// teamRefChecker returns the check of a team reference: an error for an
+// undeclared team once the teams block exists, otherwise a warning (once per
+// team) and the team is declared automatically.
+func (c *Config) teamRefChecker(add func(string, ...any)) func(at, team string) {
+	c.Warnings = nil
+	warned := map[string]bool{}
+	return func(at, team string) {
+		if _, ok := c.Teams[team]; ok {
+			return
+		}
+		if c.TeamsDeclared() {
+			add("%s: team %q is not declared under teams", at, team)
+			return
+		}
+		if !warned[team] {
+			warned[team] = true
+			c.Warnings = append(c.Warnings, fmt.Sprintf("%s: team %q is not declared under teams; it is declared automatically for now, declare it (validation becomes strict once a teams block exists)", at, team))
+		}
+	}
+}
+
+func sortedNames[T any](m map[string]T) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // decodeKey accepts a 32-byte key encoded as hex or base64.

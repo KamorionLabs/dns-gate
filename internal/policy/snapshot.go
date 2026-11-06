@@ -27,6 +27,12 @@ type compiledRole struct {
 	delegation string // owner delegation of a delegated role, "" otherwise
 }
 
+type compiledTeam struct {
+	name  string
+	layer string
+	team  uiapi.Team
+}
+
 type compiledGroup struct {
 	name    string
 	layer   string
@@ -67,6 +73,8 @@ type Snapshot struct {
 	zones      map[string]bool // managed: base zones and managed document zones
 	discovery  Discovery       // live account lists, nil without discovery
 	roles      map[string]*compiledRole
+	teams      map[string]*compiledTeam
+	strict     bool // team references must be declared (config teams block)
 	groups     map[string]*compiledGroup
 	groupNames []string
 	bindings   []compiledBinding
@@ -83,6 +91,7 @@ type Snapshot struct {
 // BaseDocument converts the file policy to the document form.
 func BaseDocument(c *config.Config) uiapi.PolicyDocument {
 	d := uiapi.PolicyDocument{
+		Teams:       map[string]uiapi.Team{},
 		Groups:      map[string]uiapi.Group{},
 		Roles:       map[string]uiapi.Role{},
 		Bindings:    []uiapi.Binding{},
@@ -90,6 +99,13 @@ func BaseDocument(c *config.Config) uiapi.PolicyDocument {
 	}
 	for name, g := range c.Groups {
 		d.Groups[name] = uiapi.Group{Description: g.Description, Members: matchers(g.Members)}
+	}
+	for name, t := range c.Teams {
+		ut := uiapi.Team{Description: t.Description, Members: uiapi.TeamMembers{Groups: t.Members.Groups}}
+		if len(t.Members.Subjects) > 0 {
+			ut.Members.Subjects = matchers(t.Members.Subjects)
+		}
+		d.Teams[name] = ut
 	}
 	for name, r := range c.Roles {
 		ur := uiapi.Role{RebaseOnSave: r.RebaseOnSave, MaxChangesPerRequest: r.MaxChangesPerRequest}
@@ -142,6 +158,8 @@ func compile(c *config.Config, base uiapi.PolicyDocument, managed *uiapi.PolicyD
 		zones:      map[string]bool{},
 		discovery:  disc,
 		roles:      map[string]*compiledRole{},
+		teams:      map[string]*compiledTeam{},
+		strict:     c.TeamsDeclared(),
 		groups:     map[string]*compiledGroup{},
 		protected:  c.Protected,
 		bounds:     c.Policy.Bounds,
@@ -181,6 +199,11 @@ func compile(c *config.Config, base uiapi.PolicyDocument, managed *uiapi.PolicyD
 		}
 		for name, g := range doc.Groups {
 			s.groups[name] = &compiledGroup{name: name, layer: layer, members: g.Members}
+		}
+		for name, t := range doc.Teams {
+			if _, taken := s.teams[name]; !taken {
+				s.teams[name] = &compiledTeam{name: name, layer: layer, team: t}
+			}
 		}
 		for i, b := range doc.Bindings {
 			cb := compiledBinding{index: i, layer: layer, binding: b}
@@ -328,6 +351,9 @@ func TeamFromString(t *uiapi.TeamFrom) string {
 }
 
 func (s *Snapshot) bindingApplies(b uiapi.Binding, issuer string, claims map[string]any, inGroup map[string]bool) bool {
+	if len(b.Groups) == 0 && len(b.Subjects) == 0 {
+		return s.teamMember(b.Team, issuer, claims, inGroup)
+	}
 	for _, g := range b.Groups {
 		if inGroup[g] {
 			return true

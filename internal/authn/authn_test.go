@@ -20,6 +20,11 @@ import (
 
 func setup(t *testing.T) (*Authenticator, *oidctest.Provider) {
 	t.Helper()
+	return setupWith(t, nil)
+}
+
+func setupWith(t *testing.T, mut func(*config.Config)) (*Authenticator, *oidctest.Provider) {
+	t.Helper()
 	p := oidctest.New()
 	t.Cleanup(p.Close)
 	sum := sha256.Sum256([]byte("vk-secret"))
@@ -42,6 +47,9 @@ func setup(t *testing.T) (*Authenticator, *oidctest.Provider) {
 			{ID: "caddy", AppID: "vk-caddy", KeySHA256: hex.EncodeToString(sum[:]), Roles: []string{"acme-solver"}, Teams: []string{"platform"}, ExpiresAt: &exp, AllowedCIDRs: []string{"192.0.2.0/24"}},
 			{ID: "old", AppID: "vk-old", KeySHA256: hex.EncodeToString(sum[:]), Roles: []string{"acme-solver"}, ExpiresAt: &past},
 		},
+	}
+	if mut != nil {
+		mut(c)
 	}
 	a, err := New(c, p.Client(), nil)
 	if err != nil {
@@ -82,6 +90,21 @@ func TestBearerOK(t *testing.T) {
 	}
 	if s.String() != "ci:repo:acme/web:ref:refs/heads/main" {
 		t.Fatal(s.String())
+	}
+}
+
+func TestClaimTeamsStrict(t *testing.T) {
+	a, p := setupWith(t, func(c *config.Config) {
+		c.Teams = map[string]config.Team{"web": {}, "ops": {}}
+	})
+	claims := good()
+	claims["teams"] = []any{"Edge", "OPS"}
+	s, err := a.Authenticate(bearer(p.Sign(claims)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(s.Teams, ",") != "web,ops" {
+		t.Fatalf("undeclared claim teams must be dropped once teams are declared: %v", s.Teams)
 	}
 }
 

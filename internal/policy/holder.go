@@ -172,6 +172,9 @@ func DecodeDocument(b []byte) (uiapi.PolicyDocument, error) {
 
 // Normalize replaces nil collections with empty ones.
 func Normalize(d *uiapi.PolicyDocument) {
+	if d.Teams == nil {
+		d.Teams = map[string]uiapi.Team{}
+	}
 	if d.Groups == nil {
 		d.Groups = map[string]uiapi.Group{}
 	}
