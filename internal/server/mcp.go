@@ -441,7 +441,7 @@ func (m *mcpServer) addReadTools(srv *mcp.Server) {
 		all := m.s.readsEveryManagedZone(readable)
 		page := uiapi.AuditPage{Entries: []uiapi.AuditEntry{}, NextCursor: next}
 		for _, e := range events {
-			if (e.Zone == "" && all) || readable[e.Zone] {
+			if ((e.Zone == "" && all) || readable[e.Zone]) && m.s.auditVisible(subj, e) {
 				page.Entries = append(page.Entries, toAuditEntry(e))
 			}
 		}

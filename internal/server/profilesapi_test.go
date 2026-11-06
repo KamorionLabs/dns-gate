@@ -36,18 +36,30 @@ func (o otherKind) Kind() string { return "route53" }
 // only, subject narrow).
 func profileEnv(t *testing.T, writes bool, others ...provider.Provider) (*env, *profiletest.Fake) {
 	t.Helper()
+	return profileEnvTweak(t, writes, nil, others...)
+}
+
+// profileEnvTweak is profileEnv with a change of the configuration.
+func profileEnvTweak(t *testing.T, writes bool, tweak func(*config.Config), others ...provider.Provider) (*env, *profiletest.Fake) {
+	t.Helper()
 	e := newEnvWith(t, func(c *config.Config) {
 		c.MCP = config.MCP{Enabled: true, AllowWrites: writes, PlanTTL: config.Duration(10 * time.Minute), RequestsPerMinute: 600}
 		c.Issuers[0].CategoryClaim = "kind"
 		c.Issuers[0].CategoryMap = map[string]string{"user": "human"}
 		c.Policy.EditMaxAge = config.Duration(15 * time.Minute)
-		c.Protected = []config.Protected{{Zones: []string{"*"}, Hosts: []string{"@"}, Types: []string{"NS", "CAA"}},
+		c.Protected = []config.Protected{{Zones: []string{"*"}, Hosts: []string{"@"}, Types: []string{"NS", "CAA", "AAAA"}},
+			{Zones: []string{"*"}, Hosts: []string{"login"}, Types: []string{"CNAME"}},
 			{Zones: []string{"example.com"}, Hosts: []string{"_dmarc"}, Types: []string{"TXT"}}}
 		c.Roles["profiles"] = config.Role{Rules: []config.Rule{{Zones: []string{"*"}, Actions: []string{policy.ActionZoneProfile}}}}
 		c.Roles["narrow"] = config.Role{Rules: []config.Rule{{Zones: []string{"example.com"}, Actions: []string{policy.ActionZoneProfile, policy.ActionUIRead}}}}
 		c.Bindings = append(c.Bindings,
 			config.Binding{Role: "profiles", Team: "ops", Subjects: []config.Subject{{Issuer: "idp", Claims: map[string]config.StringList{"sub": {"profiler"}}}}},
-			config.Binding{Role: "narrow", Team: "web", Subjects: []config.Subject{{Issuer: "idp", Claims: map[string]config.StringList{"sub": {"narrow"}}}}})
+			config.Binding{Role: "narrow", Team: "web", Subjects: []config.Subject{{Issuer: "idp", Claims: map[string]config.StringList{"sub": {"narrow"}}}}},
+			config.Binding{Role: "admin", Team: "ops", Subjects: []config.Subject{{Issuer: "idp", Claims: map[string]config.StringList{"sub": {"profile-auditor"}}}}},
+			config.Binding{Role: "profiles", Team: "ops", Subjects: []config.Subject{{Issuer: "idp", Claims: map[string]config.StringList{"sub": {"profile-auditor"}}}}})
+		if tweak != nil {
+			tweak(c)
+		}
 	})
 	fake := profiletest.New()
 	fake.APIKey = "upstream-secret"
@@ -425,6 +437,11 @@ func TestZoneProfileUpdateAuditsPrevious(t *testing.T) {
 	if ev := e.events("zone_profile.create"); len(ev[0].Changes) != 2 {
 		t.Fatalf("create changes: %+v", ev[0].Changes)
 	}
+	for _, c := range ev[0].Changes {
+		if c.OldValues != nil || c.NewValues != nil || c.OldTTL != 0 || c.NewTTL != 0 {
+			t.Fatalf("record values in the journal changes: %+v", c)
+		}
+	}
 }
 
 func TestZoneProfilesProviderOptIn(t *testing.T) {
@@ -508,5 +525,67 @@ func TestMCPZoneProfileUpdateKeepsForwards(t *testing.T) {
 	}
 	if res = call(t, cs, "update_zone_profile", map[string]any{"id": id, "name": "renamed", "records": []map[string]any{}, "mail_forwards": []any{}}, nil); res.IsError || len(fake.Profile(id).MailForwards) != 0 {
 		t.Fatalf("explicit removal of the forwards: %s", errText(res))
+	}
+}
+
+func TestZoneProfileEventsHiddenFromJournalReaders(t *testing.T) {
+	e, _ := profileEnv(t, true)
+	secret := `{"name":"p","records":[{"type":"TXT","host":"@","ttl":600,"rdata":"google-site-verification=SECRET123"}]}`
+	if r := e.do(t, "POST", "/api/v1/providers/eurodns/zone-profiles", e.token("profiler"), secret, nil); r.StatusCode != 201 {
+		t.Fatalf("create: %d", r.StatusCode)
+	}
+	e.do(t, "POST", "/zone-profiles/check", e.token("profiler"), secret, nil)
+	cs := connect(t, e, e.token("profiler"))
+	call(t, cs, "list_zone_profiles", map[string]any{}, nil)
+
+	r := e.do(t, "GET", "/api/v1/audit?limit=500", e.token("admin"), "", nil)
+	body := readAll(r)
+	if r.StatusCode != 200 || strings.Contains(body, "SECRET123") || strings.Contains(body, "zone_profile") || strings.Contains(body, "ZoneProfile") {
+		t.Fatalf("profile events shown to a ui.read holder without dns.zone.profile: %d %s", r.StatusCode, body)
+	}
+	cs = connect(t, e, e.token("admin"))
+	var page uiapi.AuditPage
+	if res := call(t, cs, "search_audit", map[string]any{"limit": 200}, &page); res.IsError {
+		t.Fatalf("search_audit: %s", errText(res))
+	}
+	for _, en := range page.Entries {
+		if strings.Contains(en.Action, "zone_profile") || strings.Contains(en.Action, "ZoneProfile") {
+			t.Fatalf("MCP search_audit shows %s", en.Action)
+		}
+	}
+
+	r = e.do(t, "GET", "/api/v1/audit?limit=500", e.token("profile-auditor"), "", nil)
+	body = readAll(r)
+	for _, a := range []string{"zone_profile.create", "checkZoneProfile", "mcp.list_zone_profiles"} {
+		if !strings.Contains(body, `"`+a+`"`) {
+			t.Fatalf("%s hidden from a dns.zone.profile holder: %s", a, body)
+		}
+	}
+	if strings.Contains(body, "SECRET123") {
+		t.Fatal("record values in the journal")
+	}
+}
+
+func TestZoneProfilesProtectedForwards(t *testing.T) {
+	e, fake := profileEnvTweak(t, false, func(c *config.Config) {
+		c.Protected = append(c.Protected, config.Protected{Zones: []string{"example.com"}, Hosts: []string{"@"}, Types: []string{"MX"}})
+	})
+	tok := e.token("profiler")
+	for _, body := range []string{
+		`{"name":"p","records":[],"mailForwards":[{"source":"*","destination":"x@attacker.example"}]}`,
+		`{"name":"p","records":[],"urlForwards":[{"forwardType":"HTTP301","host":"","url":"https://attacker.example"}]}`,
+		`{"name":"p","records":[],"urlForwards":[{"forwardType":"HTTP302","host":"login","url":"https://attacker.example"}]}`,
+	} {
+		for _, path := range []string{"/api/v1/providers/eurodns/zone-profiles", "/api/v1/providers/eurodns/zone-profiles/check", "/zone-profiles"} {
+			if r := e.do(t, "POST", path, tok, body, nil); r.StatusCode != 403 || reason(t, r) != "protected" {
+				t.Fatalf("%s %s: %d", path, body, r.StatusCode)
+			}
+		}
+	}
+	if r := e.do(t, "POST", "/zone-profiles", tok, `{"name":"p","records":[],"urlForwards":[{"forwardType":"HTTP301","host":"www","url":"https://example.net"}]}`, nil); r.StatusCode != 201 {
+		t.Fatalf("unprotected URL forward: %d", r.StatusCode)
+	}
+	if fake.Len() != 1 {
+		t.Fatalf("profiles: %d", fake.Len())
 	}
 }

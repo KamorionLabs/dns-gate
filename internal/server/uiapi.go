@@ -195,7 +195,7 @@ func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, http.StatusOK, inv)
 	case rest == "/audit":
-		s.handleAudit(w, r, readable)
+		s.handleAudit(w, r, subj, readable)
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "unknown API endpoint")
 	}
@@ -341,7 +341,7 @@ var auditParams = map[string]bool{
 // handleAudit lists audit events. Events of zones the subject cannot read
 // are filtered out; events without a zone (authentication failures) are
 // only shown to subjects that can read every managed zone.
-func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request, readable map[string]bool) {
+func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request, subj *identity.Subject, readable map[string]bool) {
 	if s.cfg.AuditReader == nil {
 		writeError(w, http.StatusNotFound, "not_found", "audit storage not configured")
 		return
@@ -408,7 +408,7 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request, readable ma
 	all := s.readsEveryManagedZone(readable)
 	page := uiapi.AuditPage{Entries: []uiapi.AuditEntry{}, NextCursor: next}
 	for _, e := range events {
-		if (e.Zone == "" && !all) || (e.Zone != "" && !readable[e.Zone]) {
+		if (e.Zone == "" && !all) || (e.Zone != "" && !readable[e.Zone]) || !s.auditVisible(subj, e) {
 			continue
 		}
 		page.Entries = append(page.Entries, toAuditEntry(e))

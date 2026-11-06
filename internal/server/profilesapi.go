@@ -2,11 +2,11 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -206,50 +206,67 @@ func (s *Server) runProfile(ctx context.Context, subj *identity.Subject, c profi
 }
 
 // protectedInProfile returns why a profile holds a record of the protected
-// list, "" when it holds none. The zones of the protected entries are
-// ignored: the profile is applied to domains the gate does not know yet.
+// list, "" when it holds none. Mail forwards count as the apex MX, URL
+// forwards as A, AAAA and CNAME records of their host. The zones of the
+// protected entries are ignored: the profile is applied to domains the gate
+// does not know yet.
 func (s *Server) protectedInProfile(p *eurodnsprov.ZoneProfile) string {
 	snap := s.cfg.Policy.Current()
+	type rec struct{ host, typ, what string }
+	var recs []rec
 	for _, r := range p.Records {
-		if pe, ok := snap.ProtectedRecord(r.Host, r.Type); ok {
-			host := r.Host
+		recs = append(recs, rec{r.Host, r.Type, "record"})
+	}
+	if len(p.MailForwards) > 0 {
+		recs = append(recs, rec{"@", "MX", "mail forward"})
+	}
+	for _, raw := range p.URLForwards {
+		var f struct {
+			Host string `json:"host"`
+		}
+		if err := json.Unmarshal(raw, &f); err != nil {
+			return "invalid URL forward"
+		}
+		for _, t := range []string{"A", "AAAA", "CNAME"} {
+			recs = append(recs, rec{f.Host, t, "URL forward"})
+		}
+	}
+	for _, r := range recs {
+		if pe, ok := snap.ProtectedRecord(r.host, r.typ); ok {
+			host := r.host
 			if host == "" {
 				host = "@"
 			}
-			return fmt.Sprintf("record %s %s is protected (hosts %s, types %s): zone profiles may not hold protected records, whatever the zones of the protected entry",
-				host, strings.ToUpper(r.Type), strings.Join(pe.Hosts, ","), strings.Join(pe.Types, ","))
+			return fmt.Sprintf("%s %s %s is protected (hosts %s, types %s): zone profiles may not hold protected records, whatever the zones of the protected entry",
+				r.what, host, strings.ToUpper(r.typ), strings.Join(pe.Hosts, ","), strings.Join(pe.Types, ","))
 		}
 	}
 	return ""
 }
 
-// profileChanges summarizes, per host and type, the records a profile
-// write changes, for the audit journal.
+// profileChanges lists, per host and type, the records a profile write
+// creates, changes or deletes, for the audit journal. Values and TTLs are
+// left out: the journal is readable by holders of ui.read, the content stays
+// in the profile and previous fields of the event.
 func profileChanges(before, after *eurodnsprov.ZoneProfile) []uiapi.Change {
-	type set struct {
-		ttl    int
-		values []string
-	}
-	group := func(p *eurodnsprov.ZoneProfile) map[dns.Key]*set {
-		out := map[dns.Key]*set{}
-		if p == nil {
-			return out
-		}
-		for _, r := range p.Records {
-			h := strings.TrimSuffix(strings.ToLower(r.Host), ".")
-			if h == "" {
-				h = "@"
+	group := func(p *eurodnsprov.ZoneProfile) map[dns.Key]string {
+		out := map[dns.Key][]string{}
+		if p != nil {
+			for _, r := range p.Records {
+				h := strings.TrimSuffix(strings.ToLower(r.Host), ".")
+				if h == "" {
+					h = "@"
+				}
+				k := dns.Key{Host: h, Type: strings.ToUpper(r.Type)}
+				out[k] = append(out[k], fmt.Sprintf("%d %s", r.TTL, r.RData))
 			}
-			k := dns.Key{Host: h, Type: strings.ToUpper(r.Type)}
-			if out[k] == nil {
-				out[k] = &set{ttl: r.TTL}
-			}
-			out[k].values = append(out[k].values, r.RData)
 		}
-		for _, st := range out {
-			sort.Strings(st.values)
+		sum := map[dns.Key]string{}
+		for k, v := range out {
+			sort.Strings(v)
+			sum[k] = strings.Join(v, "\x00")
 		}
-		return out
+		return sum
 	}
 	old, cur := group(before), group(after)
 	keys := map[dns.Key]bool{}
@@ -261,15 +278,16 @@ func profileChanges(before, after *eurodnsprov.ZoneProfile) []uiapi.Change {
 	}
 	var out []uiapi.Change
 	for k := range keys {
-		o, n := old[k], cur[k]
+		o, inOld := old[k]
+		n, inNew := cur[k]
 		c := uiapi.Change{Host: k.Host, Type: k.Type}
 		switch {
-		case o == nil:
-			c.Op, c.NewTTL, c.NewValues = "create", n.ttl, n.values
-		case n == nil:
-			c.Op, c.OldTTL, c.OldValues = "delete", o.ttl, o.values
-		case o.ttl != n.ttl || !slices.Equal(o.values, n.values):
-			c.Op, c.OldTTL, c.OldValues, c.NewTTL, c.NewValues = "update", o.ttl, o.values, n.ttl, n.values
+		case !inOld:
+			c.Op = "create"
+		case !inNew:
+			c.Op = "delete"
+		case o != n:
+			c.Op = "update"
 		default:
 			continue
 		}
@@ -282,6 +300,23 @@ func profileChanges(before, after *eurodnsprov.ZoneProfile) []uiapi.Change {
 		return out[i].Type < out[j].Type
 	})
 	return out
+}
+
+// profileActions are the EuroDNS operation ids of zone profiles.
+var profileActions = map[string]bool{"listZoneProfiles": true, "createZoneProfile": true, "checkZoneProfile": true,
+	"getProfile": true, "updateUserAPiZoneProfile": true, "deleteZoneProfile": true}
+
+// isProfileEvent reports whether an audit action is a zone profile
+// operation, on any channel.
+func isProfileEvent(action string) bool {
+	return strings.HasPrefix(action, "zone_profile.") || profileActions[action] ||
+		(strings.HasPrefix(action, "mcp.") && (strings.HasSuffix(action, "_zone_profile") || strings.HasSuffix(action, "_zone_profiles")))
+}
+
+// auditVisible reports whether subj may see an audit event of the journal
+// whose zone check passed: zone profile events need dns.zone.profile.
+func (s *Server) auditVisible(subj *identity.Subject, e audit.Event) bool {
+	return !isProfileEvent(e.Action) || s.canManageProfiles(subj)
 }
 
 // checkProfile validates what the gate requires of a profile to save; the
