@@ -26,7 +26,14 @@ import type {
   RevisionSummary,
   Role,
   RRset,
+  TeamDetail,
+  TeamInfo,
+  TeamList,
   TerraformQuery,
+  Transfer,
+  TransferPage,
+  TransferProposal,
+  TransferQuery,
   ValidationError,
   WhoCanResponse,
   ZoneInventory,
@@ -66,6 +73,7 @@ const me: Me = asReader
       category: 'human',
       roles: ['viewer'],
       teams: ['ops'],
+      default_team: 'ops',
       groups: ['dns-viewers'],
       permissions: [{ role: 'viewer', zones: ['*'], actions: ['dns.read', 'ui.read', 'policy.read'], hosts: [], types: [] }],
     }
@@ -75,6 +83,7 @@ const me: Me = asReader
       category: 'human',
       roles: ['viewer', 'policy-admin', 'app-cname-writer', 'edge-writer', 'adopter'],
       teams: ['web', 'platform'],
+      default_team: 'web',
       groups: ['policy-admins', 'web-humans'],
       permissions: [
         {
@@ -118,6 +127,10 @@ const inventories: ZoneInventory[] = [
   {
     zone: 'example.com',
     last_synced_at: ago(3),
+    tombstones: [
+      { host: 'promo', type: 'CNAME', team: 'web', deleted_by: ghWeb, deleted_at: ago(2 * D), expires_at: ahead(5 * D) },
+      { host: 'old-careers', type: 'CNAME', team: 'corporate', deleted_by: ciCorp, deleted_at: ago(6 * H), expires_at: ahead(7 * D - 6 * H) },
+    ],
     rrsets: [
       foreign('@', 'SOA', 86400, ['ns1.eurodns.com. hostmaster.eurodns.com. 2026110201 10800 3600 604800 600']),
       foreign('@', 'NS', 86400, ['ns1.eurodns.com.', 'ns2.eurodns.com.', 'ns3.eurodns.com.', 'ns4.eurodns.com.'], true),
@@ -1316,7 +1329,8 @@ function refusal(c: RRsetChange, cur: RRset | undefined): { reason: string; mess
   return null;
 }
 
-function planChanges(zone: string, input: RRsetChange[]): PlanResult {
+function planChanges(zone: string, input: RRsetChange[], team?: string): PlanResult {
+  if (team && !me.teams.includes(team)) throw new ApiError(403, 'not_team_member', `team ${team} is not one of your teams`);
   // what goes over the wire: plain JSON
   const changes = JSON.parse(JSON.stringify(input)) as RRsetChange[];
   const inv = managedZones().has(zone) ? findInv(zone) : undefined;
@@ -1328,7 +1342,12 @@ function planChanges(zone: string, input: RRsetChange[]): PlanResult {
   for (const c of changes) {
     const cur = inv.rrsets.find((r) => r.host === c.host && r.type === c.type);
     const op = c.delete ? 'delete' : cur ? 'update' : 'create';
-    const why = refusal(c, cur) ?? (rbacAllows(me, zone, c.host, c.type) ? null : { reason: 'forbidden', message: `dns.record.write not granted on ${c.host} ${c.type}` });
+    const tomb = !cur ? (inv.tombstones ?? []).find((t) => t.host === c.host && t.type === c.type) : undefined;
+    const why =
+      refusal(c, cur) ??
+      (cur?.owner && team && cur.owner !== team ? { reason: 'not_owner', message: `${c.host} ${c.type} is owned by team ${cur.owner}, not ${team}` } : null) ??
+      (tomb && !(team ? [team] : me.teams).includes(tomb.team) ? { reason: 'not_owner', message: `${c.host} ${c.type} was deleted recently and is reserved for team ${tomb.team}` } : null) ??
+      (rbacAllows(me, zone, c.host, c.type) ? null : { reason: 'forbidden', message: `dns.record.write not granted on ${c.host} ${c.type}` });
     first ??= why;
     out.push({
       op,
@@ -1340,7 +1359,7 @@ function planChanges(zone: string, input: RRsetChange[]): PlanResult {
     });
   }
   const version = zoneVersion[zone] ?? 1;
-  const result: PlanResult = { zone, allowed: !first, reason: first?.reason, message: first?.message, changes: out, zone_version: version };
+  const result: PlanResult = { zone, allowed: !first, reason: first?.reason, message: first?.message, changes: out, zone_version: version, team };
   if (!first) {
     result.plan_id = 'pl_' + randomToken(12);
     plans.set(result.plan_id, { zone, subject: me.subject, version, changes, result });
@@ -1348,11 +1367,13 @@ function planChanges(zone: string, input: RRsetChange[]): PlanResult {
   return result;
 }
 
-function applyPlan(zone: string, planId: string): PlanResult {
+function applyPlan(zone: string, planId: string, team?: string): PlanResult {
   const p = plans.get(planId);
   if (!p || p.zone !== zone) throw new ApiError(404, 'plan_not_found', 'unknown or already used plan_id: plan again');
+  if (team && p.result.team && team !== p.result.team) throw new ApiError(400, 'team_mismatch', `the plan was made for team ${p.result.team}, not ${team}`);
   plans.delete(planId);
   const inv = findInv(zone)!;
+  const owner = p.result.team ?? team ?? me.default_team ?? me.teams[0];
   if (writeConflict || (zoneVersion[zone] ?? 1) !== p.version) {
     writeConflict = false;
     // someone else changed the first record set meanwhile
@@ -1372,12 +1393,19 @@ function applyPlan(zone: string, planId: string): PlanResult {
   for (const c of p.changes) {
     const i = inv.rrsets.findIndex((r) => r.host === c.host && r.type === c.type);
     if (c.delete) {
-      if (i >= 0) inv.rrsets.splice(i, 1);
+      if (i >= 0) {
+        const gone = inv.rrsets[i]!;
+        if (gone.owner) {
+          inv.tombstones = [...(inv.tombstones ?? []).filter((t) => t.host !== gone.host || t.type !== gone.type), { host: gone.host, type: gone.type, team: gone.owner, deleted_by: actor, deleted_at: now, expires_at: ahead(7 * D) }];
+        }
+        inv.rrsets.splice(i, 1);
+      }
     } else if (i >= 0) {
       Object.assign(inv.rrsets[i]!, { ttl: c.ttl, values: c.values ?? [], updated_by: actor, updated_at: now, last_request_id: requestId, status: 'managed' });
     } else {
+      inv.tombstones = (inv.tombstones ?? []).filter((t) => t.host !== c.host || t.type !== c.type);
       inv.rrsets.push({
-        host: c.host, type: c.type, ttl: c.ttl ?? 3600, values: c.values ?? [], status: 'managed', protected: false, owner: me.teams[0],
+        host: c.host, type: c.type, ttl: c.ttl ?? 3600, values: c.values ?? [], status: 'managed', protected: false, owner,
         created_by: actor, created_at: now, adopted: false, last_request_id: requestId,
       });
     }
@@ -1393,6 +1421,230 @@ function applyPlan(zone: string, planId: string): PlanResult {
     })),
   });
   return { ...p.result, request_id: requestId };
+}
+
+// ------------------------------------------------------------ teams and transfers
+
+const declaredTeams: Record<string, { description: string; roles: string[]; groups?: string[] }> = {
+  web: { description: 'Web shop: people and deployment pipelines', roles: ['app-cname-writer', 'edge-writer'], groups: ['web-humans'] },
+  platform: { description: 'Shared platform: load balancers, certificates', roles: ['edge-writer'], groups: ['platform-ops'] },
+  corporate: { description: 'Corporate sites', roles: ['app-cname-writer'], groups: ['dns-corporate'] },
+  security: { description: 'Certificates and ACME challenges', roles: ['acme'] },
+  ops: { description: 'Operations, read-only on every zone', roles: ['viewer'], groups: ['dns-viewers'] },
+};
+
+function ownedCounts(): Record<string, Record<string, { rrsets: number; tombstones: number }>> {
+  const out: Record<string, Record<string, { rrsets: number; tombstones: number }>> = {};
+  const add = (team: string, zone: string, k: 'rrsets' | 'tombstones') => {
+    out[team] ??= {};
+    out[team][zone] ??= { rrsets: 0, tombstones: 0 };
+    out[team][zone][k]++;
+  };
+  for (const inv of inventories) {
+    if (!managedZones().has(inv.zone)) continue;
+    for (const r of inv.rrsets) if (r.owner) add(r.owner, inv.zone, 'rrsets');
+    for (const t of inv.tombstones ?? []) add(t.team, inv.zone, 'tombstones');
+  }
+  return out;
+}
+
+function teamInfos(): TeamInfo[] {
+  const counts = ownedCounts();
+  const total = (t: string) => Object.values(counts[t] ?? {}).reduce((n, z) => n + z.rrsets, 0);
+  const canSeeMembers = me.permissions?.some((p) => p.actions.includes('policy.read')) ?? false;
+  const out: TeamInfo[] = Object.entries(declaredTeams).map(([name, t]) => ({
+    name, kind: 'declared', layer: name === 'corporate' ? 'managed' : 'base', description: t.description, roles: t.roles, rrsets: total(name),
+    members: canSeeMembers ? { groups: t.groups ?? [], subjects: name === 'web' ? [{ issuer: 'github', claims: { sub: ['repo:acme/web:*'] } }] : [] } : undefined,
+    virtual_keys: name === 'security' ? ['acme-solver'] : undefined,
+  }));
+  out.push({ name: 'ci-*', kind: 'family', family: { claim: 'sub', regex: '^repo:acme/([a-z0-9-]+):', prefix: 'ci-' }, roles: ['app-cname-writer'], rrsets: 0 });
+  for (const name of Object.keys(counts).sort()) {
+    if (declaredTeams[name]) continue;
+    out.push({ name, kind: 'store', roles: [], rrsets: total(name), warning: 'owns RRsets but no binding, virtual key or declaration names it' });
+  }
+  return out;
+}
+
+interface StoredTransfer extends Transfer {
+  requesterSubject: string;
+}
+
+// ?second=1 requires a second approver for transfers (ownership.require_second_approver).
+const secondApprover = new URLSearchParams(window.location.search).get('second') === '1';
+
+const transfers: StoredTransfer[] = [];
+const addTransfer = (t: Omit<Transfer, 'can_decide'>) => transfers.push({ ...t, can_decide: false, requesterSubject: t.requester.subject });
+addTransfer({
+  id: 'tr-1762300000000-a1b2c3d4e5', kind: 'rrsets', zone: 'example.com', from_team: 'web', to_team: 'platform', status: 'proposed',
+  rrsets: [{ host: '_3f1c9a7b2d.www', type: 'CNAME' }], comment: 'Certificate validation records move to the platform team, which renews the certificates now.',
+  requester: bob, created_at: ago(5 * H), expires_at: ahead(7 * D - 5 * H),
+});
+addTransfer({
+  id: 'tr-1762200000000-b2c3d4e5f6', kind: 'rrsets', zone: 'example.com', from_team: 'corporate', to_team: 'web', status: 'proposed',
+  rrsets: [{ host: 'old-careers', type: 'CNAME', tombstone: true }], comment: 'The careers page is now part of the web shop.',
+  requester: alice, created_at: ago(3 * H), expires_at: ahead(7 * D - 3 * H),
+});
+addTransfer({
+  id: 'tr-1762100000000-c3d4e5f6a7', kind: 'rename', from_team: 'data', to_team: 'platform', status: 'proposed', rrsets: [],
+  comment: 'The data team was merged into platform.', requester: dave, created_at: ago(D), expires_at: ahead(6 * D),
+});
+addTransfer({
+  id: 'tr-1761900000000-d4e5f6a7b8', kind: 'rrsets', zone: 'example.com', from_team: 'platform', to_team: 'web', status: 'applied', moved: 1,
+  rrsets: [{ host: 'shop', type: 'CNAME' }], comment: 'Records first adopted by the wrong team.', requester: carol, created_at: ago(4 * D),
+  expires_at: ahead(3 * D), decided_by: alice, decided_at: ago(4 * D - 2 * H), decision_comment: 'Checked with the shop team.',
+});
+addTransfer({
+  id: 'tr-1762000000000-f6a7b8c9d0', kind: 'rrsets', zone: 'edge.example.org', from_team: 'platform', to_team: 'web', status: 'applying',
+  rrsets: [{ host: 'cdn', type: 'CNAME' }], comment: 'The CDN entry belongs to the web shop.', requester: carol, created_at: ago(2 * H),
+  expires_at: ahead(7 * D), decided_by: bob, decided_at: ago(20), error: 'zone edge.example.org is locked by another write',
+});
+addTransfer({
+  id: 'tr-1761800000000-e5f6a7b8c9', kind: 'rrsets', zone: 'example.com', from_team: 'web', to_team: 'corporate', status: 'failed',
+  rrsets: [{ host: 'www', type: 'CNAME' }], comment: 'Move the homepage to corporate.', requester: dave, created_at: ago(6 * D),
+  expires_at: ahead(D), decided_by: bob, decided_at: ago(6 * D - H), error: 'www CNAME changed since the request',
+});
+
+const ownershipApprover = (zone?: string) => !!zone && (me.permissions ?? []).some((p) => p.actions.includes('dns.ownership.approve') && p.zones.some((z) => zoneMatch(z, zone)));
+const writes = (zone?: string) => !!zone && (me.permissions ?? []).some((p) => p.actions.includes('dns.record.write') && p.zones.some((z) => zoneMatch(z, zone)));
+const policyApprover = () => (me.permissions ?? []).some((p) => p.actions.includes('policy.approve'));
+
+function view(t: StoredTransfer): Transfer {
+  const { requesterSubject, ...rest } = t;
+  const mayDecide = t.kind === 'rename' ? policyApprover() : (me.teams.includes(t.from_team) && writes(t.zone)) || ownershipApprover(t.zone);
+  const status = t.status === 'proposed' && new Date(t.expires_at).getTime() <= Date.now() ? 'expired' : t.status;
+  const other = !secondApprover || requesterSubject !== me.subject;
+  return {
+    ...rest, status, can_decide: status === 'proposed' && other && me.category === 'human' && mayDecide,
+    self_approved: !!t.decided_by && t.status !== 'rejected' && t.decided_by.subject === requesterSubject,
+  };
+}
+
+function findTransfer(id: string): StoredTransfer {
+  const t = transfers.find((x) => x.id === id);
+  if (!t) throw new ApiError(404, 'not_found', `unknown transfer ${id}`);
+  return t;
+}
+
+function listTransfers(q: TransferQuery): TransferPage {
+  const all = [...transfers].sort((a, b) => b.created_at.localeCompare(a.created_at)).map(view);
+  return { transfers: all.filter((t) => (!q.status || t.status === q.status) && (!q.zone || t.zone === q.zone)).slice(0, q.limit ?? 50) };
+}
+
+function teamDetail(name: string): TeamDetail {
+  const info = teamInfos().find((t) => t.name === name);
+  if (!info) throw new ApiError(404, 'not_found', `unknown team ${name}`);
+  const counts = ownedCounts()[name] ?? {};
+  const visible = me.permissions?.some((p) => p.actions.includes('policy.read')) || me.teams.includes(name);
+  return {
+    ...info,
+    owned: Object.entries(counts).map(([zone, c]) => ({ zone, ...c })),
+    transfers: transfers.filter((t) => t.status === 'proposed' && (t.from_team === name || t.to_team === name)).map(view),
+    permissions: visible ? info.roles.flatMap((r) => rolePerms(r)) : undefined,
+  };
+}
+
+function rolePerms(role: string) {
+  const fromMe = (me.permissions ?? []).filter((p) => p.role === role);
+  if (fromMe.length) return fromMe;
+  const def = base.document.roles[role] ?? activeRev()?.doc.roles[role];
+  return (def?.rules ?? []).map((r) => ({ role, zones: r.zones, actions: r.actions, hosts: r.records?.hosts ?? [], types: r.records?.types ?? [] }));
+}
+
+function proposeTransfer(zone: string, req: TransferProposal): Transfer {
+  const inv = findInv(zone);
+  if (!inv || !managedZones().has(zone)) throw new ApiError(404, 'not_found', 'zone not managed by the gate');
+  if (!writes(zone) && !ownershipApprover(zone)) throw new ApiError(403, 'forbidden', `dns.record.write or dns.ownership.approve is required on ${zone}`);
+  if (!req.comment.trim()) throw new ApiError(400, 'invalid', 'a comment is required');
+  let from = '';
+  const rrsets = req.rrsets.map((r) => {
+    const cur = inv.rrsets.find((x) => x.host === r.host && x.type === r.type && x.status !== 'foreign');
+    const tomb = (inv.tombstones ?? []).find((t) => t.host === r.host && t.type === r.type);
+    const team = cur?.owner ?? tomb?.team;
+    if (!team) throw new ApiError(404, 'not_found', `${r.host} ${r.type} is not owned by a team in ${zone}`);
+    if (from && team !== from) throw new ApiError(400, 'invalid', `the RRsets of a transfer must belong to one team (${from} and ${team})`);
+    from = team;
+    return { host: r.host, type: r.type, hash: cur?.hash, tombstone: !cur };
+  });
+  if (from === req.to_team) throw new ApiError(400, 'invalid', `the RRsets already belong to team ${from}`);
+  if (!ownershipApprover(zone) && !me.teams.includes(from) && !me.teams.includes(req.to_team)) {
+    throw new ApiError(403, 'not_owner', `only members of team ${from} or ${req.to_team} (or dns.ownership.approve holders) may request this transfer`);
+  }
+  const t: StoredTransfer = {
+    id: `tr-${Date.now()}-${randomToken(10).toLowerCase()}`, kind: 'rrsets', zone, from_team: from, to_team: req.to_team, rrsets, status: 'proposed',
+    comment: req.comment, requester: { subject: me.subject, name: me.name, category: me.category }, requesterSubject: me.subject,
+    created_at: new Date().toISOString(), expires_at: ahead(7 * D), can_decide: false,
+  };
+  transfers.push(t);
+  if (req.apply) {
+    if (secondApprover) throw new ApiError(400, 'invalid', 'apply: a second approver is required (ownership.require_second_approver)');
+    return decideTransfer(t.id, true, req.comment);
+  }
+  return view(t);
+}
+
+function moveOwnership(t: Transfer): number {
+  let moved = 0;
+  for (const inv of inventories) {
+    if (t.kind === 'rrsets' && inv.zone !== t.zone) continue;
+    for (const r of inv.rrsets) {
+      if (r.owner === t.from_team && (t.kind === 'rename' || t.rrsets.some((x) => !x.tombstone && x.host === r.host && x.type === r.type))) {
+        r.owner = t.to_team;
+        moved++;
+      }
+    }
+    for (const tb of inv.tombstones ?? []) {
+      if (tb.team === t.from_team && (t.kind === 'rename' || t.rrsets.some((x) => x.tombstone && x.host === tb.host && x.type === tb.type))) {
+        tb.team = t.to_team;
+        moved++;
+      }
+    }
+  }
+  return moved;
+}
+
+function decideTransfer(id: string, approve: boolean, comment: string): Transfer {
+  const t = findTransfer(id);
+  const v = view(t);
+  if (v.status !== 'proposed') throw new ApiError(412, 'precondition', `transfer ${id} is ${v.status}`);
+  const self = t.requesterSubject === me.subject;
+  if (approve && self && secondApprover) throw new ApiError(403, 'forbidden', 'the requester cannot approve its own transfer: a second person must');
+  if (approve && !v.can_decide) throw new ApiError(403, 'forbidden', `for every RRset, a member of team ${t.from_team} allowed to write it through that team, or a dns.ownership.approve holder on it, must approve this transfer`);
+  Object.assign(t, { decided_by: { subject: me.subject, name: me.name, category: me.category }, decided_at: new Date().toISOString(), decision_comment: comment || undefined });
+  if (!approve) {
+    t.status = 'rejected';
+    return view(t);
+  }
+  if (t.kind === 'rename') {
+    // renames run in the background: applied a few seconds later here
+    t.status = 'applying';
+    setTimeout(() => {
+      t.moved = moveOwnership(t);
+      t.status = 'applied';
+    }, 8000);
+    return view(t);
+  }
+  const moved = moveOwnership(t);
+  t.status = 'applied';
+  t.moved = moved;
+  audit.unshift({
+    time: new Date().toISOString(), request_id: 'req_' + randomToken(10).toUpperCase(), actor: t.decided_by!, teams: me.teams, action: 'gate.transfer.apply',
+    zone: t.zone, decision: 'allow', changes: t.rrsets.map((r) => ({ op: 'transfer', host: r.host, type: r.type })),
+  });
+  return view(t);
+}
+
+function renameTeam(team: string, to: string, comment: string, apply = false): Transfer {
+  if (apply && secondApprover) throw new ApiError(400, 'invalid', 'apply: a second approver is required (ownership.require_second_approver)');
+  needRight('propose');
+  if (!comment.trim()) throw new ApiError(400, 'invalid', 'a comment is required');
+  if (!to || to === team) throw new ApiError(400, 'invalid', `unknown or unchanged target team "${to}"`);
+  const t: StoredTransfer = {
+    id: `tr-${Date.now()}-${randomToken(10).toLowerCase()}`, kind: 'rename', from_team: team, to_team: to, rrsets: [], status: 'proposed', comment,
+    requester: { subject: me.subject, name: me.name, category: me.category }, requesterSubject: me.subject,
+    created_at: new Date().toISOString(), expires_at: ahead(7 * D), can_decide: false,
+  };
+  transfers.push(t);
+  return apply ? decideTransfer(t.id, true, comment) : view(t);
 }
 
 export const fixtureBackend = {
@@ -1513,8 +1765,15 @@ export const fixtureBackend = {
     const token = `${b64({ alg: 'ES256', kid: 'demo' })}.${b64({ iss: GATE, sub: me.subject, exp })}.${randomToken(43)}`;
     return delay({ access_token: token, token_type: 'Bearer', expires_in: 3600, expires_at: new Date(exp * 1000).toISOString(), issuer: GATE }, 400);
   },
-  plan: async (zone: string, changes: RRsetChange[]) => delay(planChanges(zone, changes), 600),
-  apply: async (zone: string, planId: string) => delay(applyPlan(zone, planId), 900),
+  plan: async (zone: string, changes: RRsetChange[], team?: string) => delay(planChanges(zone, changes, team), 600),
+  apply: async (zone: string, planId: string, team?: string) => delay(applyPlan(zone, planId, team), 900),
+  teams: async (): Promise<TeamList> => delay({ strict: true, teams: teamInfos(), require_second_approver: secondApprover }),
+  team: async (name: string): Promise<TeamDetail> => delay(teamDetail(name)),
+  transfers: async (q: TransferQuery): Promise<TransferPage> => delay(listTransfers(q)),
+  transfer: async (id: string): Promise<Transfer> => delay(view(findTransfer(id))),
+  proposeTransfer: async (zone: string, req: TransferProposal): Promise<Transfer> => delay(proposeTransfer(zone, req), 400),
+  decideTransfer: async (id: string, approve: boolean, comment: string): Promise<Transfer> => delay(decideTransfer(id, approve, comment), 500),
+  renameTeam: async (team: string, to: string, comment: string, apply?: boolean): Promise<Transfer> => delay(renameTeam(team, to, comment, apply), 400),
   generateKey: async (): Promise<GeneratedKey> => {
     needRight('propose');
     const key = 'egk_' + randomToken(40);

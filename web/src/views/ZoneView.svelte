@@ -1,11 +1,14 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { api, onBeforeReauth } from '../lib/api';
-  import type { AdoptResult, Me, RRset, RRsetRef, Status, ZoneInventory } from '../lib/types';
+  import type { AdoptResult, Me, RRset, RRsetRef, Status, Tombstone, Transfer, ZoneInventory } from '../lib/types';
   import { takeAdopt, type StoredAdopt } from '../lib/adoptDraft';
   import AdoptPanel from '../components/AdoptPanel.svelte';
   import TerraformPanel from '../components/TerraformPanel.svelte';
-  import { router, href, journalHref } from '../lib/router.svelte';
+  import { router, href, journalHref, teamHref, transferHref, transfersHref } from '../lib/router.svelte';
+  import { ownership, pickable, reservation, selectionTeam, transferAllowed } from '../lib/teams';
+  import { inbox } from '../lib/inbox.svelte';
+  import TransferPanel from '../components/teams/TransferPanel.svelte';
   import { needsAttention, statusHelp, statusLabel } from '../lib/labels';
   import { shortHashes, ttl as fmtTTL } from '../lib/format';
   import { identityLabel } from '../lib/identity';
@@ -41,6 +44,12 @@
   let tfOpen = $state(false);
   let adoptForbidden = $state(false);
   let restored = $state<StoredAdopt | null>(null);
+
+  // Record sets of one team selected for a transfer to another team.
+  let transferring = $state(false);
+  let tpicked = $state<string[]>([]);
+  let transferOpen = $state(false);
+  let sentTransfer = $state<Transfer | null>(null);
 
   // DNS changes staged in this zone, reviewed and applied together.
   let staged = $state<StagedChange[]>([]);
@@ -98,6 +107,9 @@
 
   const canAdd = $derived(!!inv && !unmanaged && canWriteZone(me, zone));
   const verdict = (r: RRset) => canChange(me, zone, r, unmanaged);
+  const tombstones = $derived<Tombstone[]>(inv?.tombstones ?? []);
+  const reservedFor = (r: RRset) => (r.status === 'foreign' ? reservation(tombstones, r.host, r.type) : undefined);
+  const owns = (r: RRset) => ownership(me, zone, r, unmanaged, reservedFor(r));
   const existingAfter = $derived(keysAfter(inv?.rrsets ?? [], staged));
 
   function onstage(c: StagedChange) {
@@ -138,6 +150,40 @@
   );
   const togglePick = (r: RRset) =>
     (picked = picked.includes(keyOf(r)) ? picked.filter((k) => k !== keyOf(r)) : [...picked, keyOf(r)]);
+
+  const transferRefs = $derived(
+    tpicked.map((k): RRsetRef => {
+      const i = k.lastIndexOf('/');
+      return { host: k.slice(0, i), type: k.slice(i + 1) };
+    }),
+  );
+  const transferSel = $derived(selectionTeam(transferRefs, inv?.rrsets ?? [], tombstones));
+  const transferFrom = $derived(transferSel.from);
+  const transferGate = $derived(transferAllowed(me, zone));
+  const toggleTransfer = (k: string) => (tpicked = tpicked.includes(k) ? tpicked.filter((x) => x !== k) : [...tpicked, k]);
+  const tombPickable = (t: Tombstone) => !transferFrom || t.team === transferFrom;
+  function stopTransfer() {
+    transferring = false;
+    tpicked = [];
+  }
+  /** Opens the transfer selection with one record set selected. */
+  function transferOne(r: RRset) {
+    router.setParams({ rr: undefined });
+    selecting = false;
+    picked = [];
+    transferring = true;
+    tpicked = [keyOf(r)];
+    transferOpen = true;
+  }
+  function onTransferSent(t: Transfer) {
+    sentTransfer = t;
+    void inbox.load(true);
+    if (t.status === 'applied') load();
+  }
+  function closeTransfer() {
+    transferOpen = false;
+    if (sentTransfer) stopTransfer();
+  }
 
   function onAdopted(_r: AdoptResult) {
     picked = [];
@@ -233,9 +279,14 @@
       if (r.status === 'foreign') togglePick(r);
       return;
     }
+    if (transferring) {
+      if (pickable(r, transferFrom) || tpicked.includes(keyOf(r))) toggleTransfer(keyOf(r));
+      return;
+    }
     router.setParams({ rr: `${r.host}/${r.type}` }, true);
   };
   const shownForeign = $derived(shown.filter((r) => r.status === 'foreign' && !r.protected));
+  const shownTransferable = $derived(shown.filter((r) => pickable(r, transferFrom ?? (ownerF || undefined))));
   const close = () => router.setParams({ rr: undefined });
   const rowKey = (e: KeyboardEvent, r: RRset) => {
     if (e.target !== e.currentTarget) return;
@@ -379,11 +430,31 @@
           title={adoptAllowed ? 'Select record sets that are not managed and adopt them' : adoptWhyNot}
           onclick={() => {
             if (!adoptAllowed) return;
+            stopTransfer();
             selecting = !selecting;
             if (!selecting) picked = [];
           }}
         >
           <Seal status="managed" size={13} />{selecting ? 'Selecting…' : 'Adopt…'}
+        </button>
+      {/if}
+      {#if inv && !unmanaged && (counts.managed ?? 0) + tombstones.length > 0 && transferGate.ok}
+        <button
+          class="btn"
+          class:on={transferring}
+          type="button"
+          aria-pressed={transferring}
+          title="Select record sets of one team and ask for their transfer to another team"
+          onclick={() => {
+            if (transferring) stopTransfer();
+            else {
+              selecting = false;
+              picked = [];
+              transferring = true;
+            }
+          }}
+        >
+          <Icon name="transfer" size={14} />{transferring ? 'Selecting…' : 'Transfer…'}
         </button>
       {/if}
       {#if inv && !unmanaged}<button class="btn" type="button" onclick={() => (tfOpen = true)}><Icon name="download" size={14} />Export Terraform</button>{/if}
@@ -392,6 +463,20 @@
 
   {#if inv && !unmanaged && !adoptAllowed && (counts.foreign ?? 0) > 0 && (statusF === 'foreign' || statusF === 'all')}
     <p class="note"><Icon name="lock" size={12} /> {adoptWhyNot}</p>
+  {/if}
+  {#if sentTransfer}
+    <p class="note sent" role="status">
+      <Icon name="transfer" size={12} />
+      {#if sentTransfer.status === 'applied'}
+        {sentTransfer.moved ?? sentTransfer.rrsets.length} record set{(sentTransfer.moved ?? sentTransfer.rrsets.length) === 1 ? '' : 's'} transferred from team {sentTransfer.from_team} to {sentTransfer.to_team}{sentTransfer.self_approved ? ' (self-approved)' : ''}.
+      {:else if sentTransfer.status === 'applying'}
+        Transfer from team {sentTransfer.from_team} to {sentTransfer.to_team} approved: the gate applies it as soon as the zone is free.
+      {:else}
+        Transfer of {sentTransfer.rrsets.length} record set{sentTransfer.rrsets.length === 1 ? '' : 's'} from team {sentTransfer.from_team} to {sentTransfer.to_team} requested: nothing moves until it is approved.
+      {/if}
+      <a href={transferHref(sentTransfer.id)}>Open the request</a>
+      <button class="btn quiet small" type="button" aria-label="Dismiss" onclick={() => (sentTransfer = null)}><Icon name="x" size={12} /></button>
+    </p>
   {/if}
 
   <div class="sheet">
@@ -434,8 +519,8 @@
             <tr
               class="{r.status}{st ? ' staged-' + st.kind : ''}"
               class:owned={owned(r)}
-              class:selected={selected === r || (selecting && picked.includes(k))}
-              class:inert={selecting && (r.status !== 'foreign' || r.protected)}
+              class:selected={selected === r || (selecting && picked.includes(k)) || (transferring && tpicked.includes(k))}
+              class:inert={(selecting && (r.status !== 'foreign' || r.protected)) || (transferring && !pickable(r, transferFrom) && !tpicked.includes(k))}
               tabindex="0"
               onclick={() => open(r)}
               onkeydown={(e) => rowKey(e, r)}
@@ -444,6 +529,8 @@
               <td class="c-seal">
                 {#if selecting && r.status === 'foreign' && !r.protected}
                   <input type="checkbox" class="pick" checked={picked.includes(k)} onclick={stop} onchange={() => togglePick(r)} aria-label="Select {r.host} {r.type}" />
+                {:else if transferring && (pickable(r, transferFrom) || tpicked.includes(k))}
+                  <input type="checkbox" class="pick" checked={tpicked.includes(k)} onclick={stop} onchange={() => toggleTransfer(k)} aria-label="Select {r.host} {r.type} for a transfer" />
                 {:else}
                   <Seal status={r.status} title={statusLabel[r.status]} />
                 {/if}
@@ -477,7 +564,12 @@
               </td>
               <td class="c-ttl mono num">{fmtTTL(r.ttl)}</td>
               <td class="c-owner">
-                {#if r.owner}<span class="team" title="Owner team: only this team changes it"><Seal status="managed" size={11} />{r.owner}</span>
+                {#if r.owner}
+                  {@const own = owns(r)}
+                  <a class="team" class:mine={own.mine} href={teamHref(r.owner)} onclick={stop} title={own.text}><Seal status="managed" size={11} />{r.owner}</a>
+                {:else if reservedFor(r)}
+                  {@const tb = reservedFor(r)}
+                  {#if tb}<a class="team reserved" href={teamHref(tb.team)} onclick={stop} title={owns(r).text}><Icon name="clock" size={11} />{tb.team}</a>{/if}
                 {:else}<span class="ro" aria-label="No owner">—</span>{/if}
               </td>
               <td class="c-custody">
@@ -502,7 +594,7 @@
                     </span>
                   {:else if owned(r)}
                     <span class="acts">
-                      {#if !v.ok}<span class="ico" role="img" aria-label="Read-only: {v.text}" title={v.text}><Icon name="lock" size={12} /></span>{/if}
+                      {#if !v.ok}<span class="ico" role="img" aria-label="Read-only: {owns(r).text}" title={owns(r).text}><Icon name="lock" size={12} /></span>{/if}
                       <button class="btn quiet small act" type="button" onclick={(e) => { stop(e); open(r); }} aria-label="Details of {r.host} {r.type}">Details</button>
                     </span>
                   {:else if adoptAllowed && (r.protected || r.type === 'SOA' || r.read_only)}
@@ -547,6 +639,45 @@
   {/if}
 {/if}
 
+{#if inv && !unmanaged && tombstones.length}
+  <details class="tombs" open={transferring}>
+    <summary>Deleted recently, reserved for their team <span class="count num">{tombstones.length}</span></summary>
+    <p class="dim small">Until a reservation expires, only that team can create or adopt the record set again; another team asks for a transfer of the reservation.</p>
+    <ul>
+      {#each tombstones as t (t.host + '/' + t.type)}
+        {@const k = `${t.host}/${t.type}`}
+        <li class:mine={!!me?.teams.includes(t.team)}>
+          {#if transferring}
+            <input type="checkbox" class="pick" checked={tpicked.includes(k)} disabled={!tombPickable(t) && !tpicked.includes(k)} onchange={() => toggleTransfer(k)} aria-label="Select the reservation of {t.host} {t.type} for a transfer" />
+          {/if}
+          <span class="mono">{t.host === '@' ? zone : t.host}</span>
+          <span class="mono t">{t.type}</span>
+          <a class="team" href={teamHref(t.team)}>{t.team}</a>
+          <span class="dim">
+            deleted {#if t.deleted_by}by <ActorChip actor={t.deleted_by} quiet />{/if} <RelTime iso={t.deleted_at} /> · reserved until <RelTime iso={t.expires_at} />
+          </span>
+        </li>
+      {/each}
+    </ul>
+  </details>
+{/if}
+
+{#if transferring}
+  <div class="pickbar" role="region" aria-label="Transfer selection">
+    <span class="n"><b class="num">{tpicked.length}</b> selected{#if transferFrom}{' '}from team <b>{transferFrom}</b>{/if}</span>
+    {#if transferSel.error}<span class="selerr">{transferSel.error}</span>
+    {:else if !tpicked.length}<span class="dim">Select record sets of one team</span>{/if}
+    {#if transferFrom || ownerF}
+      <button class="btn quiet" type="button" disabled={!shownTransferable.length} onclick={() => (tpicked = [...new Set([...tpicked, ...shownTransferable.map(keyOf)])])}>Select all shown ({shownTransferable.length})</button>
+    {/if}
+    {#if tpicked.length}<button class="btn quiet" type="button" onclick={() => (tpicked = [])}>Clear</button>{/if}
+    <span class="sp"></span>
+    <a class="btn quiet link" href={transfersHref({ zone })}>Transfers of this zone</a>
+    <button class="btn quiet" type="button" onclick={stopTransfer}>Cancel</button>
+    <button class="btn primary" type="button" disabled={!tpicked.length || !!transferSel.error} onclick={() => (transferOpen = true)}><Icon name="transfer" size={14} />Transfer…</button>
+  </div>
+{/if}
+
 {#if selecting}
   <div class="pickbar" role="region" aria-label="Adoption selection">
     <span class="n"><b class="num">{picked.length}</b> record set{picked.length === 1 ? '' : 's'} selected</span>
@@ -558,7 +689,7 @@
   </div>
 {/if}
 
-{#if staged.length && !selecting}
+{#if staged.length && !selecting && !transferring}
   <div class="tray" role="region" aria-label="Changes not applied yet">
     <span class="n"><b class="num">{staged.length}</b> change{staged.length === 1 ? '' : 's'} not applied yet</span>
     <ul class="pending">
@@ -578,13 +709,15 @@
 {/if}
 
 {#if formFor && inv && !unmanaged}
-  <RecordForm {zone} {me} existing={existingAfter} editing={formFor.rr} staged={formFor.staged} {onstage} onclose={() => (formFor = null)} />
+  <RecordForm {zone} {me} existing={existingAfter} editing={formFor.rr} staged={formFor.staged} {tombstones} {onstage} onclose={() => (formFor = null)} />
 {/if}
 
 {#if reviewOpen && inv && !unmanaged}
   <ReviewPanel
     {zone}
     {staged}
+    {me}
+    {tombstones}
     onclose={() => (reviewOpen = false)}
     onunstage={undo}
     onapplied={() => { staged = []; load(); }}
@@ -610,7 +743,11 @@
   <TerraformPanel {zone} teams={me?.teams ?? []} {owners} onclose={() => { tfOpen = false; router.setParams({ export: undefined }); }} />
 {/if}
 
-{#if selected && !selecting && !adoptOpen && !formFor && !reviewOpen}
+{#if transferOpen && inv && !unmanaged && transferFrom}
+  <TransferPanel {zone} picked={transferRefs} from={transferFrom} {me} onclose={closeTransfer} ondone={onTransferSent} />
+{/if}
+
+{#if selected && !selecting && !transferring && !adoptOpen && !formFor && !reviewOpen && !transferOpen}
   {#key selectedKey}
     <RRsetDrawer
       {zone}
@@ -625,6 +762,8 @@
       canAdopt={adoptAllowed}
       adoptHint={adoptWhyNot}
       onadopt={() => adoptOne(selected)}
+      ownership={owns(selected)}
+      ontransfer={selected.owner && pickable(selected) && transferGate.ok ? () => transferOne(selected) : undefined}
     />
   {/key}
 {/if}
@@ -836,6 +975,78 @@
     color: var(--ink-3);
     font-size: 13px;
   }
+  .note.sent {
+    flex-wrap: wrap;
+    padding: var(--s2) var(--s3);
+    border-radius: var(--r-md);
+    background: var(--brass-wash);
+    color: var(--ink-2);
+  }
+  .note.sent .btn {
+    margin-left: auto;
+    height: 24px;
+    padding: 0 6px;
+  }
+  .tombs {
+    margin-top: var(--s4);
+    padding: var(--s2) var(--s4);
+    border: 1px solid var(--rule-soft);
+    border-radius: var(--r-lg);
+  }
+  .tombs[open] {
+    padding-bottom: var(--s3);
+    background: var(--sheet);
+  }
+  .tombs summary {
+    cursor: pointer;
+    color: var(--ink-2);
+    font-weight: 500;
+  }
+  .tombs .count {
+    margin-left: 4px;
+    color: var(--ink-3);
+    font-weight: 400;
+  }
+  .tombs .small {
+    margin: var(--s2) 0;
+    font-size: 12px;
+  }
+  .tombs ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 2px;
+  }
+  .tombs li {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px var(--s3);
+    padding: 4px 0;
+    border-bottom: 1px solid var(--rule-soft);
+  }
+  .tombs li:last-child {
+    border-bottom: 0;
+  }
+  .tombs .t {
+    color: var(--ink-3);
+    font-size: 12px;
+  }
+  .tombs .dim {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+  }
+  .btn.link {
+    text-decoration: none;
+  }
+  .selerr {
+    color: var(--wax);
+    font-size: 12px;
+  }
   .sheet {
     border: 1px solid var(--rule);
     border-radius: var(--r-lg);
@@ -1004,13 +1215,28 @@
     height: 20px;
     padding: 0 7px 0 5px;
     border-radius: 6px;
-    background: var(--seal-ink-wash);
-    color: var(--seal-ink);
+    background: var(--pencil-wash);
+    color: var(--ink-2);
     font-size: 12px;
     font-weight: 600;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    text-decoration: none;
+  }
+  .team.mine {
+    background: var(--seal-ink-wash);
+    color: var(--seal-ink);
+  }
+  .team.reserved {
+    background: transparent;
+    box-shadow: inset 0 0 0 1px var(--rule-strong);
+    color: var(--ink-3);
+    font-weight: 500;
+  }
+  a.team:hover {
+    text-decoration: underline;
+    text-underline-offset: 2px;
   }
   .ro {
     color: var(--ink-4);
@@ -1208,7 +1434,7 @@
   .tray .sp {
     flex: 1;
   }
-  .pending {
+  .tray .pending {
     display: flex;
     flex-wrap: wrap;
     gap: 4px;
@@ -1217,7 +1443,7 @@
     list-style: none;
     min-width: 0;
   }
-  .pending li {
+  .tray .pending li {
     display: inline-flex;
     align-items: center;
     height: 24px;
@@ -1263,7 +1489,7 @@
   .delete .sign {
     color: var(--wax);
   }
-  .pending .x {
+  .tray .pending .x {
     display: grid;
     place-items: center;
     width: 20px;
@@ -1274,7 +1500,7 @@
     color: var(--ink-4);
     cursor: pointer;
   }
-  .pending .x:hover {
+  .tray .pending .x:hover {
     color: var(--ink);
   }
   @media (max-width: 900px) {

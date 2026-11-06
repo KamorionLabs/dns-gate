@@ -1,4 +1,4 @@
-import { ApiError, createRequest, dnsWrites, issueToken } from './http';
+import { ApiError, createRequest, dnsWrites, issueToken, teamsApi } from './http';
 import type {
   AdoptApply,
   AdoptPreview,
@@ -19,7 +19,13 @@ import type {
   RevisionDetail,
   RevisionPage,
   RRsetChange,
+  TeamDetail,
+  TeamList,
   TerraformQuery,
+  Transfer,
+  TransferPage,
+  TransferProposal,
+  TransferQuery,
   WhoCanResponse,
   ZoneInventory,
   ZoneSummary,
@@ -48,9 +54,16 @@ export interface Backend {
   adoptPreview(zone: string, sel: AdoptSelection): Promise<AdoptPreview>;
   adopt(zone: string, req: AdoptApply): Promise<AdoptResult>;
   terraform(zone: string, q: TerraformQuery): Promise<string>;
-  plan(zone: string, changes: RRsetChange[]): Promise<PlanResult>;
-  apply(zone: string, planId: string): Promise<PlanResult>;
+  plan(zone: string, changes: RRsetChange[], team?: string): Promise<PlanResult>;
+  apply(zone: string, planId: string, team?: string): Promise<PlanResult>;
   issueToken(): Promise<IssuedToken>;
+  teams(): Promise<TeamList>;
+  team(name: string): Promise<TeamDetail>;
+  transfers(q: TransferQuery): Promise<TransferPage>;
+  transfer(id: string): Promise<Transfer>;
+  proposeTransfer(zone: string, req: TransferProposal): Promise<Transfer>;
+  decideTransfer(id: string, approve: boolean, comment: string): Promise<Transfer>;
+  renameTeam(team: string, to: string, comment: string, apply?: boolean): Promise<Transfer>;
 }
 
 export function loginURL(reauth = false): string {
@@ -83,6 +96,7 @@ const request = createRequest({
   },
 });
 const writes = dnsWrites(request);
+const teamCalls = teamsApi(request);
 
 function query(q: object): string {
   const p = new URLSearchParams();
@@ -131,6 +145,7 @@ const http: Backend = {
   plan: writes.plan,
   apply: writes.apply,
   issueToken: () => issueToken(request),
+  ...teamCalls,
 };
 
 export const usingFixtures = import.meta.env.VITE_FIXTURES === '1';

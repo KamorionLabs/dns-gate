@@ -1,6 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import type { Me, RRset } from '../lib/types';
+  import type { Me, RRset, Tombstone } from '../lib/types';
+  import { reservation, reservationText } from '../lib/teams';
   import {
     TTL_PRESETS,
     checkDraft,
@@ -30,6 +31,7 @@
     existing,
     editing,
     staged,
+    tombstones = [],
     onstage,
     onclose,
   }: {
@@ -41,6 +43,8 @@
     editing?: RRset;
     /** What is already staged for it (edits of a staged change start from there). */
     staged?: StagedChange;
+    /** Record sets deleted recently, reserved for their team. */
+    tombstones?: Tombstone[];
     onstage: (c: StagedChange) => void;
     onclose: () => void;
   } = $props();
@@ -72,6 +76,10 @@
 
   // Names the user's roles allow for this type: a warning, the gate decides.
   const allowedHosts = $derived(writableHosts(me, zone, draft.type));
+  // A name deleted recently stays reserved for its team: a warning, the gate decides.
+  const reserved = $derived(isEdit || !draft.host.trim() ? undefined : reservation(tombstones, host, draft.type));
+  const reservedOther = $derived(!!reserved && !me?.teams.includes(reserved.team));
+
   const outOfScope = $derived(!!draft.host.trim() && !check.host && allowedHosts.length > 0 && !allowedHosts.some((h) => hostMatch(h, host)));
 
   function setType(t: RecordType) {
@@ -120,6 +128,7 @@
         </div>
         <p class="hint">The part before the zone, for example <span class="mono">www</span> or <span class="mono">api.staging</span>. Type <span class="mono">@</span> for <span class="mono">{zone}</span> itself.</p>
         {#if tried && check.host}<p class="err">{check.host}</p>{/if}
+        {#if reserved}<p class="warn" class:block={reservedOther}><Icon name={reservedOther ? 'lock' : 'team'} size={12} /> {reservationText(me, reserved)}{reservedOther ? ' The gate will refuse it.' : ''}</p>{/if}
         {#if outOfScope}<p class="warn"><Icon name="alert" size={12} /> Your roles allow {draft.type} records only at names matching <span class="mono">{allowedHosts.join(', ')}</span>: the gate will refuse this one.</p>{/if}
       </div>
 
@@ -374,6 +383,9 @@
     gap: 6px;
     color: var(--brass);
     font-size: 12px;
+  }
+  .warn.block {
+    color: var(--wax);
   }
   .problems {
     display: grid;

@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Me } from '../lib/types';
-  import { router, href, connectHref } from '../lib/router.svelte';
+  import { router, href, connectHref, teamsHref } from '../lib/router.svelte';
+  import { inbox } from '../lib/inbox.svelte';
   import { applyTheme, initialTheme, type Theme } from '../lib/theme';
   import { categoryLabel } from '../lib/labels';
   import { usingFixtures } from '../lib/api';
@@ -23,8 +24,13 @@
       ? router.route.name
       : router.route.name === 'policy' || router.route.name === 'proposal'
         ? 'policy'
-        : 'zones',
+        : ['teams', 'team', 'transfers', 'transfer'].includes(router.route.name)
+          ? 'teams'
+          : 'zones',
   );
+  $effect(() => {
+    if (me) void inbox.load();
+  });
   const can = $derived(describePermissions(me?.permissions ?? []));
   const initials = $derived(
     (me?.name ?? '?')
@@ -53,6 +59,9 @@
     <nav aria-label="Sections">
       <a href={href('/')} aria-current={section === 'zones' ? 'page' : undefined}>Zones</a>
       <a href={href('/journal')} aria-current={section === 'journal' ? 'page' : undefined}>Journal</a>
+      <a href={teamsHref()} aria-current={section === 'teams' ? 'page' : undefined} title={inbox.count ? `${inbox.count} transfer${inbox.count === 1 ? '' : 's'} waiting for your decision` : undefined}>
+        Teams{#if inbox.count}<span class="dot" aria-label="{inbox.count} transfers waiting for your decision"></span>{/if}
+      </a>
       <a href={href('/policy')} aria-current={section === 'policy' ? 'page' : undefined}>Policy</a>
       <a href={connectHref()} aria-current={section === 'connect' ? 'page' : undefined}>Connect</a>
     </nav>
@@ -78,7 +87,7 @@
               </div>
               <dl>
                 <dt class="eyebrow">Teams</dt>
-                <dd>{#each me.teams as t (t)}<span class="tag">{t}</span>{:else}<span class="sub">none</span>{/each}</dd>
+                <dd>{#each me.teams as t (t)}<span class="tag" title={t === me.default_team ? 'Default team: new record sets go to it' : undefined}>{t}{#if t === me.default_team && me.teams.length > 1} · default{/if}</span>{:else}<span class="sub">none</span>{/each}</dd>
                 {#if me.groups?.length}
                   <dt class="eyebrow">Groups</dt>
                   <dd>{#each me.groups as g (g)}<span class="tag role">{g}</span>{/each}</dd>
@@ -161,6 +170,13 @@
   }
   nav a[aria-current='page'] {
     color: var(--ink);
+  }
+  nav .dot {
+    width: 6px;
+    height: 6px;
+    margin-left: 5px;
+    border-radius: 50%;
+    background: var(--brass);
   }
   nav a[aria-current='page']::after {
     content: '';

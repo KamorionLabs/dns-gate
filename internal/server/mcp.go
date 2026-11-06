@@ -52,8 +52,12 @@ func (s *Server) newMCP() *mcpServer {
 		Instructions: "dns-gate manages DNS zones (EuroDNS, Route53) under RBAC and record ownership. Read tools are always available; changes are made with plan_rrset_change then apply_rrset_change, and only on RRsets owned by your team. " + recordRules,
 	})
 	m.addReadTools(srv)
+	m.addTeamTools(srv)
 	if s.cfg.Config.MCP.AllowWrites && s.cfg.Ops != nil {
 		m.addWriteTools(srv)
+	}
+	if s.cfg.Config.MCP.AllowWrites && s.cfg.Transfers != nil {
+		m.addTransferWriteTools(srv)
 	}
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 	m.handler = h
@@ -211,6 +215,8 @@ type listRRsetsOut struct {
 	Unmanaged    bool          `json:"unmanaged,omitempty"`
 	LastSyncedAt *time.Time    `json:"last_synced_at,omitempty"`
 	RRsets       []uiapi.RRset `json:"rrsets"`
+	// Tombstones are RRsets deleted recently, reserved for their team.
+	Tombstones []uiapi.Tombstone `json:"tombstones,omitempty"`
 }
 
 type getRRsetIn struct {
@@ -220,8 +226,10 @@ type getRRsetIn struct {
 }
 
 type getRRsetOut struct {
-	RRset   *uiapi.RRset       `json:"rrset,omitempty"`
-	History []uiapi.AuditEntry `json:"history"`
+	RRset     *uiapi.RRset       `json:"rrset,omitempty"`
+	Tombstone *uiapi.Tombstone   `json:"tombstone,omitempty"`
+	Ownership string             `json:"ownership,omitempty"`
+	History   []uiapi.AuditEntry `json:"history"`
 }
 
 type searchAuditIn struct {
@@ -256,15 +264,18 @@ type whoCanIn struct {
 type planIn struct {
 	Zone    string              `json:"zone" jsonschema:"managed zone name"`
 	Changes []uiapi.RRsetChange `json:"changes" jsonschema:"desired state per RRset; delete=true removes it"`
+	Team    string              `json:"team,omitempty" jsonschema:"one of your teams to act for (list_teams, or your default team when omitted): new RRsets go to it and only its RRsets may change"`
 }
 
 type applyIn struct {
 	PlanID string `json:"plan_id" jsonschema:"plan_id returned by plan_rrset_change"`
+	Team   string `json:"team,omitempty" jsonschema:"optional; must be the team of the plan when given"`
 }
 
 type adoptPreviewIn struct {
 	Zone      string               `json:"zone"`
 	Selection uiapi.AdoptSelection `json:"selection"`
+	Team      string               `json:"team,omitempty" jsonschema:"one of your teams to act for (list_teams, or your default team when omitted): new RRsets go to it and only its RRsets may change"`
 }
 
 type adoptApplyIn struct {
@@ -273,6 +284,7 @@ type adoptApplyIn struct {
 	Owner        string           `json:"owner,omitempty"`
 	Comment      string           `json:"comment"`
 	PreviewToken string           `json:"preview_token"`
+	Team         string           `json:"team,omitempty" jsonschema:"one of your teams to act for (list_teams, or your default team when omitted): new RRsets go to it and only its RRsets may change"`
 }
 
 func (m *mcpServer) addReadTools(srv *mcp.Server) {
@@ -302,7 +314,7 @@ func (m *mcpServer) addReadTools(srv *mcp.Server) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_rrsets",
-		Description: "List the RRsets of a zone with their ownership status (managed: owned by a team through the gate; foreign: created outside the gate, read-only; tainted: changed outside the gate, writes blocked; pending; missing). Optional filters on status, host glob, type and owner team.",
+		Description: "List the RRsets of a zone with their owner team and ownership status (managed: owned by a team through the gate; foreign: created outside the gate, read-only; tainted: changed outside the gate, writes blocked; pending; missing), and the tombstones: RRsets deleted recently, reserved for their team until they expire. Optional filters on status, host glob, type and owner team.",
 		Annotations: readOnly("List RRsets"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in listRRsetsIn) (*mcp.CallToolResult, listRRsetsOut, error) {
 		subj, err := m.subject(ctx, req)
@@ -318,10 +330,20 @@ func (m *mcpServer) addReadTools(srv *mcp.Server) {
 			return nil, listRRsetsOut{}, inventoryError(err)
 		}
 		out := listRRsetsOut{Zone: inv.Zone, Unmanaged: inv.Unmanaged, LastSyncedAt: inv.LastSyncedAt, RRsets: []uiapi.RRset{}}
+		match := func(host, typ, owner string) bool {
+			return (in.Host == "" || glob.Match(strings.ToLower(in.Host), host)) && (in.Type == "" || strings.EqualFold(in.Type, typ)) &&
+				(in.Owner == "" || owner == in.Owner)
+		}
 		for _, rs := range inv.RRsets {
-			if (in.Status == "" || rs.Status == in.Status) && (in.Host == "" || glob.Match(strings.ToLower(in.Host), rs.Host)) &&
-				(in.Type == "" || strings.EqualFold(in.Type, rs.Type)) && (in.Owner == "" || rs.Owner == in.Owner) {
+			if (in.Status == "" || rs.Status == in.Status) && match(rs.Host, rs.Type, rs.Owner) {
 				out.RRsets = append(out.RRsets, rs)
+			}
+		}
+		if in.Status == "" {
+			for _, tb := range inv.Tombstones {
+				if match(tb.Host, tb.Type, tb.Team) {
+					out.Tombstones = append(out.Tombstones, tb)
+				}
 			}
 		}
 		m.audit(ctx, req, subj, "list_rrsets", zone, "allow", "", nil)
@@ -330,7 +352,7 @@ func (m *mcpServer) addReadTools(srv *mcp.Server) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "get_rrset",
-		Description: "Get one RRset (values, TTL, owner, status) and its recent audit history.",
+		Description: "Get one RRset (values, TTL, owner team, status), its tombstone when it was deleted recently, whether and why you may change it (ownership), and its recent audit history.",
 		Annotations: readOnly("Get RRset"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in getRRsetIn) (*mcp.CallToolResult, getRRsetOut, error) {
 		subj, err := m.subject(ctx, req)
@@ -355,6 +377,12 @@ func (m *mcpServer) addReadTools(srv *mcp.Server) {
 				out.RRset = &inv.RRsets[i]
 			}
 		}
+		for i := range inv.Tombstones {
+			if inv.Tombstones[i].Host == host && strings.EqualFold(inv.Tombstones[i].Type, in.Type) {
+				out.Tombstone = &inv.Tombstones[i]
+			}
+		}
+		out.Ownership = m.ownershipNote(subj, zone, inv.Unmanaged, out.RRset, out.Tombstone)
 		if m.s.cfg.AuditReader != nil {
 			events, _, err := m.s.cfg.AuditReader.ListAudit(ctx, store.AuditQuery{Zone: zone, Host: host, Type: strings.ToUpper(in.Type), Limit: 20})
 			if err == nil {
@@ -416,15 +444,15 @@ func (m *mcpServer) addReadTools(srv *mcp.Server) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "explain",
-		Description: "Simulate an authorization decision of the active policy for a subject with given claims: groups, bindings, the rule that grants or the reason of the denial. Requires policy.read.",
+		Description: "Simulate an authorization decision of the active policy for a subject with given claims: groups, bindings, teams and default team, the rule that grants or the reason of the denial and, for an RRset of a managed zone, its owner team (or the team a tombstone reserves it for) and whether the subject's teams may change it. Requires policy.read.",
 		Annotations: readOnly("Explain a decision"),
-	}, func(ctx context.Context, req *mcp.CallToolRequest, in explainIn) (*mcp.CallToolResult, uiapi.ExplainResponse, error) {
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in explainIn) (*mcp.CallToolResult, explainOut, error) {
 		subj, err := m.subject(ctx, req)
 		if err != nil {
-			return nil, uiapi.ExplainResponse{}, err
+			return nil, explainOut{}, err
 		}
 		if !m.s.pol.AllowMeta(subj, uiapi.ActionPolicyRead) {
-			return nil, uiapi.ExplainResponse{}, errors.New("policy.read not granted")
+			return nil, explainOut{}, errors.New("policy.read not granted")
 		}
 		claims := map[string]any{}
 		for k, v := range in.Claims {
@@ -438,7 +466,7 @@ func (m *mcpServer) addReadTools(srv *mcp.Server) {
 				claims[k] = arr
 			}
 		}
-		return nil, m.s.cfg.Policy.Current().Explain(in.Issuer, claims, in.Action, normZoneArg(in.Zone), in.Host, in.Type), nil
+		return nil, m.explainOwnership(ctx, in, claims), nil
 	})
 
 	mcp.AddTool(srv, &mcp.Tool{
@@ -465,7 +493,7 @@ func (m *mcpServer) addWriteTools(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "plan_rrset_change",
 		Description: "Dry run of RRset changes in a zone: checks RBAC, ownership and the provider validation without writing, and returns the changes and a plan_id valid for a few minutes. Each change is the full desired state of one RRset (host, type, ttl, values) or delete=true. " +
-			recordRules + " Only RRsets owned by your team, or new ones in your scope, can change. Show the plan to the user before applying it.",
+			recordRules + " Only RRsets owned by your teams, or new ones in your scope, can change; new RRsets go to your default team, or to team when given (one of your teams, list_teams). A recently deleted RRset is reserved for its previous team (tombstone). Show the plan to the user before applying it.",
 		Annotations: readOnly("Plan RRset changes"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in planIn) (*mcp.CallToolResult, uiapi.PlanResult, error) {
 		subj, err := m.subject(ctx, req)
@@ -476,6 +504,9 @@ func (m *mcpServer) addWriteTools(srv *mcp.Server) {
 		if len(in.Changes) == 0 || len(in.Changes) > 100 {
 			return nil, uiapi.PlanResult{}, errors.New("between 1 and 100 changes are required")
 		}
+		if subj, err = m.forTeam(ctx, req, subj, "plan_rrset_change", zone, in.Team); err != nil {
+			return nil, uiapi.PlanResult{}, err
+		}
 		if !m.s.cfg.Authz.Allow(subj, policy.ActionRecordWrite, zone) {
 			m.audit(ctx, req, subj, "plan_rrset_change", zone, "deny", "forbidden", nil)
 			return nil, uiapi.PlanResult{}, fmt.Errorf("dns.record.write not granted on %q", zone)
@@ -484,19 +515,20 @@ func (m *mcpServer) addWriteTools(srv *mcp.Server) {
 		if err != nil {
 			return nil, uiapi.PlanResult{}, toolError(err)
 		}
+		plan.Team = in.Team
 		if plan.Allowed {
-			if plan.PlanID, err = m.s.savePlan(ctx, subj, zone, "", in.Changes, plan.ZoneVersion); err != nil {
+			if plan.PlanID, err = m.s.savePlan(ctx, subj, zone, in.Team, in.Changes, plan.ZoneVersion); err != nil {
 				m.s.log.Error("save plan", "zone", zone, "err", err)
 				return nil, uiapi.PlanResult{}, errors.New("plan storage unavailable")
 			}
 		}
-		m.audit(ctx, req, subj, "plan_rrset_change", zone, "allow", plan.Reason, map[string]any{"plan_id": plan.PlanID, "allowed": plan.Allowed})
+		m.audit(ctx, req, subj, "plan_rrset_change", zone, "allow", plan.Reason, withTeam(map[string]any{"plan_id": plan.PlanID, "allowed": plan.Allowed}, in.Team))
 		return nil, *plan, nil
 	})
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "apply_rrset_change",
-		Description: "Apply a plan returned by plan_rrset_change, exactly as planned. Fails if the plan expired, belongs to another caller, or if the zone changed since the plan (plan again). Only apply after the user confirmed the plan.",
+		Description: "Apply a plan returned by plan_rrset_change, exactly as planned and for the team it was planned for. Fails if the plan expired, belongs to another caller, or if the zone changed since the plan (plan again). Only apply after the user confirmed the plan.",
 		Annotations: &mcp.ToolAnnotations{Title: "Apply RRset plan", DestructiveHint: ptr(true), IdempotentHint: false, OpenWorldHint: ptr(true)},
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in applyIn) (*mcp.CallToolResult, uiapi.PlanResult, error) {
 		subj, err := m.subject(ctx, req)
@@ -509,26 +541,33 @@ func (m *mcpServer) addWriteTools(srv *mcp.Server) {
 			m.audit(ctx, req, subj, "apply_rrset_change", "", "deny", reason, map[string]any{"plan_id": in.PlanID})
 			return nil, uiapi.PlanResult{}, fmt.Errorf("%s: %w", reason, err)
 		}
-		if p.Team != "" {
-			if !slices.Contains(subj.Teams, p.Team) {
+		team := p.Team
+		if in.Team != "" && team != "" && in.Team != team {
+			m.audit(ctx, req, subj, "apply_rrset_change", p.Zone, "deny", "team_mismatch", map[string]any{"plan_id": in.PlanID})
+			return nil, uiapi.PlanResult{}, fmt.Errorf("team_mismatch: the plan was made for team %s, not %s", team, in.Team)
+		} else if team == "" {
+			team = in.Team
+		}
+		if team != "" {
+			if !slices.Contains(subj.Teams, team) {
 				m.audit(ctx, req, subj, "apply_rrset_change", p.Zone, "deny", "not_team_member", map[string]any{"plan_id": in.PlanID})
-				return nil, uiapi.PlanResult{}, fmt.Errorf("not_team_member: the plan was made for team %s", p.Team)
+				return nil, uiapi.PlanResult{}, fmt.Errorf("not_team_member: team %s is not one of your teams", team)
 			}
-			subj = subj.ForTeam(p.Team)
+			subj = subj.ForTeam(team)
 		}
 		res, err := m.s.cfg.Ops.ApplyRRsets(ctx, subj, p.Zone, p.Changes, p.ZoneVersion)
 		if err != nil {
 			m.audit(ctx, req, subj, "apply_rrset_change", p.Zone, "error", reasonOf(err), map[string]any{"plan_id": in.PlanID})
 			return nil, uiapi.PlanResult{}, toolError(err)
 		}
-		m.audit(ctx, req, subj, "apply_rrset_change", p.Zone, "allow", "", map[string]any{"plan_id": in.PlanID})
-		res.PlanID = in.PlanID
+		m.audit(ctx, req, subj, "apply_rrset_change", p.Zone, "allow", "", withTeam(map[string]any{"plan_id": in.PlanID}, team))
+		res.PlanID, res.Team = in.PlanID, team
 		return nil, *res, nil
 	})
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "adopt_preview",
-		Description: "Preview the adoption of foreign RRsets (created outside the gate) by a team: which ones are adoptable and why not (protected, server-managed, owned by another team, relative target). Returns a preview_token for adopt_apply. Requires dns.record.adopt.",
+		Description: "Preview the adoption of foreign RRsets (created outside the gate) by a team: which ones are adoptable and why not (protected, server-managed, owned by another team, reserved for another team by a tombstone, relative target). The owner of the selection must be one of your teams unless you hold dns.ownership.approve; team acts for one of your teams only. Returns a preview_token for adopt_apply. Requires dns.record.adopt.",
 		Annotations: readOnly("Preview adoption"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in adoptPreviewIn) (*mcp.CallToolResult, uiapi.AdoptPreview, error) {
 		subj, err := m.subject(ctx, req)
@@ -536,6 +575,9 @@ func (m *mcpServer) addWriteTools(srv *mcp.Server) {
 			return nil, uiapi.AdoptPreview{}, err
 		}
 		zone := normZoneArg(in.Zone)
+		if subj, err = m.forTeam(ctx, req, subj, "adopt_preview", zone, in.Team); err != nil {
+			return nil, uiapi.AdoptPreview{}, err
+		}
 		if !m.s.cfg.Authz.Allow(subj, policy.ActionRecordAdopt, zone) {
 			return nil, uiapi.AdoptPreview{}, fmt.Errorf("dns.record.adopt not granted on %q", zone)
 		}
@@ -548,7 +590,7 @@ func (m *mcpServer) addWriteTools(srv *mcp.Server) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "adopt_apply",
-		Description: "Adopt RRsets listed by adopt_preview, all or nothing, with the preview_token. A comment explaining why is required. Fails if any RRset changed since the preview.",
+		Description: "Adopt RRsets listed by adopt_preview, all or nothing, with the preview_token (and the same owner and team as the preview). A comment explaining why is required. Fails if any RRset changed since the preview.",
 		Annotations: &mcp.ToolAnnotations{Title: "Adopt RRsets", DestructiveHint: ptr(false), IdempotentHint: true, OpenWorldHint: ptr(false)},
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in adoptApplyIn) (*mcp.CallToolResult, uiapi.AdoptResult, error) {
 		subj, err := m.subject(ctx, req)
@@ -556,6 +598,9 @@ func (m *mcpServer) addWriteTools(srv *mcp.Server) {
 			return nil, uiapi.AdoptResult{}, err
 		}
 		zone := normZoneArg(in.Zone)
+		if subj, err = m.forTeam(ctx, req, subj, "adopt_apply", zone, in.Team); err != nil {
+			return nil, uiapi.AdoptResult{}, err
+		}
 		if !m.s.cfg.Authz.Allow(subj, policy.ActionRecordAdopt, zone) {
 			return nil, uiapi.AdoptResult{}, fmt.Errorf("dns.record.adopt not granted on %q", zone)
 		}

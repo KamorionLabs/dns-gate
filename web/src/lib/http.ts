@@ -1,18 +1,21 @@
 // JSON client of /api/v1, independent of the browser globals so it can be
 // tested with a mock fetch.
-import type { IssuedToken, PlanResult, RRsetChange, ValidationError } from './types';
+import type { IssuedToken, PlanResult, RRsetChange, TeamDetail, TeamList, Transfer, TransferPage, TransferProposal, TransferQuery, ValidationError } from './types';
 
 export class ApiError extends Error {
   readonly status: number;
   readonly reason: string;
   readonly errors: ValidationError[];
   readonly details?: unknown;
-  constructor(status: number, reason: string, message: string, errors: ValidationError[] = [], details?: unknown) {
+  /** The whole JSON error body, for the fields some endpoints add (the transfer of a failed approval). */
+  readonly body?: Record<string, unknown>;
+  constructor(status: number, reason: string, message: string, errors: ValidationError[] = [], details?: unknown, body?: Record<string, unknown>) {
     super(message);
     this.status = status;
     this.reason = reason;
     this.errors = errors;
     this.details = details;
+    this.body = body;
   }
 }
 
@@ -52,17 +55,19 @@ export function createRequest(deps: HttpDeps): Request {
       let message = res.statusText || `HTTP ${res.status}`;
       let errors: ValidationError[] = [];
       let details: unknown;
+      let body: Record<string, unknown> | undefined;
       try {
         const b = (await res.json()) as { reason?: string; message?: string; errors?: ValidationError[]; details?: unknown };
         reason = b.reason ?? reason;
         message = b.message ?? message;
         errors = b.errors ?? [];
         details = b.details;
+        body = b as Record<string, unknown>;
       } catch {
         // non-JSON error body
       }
       if (res.status === 403 && reason === 'reauth_required') deps.onReauth();
-      throw new ApiError(res.status, reason, message, errors, details);
+      throw new ApiError(res.status, reason, message, errors, details, body);
     }
     return (text ? await res.text() : await res.json()) as T;
   };
@@ -73,12 +78,62 @@ export const issueToken = (request: Request) => request<IssuedToken>('POST', '/a
 
 const zonePath = (zone: string) => '/api/v1/zones/' + encodeURIComponent(zone);
 
-/** DNS writes: a plan (dry run, returns the diff and a plan_id), then the apply of exactly that plan. */
+/**
+ * DNS writes: a plan (dry run, returns the diff and a plan_id), then the apply of exactly that plan.
+ * team, one of the user's teams, is the team the plan is made for; without it, the default team.
+ */
 export function dnsWrites(request: Request) {
   // the Go side may send a null list
   const norm = (r: PlanResult): PlanResult => ({ ...r, changes: r.changes ?? [] });
   return {
-    plan: (zone: string, changes: RRsetChange[]) => request<PlanResult>('POST', zonePath(zone) + '/plan', { changes }).then(norm),
-    apply: (zone: string, planId: string) => request<PlanResult>('POST', zonePath(zone) + '/apply', { plan_id: planId }).then(norm),
+    plan: (zone: string, changes: RRsetChange[], team?: string) =>
+      request<PlanResult>('POST', zonePath(zone) + '/plan', team ? { changes, team } : { changes }).then(norm),
+    apply: (zone: string, planId: string, team?: string) =>
+      request<PlanResult>('POST', zonePath(zone) + '/apply', team ? { plan_id: planId, team } : { plan_id: planId }).then(norm),
+  };
+}
+
+function query(q: object): string {
+  const p = new URLSearchParams();
+  for (const [k, v] of Object.entries(q)) {
+    if (v !== undefined && v !== '' && v !== null) p.set(k, String(v));
+  }
+  const s = p.toString();
+  return s ? '?' + s : '';
+}
+
+// the Go side may send null lists
+const normT = (t: Transfer): Transfer => ({ ...t, rrsets: t.rrsets ?? [] });
+
+/**
+ * The transfer an approval refusal carries: failed (412, its record sets
+ * changed) or still applying (423 zone locked, 502 provider or store
+ * unavailable, retried by the gate).
+ */
+export function transferOf(e: unknown): Transfer | undefined {
+  const t = e instanceof ApiError ? e.body?.transfer : undefined;
+  return t && typeof t === 'object' ? normT(t as Transfer) : undefined;
+}
+
+/** Teams and ownership transfers. */
+export function teamsApi(request: Request) {
+  const tr = '/api/v1/transfers/';
+  return {
+    teams: () => request<TeamList>('GET', '/api/v1/teams').then((l) => ({ ...l, teams: (l.teams ?? []).map((t) => ({ ...t, roles: t.roles ?? [] })) })),
+    team: (name: string) =>
+      request<TeamDetail>('GET', '/api/v1/teams/' + encodeURIComponent(name)).then((d) => ({
+        ...d,
+        roles: d.roles ?? [],
+        owned: d.owned ?? [],
+        transfers: (d.transfers ?? []).map(normT),
+      })),
+    transfers: (q: TransferQuery) =>
+      request<TransferPage>('GET', '/api/v1/transfers' + query(q)).then((p) => ({ ...p, transfers: (p.transfers ?? []).map(normT) })),
+    transfer: (id: string) => request<Transfer>('GET', tr + encodeURIComponent(id)).then(normT),
+    proposeTransfer: (zone: string, req: TransferProposal) => request<Transfer>('POST', zonePath(zone) + '/transfers', req).then(normT),
+    decideTransfer: (id: string, approve: boolean, comment: string) =>
+      request<Transfer>('POST', tr + encodeURIComponent(id) + (approve ? '/approve' : '/reject'), { comment }).then(normT),
+    renameTeam: (team: string, to: string, comment: string, apply = false) =>
+      request<Transfer>('POST', '/api/v1/teams/' + encodeURIComponent(team) + '/rename', apply ? { to, comment, apply } : { to, comment }).then(normT),
   };
 }

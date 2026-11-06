@@ -38,6 +38,12 @@
     {/if}
   </div>
 {:else if p}
+  {#if p.load_error}
+    <p class="loaderr" role="alert">
+      This gate does not serve the active managed revision: its last policy refresh failed ({p.load_error}). Requests are decided by the policy it loaded
+      before; check the gate logs.
+    </p>
+  {/if}
   <PolicyNav active={tab} canPropose={p.me.can_propose && p.settings.editable} pending={policyState.pending} />
   {@render children(p)}
 {:else}
@@ -59,5 +65,12 @@
   }
   .bar {
     height: 120px;
+  }
+  .loaderr {
+    margin-bottom: var(--s4);
+    padding: var(--s3) var(--s4);
+    border-radius: var(--r-md);
+    background: var(--wax-wash);
+    color: var(--wax);
   }
 </style>

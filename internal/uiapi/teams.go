@@ -45,6 +45,9 @@ type TeamInfo struct {
 	Family      *TeamFrom    `json:"family,omitempty"` // derivation of a family
 	Issuer      string       `json:"issuer,omitempty"` // issuer of a claim kind
 	Warning     string       `json:"warning,omitempty"`
+	// RRsets is the number of RRsets the team owns in the zones the caller
+	// can read.
+	RRsets int `json:"rrsets"`
 }
 
 // TeamList is GET /api/v1/teams. Strict tells whether team references must
@@ -52,6 +55,10 @@ type TeamInfo struct {
 type TeamList struct {
 	Strict bool       `json:"strict"`
 	Teams  []TeamInfo `json:"teams"`
+	// RequireSecondApprover tells whether transfers and renames need the
+	// approval of another person (ownership.require_second_approver);
+	// otherwise their requester may approve them.
+	RequireSecondApprover bool `json:"require_second_approver"`
 }
 
 // TeamZone counts what a team owns in a zone.
@@ -67,6 +74,9 @@ type TeamDetail struct {
 	TeamInfo
 	Owned     []TeamZone `json:"owned"`
 	Transfers []Transfer `json:"transfers"`
+	// Permissions are the rules of the team's roles, per zone; given to
+	// policy.read holders and to the members of the team.
+	Permissions []Permission `json:"permissions,omitempty"`
 }
 
 // Transfer kinds.

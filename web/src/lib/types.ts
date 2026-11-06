@@ -116,6 +116,18 @@ export interface ZoneInventory {
   rrsets: RRset[];
   /** Discovered but not managed: every RRset is foreign, no write nor adoption. */
   unmanaged?: boolean;
+  /** Record sets deleted recently through the gate, still reserved for their team. */
+  tombstones?: Tombstone[];
+}
+
+/** Until expires_at, only this team may create or adopt the record set again; others ask for a transfer. */
+export interface Tombstone {
+  host: string;
+  type: string;
+  team: string;
+  deleted_by?: Actor;
+  deleted_at: string;
+  expires_at: string;
 }
 
 export interface Change {
@@ -211,6 +223,8 @@ export interface PlanResult {
   zone_version?: number;
   plan_id?: string;
   request_id?: string;
+  /** Team the plan was made for, when one was selected. */
+  team?: string;
 }
 
 // Policy (internal/uiapi/policy.go)
@@ -398,6 +412,8 @@ export interface EffectivePolicy {
   active?: RevisionSummary;
   managed?: PolicyDocument;
   me: MyPolicyRights;
+  /** Why this replica does not serve the active managed revision (its last policy refresh failed). */
+  load_error?: string;
 }
 
 export interface Approval {
@@ -547,4 +563,99 @@ export interface TerraformQuery {
   team?: string;
   hosts?: string[];
   types?: string[];
+}
+
+// Teams and ownership transfers (internal/uiapi/teams.go)
+
+/** declared: teams block; auto: referenced, not declared; family: team_from; claim: issuer team_claim; store: owns RRsets, named nowhere. */
+export type TeamKind = 'declared' | 'auto' | 'family' | 'claim' | 'store';
+
+export interface TeamInfo {
+  name: string;
+  kind: TeamKind;
+  layer?: 'base' | 'managed';
+  description?: string;
+  /** With policy.read only. */
+  members?: { groups?: string[]; subjects?: SubjectMatcher[] };
+  roles: string[];
+  virtual_keys?: string[];
+  family?: TeamFrom;
+  issuer?: string;
+  warning?: string;
+  /** Record sets owned in the zones the caller can read. */
+  rrsets: number;
+}
+
+export interface TeamList {
+  strict: boolean;
+  teams: TeamInfo[];
+  /** Transfers and renames need another person's approval; otherwise their requester may approve them. */
+  require_second_approver?: boolean;
+}
+
+export interface TeamZone {
+  zone: string;
+  rrsets: number;
+  tombstones: number;
+}
+
+export interface TeamDetail extends TeamInfo {
+  owned: TeamZone[];
+  transfers: Transfer[];
+  /** Rules of the team's roles: for policy.read holders and the team's members. */
+  permissions?: Permission[];
+}
+
+/** applying: approved, being applied or retried by the gate (error holds the last transient error). */
+export type TransferStatus = 'proposed' | 'applying' | 'applied' | 'rejected' | 'expired' | 'failed';
+
+export interface TransferRRset {
+  host: string;
+  type: string;
+  hash?: string;
+  tombstone?: boolean;
+}
+
+export interface Transfer {
+  id: string;
+  kind: 'rrsets' | 'rename';
+  /** Empty for a rename. */
+  zone?: string;
+  from_team: string;
+  to_team: string;
+  rrsets: TransferRRset[];
+  status: TransferStatus;
+  comment: string;
+  requester: Actor;
+  created_at: string;
+  expires_at: string;
+  decided_by?: Actor;
+  decided_at?: string;
+  decision_comment?: string;
+  moved?: number;
+  /** Why a failed transfer was not applied, or the last transient error of an applying one. */
+  error?: string;
+  can_decide: boolean;
+  /** Approved by its requester (no second approver required). */
+  self_approved?: boolean;
+}
+
+export interface TransferProposal {
+  rrsets: RRsetRef[];
+  to_team: string;
+  comment: string;
+  /** Approve it at once, by its requester (no second approver required). */
+  apply?: boolean;
+}
+
+export interface TransferPage {
+  transfers: Transfer[];
+  next_cursor?: string;
+}
+
+export interface TransferQuery {
+  zone?: string;
+  status?: TransferStatus;
+  limit?: number;
+  cursor?: string;
 }

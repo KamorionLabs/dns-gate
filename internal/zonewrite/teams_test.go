@@ -88,6 +88,11 @@ func TestTombstoneReservesDeletedRRset(t *testing.T) {
 	if err != nil || tb.Team != "team-a" || tb.DeletedBy != alice.String() || tb.ContentHash == "" || !tb.ExpiresAt.Equal(e.clock.Now().Add(7*24*time.Hour)) {
 		t.Fatalf("tombstone %+v %v", tb, err)
 	}
+	inv, err := e.eng.Inventory(ctx, bob, zoneName)
+	if err != nil || len(inv.Tombstones) != 1 || inv.Tombstones[0].Host != "api" || inv.Tombstones[0].Team != "team-a" ||
+		inv.Tombstones[0].DeletedBy == nil || inv.Tombstones[0].DeletedBy.Subject != alice.String() {
+		t.Fatalf("inventory tombstones: %+v %v", inv, err)
+	}
 	res, err := e.eng.PlanRRsets(ctx, bob, zoneName, put("api", "192.0.2.2"))
 	if err != nil || res.Allowed || res.Reason != string(ReasonNotOwner) || !strings.Contains(res.Message, "reserved for it") {
 		t.Fatalf("plan by another team: %+v %v", res, err)
@@ -110,6 +115,9 @@ func TestTombstoneReservesDeletedRRset(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.clock.Add(7*24*time.Hour + time.Minute)
+	if inv, err := e.eng.Inventory(ctx, bob, zoneName); err != nil || len(inv.Tombstones) != 0 {
+		t.Fatalf("expired tombstone listed: %+v %v", inv, err)
+	}
 	if _, err := e.eng.ApplyRRsets(ctx, bob, zoneName, put("api", "192.0.2.4"), 0); err != nil {
 		t.Fatalf("after expiry: %v", err)
 	}

@@ -629,7 +629,7 @@ Both are mutations for CSRF (cookie sessions) and the apply requires the same re
 | Field | Default | Description |
 |---|---|---|
 | `mcp.enabled` | `false` | Serves `/mcp` and `/.well-known/oauth-protected-resource`. |
-| `mcp.allow_writes` | `false` | Adds the write tools (plan/apply, adoption). Without it, the server is read-only. |
+| `mcp.allow_writes` | `false` | Adds the write tools (plan/apply, adoption, transfer requests and decisions). Without it, the server is read-only. |
 | `mcp.plan_ttl` | `10m` | Lifetime of a plan returned by `plan_rrset_change` or `POST /api/v1/zones/{zone}/plan` (1m to 1h). |
 | `mcp.requests_per_minute` | `120` | Rate limit per subject (`429` beyond). |
 | `mcp.public_url` | UI origin, else the request host | Public base URL of the gate, advertised in the protected resource metadata and shown on the Connect page. |
@@ -641,13 +641,16 @@ Tools:
 | Tool | Kind | Description |
 |---|---|---|
 | `list_zones` | read | Readable zones with their counts; zones discovered in the account but not managed are flagged `unmanaged`. |
-| `list_rrsets` | read | RRsets of a zone (managed, or unmanaged with `dns.read`), filters on status, host glob, type, owner. |
-| `get_rrset` | read | One RRset and its recent audit history. |
+| `list_rrsets` | read | RRsets of a zone (managed, or unmanaged with `dns.read`) with their owner team, and the tombstones (deleted RRsets still reserved for their team); filters on status, host glob, type, owner. |
+| `get_rrset` | read | One RRset, its tombstone, why the caller may or may not change it (`ownership`), and its recent audit history. |
 | `search_audit` | read | Audit search, same visibility as the UI. |
-| `explain`, `who_can` | read | Policy simulation (`policy.read`). |
-| `plan_rrset_change` | dry run | Desired state of RRsets, checked without writing; returns a `plan_id` bound to the caller, the zone, the changes and the zone version. |
-| `apply_rrset_change` | write | Applies a plan exactly as planned; refused when expired, used, owned by another caller, or when the zone changed since (`precondition`). |
-| `adopt_preview`, `adopt_apply` | dry run, write | Adoption as above. |
+| `explain`, `who_can` | read | Policy simulation (`policy.read`); `explain` adds the teams and default team of the simulated subject and, for an RRset, its owner team or reservation. |
+| `list_teams`, `get_team` | read | Teams as `GET /api/v1/teams[/{team}]`, plus the caller's teams (`my_teams`). |
+| `transfer_list` | read | Transfer requests the caller may see (`status=proposed` is the inbox, `can_decide`). |
+| `plan_rrset_change` | dry run | Desired state of RRsets, checked without writing; returns a `plan_id` bound to the caller, the zone, the changes, the zone version and the optional `team` (one of the caller's teams). |
+| `apply_rrset_change` | write | Applies a plan exactly as planned, for its team; refused when expired, used, owned by another caller, planned for another team (`team_mismatch`), or when the zone changed since (`precondition`). |
+| `adopt_preview`, `adopt_apply` | dry run, write | Adoption as above, with an optional `team`. |
+| `transfer_propose`, `transfer_approve`, `transfer_reject` | write | Ownership transfers with the REST rules ([transfers](#ownership)): one owner team per request, approved by someone who may write every RRset through the owner team or holds `dns.ownership.approve` on it (humans only unless `ownership.machine_approvers`), another person with `ownership.require_second_approver`, otherwise possibly the requester (`transfer_propose` with `apply: true`); the requester may reject (withdraw) it. An approval the gate cannot complete at once, and every rename, leaves the transfer `applying`, applied in the background. |
 
 There is no policy tool: policy changes stay with humans in the UI, with step-up. Plans are kept in the store, shared by every replica, and taken once: a plan made on one replica can be applied on another. The same plans back `POST /api/v1/zones/{zone}/plan` and `/apply` ([API.md](API.md)). Expired plans are purged every 15 minutes by the gate (SQL stores) or by the DynamoDB TTL.
 

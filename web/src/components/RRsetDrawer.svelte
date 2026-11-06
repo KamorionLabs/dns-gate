@@ -6,7 +6,7 @@
   import Matcher from './policy/Matcher.svelte';
   import { statusHelp } from '../lib/labels';
   import { ttl as fmtTTL } from '../lib/format';
-  import { journalHref } from '../lib/router.svelte';
+  import { journalHref, teamHref } from '../lib/router.svelte';
   import Seal from './Seal.svelte';
   import StatusBadge from './StatusBadge.svelte';
   import Host from './Host.svelte';
@@ -33,6 +33,8 @@
     stagedKind,
     onedit,
     ondelete,
+    ownership,
+    ontransfer,
   }: {
     zone: string;
     rr: RRset;
@@ -46,6 +48,10 @@
     stagedKind?: StagedKind;
     onedit?: () => void;
     ondelete?: () => void;
+    /** Who owns the record set and what it means for the user. */
+    ownership?: { mine: boolean; text: string };
+    /** Opens a transfer request with this record set. */
+    ontransfer?: () => void;
   } = $props();
   const roTag = $derived(readOnlyLabel(rr));
   const owned = $derived(rr.status !== 'foreign');
@@ -141,7 +147,7 @@
           <p class="dim small">Changes are staged first, then reviewed and applied together.</p>
         </div>
       {:else if readOnlyWhy && !unmanaged && (owned || rr.read_only || rr.alias)}
-        <p class="ro-why"><Icon name="lock" size={13} /> {readOnlyWhy}</p>
+        <p class="ro-why"><Icon name="lock" size={13} /> {ownership && rr.owner && !ownership.mine ? ownership.text : readOnlyWhy}</p>
       {/if}
 
       {#if !owned && !unmanaged && onadopt && !rr.read_only}
@@ -174,9 +180,20 @@
         </section>
       {/if}
 
+      {#if ownership && !unmanaged && (rr.owner || ownership.text.includes('reserved'))}
+        <div class="ownnote" class:mine={ownership.mine}>
+          <p><Icon name="team" size={13} /> {ownership.text}</p>
+          {#if ontransfer}<button class="btn quiet small" type="button" onclick={ontransfer}><Icon name="transfer" size={13} />Request a transfer…</button>{/if}
+        </div>
+      {/if}
+
       <section class="facts">
         <div><span class="eyebrow">TTL</span><span class="mono num">{fmtTTL(rr.ttl)} <span class="dim">({rr.ttl}s)</span></span></div>
-        <div><span class="eyebrow">Owner team</span>{#if rr.owner}<span class="team">{rr.owner}</span>{:else}<span class="dim">— (not managed by the gate)</span>{/if}</div>
+        <div>
+          <span class="eyebrow">Owner team</span>
+          {#if rr.owner}<a class="team" href={teamHref(rr.owner)}>{rr.owner}</a>{#if ownership?.mine}<span class="dim small">your team</span>{/if}
+          {:else}<span class="dim">— (not managed by the gate)</span>{/if}
+        </div>
         {#if rr.expires_at}
           <div><span class="eyebrow">Expires</span><span class="expire"><Icon name="clock" size={14} /> <RelTime iso={rr.expires_at} /></span></div>
         {/if}
@@ -470,6 +487,41 @@
   }
   .team {
     font-weight: 600;
+    color: var(--ink);
+    text-decoration: none;
+  }
+  a.team:hover {
+    color: var(--seal-ink);
+  }
+  .ownnote {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--s2) var(--s3);
+    padding: var(--s2) var(--s3);
+    border-radius: var(--r-md);
+    background: var(--well);
+    color: var(--ink-2);
+    font-size: 13px;
+  }
+  .ownnote.mine {
+    background: var(--seal-ink-wash);
+  }
+  .ownnote p {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    margin: 0;
+  }
+  .ownnote :global(svg) {
+    flex: none;
+    transform: translateY(2px);
+  }
+  .ownnote .btn {
+    height: 26px;
+    padding: 0 var(--s2);
+    font-size: 12px;
   }
   .expire {
     display: inline-flex;

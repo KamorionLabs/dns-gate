@@ -168,7 +168,33 @@ func (e *engine) Inventory(ctx context.Context, s *identity.Subject, zoneIn stri
 		return nil, fail(ReasonForbidden, "not allowed to view zone %s", zone)
 	}
 	inv, _, err := e.inventory(ctx, zone, 0)
-	return inv, err
+	if err != nil {
+		return nil, err
+	}
+	e.addTombstones(ctx, inv)
+	return inv, nil
+}
+
+// addTombstones lists the live tombstones of a managed zone in its
+// inventory; a store failure leaves them out.
+func (e *engine) addTombstones(ctx context.Context, inv *uiapi.ZoneInventory) {
+	tombs, err := e.liveTombstones(ctx, inv.Zone)
+	if err != nil {
+		e.log.Warn("inventory tombstones", "zone", inv.Zone, "error", err)
+		return
+	}
+	for _, t := range tombs {
+		inv.Tombstones = append(inv.Tombstones, uiapi.Tombstone{
+			Host: t.Host, Type: t.Type, Team: t.Team, DeletedBy: actor(t.DeletedBy, t.DeletedByName, t.DeletedByCategory),
+			DeletedAt: t.DeletedAt, ExpiresAt: t.ExpiresAt,
+		})
+	}
+	sort.Slice(inv.Tombstones, func(i, j int) bool {
+		if inv.Tombstones[i].Host != inv.Tombstones[j].Host {
+			return inv.Tombstones[i].Host < inv.Tombstones[j].Host
+		}
+		return inv.Tombstones[i].Type < inv.Tombstones[j].Type
+	})
 }
 
 // unmanagedSummary describes a discovered zone from the cache only: listing

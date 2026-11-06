@@ -264,12 +264,16 @@ The EuroDNS-compatible API always writes for the default team.
 `GET /api/v1/teams` lists the teams: declared in the `teams` block (with their
 members for `policy.read` holders), referenced without being declared (migration),
 derived from claims (`team_from` families, issuer `team_claim`), and the owners
-found in the store that nothing declares. `GET /api/v1/teams/{team}` adds what the
-team owns in the zones the caller can read and its pending transfers.
+found in the store that nothing declares, with the number of RRsets each owns in the
+zones the caller can read; `require_second_approver` tells whether transfers and
+renames need another person's approval. `GET /api/v1/teams/{team}` adds what the team owns per
+zone, its pending transfers and, for `policy.read` holders and the team's members,
+the rules of its roles (`permissions`).
 
 A deleted RRset stays reserved for its team for `ownership.tombstone_ttl` (7 days):
 another team creating or adopting it gets `403 not_owner` and must ask for a
-transfer, whoever the caller is.
+transfer, whoever the caller is. The live tombstones of a managed zone are listed in
+the `tombstones` of `GET /api/v1/zones/{zone}/rrsets`.
 
 ### Ownership transfers
 
@@ -312,6 +316,12 @@ approval answers `applying`: the gate applies the rename in the background withi
 few minutes, the approver needing `dns.ownership.approve` on every RRset of the team.
 The policy itself still names the old team: change the bindings in a policy revision
 too.
+
+The MCP server has the same operations: `list_teams`, `get_team` and
+`transfer_list` always, `transfer_propose`, `transfer_approve` and
+`transfer_reject` with `mcp.allow_writes`, and an optional `team` argument on
+`plan_rrset_change`, `apply_rrset_change`, `adopt_preview` and `adopt_apply`.
+`get_rrset` tells why the caller may or may not change an RRset ([CONFIG.md](CONFIG.md#mcp)).
 
 ## Errors
 
