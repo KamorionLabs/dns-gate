@@ -37,6 +37,7 @@
     ondelete,
     ownership,
     ontransfer,
+    canCheckPropagation = false,
   }: {
     zone: string;
     rr: RRset;
@@ -54,6 +55,8 @@
     ownership?: { mine: boolean; text: string };
     /** Opens a transfer request with this record set. */
     ontransfer?: () => void;
+    /** The viewer holds dns.read on the record set: the propagation check is offered. */
+    canCheckPropagation?: boolean;
   } = $props();
   const roTag = $derived(readOnlyLabel(rr));
   const isFwd = $derived(isForward(rr));
@@ -217,7 +220,7 @@
         {/if}
       </section>
 
-      {#if !unmanaged}
+      {#if !unmanaged && canCheckPropagation}
         <section>
           <h3 class="eyebrow">Propagation</h3>
           <PropagationPanel {zone} host={rr.host} type={rr.type} />

@@ -1,5 +1,7 @@
 // Display helpers of the DNS propagation panel.
-import type { Propagation, PropagationAnswer, PropagationStatus } from './types';
+import type { Me, PlanChange, Propagation, PropagationAnswer, PropagationStatus } from './types';
+import { hostMatch } from './glob';
+import { ruleCovers } from './folders';
 
 /** Refresh period of a running check, and how long it keeps refreshing. */
 export const POLL_MS = 5_000;
@@ -10,13 +12,15 @@ export const statusText: Record<PropagationStatus, string> = {
   stale: 'Old answer',
   missing: 'No record',
   error: 'No answer',
+  indeterminate: 'Not comparable',
 };
 
 export const statusHelp: Record<PropagationStatus, string> = {
   match: 'Answers the content read from the DNS provider.',
   stale: 'Answers other values: usually the previous content, cached until its TTL runs out.',
   missing: 'Answers that the name or the type does not exist, possibly a cached negative answer.',
-  error: 'Did not answer usefully (timeout, refusal, server failure): not counted against propagation.',
+  error: 'Did not answer usefully (timeout, refusal, server failure, filtered): not counted against propagation.',
+  indeterminate: 'Alias: the addresses could not be tied to the target (a CDN answers per location). Not counted as up to date.',
 };
 
 const REGIONS: Record<string, string> = {
@@ -71,8 +75,28 @@ export function keepPolling(p: Propagation | null, startedAt: number, now: numbe
 export function summaryLine(p: Propagation): string {
   const s = p.summary;
   const answered = s.total - s.error;
-  const head = `${s.match} of ${answered} up to date`;
-  return s.error ? `${head} · ${s.error} without answer` : head;
+  const parts = [`${s.match} of ${answered} up to date`];
+  if (s.indeterminate) parts.push(`${s.indeterminate} not comparable`);
+  if (s.error) parts.push(`${s.error} without answer`);
+  return parts.join(' · ');
+}
+
+/** What a check right after an apply expects: the hash written, or no record after a deletion. */
+export function expectOf(c: Pick<PlanChange, 'op' | 'new_hash'>): string | undefined {
+  return c.op === 'delete' ? 'absent' : c.new_hash;
+}
+
+/** Whether the user holds dns.read on the record set (unknown permissions: assume yes, the gate decides). */
+export function canCheckPropagation(me: Me | null, zone: string, host: string, type: string): boolean {
+  if (!me) return false;
+  if (!me.permissions) return true;
+  return me.permissions.some(
+    (p) =>
+      p.actions.includes('dns.read') &&
+      ruleCovers(p, zone) &&
+      (p.hosts.length === 0 || p.hosts.some((h) => hostMatch(h, host))) &&
+      (p.types.length === 0 || p.types.includes('*') || p.types.includes(type)),
+  );
 }
 
 /** What the answers are compared with. */

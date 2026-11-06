@@ -264,6 +264,8 @@ export interface PlanChange {
   new?: PlanSide | null;
   reason?: string;
   message?: string;
+  /** Content hash after an applied create or update: the expect of a propagation check. */
+  new_hash?: string;
 }
 
 export interface PlanResult {
@@ -730,7 +732,7 @@ export interface TransferQuery {
 
 // DNS propagation (GET /api/v1/zones/{zone}/rrsets/{host}/{type}/propagation, internal/propagation)
 
-export type PropagationStatus = 'match' | 'stale' | 'missing' | 'error';
+export type PropagationStatus = 'match' | 'stale' | 'missing' | 'error' | 'indeterminate';
 
 export interface PropagationAnswer {
   kind: 'authoritative' | 'resolver';
@@ -747,6 +749,10 @@ export interface PropagationAnswer {
   latency_ms: number;
   tcp?: boolean;
   error?: string;
+  /** The resolver blocks some names by policy: its negative answers may be a filter decision. */
+  filtering?: boolean;
+  /** Values left out or cut. */
+  truncated?: boolean;
 }
 
 export interface PropagationSummary {
@@ -755,7 +761,9 @@ export interface PropagationSummary {
   stale: number;
   missing: number;
   error: number;
-  /** Every server that answered has the expected content. */
+  /** Alias answers that could not be tied to the target (never up to date). */
+  indeterminate: number;
+  /** Every server that answered has the expected content, an authoritative one at least. */
   converged: boolean;
   /** Longest TTL left among the stale and missing answers, in seconds. */
   max_ttl_left: number;

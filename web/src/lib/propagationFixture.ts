@@ -62,6 +62,7 @@ export function fixturePropagation(zone: string, host: string, type: string, rr:
       stale: count('stale'),
       missing: count('missing'),
       error: count('error'),
+      indeterminate: 0,
       converged: pending.length === 0 && count('match') > 0,
       max_ttl_left: Math.max(0, ...pending.map((a) => a.ttl_left ?? 0)),
     },

@@ -12,6 +12,7 @@
   import Seal from './Seal.svelte';
   import Icon from './Icon.svelte';
   import PropagationPanel from './PropagationPanel.svelte';
+  import { expectOf } from '../lib/propagation';
 
   let {
     zone,
@@ -155,7 +156,7 @@
               {/each}
             </div>
           {/if}
-          {#if c}<PropagationPanel {zone} host={c.host} type={c.type} auto />{/if}
+          {#if c}<PropagationPanel {zone} host={c.host} type={c.type} expect={expectOf(c)} auto />{/if}
         </section>
       {/if}
       <button class="btn" type="button" onclick={onclose}>Close</button>

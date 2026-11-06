@@ -105,6 +105,7 @@
             <span class="seg match" style:width="{pct(result.summary.match)}%"></span>
             <span class="seg stale" style:width="{pct(result.summary.stale)}%"></span>
             <span class="seg missing" style:width="{pct(result.summary.missing)}%"></span>
+            <span class="seg indeterminate" style:width="{pct(result.summary.indeterminate)}%"></span>
             <span class="seg error" style:width="{pct(result.summary.error)}%"></span>
           </div>
         </div>
@@ -150,11 +151,12 @@
                 <span class="who">
                   <span class="name">{a.name}</span>
                   {#if placeLine(a)}<span class="dim small">{placeLine(a)}</span>{/if}
+                  {#if a.filtering}<span class="dim small" title="Blocks some names by policy: a negative answer may be a filter decision.">filtering</span>{/if}
                 </span>
                 <span class="st" title={statusHelp[a.status]}>{statusText[a.status]}</span>
                 <span class="what mono" title={a.address}>
-                  {#if a.status === 'error'}{a.error ?? a.rcode ?? 'no answer'}
-                  {:else if a.values.length}{#if a.cnames?.length}<span class="dim">→ {a.cnames.join(' → ')} · </span>{/if}{a.values.join(', ')}
+                  {#if a.status === 'error' || (a.status === 'indeterminate' && !a.values.length)}{a.error ?? a.rcode ?? 'no answer'}
+                  {:else if a.values.length}{#if a.cnames?.length}<span class="dim">→ {a.cnames.join(' → ')} · </span>{/if}{a.values.join(', ')}{#if a.truncated}<span class="dim"> …</span>{/if}
                   {:else}{a.rcode === 'NXDOMAIN' ? 'NXDOMAIN' : 'no record'}{/if}
                 </span>
                 <span class="meta dim small num">
@@ -227,6 +229,9 @@
   }
   .seg.missing {
     background: var(--wax);
+  }
+  .seg.indeterminate {
+    background: var(--pencil);
   }
   .seg.error {
     background: var(--pencil-wash);
@@ -365,6 +370,12 @@
   }
   .row.missing .st {
     color: var(--wax);
+  }
+  .row.indeterminate .dot {
+    background: var(--pencil);
+  }
+  .row.indeterminate .st {
+    color: var(--ink-2);
   }
   .row.error .dot {
     background: transparent;
