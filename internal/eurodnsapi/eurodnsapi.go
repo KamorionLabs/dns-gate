@@ -348,11 +348,17 @@ func (f *Facade) SaveZone(ctx context.Context, s *identity.Subject, zone string,
 			}
 			plan.Ignored = append(plan.Ignored, string(c.Op)+" "+keyString(c.Key))
 		}
-		fwd, err := forwardChanges(name, cur, z)
-		if err != nil {
-			return nil, err
+		fwd := forwardChanges(name, cur, z)
+		for _, h := range fwd.Duplicates {
+			if !rebase {
+				return nil, fail(zonewrite.ReasonInvalid, "several URL forwards for host %s: the gate does not change a host holding several forwards, send them unchanged or fix them at the provider", h)
+			}
+			plan.Ignored = append(plan.Ignored, "forwards of "+h+" (several entries)")
 		}
-		for _, c := range fwd {
+		for _, h := range fwd.Unwritten {
+			plan.Ignored = append(plan.Ignored, "forward "+h+": fields the gate does not write (id, updated, unknown fields)")
+		}
+		for _, c := range fwd.Changes {
 			if f.cfg.Authz.AllowRRset(s, policy.ActionForwardWrite, name, c.Key) || f.cfg.Authz.AllowRRset(s, policy.ActionZoneAdmin, name, c.Key) {
 				plan.Changes = append(plan.Changes, c)
 				continue
@@ -377,10 +383,38 @@ func (f *Facade) SaveZone(ctx context.Context, s *identity.Subject, zone string,
 	return err
 }
 
-// forwardChanges returns the URL forward changes from cur to desired, as
-// neutral changes of the forward RRsets. A desired host with several
-// forwards is refused.
-func forwardChanges(zone string, cur, desired *api.Zone) ([]dns.Change, error) {
+// forwardDelta is the URL forward part of a full-zone PUT.
+type forwardDelta struct {
+	// Changes are the neutral changes of the forward RRsets.
+	Changes []dns.Change
+	// Unwritten lists the hosts whose entries differ only in fields the
+	// gate does not write (id, updated, unknown fields, formatting).
+	Unwritten []string
+	// Duplicates lists the hosts the client changes while they hold, or
+	// would hold, several forwards.
+	Duplicates []string
+}
+
+// forwardChanges compares the URL forwards of cur and desired host by host.
+// A host whose entries are the same (canonical JSON, order kept) is no
+// change, duplicates included; otherwise its forward RRsets are compared
+// by content hash.
+func forwardChanges(zone string, cur, desired *api.Zone) forwardDelta {
+	group := func(raws []json.RawMessage) map[string][]string {
+		out := map[string][]string{}
+		for _, raw := range raws {
+			var e struct {
+				Host *string `json:"host"`
+			}
+			_ = json.Unmarshal(raw, &e)
+			host := "@"
+			if e.Host != nil {
+				host = dns.NormalizeHost(*e.Host, zone)
+			}
+			out[host] = append(out[host], canonical(raw))
+		}
+		return out
+	}
 	forwards := func(z *api.Zone) map[dns.Key]dns.RRset {
 		out := map[dns.Key]dns.RRset{}
 		for _, s := range eurodnsprov.FromNative("", zone, &api.Zone{URLForwards: z.URLForwards}).RRsets {
@@ -390,35 +424,51 @@ func forwardChanges(zone string, cur, desired *api.Zone) ([]dns.Change, error) {
 		}
 		return out
 	}
+	oldRaw, newRaw := group(cur.URLForwards), group(desired.URLForwards)
 	old, next := forwards(cur), forwards(desired)
-	keys := make([]dns.Key, 0, len(old)+len(next))
-	for k := range old {
-		keys = append(keys, k)
+	hosts := make([]string, 0, len(oldRaw)+len(newRaw))
+	for h := range oldRaw {
+		hosts = append(hosts, h)
 	}
-	for k := range next {
-		if _, ok := old[k]; !ok {
-			keys = append(keys, k)
+	for h := range newRaw {
+		if _, ok := oldRaw[h]; !ok {
+			hosts = append(hosts, h)
 		}
 	}
-	sort.Slice(keys, func(i, j int) bool { return keys[i].Less(keys[j]) })
-	var out []dns.Change
-	for _, k := range keys {
+	sort.Strings(hosts)
+	var d forwardDelta
+	for _, h := range hosts {
+		if slices.Equal(oldRaw[h], newRaw[h]) {
+			continue
+		}
+		if len(oldRaw[h]) > 1 || len(newRaw[h]) > 1 {
+			d.Duplicates = append(d.Duplicates, h)
+			continue
+		}
+		k := dns.ForwardKey(h)
 		o, hasOld := old[k]
 		n, hasNew := next[k]
-		if hasNew && n.ReadOnly == eurodnsprov.ReadOnlyDuplicateForward {
-			return nil, fail(zonewrite.ReasonInvalid, "several URL forwards for host %s", k.Host)
-		}
 		switch {
 		case hasOld && hasNew && dns.ContentHash(o) == dns.ContentHash(n):
+			d.Unwritten = append(d.Unwritten, h)
 		case hasOld && hasNew:
-			out = append(out, dns.Change{Op: dns.OpUpdate, Key: k, Old: &o, New: &n})
+			d.Changes = append(d.Changes, dns.Change{Op: dns.OpUpdate, Key: k, Old: &o, New: &n})
 		case hasOld:
-			out = append(out, dns.Change{Op: dns.OpDelete, Key: k, Old: &o})
+			d.Changes = append(d.Changes, dns.Change{Op: dns.OpDelete, Key: k, Old: &o})
 		default:
-			out = append(out, dns.Change{Op: dns.OpCreate, Key: k, New: &n})
+			d.Changes = append(d.Changes, dns.Change{Op: dns.OpCreate, Key: k, New: &n})
 		}
 	}
-	return out, nil
+	return d
+}
+
+func canonical(raw json.RawMessage) string {
+	var v any
+	if json.Unmarshal(raw, &v) != nil {
+		return string(raw)
+	}
+	out, _ := json.Marshal(v)
+	return string(out)
 }
 
 // sameRawList compares two lists of JSON values, ignoring formatting.
@@ -426,16 +476,8 @@ func sameRawList(a, b []json.RawMessage) bool {
 	if len(a) != len(b) {
 		return false
 	}
-	canon := func(raw json.RawMessage) string {
-		var v any
-		if json.Unmarshal(raw, &v) != nil {
-			return string(raw)
-		}
-		out, _ := json.Marshal(v)
-		return string(out)
-	}
 	for i := range a {
-		if canon(a[i]) != canon(b[i]) {
+		if canonical(a[i]) != canonical(b[i]) {
 			return false
 		}
 	}

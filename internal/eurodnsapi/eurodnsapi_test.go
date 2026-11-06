@@ -988,3 +988,83 @@ func TestOtherProviderZonesRefused(t *testing.T) {
 		t.Fatal("empty add accepted")
 	}
 }
+
+func TestFullZonePutWithDuplicateForwards(t *testing.T) {
+	e := newEnv(t, eurodnstest.Options{})
+	ctx := context.Background()
+	z := baseZone()
+	z.URLForwards = append(z.URLForwards,
+		json.RawMessage(`{"host":"@","forwardType":"HTTP301","url":"https://a.example.net/"}`),
+		json.RawMessage(`{"host":"example.com.","forwardType":"HTTP302","url":"https://b.example.net/"}`),
+		json.RawMessage(`{"forwardType":"HTTP302","url":"https://c.example.net/"}`))
+	e.srv.Seed(z)
+	fa := &identity.Subject{Issuer: "idp", ID: "fa", Name: "fa@example.com", Category: identity.CategoryHuman, Roles: []string{"writer", "forwarder"}, Teams: []string{"team-a"}}
+
+	cur := e.srv.Zone(zoneName)
+	cur.Records = append(cur.Records, eurodns.Record{Type: "A", Host: "www", TTL: 600, RData: "192.0.2.1"})
+	if err := e.api.SaveZone(ctx, alice, zoneName, cur, ""); err != nil {
+		t.Fatalf("unchanged duplicate forwards block the save: %v", err)
+	}
+	stale := e.srv.Zone(zoneName)
+	stale.URLForwards = stale.URLForwards[:1]
+	stale.Records = append(stale.Records, eurodns.Record{Type: "TXT", Host: "_acme-challenge", TTL: 600, RData: "token"})
+	if err := e.api.SaveZone(ctx, acme, zoneName, stale, ""); err != nil {
+		t.Fatalf("rebase with stale duplicate forwards: %v", err)
+	}
+	if len(e.srv.Zone(zoneName).URLForwards) != 4 {
+		t.Fatal("rebase changed the duplicate forwards")
+	}
+	changed := e.srv.Zone(zoneName)
+	changed.URLForwards[1] = json.RawMessage(`{"host":"@","forwardType":"HTTP301","url":"https://evil.example.net/"}`)
+	e.wantReason(e.api.SaveZone(ctx, fa, zoneName, changed, ""), zonewrite.ReasonInvalid)
+}
+
+func TestZoneAdminDoesNotCreateOwnedForwards(t *testing.T) {
+	e := newEnv(t, eurodnstest.Options{})
+	ctx := context.Background()
+	fa := &identity.Subject{Issuer: "idp", ID: "fa", Name: "fa@example.com", Category: identity.CategoryHuman, Roles: []string{"writer", "forwarder"}, Teams: []string{"team-a"}}
+	with := func(raws ...string) *eurodns.Zone {
+		z := e.srv.Zone(zoneName)
+		z.URLForwards = nil
+		for _, r := range raws {
+			z.URLForwards = append(z.URLForwards, json.RawMessage(r))
+		}
+		return z
+	}
+	goRaw := string(e.srv.Zone(zoneName).URLForwards[0])
+	promo := `{"host":"promo","forwardType":"HTTP301","url":"https://example.org/"}`
+	e.wantReason(e.api.SaveZone(ctx, admin, zoneName, with(goRaw, promo), ""), zonewrite.ReasonForbidden)
+	if e.own("promo", dns.TypeURLForward) != nil || len(e.srv.Zone(zoneName).URLForwards) != 1 {
+		t.Fatal("zone admin created a forward")
+	}
+	if err := e.api.SaveZone(ctx, fa, zoneName, with(goRaw, promo), ""); err != nil {
+		t.Fatal(err)
+	}
+	e.wantReason(e.api.SaveZone(ctx, admin, zoneName, with(goRaw, `{"host":"promo","forwardType":"HTTP302","url":"https://example.org/"}`), ""), zonewrite.ReasonForbidden)
+	if err := e.api.SaveZone(ctx, admin, zoneName, with(`{"id":41,"host":"go","forwardType":"HTTP302","url":"https://example.org/"}`, promo), ""); err != nil {
+		t.Fatalf("zone admin change of an unowned forward: %v", err)
+	}
+	ev := e.audit.find("saveDnsZone", "allow")
+	last := ev[len(ev)-1]
+	if fmt.Sprint(last.Extra["zone_admin_forwards"]) != "[go URLFWD]" || e.own("go", dns.TypeURLForward) != nil {
+		t.Fatalf("zone admin change not marked or owned: %+v", last.Extra)
+	}
+}
+
+func TestUnwrittenForwardFieldsAreAudited(t *testing.T) {
+	e := newEnv(t, eurodnstest.Options{})
+	ctx := context.Background()
+	before := string(e.srv.Zone(zoneName).URLForwards[0])
+	z := e.srv.Zone(zoneName)
+	z.URLForwards = []json.RawMessage{json.RawMessage(`{"id":99,"host":"go","forwardType":"HTTP301","url":"https://example.net/","updated":true,"x":1}`)}
+	if err := e.api.SaveZone(ctx, alice, zoneName, z, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(e.srv.Zone(zoneName).URLForwards[0]); got != before {
+		t.Fatalf("unwritten fields saved: %s", got)
+	}
+	ev := e.audit.find("saveDnsZone", "allow")
+	if len(ev) != 1 || !strings.Contains(fmt.Sprint(ev[0].Extra["ignored_out_of_scope"]), "forward go") {
+		t.Fatalf("ignored change not audited: %+v", ev)
+	}
+}
