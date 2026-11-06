@@ -555,8 +555,11 @@ paths:
         tombstone after a recent delete). The caller needs dns.record.write
         or dns.ownership.approve on the zone and, for every RRset, be allowed
         to write it through the bindings of the owner team or of the target
-        team, or hold dns.ownership.approve on it (`403 not_owner`). The request waits for a second person
-        (`ownership.transfer_ttl`, 7 days by default).
+        team, or hold dns.ownership.approve on it (`403 not_owner`). The
+        request waits for its approval (`ownership.transfer_ttl`, 7 days by
+        default); with `"apply": true` its requester approves it at once,
+        when `ownership.require_second_approver` is false (`400 invalid`
+        otherwise).
       requestBody:
         required: true
         content:
@@ -622,13 +625,17 @@ paths:
       operationId: approveTransfer
       summary: Approve a transfer request, which applies it
       description: |
-        By another person than the requester (`403 forbidden`): a human
-        unless `ownership.machine_approvers`, after a recent login, whose
-        `ownership.person_claims` differ from the requester's. For every
-        RRset, the approver must be allowed to write it through the bindings
-        of the owner team, or hold dns.ownership.approve on it; a team rename
-        needs policy.approve and dns.ownership.approve on every RRset of the
-        team. The ownership entries change team
+        By a human unless `ownership.machine_approvers`, after a recent
+        login. With `ownership.require_second_approver` the approver is
+        another person than the requester under any identity
+        (`ownership.person_issuers`, `ownership.person_claims`, fail closed
+        when either cannot be identified); without it the requester may
+        approve its own request (`self_approved`). For every RRset, the
+        approver must be allowed to write it through the bindings of the
+        owner team, or hold dns.ownership.approve on it. A team rename needs
+        policy.approve; it answers `applying` and is applied in the
+        background, the approver needing dns.ownership.approve on every RRset
+        of the team. The ownership entries change team
         in one store transaction, after checking under the zone lock that
         they still belong to the team with the content hash of the request,
         in the store and upstream; otherwise the transfer is `failed` and the
@@ -636,8 +643,8 @@ paths:
         `410 expired` when the request expired, `412 precondition` when it
         was already decided. When the zone is locked (`423`) or the store or
         the provider is unavailable (`502`), the transfer stays `applying`,
-        returned in `transfer`, and the gate retries it for 24 hours before
-        marking it `failed`.
+        returned in `transfer`, and the gate retries it for 24 hours (checking
+        the rights of the approver again) before marking it `failed`.
       requestBody:
         content:
           application/json:
@@ -726,7 +733,9 @@ paths:
       description: |
         Bulk transfer for migrations, in the managed zones and every other
         zone where the store holds RRsets or tombstones of the team, store
-        only:
+        only, applied in the background once approved (`"apply": true`
+        approves it at once when `ownership.require_second_approver` is
+        false):
         proposed by a policy.propose holder, applied when another
         policy.approve holder approves it (`/api/v1/transfers/{id}/approve`).
         The policy still names the old team: change the bindings in a policy
@@ -2039,7 +2048,7 @@ components:
       type: object
       required: [name, kind, roles]
       properties:
-        name: { type: string, description: 'Team name; "<prefix>*" for a team_from family, "*" for a team_claim issuer.' }
+        name: { type: string, description: 'Team name; "<prefix>*" for a team_from family or the team_claim of an issuer (its team_claim_prefix).' }
         kind: { type: string, enum: [declared, auto, family, claim, store] }
         layer: { type: string, enum: [base, managed], description: "Layer declaring the team." }
         description: { type: string }
@@ -2082,6 +2091,7 @@ components:
         rrsets: { type: array, minItems: 1, maxItems: 100, items: { $ref: "#/components/schemas/RRsetRef" } }
         to_team: { type: string }
         comment: { type: string, maxLength: 2000 }
+        apply: { type: boolean, description: "Approve at once, by the requester (ownership.require_second_approver false only)." }
 
     TeamRenameRequest:
       type: object
@@ -2090,6 +2100,7 @@ components:
       properties:
         to: { type: string }
         comment: { type: string, maxLength: 2000 }
+        apply: { type: boolean, description: "Approve at once, by the requester (ownership.require_second_approver false only)." }
 
     Transfer:
       type: object
@@ -2119,7 +2130,8 @@ components:
         decision_comment: { type: string }
         moved: { type: integer, description: "RRsets and tombstones moved." }
         error: { type: string, description: "Why a failed transfer was not applied." }
-        can_decide: { type: boolean, description: "The caller may approve or reject it." }
+        can_decide: { type: boolean, description: "The caller may approve it; with ownership.require_second_approver false, the requester may approve its own request. The requester may always withdraw (reject) a proposed request." }
+        self_approved: { type: boolean, description: "Approved by its requester (ownership.require_second_approver false)." }
 
     TransferPage:
       type: object
