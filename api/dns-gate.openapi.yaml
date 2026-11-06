@@ -733,11 +733,10 @@ paths:
       description: |
         Bulk transfer for migrations, in the managed zones and every other
         zone where the store holds RRsets or tombstones of the team, store
-        only, applied in the background once approved (`"apply": true`
-        approves it at once when `ownership.require_second_approver` is
-        false):
-        proposed by a policy.propose holder, applied when another
-        policy.approve holder approves it (`/api/v1/transfers/{id}/approve`).
+        only: proposed by a policy.propose holder and approved by a
+        policy.approve holder (`/api/v1/transfers/{id}/approve`; another
+        person with `ownership.require_second_approver`, otherwise
+        `"apply": true` approves it at once), then applied in the background.
         The policy still names the old team: change the bindings in a policy
         revision too. Applied zone by zone; an interruption leaves the
         rename `applying` and the gate resumes it.
