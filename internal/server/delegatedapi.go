@@ -10,13 +10,13 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/identity"
-	"github.com/KamorionLabs/eurodns-gate/internal/policy"
-	"github.com/KamorionLabs/eurodns-gate/internal/store"
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
+	"github.com/KamorionLabs/dns-gate/internal/identity"
+	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/store"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 )
 
-// FeaturePolicyDelegation is advertised by GET /.well-known/eurodns-gate
+// FeaturePolicyDelegation is advertised by GET /.well-known/dns-gate
 // when the delegation API (/api/v1/policy/delegated) is served.
 const FeaturePolicyDelegation = "policy-delegation"
 

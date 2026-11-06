@@ -5,13 +5,19 @@
   import { zoneHref } from '../lib/router.svelte';
   import Host from './Host.svelte';
 
-  let { change, zone, link = true, applied = true }: { change: ShownChange; zone?: string; link?: boolean; applied?: boolean } =
-    $props();
+  let {
+    change,
+    zone,
+    link = true,
+    applied = true,
+    verb,
+  }: { change: ShownChange; zone?: string; link?: boolean; applied?: boolean; verb?: string } = $props();
   // A record set replaced by one of another type (A to CNAME) reads as one change.
   const retyped = $derived(!!change.old_type && change.old_type !== change.type);
 
-  const oldV = $derived(change.old_values ?? []);
-  const newV = $derived(change.new_values ?? []);
+  const aliasLine = (a?: { target: string } | null) => (a ? [`alias ${a.target}`] : []);
+  const oldV = $derived(change.old_values?.length ? change.old_values : aliasLine(change.old_alias));
+  const newV = $derived(change.new_values?.length ? change.new_values : aliasLine(change.new_alias));
   const lines = $derived.by(() => {
     const out: { kind: 'add' | 'del' | 'keep'; v: string }[] = [];
     for (const v of oldV) if (!newV.includes(v)) out.push({ kind: 'del', v });
@@ -25,7 +31,7 @@
 
 <div class="change {change.op}" class:proposed={!applied}>
   <div class="head">
-    <span class="op">{applied ? opLabel[change.op] : 'Proposed'}{#if retyped}<span class="retype">(type {change.old_type} → {change.type})</span>{/if}</span>
+    <span class="op">{verb ?? (applied ? opLabel[change.op] : 'Proposed')}{#if retyped}<span class="retype">(type {change.old_type} → {change.type})</span>{/if}</span>
     {#if link && zone}
       <a href={zoneHref(zone, { rr: `${change.host}/${change.type}` })}><Host host={change.host} {zone} showZone={false} /></a>
     {:else}

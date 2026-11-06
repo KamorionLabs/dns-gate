@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 	eurodns "github.com/KamorionLabs/eurodns-go"
 )
 

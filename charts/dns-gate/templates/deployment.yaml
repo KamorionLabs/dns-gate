@@ -1,0 +1,155 @@
+{{- $store := include "dns-gate.storeType" . -}}
+{{- $sqlite := eq $store "sqlite" -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dns-gate.fullname" . }}
+  labels:
+    {{- include "dns-gate.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  {{- if or $sqlite (eq $store "memory") }}
+  strategy:
+    type: Recreate
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "dns-gate.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "dns-gate.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "dns-gate.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.automountServiceAccountToken }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: gate
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["-config", "/etc/dns-gate/config.yaml"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: DNS_GATE_REPLICAS
+              value: {{ .Values.replicaCount | quote }}
+            - name: EURODNS_API_KEY_FILE
+              value: /var/run/secrets/eurodns/{{ .Values.eurodns.apiKeyKey }}
+            {{- if .Values.eurodns.appIdKey }}
+            - name: EURODNS_APP_ID_FILE
+              value: /var/run/secrets/eurodns/{{ .Values.eurodns.appIdKey }}
+            {{- end }}
+            {{- if eq $store "postgres" }}
+            - name: DNS_GATE_POSTGRES_DSN_FILE
+              value: /var/run/secrets/postgres/{{ .Values.postgres.dsnKey }}
+            {{- end }}
+            {{- if (.Values.config.ui | default dict).enabled }}
+            - name: DNS_GATE_SESSION_KEY_FILE
+              value: /var/run/secrets/ui/{{ .Values.ui.sessionKeyKey }}
+            {{- if .Values.ui.clientSecretKey }}
+            - name: DNS_GATE_UI_CLIENT_SECRET_FILE
+              value: /var/run/secrets/ui/{{ .Values.ui.clientSecretKey }}
+            {{- end }}
+            {{- end }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 20
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/dns-gate
+              readOnly: true
+            - name: eurodns
+              mountPath: /var/run/secrets/eurodns
+              readOnly: true
+            {{- if eq $store "postgres" }}
+            - name: postgres
+              mountPath: /var/run/secrets/postgres
+              readOnly: true
+            {{- end }}
+            {{- if (.Values.config.ui | default dict).enabled }}
+            - name: ui
+              mountPath: /var/run/secrets/ui
+              readOnly: true
+            {{- end }}
+            {{- if $sqlite }}
+            - name: data
+              mountPath: {{ .Values.persistence.mountPath }}
+            {{- end }}
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "dns-gate.fullname" . }}
+        - name: eurodns
+          secret:
+            secretName: {{ .Values.eurodns.existingSecret }}
+        {{- if eq $store "postgres" }}
+        - name: postgres
+          secret:
+            secretName: {{ .Values.postgres.existingSecret }}
+        {{- end }}
+        {{- if (.Values.config.ui | default dict).enabled }}
+        - name: ui
+          secret:
+            secretName: {{ .Values.ui.existingSecret }}
+        {{- end }}
+        {{- if $sqlite }}
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.existingClaim | default (include "dns-gate.fullname" .) }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- end }}
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

@@ -1,12 +1,14 @@
 package uiapi
 
+import "github.com/KamorionLabs/dns-gate/internal/dns"
+
 // Adoption brings RRsets created outside the gate (foreign) under its
 // ownership, for a team. It requires dns.record.adopt on each RRset and never
 // applies to protected or server-managed (SOA, locked) records.
 //
 //	POST /api/v1/zones/{zone}/adopt/preview  AdoptSelection -> AdoptPreview   (dns.record.adopt)
 //	POST /api/v1/zones/{zone}/adopt          AdoptApply     -> AdoptResult    (dns.record.adopt)
-//	GET  /api/v1/zones/{zone}/terraform?team=&hosts=&types=  -> text/plain HCL (ui.read)
+//	GET  /api/v1/zones/{zone}/terraform?team=&hosts=&types=&rrsets=&provider=dnsgate|eurodns -> text/plain HCL (ui.read)
 //
 // Apply is all-or-nothing: if any selected RRset is no longer adoptable (or
 // changed since the preview, see PreviewToken), nothing is adopted and the
@@ -28,13 +30,18 @@ type AdoptSelection struct {
 
 // AdoptCandidate is one RRset in a preview.
 type AdoptCandidate struct {
-	Host      string   `json:"host"`
-	Type      string   `json:"type"`
-	TTL       int      `json:"ttl"`
-	Values    []string `json:"values"`
-	Status    string   `json:"status"` // current inventory status
-	Adoptable bool     `json:"adoptable"`
-	Reason    string   `json:"reason,omitempty"` // why not: protected, server_managed, owned_by_other_team, already_owned, forbidden, relative_target
+	Host      string     `json:"host"`
+	Type      string     `json:"type"`
+	TTL       int        `json:"ttl"`
+	Values    []string   `json:"values"`
+	Alias     *dns.Alias `json:"alias,omitempty"`
+	Status    string     `json:"status"` // current inventory status
+	Adoptable bool       `json:"adoptable"`
+	// Reason tells why not: protected, owned_by_other_team, already_owned,
+	// forbidden, not_found, the read-only reason of the RRset
+	// (server_managed...), or the provider refusal of its content
+	// (relative_target, invalid).
+	Reason string `json:"reason,omitempty"`
 }
 
 // AdoptPreview is the dry-run result.
@@ -64,11 +71,17 @@ type AdoptResult struct {
 // RRsetChange is a desired state for one RRset (Values nil or empty with
 // Delete=true removes it). Used by MCP plan/apply and the UI.
 type RRsetChange struct {
-	Host   string   `json:"host"`
-	Type   string   `json:"type"`
-	TTL    int      `json:"ttl,omitempty"`
-	Values []string `json:"values,omitempty"`
-	Delete bool     `json:"delete,omitempty"`
+	Host   string     `json:"host"`
+	Type   string     `json:"type"`
+	TTL    int        `json:"ttl,omitempty"`
+	Values []string   `json:"values,omitempty"`
+	Alias  *dns.Alias `json:"alias,omitempty"`
+	Delete bool       `json:"delete,omitempty"`
+	// ExpectedHash, when set, is the content hash (dns.ContentHash) the
+	// RRset must have upstream for the change to apply: precondition
+	// otherwise. MustNotExist refuses the change if the RRset exists.
+	ExpectedHash string `json:"expected_hash,omitempty"`
+	MustNotExist bool   `json:"must_not_exist,omitempty"`
 }
 
 // PlanResult is a dry run of RRset changes for a subject.

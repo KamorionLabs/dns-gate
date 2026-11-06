@@ -1,30 +1,41 @@
-# eurodns-gate example configuration (see docs/CONFIG.md).
-# Secrets are never written here: EURODNS_API_KEY(_FILE),
-# EURODNS_GATE_SESSION_KEY(_FILE), EURODNS_GATE_UI_CLIENT_SECRET(_FILE),
-# EURODNS_GATE_POSTGRES_DSN(_FILE).
+# dns-gate example configuration (see docs/CONFIG.md).
+# Secrets are never written here: EURODNS_API_KEY(_FILE) (or
+# EURODNS_<PROVIDER_ID>_API_KEY(_FILE) per EuroDNS account),
+# DNS_GATE_SESSION_KEY(_FILE), DNS_GATE_UI_CLIENT_SECRET(_FILE),
+# DNS_GATE_POSTGRES_DSN(_FILE). Route53 uses the default AWS credentials.
 
 listen:
   address: ":8080"
 
-upstream:
-  base_url: https://rest-api.eurodns.com
-  app_id: acme-gate            # or EURODNS_APP_ID(_FILE)
-  rate: {every: 1.1s, burst: 5} # EuroDNS allows 10 requests / 10 s per IP
+# The DNS accounts the gate fronts. Each zone is served by exactly one
+# provider: the one whose zones filter selects it (and, when several do,
+# whose account lists it). Every account is listed each zones.refresh: its
+# zones outside the managed ones are shown read-only (unmanaged) and can be
+# brought under management from the UI by a policy revision.
+providers:
+  - id: eurodns
+    kind: eurodns
+    zones: {include: ["*"], exclude: [], refresh: 1h}
+    eurodns:
+      base_url: https://rest-api.eurodns.com
+      app_id: acme-gate             # or EURODNS_APP_ID(_FILE)
+      rate: {every: 1.1s, burst: 5} # EuroDNS allows 10 requests / 10 s per IP
+      max_retries: 3
+  # - id: route53-prod
+  #   kind: route53
+  #   zones: {include: ["*.example.net"]}
+  #   route53:
+  #     region: eu-west-3
+  #     assume_role_arn: arn:aws:iam::123456789012:role/dns-gate
+  #     external_id: dns-gate
+  #     hosted_zones: {"example.net": Z0123456789ABC}  # optional pinning
+  #     include_private: false
 
 # Only these zones are reachable through the gate (plus the zones of the
 # active managed policy revision).
 zones:
   - example.com
   - example.org
-
-# List the domains of the EuroDNS account: those outside the managed zones are
-# shown read-only (unmanaged) and can be brought under management from the UI
-# by a policy revision. Costs one upstream request per 100 domains per refresh.
-zones_discovery:
-  enabled: true
-  include: ["*"]
-  exclude: []
-  refresh: 1h
 
 check_on_write: true
 reconcile_interval: 15m
@@ -37,14 +48,14 @@ store:
   type: sqlite                 # memory | sqlite | postgres | dynamodb
   audit_retention: 9600h       # 400 days
   sqlite:
-    path: /var/lib/eurodns-gate/gate.db
+    path: /var/lib/dns-gate/gate.db
 
 issuers:
   # AWS IAM outbound identity federation (sts:GetWebIdentityToken).
   # The issuer URL is account specific: aws iam get-outbound-web-identity-federation-info
   - name: aws
     issuer: https://00000000-0000-0000-0000-000000000000.tokens.sts.global.api.aws
-    audiences: [eurodns-gate]
+    audiences: [dns-gate]
     category: pipeline
     bound_claims:
       sub: ["arn:aws:iam::111111111111:role/*"]
@@ -52,7 +63,7 @@ issuers:
   # GitHub Actions OIDC.
   - name: github
     issuer: https://token.actions.githubusercontent.com
-    audiences: [eurodns-gate]
+    audiences: [dns-gate]
     category: pipeline
     name_claim: workflow
     bound_claims:
@@ -61,16 +72,16 @@ issuers:
   # Kubernetes service account tokens (projected, custom audience).
   - name: k8s
     issuer: https://oidc.eks.eu-west-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B71EXAMPLE
-    audiences: [eurodns-gate]
+    audiences: [dns-gate]
     category: pipeline
 
   # Entra ID: Managed Identity, AKS Workload Identity and Azure DevOps
   # (service connection with workload identity federation) access tokens.
-  # Gate app registration: Application ID URI api://eurodns-gate,
+  # Gate app registration: Application ID URI api://dns-gate,
   # accessTokenAcceptedVersion: 2, app roles, assignment required.
   - name: entra
     issuer: https://login.microsoftonline.com/11111111-2222-3333-4444-555555555555/v2.0
-    audiences: ["api://eurodns-gate", "99999999-8888-7777-6666-555555555555"]
+    audiences: ["api://dns-gate", "99999999-8888-7777-6666-555555555555"]
     subject_template: "{{tid}}/{{oid}}"
     bound_claims: {tid: "11111111-2222-3333-4444-555555555555"}
     category_claim: idtyp
@@ -80,7 +91,7 @@ issuers:
   # Corporate IdP, used by humans through the UI.
   - name: sso
     issuer: https://login.example.com
-    audiences: [eurodns-gate]
+    audiences: [dns-gate]
     category: human
     name_claim: email
 
@@ -186,7 +197,7 @@ bindings:
 
   # Azure DevOps pipeline: AzureCLI@2 with a workload identity federation
   # service connection, then
-  #   az account get-access-token --scope api://eurodns-gate/.default
+  #   az account get-access-token --scope api://dns-gate/.default
   # Bound on the DNS.Write app role assigned to the service principal.
   # Never trust the raw vstoken.dev.azure.com token (fixed audience
   # api://AzureADTokenExchange, replayable against Azure).
@@ -285,11 +296,11 @@ mcp:
 ui:
   enabled: true
   issuer: entra
-  client_id: eurodns-gate-ui
+  client_id: dns-gate-ui
   redirect_url: https://dns-gate.example.com/auth/callback
   scopes: [openid, profile, email]
   session_ttl: 8h
   # Scope command-line tools request for a gate token, shown on the Connect
   # page. Default with an Entra v2 issuer: api://<client_id>/.default; set it
   # when the Application ID URI is not built from the client id.
-  cli_scope: api://eurodns-gate/.default
+  cli_scope: api://dns-gate/.default

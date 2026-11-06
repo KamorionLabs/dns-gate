@@ -10,6 +10,8 @@
   import Seal from '../components/Seal.svelte';
   import RelTime from '../components/RelTime.svelte';
   import Icon from '../components/Icon.svelte';
+  import ProviderBadge from '../components/ProviderBadge.svelte';
+  import { providerLabel } from '../lib/labels';
 
   let all = $state<ZoneSummary[] | null>(null);
   let error = $state<string | null>(null);
@@ -18,7 +20,7 @@
   const admin = $derived(canPropose(me));
 
   const legend = ['managed', 'foreign', 'pending', 'tainted'] as const;
-  const GUIDE_KEY = 'eurodns-gate.guide-dismissed';
+  const GUIDE_KEY = 'dns-gate.guide-dismissed';
   let guide = $state(readGuide());
 
   function readGuide(): boolean {
@@ -91,6 +93,8 @@
     debounce = setTimeout(() => router.setParams({ q: v.trim() || undefined }), 150);
   }
 
+  const providers = $derived([...new Set((all ?? []).map((z) => z.provider).filter((p): p is string => !!p))].sort());
+  const multiProvider = $derived(providers.length > 1);
   const totals = $derived(managed.reduce((t, z) => ({ managed: t.managed + z.managed, rrsets: t.rrsets + z.rrsets }), { managed: 0, rrsets: 0 }));
   const adoptZone = $derived(managed.find((z) => z.foreign > 0) ?? managed[0]);
   const exportZone = $derived(managed.find((z) => z.managed > 0));
@@ -124,7 +128,7 @@
           <button class="btn quiet icon" type="button" aria-label="Dismiss the guide" title="Dismiss" onclick={() => setGuide(false)}><Icon name="x" size={14} /></button>
         </div>
         <p class="lead">
-          The gate holds the EuroDNS key and changes DNS records for teams, within their permissions. A zone is either
+          The gate holds the keys of the DNS {providers.length > 1 ? 'providers' : 'provider'}{providers.length ? ` (${providers.map(providerLabel).join(', ')})` : ''} and changes DNS records for teams, within their permissions. A zone is either
           <b>managed by the gate</b> (changes go through it) or <b>not managed</b> (shown read-only). In a managed zone, each record set has a status:
         </p>
         <dl class="legend">
@@ -190,7 +194,7 @@
               <li class="row">
                 <a class="cover" href={zoneHref(z.zone)} aria-label="Open {z.zone}"></a>
                 <div class="ident">
-                  <h3 class="mono">{z.zone}</h3>
+                  <h3 class="mono">{z.zone} <ProviderBadge provider={z.provider} /></h3>
                   <span class="meta"><span class="num">{z.rrsets.toLocaleString('en')}</span> record sets · synced <RelTime iso={z.last_synced_at} /></span>
                 </div>
                 <div class="state">
@@ -218,7 +222,7 @@
         <div class="dhead">
           <h2 class="sec" id="discovered-title">Not managed (read-only) <span class="count num">{shownUnmanaged.length.toLocaleString('en')}</span></h2>
           <p class="hint">
-            Found in the EuroDNS account. The gate shows them read-only: no write and no adoption until a zone is managed. Their records are read when you open them.
+            Found at the DNS {providers.length > 1 ? 'providers' : 'provider'}. The gate shows them read-only: no write and no adoption until a zone is managed. Their records are read when you open them.
             {#if !admin}Only a policy administrator can bring a zone under management.{/if}
           </p>
         </div>
@@ -229,6 +233,7 @@
             {#each pageUnmanaged as z (z.zone)}
               <li class="mini" class:open={managing === z.zone}>
                 <a class="zname mono" href={zoneHref(z.zone)}>{z.zone}</a>
+                {#if multiProvider}<ProviderBadge provider={z.provider} />{/if}
                 {#if z.last_synced_at}<span class="mmeta">{plural(z.rrsets, 'record set')}</span>{/if}
                 {#if admin && managing !== z.zone}
                   <button class="btn quiet small manage" type="button" onclick={() => (managing = z.zone)} aria-label="Manage {z.zone}…">Manage…</button>

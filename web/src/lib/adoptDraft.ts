@@ -1,7 +1,7 @@
 import type { AdoptSelection } from './types';
 
 // An adoption in progress survives a step-up re-authentication round trip.
-const key = (zone: string) => 'eurodns-gate.adopt.' + zone;
+const key = (zone: string) => 'dns-gate.adopt.' + zone;
 
 export interface StoredAdopt {
   selection: AdoptSelection;

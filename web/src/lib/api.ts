@@ -1,3 +1,4 @@
+import { ApiError, createRequest, dnsWrites, issueToken } from './http';
 import type {
   AdoptApply,
   AdoptPreview,
@@ -11,27 +12,20 @@ import type {
   ExplainRequest,
   ExplainResponse,
   GeneratedKey,
+  IssuedToken,
   Me,
+  PlanResult,
   ProposeRequest,
   RevisionDetail,
   RevisionPage,
-  ValidationError,
+  RRsetChange,
   TerraformQuery,
   WhoCanResponse,
   ZoneInventory,
   ZoneSummary,
 } from './types';
 
-export class ApiError extends Error {
-  constructor(
-    readonly status: number,
-    readonly reason: string,
-    message: string,
-    readonly errors: ValidationError[] = [],
-  ) {
-    super(message);
-  }
-}
+export { ApiError };
 
 export interface Backend {
   me(): Promise<Me>;
@@ -54,6 +48,9 @@ export interface Backend {
   adoptPreview(zone: string, sel: AdoptSelection): Promise<AdoptPreview>;
   adopt(zone: string, req: AdoptApply): Promise<AdoptResult>;
   terraform(zone: string, q: TerraformQuery): Promise<string>;
+  plan(zone: string, changes: RRsetChange[]): Promise<PlanResult>;
+  apply(zone: string, planId: string): Promise<PlanResult>;
+  issueToken(): Promise<IssuedToken>;
 }
 
 export function loginURL(reauth = false): string {
@@ -76,42 +73,16 @@ function csrfToken(): string {
   return m?.[1] ? decodeURIComponent(m[1]) : '';
 }
 
-async function request<T>(method: 'GET' | 'POST', path: string, body?: unknown, text = false): Promise<T> {
-  const headers: Record<string, string> = { Accept: text ? 'text/plain' : 'application/json' };
-  if (method === 'POST') {
-    headers['Content-Type'] = 'application/json';
-    headers['X-Gate-CSRF'] = csrfToken();
-  }
-  const res = await fetch(path, {
-    method,
-    headers,
-    credentials: 'same-origin',
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  if (res.status === 401) {
-    window.location.assign(loginURL());
-    throw new ApiError(401, 'unauthenticated', 'Redirecting to sign-in');
-  }
-  if (!res.ok) {
-    let reason = 'error';
-    let message = res.statusText || `HTTP ${res.status}`;
-    let errors: ValidationError[] = [];
-    try {
-      const b = (await res.json()) as { reason?: string; message?: string; errors?: ValidationError[] };
-      reason = b.reason ?? reason;
-      message = b.message ?? message;
-      errors = b.errors ?? [];
-    } catch {
-      // non-JSON error body
-    }
-    if (res.status === 403 && reason === 'reauth_required') {
-      for (const fn of beforeReauth) fn();
-      window.location.assign(loginURL(true));
-    }
-    throw new ApiError(res.status, reason, message, errors);
-  }
-  return (text ? await res.text() : await res.json()) as T;
-}
+const request = createRequest({
+  fetch: (input, init) => fetch(input, init),
+  csrf: csrfToken,
+  onUnauthenticated: () => window.location.assign(loginURL()),
+  onReauth: () => {
+    for (const fn of beforeReauth) fn();
+    window.location.assign(loginURL(true));
+  },
+});
+const writes = dnsWrites(request);
 
 function query(q: object): string {
   const p = new URLSearchParams();
@@ -126,10 +97,15 @@ const rev = (id: string) => '/api/v1/policy/revisions/' + encodeURIComponent(id)
 
 const http: Backend = {
   me: () => request('GET', '/api/v1/me'),
-  gateInfo: () => request('GET', '/.well-known/eurodns-gate'),
+  gateInfo: () => request('GET', '/.well-known/dns-gate'),
   connect: () => request('GET', '/api/v1/connect'),
   zones: () => request('GET', '/api/v1/zones'),
-  inventory: (zone) => request('GET', `/api/v1/zones/${encodeURIComponent(zone)}/rrsets`),
+  // An alias RRset has no values: the Go side may send null.
+  inventory: (zone) =>
+    request<ZoneInventory>('GET', `/api/v1/zones/${encodeURIComponent(zone)}/rrsets`).then((z) => ({
+      ...z,
+      rrsets: (z.rrsets ?? []).map((r) => ({ ...r, values: r.values ?? [] })),
+    })),
   audit: (q) => request('GET', '/api/v1/audit' + query(q)),
   policy: () => request('GET', '/api/v1/policy'),
   revisions: (q) => request('GET', '/api/v1/policy/revisions' + query(q)),
@@ -152,6 +128,9 @@ const http: Backend = {
       undefined,
       true,
     ),
+  plan: writes.plan,
+  apply: writes.apply,
+  issueToken: () => issueToken(request),
 };
 
 export const usingFixtures = import.meta.env.VITE_FIXTURES === '1';

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from 'svelte';
-  import { api } from '../lib/api';
+  import { api, onBeforeReauth } from '../lib/api';
   import type { AdoptResult, Me, RRset, RRsetRef, Status, ZoneInventory } from '../lib/types';
   import { takeAdopt, type StoredAdopt } from '../lib/adoptDraft';
   import AdoptPanel from '../components/AdoptPanel.svelte';
@@ -21,6 +21,13 @@
   import Icon from '../components/Icon.svelte';
   import ManageZone from '../components/ManageZone.svelte';
   import ZoneAccessView from '../components/policy/ZoneAccess.svelte';
+  import RecordForm from '../components/RecordForm.svelte';
+  import ReviewPanel from '../components/ReviewPanel.svelte';
+  import ProviderBadge from '../components/ProviderBadge.svelte';
+  import { blockerText, canChange, canWriteZone, readOnlyLabel } from '../lib/rights';
+  import { keysAfter, rebase, stage, stagedFor, stagedKey, unstage, valuesOf, type StagedChange } from '../lib/staging';
+  import { saveStaged, takeStaged } from '../lib/stagedDraft';
+  import { providerLabel } from '../lib/labels';
 
   let { zone }: { zone: string } = $props();
 
@@ -35,30 +42,48 @@
   let adoptForbidden = $state(false);
   let restored = $state<StoredAdopt | null>(null);
 
+  // DNS changes staged in this zone, reviewed and applied together.
+  let staged = $state<StagedChange[]>([]);
+  let formFor = $state<{ rr?: RRset; staged?: StagedChange } | null>(null);
+  let reviewOpen = $state(false);
+  let provider = $state<string | undefined>(undefined);
+
   const load = () =>
     api
       .inventory(zone)
       .then((z) => {
         inv = z;
-        // a zone that is not managed has nothing to adopt or export
+        // a zone that is not managed has nothing to adopt, export or change
         if (z.unmanaged) tfOpen = adoptOpen = selecting = false;
+        if (z.unmanaged) staged = [];
+        if (z.provider) provider = z.provider;
+        else if (!provider)
+          api
+            .zones()
+            .then((zs) => (provider = zs.find((x) => x.zone === zone)?.provider))
+            .catch(() => {});
       })
       .catch((e: Error) => (error = e.message));
 
   const unmanaged = $derived(!!inv?.unmanaged);
 
-  $effect(() => {
-    load();
-    api.me().then((m) => (me = m)).catch(() => (me = null));
-    // #/zones/<zone>?export=terraform opens the export (link from the zones page).
-    if (untrack(() => router.params.get('export')) === 'terraform') tfOpen = true;
-    const r = takeAdopt(zone);
-    if (r) {
-      restored = r;
-      picked = (r.selection.rrsets ?? []).map((x) => `${x.host}/${x.type}`);
-      adoptOpen = true;
-    }
-  });
+  // Once per zone (the view is keyed by zone): reading the zone prop would
+  // otherwise run this again on every change of the URL parameters.
+  $effect(() =>
+    untrack(() => {
+      load();
+      api.me().then((m) => (me = m)).catch(() => (me = null));
+      // #/zones/<zone>?export=terraform opens the export (link from the zones page).
+      if (router.params.get('export') === 'terraform') tfOpen = true;
+      staged = takeStaged(zone);
+      const r = takeAdopt(zone);
+      if (r) {
+        restored = r;
+        picked = (r.selection.rrsets ?? []).map((x) => `${x.host}/${x.type}`);
+        adoptOpen = true;
+      }
+    }),
+  );
 
   // Adoption needs dns.record.adopt on this zone. Without the effective
   // permissions in /me, the button stays and the gate answers.
@@ -67,6 +92,42 @@
       (!me?.permissions || me.permissions.some((p) => p.actions.includes('dns.record.adopt') && p.zones.some((z) => zoneMatch(z, zone)))),
   );
   const adoptWhyNot = 'Adopting needs the dns.record.adopt permission on this zone. Ask a policy administrator.';
+
+  // A plan or apply may ask for a fresh sign-in: the staged changes come back after it.
+  $effect(() => onBeforeReauth(() => saveStaged(zone, staged)));
+
+  const canAdd = $derived(!!inv && !unmanaged && canWriteZone(me, zone));
+  const verdict = (r: RRset) => canChange(me, zone, r, unmanaged);
+  const existingAfter = $derived(keysAfter(inv?.rrsets ?? [], staged));
+
+  function onstage(c: StagedChange) {
+    staged = stage(staged, c);
+    formFor = null;
+  }
+  function edit(r: RRset) {
+    router.setParams({ rr: undefined });
+    formFor = { rr: r, staged: stagedFor(staged, r.host, r.type) };
+  }
+  function remove(r: RRset) {
+    staged = stage(staged, { kind: 'delete', host: r.host, type: r.type, before: r });
+  }
+  const undo = (k: string) => (staged = unstage(staged, k));
+  function openForm() {
+    router.setParams({ rr: undefined });
+    formFor = {};
+  }
+  function editStaged(c: StagedChange) {
+    const rr = c.kind === 'create' ? undefined : inv?.rrsets.find((r) => r.host === c.host && r.type === c.type);
+    formFor = { rr, staged: c };
+  }
+  async function reloadForReview(): Promise<StagedChange[]> {
+    const z = await api.inventory(zone);
+    inv = z;
+    const { kept, dropped } = rebase(staged, z.rrsets);
+    staged = kept;
+    return dropped;
+  }
+  const stageSign = { create: '+', update: '~', delete: '−' } as const;
 
   const keyOf = (r: { host: string; type: string }) => `${r.host}/${r.type}`;
   const pickedRefs = $derived(
@@ -86,7 +147,7 @@
 
   /** Opens the adoption flow with one record set selected. */
   function adoptOne(r: RRset) {
-    if (!adoptAllowed || r.protected || r.type === 'SOA') return;
+    if (!adoptAllowed || r.protected || r.type === 'SOA' || r.read_only) return;
     router.setParams({ rr: undefined });
     picked = [keyOf(r)];
     adoptOpen = true;
@@ -131,7 +192,7 @@
       if (q) {
         const n = q.toLowerCase();
         const who = [r.created_by, r.updated_by].flatMap((a) => (a ? [a.name, identityLabel(a).label] : []));
-        const hay = [r.host, r.type, r.owner ?? '', ...who, ...r.values].join(' ').toLowerCase();
+        const hay = [r.host, r.type, r.owner ?? '', ...who, ...valuesOf(r)].join(' ').toLowerCase();
         if (!hay.includes(n)) return false;
       }
       return true;
@@ -147,6 +208,7 @@
   const goPage = (n: number) => router.setParams({ page: n > 1 ? String(n) : undefined });
 
   const selected = $derived(rrsets.find((r) => `${r.host}/${r.type}` === selectedKey) ?? null);
+  const selectedVerdict = $derived(selected ? verdict(selected) : null);
 
   const tabs = $derived(
     [
@@ -218,6 +280,7 @@
   <div class="title">
     <h1 class="mono">{zone}</h1>
     <p class="meta">
+      {#if provider}<ProviderBadge {provider} />{/if}
       {#if inv}
         <span class="num">{rrsets.length.toLocaleString('en')}</span> record sets · synced <RelTime iso={inv.last_synced_at} /> ·
         <a href={journalHref({ zone })}>journal</a>
@@ -237,7 +300,7 @@
   <aside class="unmanaged" aria-label="Zone not managed">
     <div class="utext">
       <h2><Icon name="lock" size={14} /> Not managed by the gate</h2>
-      <p>This zone was found in the EuroDNS account and is shown read-only: the gate writes nothing here, and adoption and Terraform export are unavailable until the zone is managed.</p>
+      <p>This zone was found at {provider ? providerLabel(provider) : 'the DNS provider'} and is shown read-only: the gate writes nothing here, and changes, adoption and Terraform export are unavailable until the zone is managed.</p>
     </div>
     <ManageZone {zone} {me} />
   </aside>
@@ -275,6 +338,9 @@
       {/each}
     </div>
     <div class="right">
+      {#if canAdd}
+        <button class="btn primary" type="button" onclick={openForm}><Icon name="plus" size={14} />Add record</button>
+      {/if}
       <label class="field search">
         <Icon name="search" size={14} />
         <span class="sr-only">Search records</span>
@@ -361,8 +427,12 @@
           {#each pageRows as r (r.host + '/' + r.type)}
             {@const k = keyOf(r)}
             {@const isOpen = expanded.includes(k)}
+            {@const st = stagedFor(staged, r.host, r.type)}
+            {@const v = verdict(r)}
+            {@const roTag = readOnlyLabel(r)}
+            {@const vals = valuesOf(r)}
             <tr
-              class={r.status}
+              class="{r.status}{st ? ' staged-' + st.kind : ''}"
               class:owned={owned(r)}
               class:selected={selected === r || (selecting && picked.includes(k))}
               class:inert={selecting && (r.status !== 'foreign' || r.protected)}
@@ -384,6 +454,7 @@
                   {#if r.protected}
                     <span class="ico" role="img" aria-label="Protected" title="Protected by the base policy: no role can change it through the gate, even after adoption."><Icon name="lock" size={12} /></span>
                   {/if}
+                  {#if roTag}<span class="rotag" title={v.ok ? undefined : v.text}>{roTag}</span>{/if}
                   {#if r.expires_at}<span class="ephemeral" title="Ephemeral record, removed automatically"><Icon name="clock" size={12} /><RelTime iso={r.expires_at} /></span>{/if}
                   <button class="copyname" type="button" onclick={(e) => { stop(e); void copyName(r); }} aria-label="Copy {fullName(r)}" title="Copy {fullName(r)}">
                     <Icon name={copiedKey === k ? 'check' : 'copy'} size={12} />
@@ -392,13 +463,16 @@
               </td>
               <td class="c-type"><span class="type mono">{r.type}</span></td>
               <td class="c-values">
-                <ul class="mono" class:open={isOpen}>
-                  {#each isOpen ? r.values : r.values.slice(0, 1) as v (v)}<li title={v}>{shortHashes(v)}</li>{/each}
+                <ul class="mono" class:open={isOpen} class:alias={!!r.alias}>
+                  {#each isOpen ? vals : vals.slice(0, 1) as val (val)}<li title={r.alias ? `Alias of ${r.alias.target} (hosted zone ${r.alias.hosted_zone_id})` : val}>{shortHashes(val)}</li>{/each}
                 </ul>
-                {#if r.values.length > 1}
+                {#if vals.length > 1}
                   <button class="more" type="button" aria-expanded={isOpen} onclick={(e) => { stop(e); toggleValues(r); }}>
-                    {isOpen ? 'Show less' : `+${r.values.length - 1} more`}
+                    {isOpen ? 'Show less' : `+${vals.length - 1} more`}
                   </button>
+                {/if}
+                {#if st}
+                  <span class="stagedtag {st.kind}">{st.kind === 'delete' ? 'Will be deleted' : `Will change to ${(st.values ?? []).length === 1 ? st.values?.[0] : (st.values ?? []).length + ' values'}${st.ttl !== r.ttl ? ` · TTL ${fmtTTL(st.ttl ?? 0)}` : ''}`}</span>
                 {/if}
               </td>
               <td class="c-ttl mono num">{fmtTTL(r.ttl)}</td>
@@ -419,10 +493,20 @@
               </td>
               {#if !unmanaged}
                 <td class="c-act">
-                  {#if owned(r)}
-                    <button class="btn quiet small act" type="button" onclick={(e) => { stop(e); open(r); }} aria-label="Details of {r.host} {r.type}">Details</button>
-                  {:else if adoptAllowed && (r.protected || r.type === 'SOA')}
-                    {@const why = r.protected ? 'Protected by the base policy: it cannot be adopted.' : 'Managed by EuroDNS: it cannot be adopted.'}
+                  {#if st}
+                    <button class="btn quiet small act" type="button" onclick={(e) => { stop(e); undo(k); }} aria-label="Undo the staged change of {r.host} {r.type}"><Icon name="undo" size={13} />Undo</button>
+                  {:else if owned(r) && v.ok}
+                    <span class="acts">
+                      <button class="btn quiet small act" type="button" onclick={(e) => { stop(e); edit(r); }} aria-label="Edit {r.host} {r.type}">Edit</button>
+                      <button class="btn quiet small icon act del" type="button" onclick={(e) => { stop(e); remove(r); }} aria-label="Delete {r.host} {r.type}" title="Delete (staged, applied after review)"><Icon name="trash" size={14} /></button>
+                    </span>
+                  {:else if owned(r)}
+                    <span class="acts">
+                      {#if !v.ok}<span class="ico" role="img" aria-label="Read-only: {v.text}" title={v.text}><Icon name="lock" size={12} /></span>{/if}
+                      <button class="btn quiet small act" type="button" onclick={(e) => { stop(e); open(r); }} aria-label="Details of {r.host} {r.type}">Details</button>
+                    </span>
+                  {:else if adoptAllowed && (r.protected || r.type === 'SOA' || r.read_only)}
+                    {@const why = r.protected ? 'Protected by the base policy: it cannot be adopted.' : 'Managed by the DNS provider: it cannot be adopted.'}
                     <button class="btn quiet small act" type="button" aria-disabled="true" onclick={stop} title={why} aria-label="Adopt {r.host} {r.type}: not possible. {why}">Adopt</button>
                   {:else if adoptAllowed}
                     <button
@@ -474,6 +558,40 @@
   </div>
 {/if}
 
+{#if staged.length && !selecting}
+  <div class="tray" role="region" aria-label="Changes not applied yet">
+    <span class="n"><b class="num">{staged.length}</b> change{staged.length === 1 ? '' : 's'} not applied yet</span>
+    <ul class="pending">
+      {#each staged as c (stagedKey(c))}
+        <li class={c.kind}>
+          <button class="pick-staged" type="button" disabled={c.kind === 'delete'} onclick={() => editStaged(c)} title={c.kind === 'delete' ? 'Will be deleted' : 'Edit this change'}>
+            <span class="sign" aria-hidden="true">{stageSign[c.kind]}</span><span class="mono">{c.host}</span><span class="mono t">{c.type}</span>
+          </button>
+          <button class="x" type="button" aria-label="Remove the change of {c.host} {c.type}" title="Remove this change" onclick={() => undo(stagedKey(c))}><Icon name="x" size={12} /></button>
+        </li>
+      {/each}
+    </ul>
+    <span class="sp"></span>
+    <button class="btn quiet" type="button" onclick={() => (staged = [])}>Discard all</button>
+    <button class="btn primary" type="button" onclick={() => { router.setParams({ rr: undefined }); reviewOpen = true; }}>Review and apply…</button>
+  </div>
+{/if}
+
+{#if formFor && inv && !unmanaged}
+  <RecordForm {zone} {me} existing={existingAfter} editing={formFor.rr} staged={formFor.staged} {onstage} onclose={() => (formFor = null)} />
+{/if}
+
+{#if reviewOpen && inv && !unmanaged}
+  <ReviewPanel
+    {zone}
+    {staged}
+    onclose={() => (reviewOpen = false)}
+    onunstage={undo}
+    onapplied={() => { staged = []; load(); }}
+    onreload={reloadForReview}
+  />
+{/if}
+
 {#if adoptOpen && inv && !unmanaged}
   <AdoptPanel
     {zone}
@@ -492,13 +610,18 @@
   <TerraformPanel {zone} teams={me?.teams ?? []} {owners} onclose={() => { tfOpen = false; router.setParams({ export: undefined }); }} />
 {/if}
 
-{#if selected && !selecting && !adoptOpen}
+{#if selected && !selecting && !adoptOpen && !formFor && !reviewOpen}
   {#key selectedKey}
     <RRsetDrawer
       {zone}
       rr={selected}
       onclose={close}
       {unmanaged}
+      writable={selectedVerdict?.ok ?? false}
+      readOnlyWhy={selectedVerdict && !selectedVerdict.ok ? selectedVerdict.text : ''}
+      stagedKind={stagedFor(staged, selected.host, selected.type)?.kind}
+      onedit={() => edit(selected)}
+      ondelete={() => { remove(selected); close(); }}
       canAdopt={adoptAllowed}
       adoptHint={adoptWhyNot}
       onadopt={() => adoptOne(selected)}
@@ -744,7 +867,7 @@
     width: 200px;
   }
   .w-act {
-    width: 88px;
+    width: 124px;
   }
   th {
     text-align: left;
@@ -1000,6 +1123,159 @@
     background: var(--seal-ink);
     color: var(--sheet);
     border-color: transparent;
+  }
+  .acts {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 2px;
+  }
+  .acts .ico {
+    margin-right: 4px;
+  }
+  .btn.small.icon {
+    width: 26px;
+    padding: 0;
+  }
+  tr:hover .act.del,
+  tr:focus-within .act.del {
+    color: var(--wax);
+  }
+  .rotag {
+    flex: none;
+    height: 17px;
+    padding: 0 5px;
+    border-radius: 4px;
+    background: var(--pencil-wash);
+    color: var(--ink-3);
+    font-size: 11px;
+    line-height: 17px;
+    cursor: help;
+  }
+  .c-values ul.alias li {
+    color: var(--ink-3);
+  }
+  .stagedtag {
+    display: inline-block;
+    max-width: 100%;
+    margin-top: 3px;
+    padding: 0 6px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 500;
+    line-height: 18px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    background: var(--brass-wash);
+    color: var(--brass);
+  }
+  .stagedtag.delete {
+    background: var(--wax-wash);
+    color: var(--wax);
+  }
+  tr.staged-delete .c-values li,
+  tr.staged-delete .c-name :global(.label) {
+    text-decoration: line-through;
+    text-decoration-color: color-mix(in srgb, var(--wax) 55%, transparent);
+  }
+  tbody tr.staged-update,
+  tbody tr.staged-delete {
+    box-shadow: inset 3px 0 0 var(--brass);
+  }
+  tbody tr.staged-delete {
+    box-shadow: inset 3px 0 0 var(--wax);
+  }
+  .tray {
+    position: sticky;
+    bottom: var(--s4);
+    z-index: 5;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--s2);
+    margin-top: var(--s4);
+    padding: var(--s2) var(--s2) var(--s2) var(--s4);
+    border-radius: var(--r-lg);
+    background: var(--sheet-raised);
+    border: 1px solid color-mix(in srgb, var(--brass) 35%, var(--rule));
+    box-shadow: var(--lift);
+    animation: rise 200ms var(--ease-out);
+  }
+  .tray .n {
+    color: var(--ink-2);
+  }
+  .tray .sp {
+    flex: 1;
+  }
+  .pending {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    min-width: 0;
+  }
+  .pending li {
+    display: inline-flex;
+    align-items: center;
+    height: 24px;
+    border-radius: 6px;
+    background: var(--well);
+    border: 1px solid var(--rule-soft);
+    font-size: 12px;
+    max-width: 260px;
+  }
+  .pick-staged {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    min-width: 0;
+    height: 100%;
+    padding: 0 4px 0 7px;
+    border: 0;
+    background: none;
+    color: var(--ink-2);
+    cursor: pointer;
+  }
+  .pick-staged:disabled {
+    cursor: default;
+  }
+  .pick-staged .mono {
+    font-size: 12px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .pick-staged .t {
+    flex: none;
+    color: var(--ink-3);
+    font-weight: 600;
+  }
+  .sign {
+    font-weight: 700;
+    color: var(--stamp);
+  }
+  .update .sign {
+    color: var(--brass);
+  }
+  .delete .sign {
+    color: var(--wax);
+  }
+  .pending .x {
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--ink-4);
+    cursor: pointer;
+  }
+  .pending .x:hover {
+    color: var(--ink);
   }
   @media (max-width: 900px) {
     .search input {

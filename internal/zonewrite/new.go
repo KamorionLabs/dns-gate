@@ -5,19 +5,20 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/audit"
-	"github.com/KamorionLabs/eurodns-gate/internal/policy"
-	"github.com/KamorionLabs/eurodns-gate/internal/store"
-	eurodns "github.com/KamorionLabs/eurodns-go"
+	"github.com/KamorionLabs/dns-gate/internal/audit"
+	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/provider"
+	"github.com/KamorionLabs/dns-gate/internal/store"
 )
 
 // Config wires the engine.
 type Config struct {
-	Client *eurodns.Client // upstream EuroDNS client (API key auth, shared transport)
-	Store  store.Store
-	Authz  policy.Authorizer
-	Audit  audit.Logger
-	Zones  []string // managed zones when ZoneSet is nil; any other zone is refused
+	// Providers resolves the provider serving each zone.
+	Providers provider.Resolver
+	Store     store.Store
+	Authz     policy.Authorizer
+	Audit     audit.Logger
+	Zones     []string // managed zones when ZoneSet is nil; any other zone is refused
 	// ZoneSet, when set, replaces Zones: the managed zones follow the
 	// policy (base and managed layers) and discovered zones of the account
 	// are readable without being managed.
@@ -29,7 +30,7 @@ type Config struct {
 	Holder       string        // lock holder id (pod name)
 	LockTTL      time.Duration // default 60s
 	LockWait     time.Duration // default 30s
-	CheckOnWrite bool          // call EuroDNS check before every save (default true in config)
+	CheckOnWrite bool          // run the provider check (provider.Checker) before every write
 	Now          func() time.Time
 	Logger       *slog.Logger
 }
@@ -40,7 +41,7 @@ type ZoneSet interface {
 	// within RBAC and ownership.
 	Managed(zone string) bool
 	ManagedZones() []string
-	// IsUnmanaged reports whether a zone exists in the EuroDNS account but
+	// IsUnmanaged reports whether a zone exists in a provider account but
 	// is not managed: readable only.
 	IsUnmanaged(zone string) bool
 	UnmanagedZones() []string

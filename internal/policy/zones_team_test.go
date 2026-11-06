@@ -5,10 +5,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/config"
-	"github.com/KamorionLabs/eurodns-gate/internal/identity"
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
-	"github.com/KamorionLabs/eurodns-go/rrset"
+	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/dns"
+	"github.com/KamorionLabs/dns-gate/internal/identity"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 )
 
 type fakeDiscovery map[string]bool
@@ -54,7 +54,7 @@ func TestUnmanagedZonesReadOnly(t *testing.T) {
 			t.Fatalf("%s must be denied on an unmanaged zone", a)
 		}
 	}
-	if e.AllowRRset(admin, ActionRecordWrite, "other.net", rrset.Key{Host: "www", Type: "A"}) {
+	if e.AllowRRset(admin, ActionRecordWrite, "other.net", dns.Key{Host: "www", Type: "A"}) {
 		t.Fatal("RRset write on an unmanaged zone")
 	}
 	if _, ok := e.OwnerTeam(&identity.Subject{Roles: []string{"admin"}, Teams: []string{"dns"}}, "other.net"); ok {
@@ -143,13 +143,13 @@ func TestValidateZonesDiscovered(t *testing.T) {
 		t.Fatal(paths(errs))
 	}
 	doc.Zones = []string{"b.example.org"}
-	if errs := ValidateZonesDiscovered(doc, h.Current(), disc, true); !strings.Contains(paths(errs), "not found in the EuroDNS account") {
+	if errs := ValidateZonesDiscovered(doc, h.Current(), disc, true); !strings.Contains(paths(errs), "not found in a provider account") {
 		t.Fatalf("got %q", paths(errs))
 	}
 	if errs := ValidateZonesDiscovered(doc, h.Current(), disc, false); !strings.Contains(paths(errs), "not loaded yet") {
 		t.Fatalf("got %q", paths(errs))
 	}
-	if errs := ValidateZonesDiscovered(doc, h.Current(), nil, false); !strings.Contains(paths(errs), "requires zones_discovery.enabled") {
+	if errs := ValidateZonesDiscovered(doc, h.Current(), nil, false); !strings.Contains(paths(errs), "requires the zone listing of the providers") {
 		t.Fatalf("got %q", paths(errs))
 	}
 	// A zone already managed by the active revision is not checked again.
@@ -209,8 +209,8 @@ func impactText(items []uiapi.ImpactItem) string {
 func adoBinding() config.Binding {
 	return config.Binding{
 		Role:     "admin",
-		TeamFrom: &config.TeamFrom{Claim: "sub", Regex: `^sc://[^/]+/[^/]+/eurodns-gate-(.+)$`, Prefix: "ado-"},
-		Subjects: []config.Subject{{Issuer: "entra", Claims: map[string]config.StringList{"sub": {"sc://org/project/eurodns-gate-*"}}}},
+		TeamFrom: &config.TeamFrom{Claim: "sub", Regex: `^sc://[^/]+/[^/]+/dns-gate-(.+)$`, Prefix: "ado-"},
+		Subjects: []config.Subject{{Issuer: "entra", Claims: map[string]config.StringList{"sub": {"sc://org/project/dns-gate-*"}}}},
 	}
 }
 
@@ -224,11 +224,11 @@ func TestTeamFromClaim(t *testing.T) {
 		roles string
 		teams string
 	}{
-		"derived team":           {"sc://org/project/eurodns-gate-Web", "admin,reader-all", "ado-web,readers"},
-		"other pipeline":         {"sc://org/project/eurodns-gate-shop", "admin,reader-all", "ado-shop,readers"},
-		"invalid team":           {"sc://org/project/eurodns-gate-a b", "reader-all", "readers"},
-		"capture with slash":     {"sc://org/project/eurodns-gate-x/y", "reader-all", "readers"},
-		"bound glob, no capture": {"sc://org/other/eurodns-gate-web", "reader-all", "readers"},
+		"derived team":           {"sc://org/project/dns-gate-Web", "admin,reader-all", "ado-web,readers"},
+		"other pipeline":         {"sc://org/project/dns-gate-shop", "admin,reader-all", "ado-shop,readers"},
+		"invalid team":           {"sc://org/project/dns-gate-a b", "reader-all", "readers"},
+		"capture with slash":     {"sc://org/project/dns-gate-x/y", "reader-all", "readers"},
+		"bound glob, no capture": {"sc://org/other/dns-gate-web", "reader-all", "readers"},
 	}
 	for name, tc := range cases {
 		r := snap.Resolve("entra", map[string]any{"sub": tc.sub})
@@ -241,17 +241,17 @@ func TestTeamFromClaim(t *testing.T) {
 	}
 	// The derived team comes first: it owns what the pipeline creates.
 	e := New(mustHolder(t, c))
-	r := snap.Resolve("entra", map[string]any{"sub": "sc://org/project/eurodns-gate-web"})
+	r := snap.Resolve("entra", map[string]any{"sub": "sc://org/project/dns-gate-web"})
 	team, ok := e.OwnerTeam(&identity.Subject{Roles: r.Roles, Teams: r.Teams}, "example.com")
 	if !ok || team != "ado-web" {
 		t.Fatalf("owner team %q %v", team, ok)
 	}
 	// A non-string claim never binds.
-	if r := snap.Resolve("entra", map[string]any{"sub": []any{"sc://org/project/eurodns-gate-web"}}); strings.Contains(strings.Join(r.Teams, ","), "ado-") {
+	if r := snap.Resolve("entra", map[string]any{"sub": []any{"sc://org/project/dns-gate-web"}}); strings.Contains(strings.Join(r.Teams, ","), "ado-") {
 		t.Fatalf("array claim derived a team: %v", r.Teams)
 	}
 	// Explain shows the derived team, who-can the derivation.
-	ex := snap.Explain("entra", map[string]any{"sub": "sc://org/project/eurodns-gate-web"}, ActionRecordWrite, "example.com", "www", "A")
+	ex := snap.Explain("entra", map[string]any{"sub": "sc://org/project/dns-gate-web"}, ActionRecordWrite, "example.com", "www", "A")
 	if !ex.Allowed || !strings.Contains(strings.Join(ex.Bindings, ","), "admin@ado-web") {
 		t.Fatalf("explain: %+v", ex)
 	}
@@ -298,18 +298,18 @@ func TestTeamFromValidation(t *testing.T) {
 func TestTeamFromAzureDevOpsServiceConnection(t *testing.T) {
 	c := discoveryConfig()
 	c.Issuers = append(c.Issuers, config.Issuer{Name: "azure-devops", Issuer: "https://vstoken.dev.azure.com/org-id"})
-	tf := &config.TeamFrom{Claim: "sub", Regex: `^sc://[^/]+/[^/]+/(eurodns-gate-[a-z0-9-]+)$`}
+	tf := &config.TeamFrom{Claim: "sub", Regex: `^sc://[^/]+/[^/]+/(dns-gate-[a-z0-9-]+)$`}
 	if err := config.ValidateTeamFrom(tf.Claim, tf.Regex, tf.Prefix); err != nil {
 		t.Fatal(err)
 	}
 	c.Bindings = append(c.Bindings, config.Binding{Role: "admin", TeamFrom: tf,
-		Subjects: []config.Subject{{Issuer: "azure-devops", Claims: map[string]config.StringList{"sub": {"sc://org/project/eurodns-gate-*"}}}}})
+		Subjects: []config.Subject{{Issuer: "azure-devops", Claims: map[string]config.StringList{"sub": {"sc://org/project/dns-gate-*"}}}}})
 	snap := mustHolder(t, c).Current()
 	for sub, team := range map[string]string{
-		"sc://org/project/eurodns-gate-certificates-prd": "eurodns-gate-certificates-prd",
-		"sc://org/project/eurodns-gate-web":              "eurodns-gate-web",
-		"sc://org/project/eurodns-gate-":                 "",
-		"sc://org/project/other":                         "",
+		"sc://org/project/dns-gate-certificates-prd": "dns-gate-certificates-prd",
+		"sc://org/project/dns-gate-web":              "dns-gate-web",
+		"sc://org/project/dns-gate-":                 "",
+		"sc://org/project/other":                     "",
 	} {
 		r := snap.Resolve("azure-devops", map[string]any{"sub": sub})
 		if got := strings.Join(r.Teams, ","); got != team {

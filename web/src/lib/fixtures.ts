@@ -17,6 +17,9 @@ import type {
   GeneratedKey,
   ImpactItem,
   Me,
+  PlanChange,
+  PlanResult,
+  RRsetChange,
   PolicyDocument,
   ProposeRequest,
   RevisionDetail,
@@ -33,6 +36,7 @@ import { teamLabel } from './team';
 import { ApiError } from './api';
 import { toYAML } from './yaml';
 import { claimMatch, hostMatch, zoneMatch } from './glob';
+import { rbacAllows } from './rights';
 
 const now = Date.now();
 const ago = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
@@ -69,7 +73,7 @@ const me: Me = asReader
       subject: 'entra:alice@example.com',
       name: 'alice@example.com',
       category: 'human',
-      roles: ['viewer', 'policy-admin', 'app-cname-writer', 'adopter'],
+      roles: ['viewer', 'policy-admin', 'app-cname-writer', 'edge-writer', 'adopter'],
       teams: ['web', 'platform'],
       groups: ['policy-admins', 'web-humans'],
       permissions: [
@@ -80,6 +84,7 @@ const me: Me = asReader
           hosts: ['*', '*.staging', '_*.*'],
           types: ['CNAME', 'TXT'],
         },
+        { role: 'edge-writer', zones: ['edge.example.org'], actions: ['dns.read', 'dns.record.write'], hosts: [], types: ['A', 'AAAA', 'CNAME', 'TXT', 'MX', 'SRV', 'CAA'] },
         { role: 'adopter', zones: ['example.com', 'acme.example', 'cloud.example'], actions: ['dns.record.adopt'], hosts: [], types: [] },
         { role: 'policy-admin', zones: ['*'], actions: ['policy.read', 'policy.propose', 'policy.approve'], hosts: [], types: [] },
         { role: 'viewer', zones: ['*'], actions: ['dns.read', 'ui.read', 'policy.read'], hosts: [], types: [] },
@@ -88,7 +93,7 @@ const me: Me = asReader
 
 // ?mcp=readonly or ?mcp=off in the page URL changes the MCP state of the Connect page.
 const mcpMode = new URLSearchParams(window.location.search).get('mcp');
-const GATE = 'https://eurodns-gate.example.com';
+const GATE = 'https://dns-gate.example.com';
 const UI_CLIENT_ID = '3f2a1b0c-9d8e-4f7a-b6c5-d4e3f2a1b0c9';
 const connect: Connect = {
   base_url: GATE,
@@ -101,6 +106,8 @@ const connect: Connect = {
   client_id: UI_CLIENT_ID,
   cli_scope: `api://${UI_CLIENT_ID}/.default`,
   claude_desktop_extension_url: mcpMode === 'off' ? '' : GATE + '/api/v1/connect/claude-desktop.mcpb',
+  // ?tokens=off: no gate issuer, no "Get an API token"
+  tokens_url: new URLSearchParams(window.location.search).get('tokens') === 'off' ? undefined : GATE + '/api/v1/tokens',
 };
 
 const foreign = (host: string, type: string, ttl: number, values: string[], prot = false): RRset => ({
@@ -353,6 +360,65 @@ inventories.push(
   },
 );
 
+// edge.example.org: a Route53 hosted zone, with alias records (no values,
+// a target) and record sets using a routing policy, read-only for the gate.
+const r53 = (o: Partial<RRset> & Pick<RRset, 'host' | 'type'>): RRset => ({ ttl: 300, values: [], status: 'foreign', protected: false, adopted: false, ...o });
+inventories.push({
+  zone: 'edge.example.org',
+  provider: 'route53',
+  last_synced_at: ago(2),
+  rrsets: [
+    r53({ host: '@', type: 'SOA', ttl: 900, values: ['ns-1536.awsdns-00.co.uk. awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400'], read_only: 'server_managed' }),
+    r53({ host: '@', type: 'NS', ttl: 172800, values: ['ns-1536.awsdns-00.co.uk.', 'ns-0.awsdns-00.com.', 'ns-1024.awsdns-00.org.', 'ns-512.awsdns-00.net.'], read_only: 'server_managed' }),
+    r53({
+      host: '@', type: 'A', ttl: 0, alias: { target: 'd444444abcdef8.cloudfront.net.', hosted_zone_id: 'Z2FDTNDATAQYW2', evaluate_target_health: false },
+      status: 'managed', owner: 'web', created_by: ciApp, created_at: ago(30 * D), adopted: true, last_request_id: 'req_01JD0EDGE01',
+    }),
+    r53({
+      host: '@', type: 'AAAA', ttl: 0, alias: { target: 'd444444abcdef8.cloudfront.net.', hosted_zone_id: 'Z2FDTNDATAQYW2', evaluate_target_health: false },
+    }),
+    r53({
+      host: 'www', type: 'CNAME', ttl: 300, values: ['d444444abcdef8.cloudfront.net.'], status: 'managed', owner: 'web',
+      created_by: ciApp, created_at: ago(30 * D), updated_by: alice, updated_at: ago(3 * D), adopted: false, last_request_id: 'req_01JD0EDGE02',
+    }),
+    r53({
+      host: 'app', type: 'A', ttl: 60, values: ['198.51.100.40', '198.51.100.41'], status: 'managed', owner: 'web',
+      created_by: alice, created_at: ago(6 * D), adopted: false, last_request_id: 'req_01JD0EDGE03',
+    }),
+    r53({
+      host: 'app', type: 'AAAA', ttl: 60, values: ['2001:db8:40::1'], status: 'managed', owner: 'web',
+      created_by: alice, created_at: ago(6 * D), adopted: false, last_request_id: 'req_01JD0EDGE04',
+    }),
+    r53({
+      host: '@', type: 'MX', ttl: 3600, values: ['10 inbound-smtp.eu-west-1.amazonaws.com.'], status: 'managed', owner: 'platform',
+      created_by: adoDeploy, created_at: ago(40 * D), adopted: true, last_request_id: 'req_01JD0EDGE05',
+    }),
+    r53({
+      host: '@', type: 'TXT', ttl: 3600, values: ['"v=spf1 include:amazonses.com -all"', '"google-site-verification=edgeQ9x"'], status: 'managed', owner: 'web',
+      created_by: alice, created_at: ago(12 * D), adopted: false, last_request_id: 'req_01JD0EDGE06',
+    }),
+    r53({
+      host: '@', type: 'CAA', ttl: 3600, values: ['0 issue "amazon.com"', '0 issue "letsencrypt.org"'], status: 'managed', owner: 'web',
+      created_by: alice, created_at: ago(12 * D), adopted: false, last_request_id: 'req_01JD0EDGE07',
+    }),
+    r53({
+      host: '_sip._tcp', type: 'SRV', ttl: 3600, values: ['10 5 5060 sip.edge.example.org.'], status: 'managed', owner: 'web',
+      created_by: alice, created_at: ago(9 * D), adopted: false, last_request_id: 'req_01JD0EDGE08',
+    }),
+    r53({
+      host: 'reports', type: 'CNAME', ttl: 300, values: ['reports.bi.example.net.'], status: 'managed', owner: 'data',
+      created_by: carol, created_at: ago(15 * D), adopted: false, last_request_id: 'req_01JD0EDGE09',
+    }),
+    r53({
+      host: 'old', type: 'CNAME', ttl: 300, values: ['legacy.hosting.example.net.'], status: 'tainted', owner: 'web',
+      created_by: alice, created_at: ago(50 * D), adopted: false, last_request_id: 'req_01JD0EDGE10',
+    }),
+    r53({ host: 'api', type: 'CNAME', ttl: 60, values: ['api-eu.edge.example.org.'], read_only: 'routing_policy' }),
+    r53({ host: 'geo', type: 'A', ttl: 60, values: ['198.51.100.60'], read_only: 'routing_policy' }),
+    r53({ host: 'mail', type: 'CNAME', ttl: 3600, values: ['mail.hosted.example.net.'] }),
+  ],
+});
+
 // The rest of the account: hundreds of zones that are not managed. Their
 // content is generated when a zone is opened.
 const words = ['north', 'river', 'alpha', 'summit', 'harbor', 'maple', 'cedar', 'atlas', 'nova', 'orbit', 'pixel', 'meadow', 'granite', 'lumen', 'vertex', 'willow', 'ember', 'falcon', 'quartz', 'tundra'];
@@ -394,6 +460,7 @@ function summarize(inv: ZoneInventory, lastWrite?: string): ZoneSummary {
   const count = (s: string) => inv.rrsets.filter((r) => r.status === s).length;
   return {
     zone: inv.zone,
+    provider: inv.provider ?? 'eurodns',
     rrsets: inv.rrsets.length,
     managed: count('managed'),
     tainted: calm ? 0 : count('tainted') + count('missing'),
@@ -414,7 +481,7 @@ const audit: AuditEntry[] = [
   mcpRead(0.7, 'get_rrset', 'example.com'),
   {
     time: ago(0.8), request_id: 'req_01JC0RETYPE', actor: adoDeploy, teams: ['platform'], action: 'saveDnsZone', zone: 'cloud.example',
-    decision: 'allow', snapshot_id: 884301,
+    decision: 'allow', snapshot_id: '884301',
     changes: [
       { op: 'delete', host: 'status.eu-central', type: 'A', old_ttl: 300, old_values: ['198.51.100.40', '198.51.100.41'] },
       { op: 'create', host: 'status.eu-central', type: 'CNAME', new_ttl: 300, new_values: ['status-page.hosted.example.org.'] },
@@ -424,7 +491,7 @@ const audit: AuditEntry[] = [
   ...Array.from({ length: 18 }, (_, i) => mcpRead(1.1 + i * 0.05, i % 2 ? 'list_rrsets' : 'get_rrset', i % 3 ? 'cloud.example' : 'example.com')),
   {
     time: ago(30), request_id: 'req_01JC0CLD16', actor: adoDeploy, teams: ['platform'], action: 'saveDnsZone', zone: 'cloud.example',
-    decision: 'allow', snapshot_id: 884250,
+    decision: 'allow', snapshot_id: '884250',
     changes: [{
       op: 'update', host: 'api.eu-central', type: 'CNAME', old_ttl: 300, old_values: ['api-alb-old.eu-central-1.elb.example.net.'],
       new_ttl: 300, new_values: ['api-alb-3f9c2a1b.eu-central-1.elb.example.net.'],
@@ -442,7 +509,7 @@ const audit: AuditEntry[] = [
   },
   {
     time: ago(12), request_id: 'req_01JBXA0001', actor: acmeKey, teams: ['security'], action: 'saveDnsZone', zone: 'acme.example',
-    decision: 'allow', snapshot_id: 884213,
+    decision: 'allow', snapshot_id: '884213',
     changes: [{
       op: 'create', host: '_acme-challenge', type: 'TXT', new_ttl: 600,
       new_values: ['"aW50ZXJuYWwtdG9rZW4tYWJjZGVm"', '"c2Vjb25kLXRva2VuLWZvci13aWxkY2FyZA"'],
@@ -450,12 +517,12 @@ const audit: AuditEntry[] = [
   },
   {
     time: ago(40), request_id: 'req_01JBX9AC3M', actor: acmeKey, teams: ['security'], action: 'saveDnsZone', zone: 'example.com',
-    decision: 'allow', snapshot_id: 884190,
+    decision: 'allow', snapshot_id: '884190',
     changes: [{ op: 'create', host: '_acme-challenge.intranet', type: 'TXT', new_ttl: 600, new_values: ['"Zm9vYmFyLWNoYWxsZW5nZS10b2tlbi0xMjM0"'] }],
   },
   {
     time: ago(2 * H), request_id: 'req_01JBX7Q4M2', actor: ghWeb, teams: ['web'], action: 'saveDnsZone', zone: 'example.com',
-    decision: 'allow', snapshot_id: 884102,
+    decision: 'allow', snapshot_id: '884102',
     changes: [{
       op: 'update', host: 'www', type: 'CNAME', old_ttl: 3600, old_values: ['www-legacy.hosting.example.org.'],
       new_ttl: 600, new_values: ['d111111abcdef8.cloudfront.net.'],
@@ -479,7 +546,7 @@ const audit: AuditEntry[] = [
   },
   {
     time: ago(26 * H), request_id: 'req_01JBQ0Z8C1', actor: ciApp, teams: ['web', 'platform'], action: 'saveDnsZone',
-    zone: 'example.com', decision: 'allow', snapshot_id: 883551,
+    zone: 'example.com', decision: 'allow', snapshot_id: '883551',
     changes: [{
       op: 'update', host: 'staging', type: 'CNAME', old_ttl: 600, old_values: ['staging-v1.edge.example.net.'],
       new_ttl: 600, new_values: ['staging.edge.example.net.'],
@@ -496,7 +563,7 @@ const audit: AuditEntry[] = [
   },
   {
     time: ago(2 * D), request_id: 'req_01JBRM5V8N', actor: bob, teams: ['corporate'], action: 'addDnsRecords', zone: 'acme.example',
-    decision: 'allow', snapshot_id: 882990,
+    decision: 'allow', snapshot_id: '882990',
     changes: [{ op: 'create', host: 'careers', type: 'CNAME', new_ttl: 1800, new_values: ['acme.careers.example.org.'] }],
   },
   {
@@ -506,7 +573,7 @@ const audit: AuditEntry[] = [
   },
   {
     time: ago(3 * D), request_id: 'req_01JBA7S2LK', actor: ciCorp, teams: ['corporate'], action: 'saveDnsZone', zone: 'acme.example',
-    decision: 'allow', snapshot_id: 882100,
+    decision: 'allow', snapshot_id: '882100',
     changes: [{ op: 'update', host: '@', type: 'APEX', old_ttl: 3600, old_values: ['acme-old.hosting.example.org.'], new_ttl: 600, new_values: ['d222222fedcba9.cloudfront.net.'] }],
   },
   {
@@ -524,12 +591,12 @@ const audit: AuditEntry[] = [
   },
   {
     time: ago(6 * D), request_id: 'req_01JAMR4E0P', actor: ciApp, teams: ['web'], action: 'saveDnsZone', zone: 'example.com',
-    decision: 'allow', snapshot_id: 880771,
+    decision: 'allow', snapshot_id: '880771',
     changes: [{ op: 'update', host: 'shop', type: 'CNAME', old_ttl: 3600, old_values: ['shop-v1.edge.example.net.'], new_ttl: 600, new_values: ['shop.edge.example.net.'] }],
   },
   {
     time: ago(9 * D), request_id: 'req_01JAVK2N7T', actor: ciApp, teams: ['web'], action: 'addDnsRecords', zone: 'example.com',
-    decision: 'allow', snapshot_id: 879400,
+    decision: 'allow', snapshot_id: '879400',
     changes: [
       { op: 'create', host: 'www', type: 'CNAME', new_ttl: 3600, new_values: ['www-legacy.hosting.example.org.'] },
       { op: 'create', host: '_3f1c9a7b2d.www', type: 'CNAME', new_ttl: 600, new_values: ['_8e2d41c0b9.mhbtsbpdnt.acm-validations.aws.'] },
@@ -537,17 +604,17 @@ const audit: AuditEntry[] = [
   },
   {
     time: ago(12 * D), request_id: 'req_01JAZZ1P4E', actor: ciCorp, teams: ['corporate'], action: 'addDnsRecords', zone: 'acme.example',
-    decision: 'allow', snapshot_id: 878002,
+    decision: 'allow', snapshot_id: '878002',
     changes: [{ op: 'create', host: 'www', type: 'CNAME', new_ttl: 600, new_values: ['d222222fedcba9.cloudfront.net.'] }],
   },
   {
     time: ago(14 * D), request_id: 'req_01JB2W9QHD', actor: ciApp, teams: ['platform'], action: 'addDnsRecords', zone: 'example.com',
-    decision: 'allow', snapshot_id: 877310,
+    decision: 'allow', snapshot_id: '877310',
     changes: [{ op: 'create', host: 'api.staging', type: 'CNAME', new_ttl: 900, new_values: ['alb-api-stg.eu-central-1.elb.example.net.'] }],
   },
   {
     time: ago(21 * D), request_id: 'req_01JAQ7B2ZR', actor: alice, teams: ['web'], action: 'addDnsRecords', zone: 'example.com',
-    decision: 'allow', snapshot_id: 875533,
+    decision: 'allow', snapshot_id: '875533',
     changes: [{ op: 'create', host: 'staging', type: 'CNAME', new_ttl: 600, new_values: ['staging-v1.edge.example.net.'] }],
   },
   {
@@ -557,7 +624,7 @@ const audit: AuditEntry[] = [
   },
   {
     time: ago(40 * D), request_id: 'req_01J9ZP3K5S', actor: ghWeb, teams: ['web'], action: 'addDnsRecords', zone: 'example.com',
-    decision: 'allow', snapshot_id: 870020,
+    decision: 'allow', snapshot_id: '870020',
     changes: [{ op: 'create', host: 'docs', type: 'CNAME', new_ttl: 3600, new_values: ['docs.pages.example.net.'] }],
   },
 ];
@@ -590,7 +657,7 @@ const ENTRA = 'entra';
 const base: EffectivePolicy['base'] = {
   config_hash: 'sha256:9f2c4e1ab07d5c3e88a1f0b6d2e4c7a9b1d3f5e7a9c1b3d5e7f9a1c3e5b7d9f1',
   loaded_at: ago(3 * D + 2 * H),
-  zones: ['example.com', 'acme.example', 'brand.example', 'cloud.example', 'mail.example', 'static.example.net', 'internal.example'],
+  zones: ['example.com', 'acme.example', 'brand.example', 'cloud.example', 'mail.example', 'static.example.net', 'internal.example', 'edge.example.org'],
   zones_discovery: {
     enabled: true,
     include: ['*'],
@@ -605,7 +672,7 @@ const base: EffectivePolicy['base'] = {
     {
       name: 'aws',
       issuer: 'https://3f8a1c2e-0b7d-4e9a-a1c3-5d7f9b1e3a5c.tokens.sts.global.api.aws',
-      audiences: ['eurodns-gate'],
+      audiences: ['dns-gate'],
       bound_claims: { 'https://sts.amazonaws.com/org_id': ['o-a1b2c3d4e5'] },
       subject_claim: 'sub',
       category: 'pipeline',
@@ -613,7 +680,7 @@ const base: EffectivePolicy['base'] = {
     {
       name: 'github',
       issuer: 'https://token.actions.githubusercontent.com',
-      audiences: ['eurodns-gate'],
+      audiences: ['dns-gate'],
       bound_claims: { repository_owner: ['acme'] },
       subject_claim: 'sub',
       category: 'pipeline',
@@ -621,7 +688,7 @@ const base: EffectivePolicy['base'] = {
     {
       name: ENTRA,
       issuer: 'https://login.microsoftonline.com/7c1e2d3f-4a5b-6c7d-8e9f-0a1b2c3d4e5f/v2.0',
-      audiences: ['api://eurodns-gate'],
+      audiences: ['api://dns-gate'],
       subject_claim: 'preferred_username',
       category: 'human',
     },
@@ -635,7 +702,7 @@ const base: EffectivePolicy['base'] = {
     {
       name: 'k8s',
       issuer: 'https://oidc.eks.eu-central-1.amazonaws.com/id/EXAMPLED539D4633E53DE1B71EXAMPLE',
-      audiences: ['eurodns-gate'],
+      audiences: ['dns-gate'],
       category: 'pipeline',
     },
   ],
@@ -738,6 +805,10 @@ const activeDoc: PolicyDocument = {
       rules: [{ zones: ['cloud.example', 'mail.example'], actions: ['dns.read', 'dns.record.write'], records: { hosts: ['*.eu-central', '_*.*.eu-central', '*'], types: ['A', 'AAAA', 'CNAME', 'TXT'] } }],
       max_changes_per_request: 50,
     },
+    'edge-writer': {
+      description: 'Web team records of the edge zone (Route53)',
+      rules: [{ zones: ['edge.example.org'], actions: ['dns.read', 'dns.record.write'], records: { types: ['A', 'AAAA', 'CNAME', 'TXT', 'MX', 'SRV', 'CAA'] } }],
+    },
     'shop-pipeline': {
       description: 'Shop deployment pipelines, each one in its own team',
       rules: [{ zones: ['shop.example'], actions: ['dns.read', 'dns.record.write'], records: { types: ['A', 'AAAA', 'CNAME', 'TXT'] } }],
@@ -749,6 +820,7 @@ const activeDoc: PolicyDocument = {
     { role: 'corporate-writer', team: 'corporate', groups: ['corporate-pipelines'], subjects: [{ issuer: ENTRA, claims: { preferred_username: ['bob@example.com'] } }] },
     { role: 'adopter', team: 'web', subjects: [{ issuer: ENTRA, claims: { preferred_username: ['bob@example.com', 'alice@example.com'] } }] },
     { role: 'platform-writer', team: 'platform', groups: ['platform-pipelines'] },
+    { role: 'edge-writer', team: 'web', groups: ['web-humans'] },
     {
       role: 'shop-pipeline',
       team: '',
@@ -1175,21 +1247,21 @@ function terraform(zone: string, q: TerraformQuery): string {
       (!q.types?.length || q.types.includes(r.type)),
   );
   const lines = [
-    `# eurodns-gate export of ${zone}${q.team ? ` for team ${q.team}` : ''}, ${new Date().toISOString().slice(0, 10)}`,
-    '# Provider: registry.terraform.io/kamorionlabs/eurodns (gate mode).',
+    `# dns-gate export of ${zone}${q.team ? ` for team ${q.team}` : ''}, ${new Date().toISOString().slice(0, 10)}`,
+    '# Provider: registry.terraform.io/KamorionLabs/dnsgate.',
     '',
   ];
   for (const r of rrs) {
     const n = tfName(r);
     lines.push(
       'import {',
-      `  to = eurodns_record_set.${n}`,
+      `  to = dnsgate_record_set.${n}`,
       `  id = "${zone}/${r.host}/${r.type}"`,
       '}',
       '',
-      `resource "eurodns_record_set" "${n}" {`,
+      `resource "dnsgate_record_set" "${n}" {`,
       `  zone   = "${zone}"`,
-      `  host   = "${r.host}"`,
+      `  name   = "${r.host}"`,
       `  type   = "${r.type}"`,
       `  ttl    = ${r.ttl}`,
       `  values = [${r.values.map((v) => JSON.stringify(v)).join(', ')}]`,
@@ -1199,6 +1271,128 @@ function terraform(zone: string, q: TerraformQuery): string {
   }
   if (!rrs.length) lines.push('# No record set held by the gate matches this export.');
   return lines.join('\n');
+}
+
+// ---------------------------------------------------------------- DNS writes
+
+// Content hash of a record set (stands in for dns.ContentHash).
+function contentHash(r: Pick<RRset, 'ttl' | 'values' | 'alias'>): string {
+  const vals = r.alias ? [`alias ${r.alias.hosted_zone_id} ${r.alias.target}`] : [...r.values].sort();
+  let h = 0x811c9dc5;
+  for (const ch of `ttl=${r.ttl}\n${vals.join('\n')}`) h = Math.imul(h ^ ch.charCodeAt(0), 0x01000193) >>> 0;
+  return h.toString(16).padStart(8, '0');
+}
+
+/** Provider fields the inventory carries: SOA records are the provider's, every record set has its hash. */
+function decorate(inv: ZoneInventory) {
+  inv.provider ??= 'eurodns';
+  for (const r of inv.rrsets) {
+    if (r.type === 'SOA') r.read_only ??= 'server_managed';
+    r.hash = contentHash(r);
+  }
+}
+
+interface StoredPlan {
+  zone: string;
+  subject: string;
+  version: number;
+  changes: RRsetChange[];
+  result: PlanResult;
+}
+const plans = new Map<string, StoredPlan>();
+// ?writeconflict=1 makes the first apply fail as if the zone changed meanwhile.
+let writeConflict = new URLSearchParams(window.location.search).get('writeconflict') === '1';
+
+function refusal(c: RRsetChange, cur: RRset | undefined): { reason: string; message: string } | null {
+  const fail = (reason: string, message: string) => ({ reason, message });
+  if (c.must_not_exist && cur) return cur.status === 'foreign' ? fail('foreign_rrset', `${c.host} ${c.type} exists and is not managed by the gate`) : fail('precondition', `${c.host} ${c.type} already exists`);
+  if (!c.must_not_exist && !cur) return fail('not_found', `${c.host} ${c.type} does not exist`);
+  if (c.expected_hash && cur && cur.hash !== c.expected_hash) return fail('precondition', `${c.host} ${c.type} changed since it was read`);
+  if (cur?.read_only) return fail('read_only', `${c.host} ${c.type} is read-only (${cur.read_only})`);
+  if (cur?.protected) return fail('forbidden', `${c.host} ${c.type} is protected`);
+  if (cur?.status === 'foreign') return fail('foreign_rrset', `${c.host} ${c.type} is not managed by the gate`);
+  if (cur?.status === 'tainted' || cur?.status === 'missing') return fail('tainted', `${c.host} ${c.type} changed outside the gate`);
+  if (cur?.owner && !me.teams.includes(cur.owner)) return fail('not_owner', `${c.host} ${c.type} is owned by team ${cur.owner}`);
+  return null;
+}
+
+function planChanges(zone: string, input: RRsetChange[]): PlanResult {
+  // what goes over the wire: plain JSON
+  const changes = JSON.parse(JSON.stringify(input)) as RRsetChange[];
+  const inv = managedZones().has(zone) ? findInv(zone) : undefined;
+  if (!inv) throw new ApiError(404, 'not_found', `zone ${zone} is not managed`);
+  decorate(inv);
+  if (!changes.length) throw new ApiError(400, 'invalid', 'between 1 and 100 changes are required');
+  const out: PlanChange[] = [];
+  let first: { reason: string; message: string } | null = null;
+  for (const c of changes) {
+    const cur = inv.rrsets.find((r) => r.host === c.host && r.type === c.type);
+    const op = c.delete ? 'delete' : cur ? 'update' : 'create';
+    const why = refusal(c, cur) ?? (rbacAllows(me, zone, c.host, c.type) ? null : { reason: 'forbidden', message: `dns.record.write not granted on ${c.host} ${c.type}` });
+    first ??= why;
+    out.push({
+      op,
+      host: c.host,
+      type: c.type,
+      old: cur ? { ttl: cur.ttl, values: [...cur.values], alias: cur.alias } : null,
+      new: c.delete ? null : { ttl: c.ttl ?? cur?.ttl ?? 3600, values: c.values ?? [], alias: c.alias },
+      ...(why ?? {}),
+    });
+  }
+  const version = zoneVersion[zone] ?? 1;
+  const result: PlanResult = { zone, allowed: !first, reason: first?.reason, message: first?.message, changes: out, zone_version: version };
+  if (!first) {
+    result.plan_id = 'pl_' + randomToken(12);
+    plans.set(result.plan_id, { zone, subject: me.subject, version, changes, result });
+  }
+  return result;
+}
+
+function applyPlan(zone: string, planId: string): PlanResult {
+  const p = plans.get(planId);
+  if (!p || p.zone !== zone) throw new ApiError(404, 'plan_not_found', 'unknown or already used plan_id: plan again');
+  plans.delete(planId);
+  const inv = findInv(zone)!;
+  if (writeConflict || (zoneVersion[zone] ?? 1) !== p.version) {
+    writeConflict = false;
+    // someone else changed the first record set meanwhile
+    const moved = inv.rrsets.find((r) => p.changes.some((c) => c.host === r.host && c.type === r.type));
+    if (moved) {
+      moved.ttl = moved.ttl === 300 ? 600 : 300;
+      moved.updated_by = bob;
+      moved.updated_at = new Date().toISOString();
+      decorate(inv);
+    }
+    zoneVersion[zone] = (zoneVersion[zone] ?? 1) + 1;
+    throw new ApiError(412, 'precondition', 'the zone changed since the plan was made');
+  }
+  const actor: Actor = { subject: me.subject, name: me.name, category: me.category };
+  const requestId = 'req_' + randomToken(10).toUpperCase();
+  const now = new Date().toISOString();
+  for (const c of p.changes) {
+    const i = inv.rrsets.findIndex((r) => r.host === c.host && r.type === c.type);
+    if (c.delete) {
+      if (i >= 0) inv.rrsets.splice(i, 1);
+    } else if (i >= 0) {
+      Object.assign(inv.rrsets[i]!, { ttl: c.ttl, values: c.values ?? [], updated_by: actor, updated_at: now, last_request_id: requestId, status: 'managed' });
+    } else {
+      inv.rrsets.push({
+        host: c.host, type: c.type, ttl: c.ttl ?? 3600, values: c.values ?? [], status: 'managed', protected: false, owner: me.teams[0],
+        created_by: actor, created_at: now, adopted: false, last_request_id: requestId,
+      });
+    }
+  }
+  decorate(inv);
+  inv.last_synced_at = now;
+  zoneVersion[zone] = p.version + 1;
+  audit.unshift({
+    time: now, request_id: requestId, actor, teams: me.teams, action: 'applyRRsets', zone, decision: 'allow',
+    changes: p.result.changes.map((c) => ({
+      op: c.op, host: c.host, type: c.type,
+      old_ttl: c.old?.ttl, old_values: c.old?.values, new_ttl: c.new?.ttl, new_values: c.new?.values,
+    })),
+  });
+  return { ...p.result, request_id: requestId };
 }
 
 export const fixtureBackend = {
@@ -1211,7 +1405,7 @@ export const fixtureBackend = {
       const inv = inventories.find((i) => i.zone === zone);
       return inv && readZones.has(zone)
         ? { ...summarize(inv), unmanaged: true }
-        : { zone, rrsets: 0, managed: 0, tainted: 0, pending: 0, foreign: 0, unmanaged: true };
+        : { zone, provider: 'eurodns', rrsets: 0, managed: 0, tainted: 0, pending: 0, foreign: 0, unmanaged: true };
     };
     // Latest successful write: a change that reached EuroDNS (not a read, an adoption or a drift check).
     const wrote = (e: AuditEntry) =>
@@ -1224,6 +1418,7 @@ export const fixtureBackend = {
   inventory: (zone: string) => {
     const inv = findInv(zone);
     if (!inv) return Promise.reject(new Error(`Zone ${zone} is not managed by this gate`));
+    decorate(inv);
     if (managedZones().has(zone)) return delay(inv);
     if (!inv.last_synced_at) inv.last_synced_at = new Date().toISOString();
     readZones.add(zone);
@@ -1312,6 +1507,14 @@ export const fixtureBackend = {
   adoptPreview: async (zone: string, sel: AdoptSelection) => delay(adoptPreview(zone, sel), 450),
   adopt: async (zone: string, req: AdoptApply) => delay(adoptApply(zone, req), 500),
   terraform: async (zone: string, q: TerraformQuery) => delay(terraform(zone, q), 200),
+  issueToken: async () => {
+    const b64 = (o: object) => btoa(JSON.stringify(o)).replace(/=+$/, '').replaceAll('+', '-').replaceAll('/', '_');
+    const exp = Math.floor(Date.now() / 1000) + 3600;
+    const token = `${b64({ alg: 'ES256', kid: 'demo' })}.${b64({ iss: GATE, sub: me.subject, exp })}.${randomToken(43)}`;
+    return delay({ access_token: token, token_type: 'Bearer', expires_in: 3600, expires_at: new Date(exp * 1000).toISOString(), issuer: GATE }, 400);
+  },
+  plan: async (zone: string, changes: RRsetChange[]) => delay(planChanges(zone, changes), 600),
+  apply: async (zone: string, planId: string) => delay(applyPlan(zone, planId), 900),
   generateKey: async (): Promise<GeneratedKey> => {
     needRight('propose');
     const key = 'egk_' + randomToken(40);

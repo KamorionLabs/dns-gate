@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dns-gate API reference</title>
+<meta name="description" content="OpenAPI 3.1 reference of the dns-gate API: zones, RRsets with content-hash preconditions, plan and apply, audit, adoption, Terraform export and policy delegation.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css">
+<style>
+  body { background: var(--sheet); }
+  .api-note { border-bottom: 1px solid var(--rule-soft); background: var(--paper); font-size: 14px; color: var(--ink-2); }
+  .api-note .wrap { display: flex; flex-wrap: wrap; gap: 8px 20px; padding-top: 10px; padding-bottom: 10px; }
+  .api-note a { color: var(--seal-ink); }
+  #redoc { min-height: 60vh; }
+  .api-fallback { padding: 48px 0; }
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="index.html"><svg width="22" height="22" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="8" cy="8" r="2.5" fill="currentColor"/></svg>dns-gate</a>
+    <nav class="nav" aria-label="Sections">
+      <a href="index.html">Overview</a>
+      <a href="https://github.com/KamorionLabs/dns-gate/blob/main/docs/API.md">API guide</a>
+      <a href="dns-gate.openapi.yaml" download>OpenAPI file</a>
+      <a class="gh" href="https://github.com/KamorionLabs/dns-gate">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<div class="api-note">
+  <div class="wrap">
+    <span>The gate's own API under <code>/api/v1</code>. The EuroDNS-compatible API served on the other paths is documented by <a href="https://docapi.eurodns.com/">EuroDNS</a>.</span>
+  </div>
+</div>
+
+<main id="redoc">
+  <div class="wrap api-fallback">
+    <p>Loading the reference. Without JavaScript, read <a href="dns-gate.openapi.yaml">dns-gate.openapi.yaml</a> directly.</p>
+  </div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/redoc@2.1.5/bundles/redoc.standalone.js"></script>
+<script>
+  (function () {
+    var css = getComputedStyle(document.documentElement);
+    function v(name) { return css.getPropertyValue(name).trim(); }
+    if (!window.Redoc) return;
+    window.Redoc.init('dns-gate.openapi.yaml', {
+      scrollYOffset: 'header.top',
+      hideDownloadButton: false,
+      expandResponses: '200,204',
+      jsonSampleExpandLevel: 3,
+      sortTagsAlphabetically: false,
+      theme: {
+        colors: { primary: { main: v('--seal-ink') || '#24406b' }, text: { primary: v('--ink') || '#1b2230' } },
+        typography: {
+          fontFamily: v('--font-ui') || 'system-ui, sans-serif',
+          headings: { fontFamily: v('--font-ui') || 'system-ui, sans-serif', fontWeight: '600' },
+          code: { fontFamily: v('--font-record') || 'ui-monospace, monospace' }
+        },
+        sidebar: { backgroundColor: v('--paper') || '#f6f5f1', textColor: v('--ink-2') || '#444d5e' },
+        rightPanel: { backgroundColor: '#1b2230' }
+      }
+    }, document.getElementById('redoc'));
+  })();
+</script>
+</body>
+</html>

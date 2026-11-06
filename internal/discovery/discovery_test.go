@@ -2,15 +2,13 @@ package discovery
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"net/http"
-	"net/http/httptest"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/KamorionLabs/dns-gate/internal/provider"
 )
 
 func TestFilter(t *testing.T) {
@@ -25,23 +23,38 @@ func TestFilter(t *testing.T) {
 }
 
 type fakeLister struct {
+	provider.Provider
+	id    string
 	mu    sync.Mutex
 	names []string
 	err   error
 	calls int
 }
 
-func (f *fakeLister) ListDomains(context.Context) ([]string, error) {
+func (f *fakeLister) ID() string {
+	if f.id == "" {
+		return "p"
+	}
+	return f.id
+}
+
+func (f *fakeLister) Kind() string { return "fake" }
+
+func (f *fakeLister) ListZones(context.Context) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
 	return f.names, f.err
 }
 
+func one(l *fakeLister, include, exclude []string, refresh time.Duration) []Source {
+	return []Source{{Provider: l, Include: include, Exclude: exclude, Refresh: refresh}}
+}
+
 func TestRefreshKeepsListOnError(t *testing.T) {
 	l := &fakeLister{names: []string{"example.com", "example.net"}}
 	now := time.Unix(1_700_000_000, 0)
-	d := New(Config{Lister: l, Include: []string{"*"}, Exclude: []string{"example.net"}, Now: func() time.Time { return now }})
+	d := New(Config{Sources: one(l, []string{"*"}, []string{"example.net"}, 0), Now: func() time.Time { return now }})
 	if d.Loaded() || d.Discovered("example.com") {
 		t.Fatal("nothing before the first listing")
 	}
@@ -64,7 +77,7 @@ func TestRefreshKeepsListOnError(t *testing.T) {
 func TestRefreshIfOlder(t *testing.T) {
 	l := &fakeLister{names: []string{"example.com"}}
 	now := time.Unix(1_700_000_000, 0)
-	d := New(Config{Lister: l, Now: func() time.Time { return now }})
+	d := New(Config{Sources: one(l, nil, nil, 0), Now: func() time.Time { return now }})
 	ctx := context.Background()
 	_ = d.RefreshIfOlder(ctx, 0)
 	_ = d.RefreshIfOlder(ctx, 0) // within MinOnDemand: no listing
@@ -90,7 +103,7 @@ func TestRefreshIfOlder(t *testing.T) {
 
 func TestRunStops(t *testing.T) {
 	l := &fakeLister{names: []string{"example.com"}}
-	d := New(Config{Lister: l, Refresh: time.Hour})
+	d := New(Config{Sources: one(l, nil, nil, time.Hour)})
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { d.Run(ctx); close(done) }()
@@ -109,90 +122,44 @@ func TestRunStops(t *testing.T) {
 	}
 }
 
-// searchServer fakes POST /domains/search with pagination headers.
-func searchServer(t *testing.T, domains []string, ignorePages bool, requests *int) *httptest.Server {
-	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		*requests++
-		if r.Method != http.MethodPost || r.URL.Path != "/domains/search" || r.Header.Get("X-API-KEY") != "k" {
-			http.Error(w, "unexpected", http.StatusBadRequest)
-			return
-		}
-		page, _ := strconv.Atoi(r.Header.Get("pagination-page"))
-		size, _ := strconv.Atoi(r.Header.Get("pagination-size"))
-		if page < 1 || size < 1 {
-			http.Error(w, "pagination", http.StatusBadRequest)
-			return
-		}
-		if ignorePages {
-			page = 1
-		}
-		start := min((page-1)*size, len(domains))
-		end := min(start+size, len(domains))
-		var out []map[string]any
-		for _, d := range domains[start:end] {
-			out = append(out, map[string]any{"domainName": d, "tldName": d[strings.LastIndex(d, ".")+1:]})
-		}
-		w.Header().Set("pagination-count", strconv.Itoa(len(domains)))
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(out)
-	}))
-}
-
-type keyRT struct{}
-
-func (keyRT) RoundTrip(r *http.Request) (*http.Response, error) {
-	r = r.Clone(r.Context())
-	r.Header.Set("X-API-KEY", "k")
-	return http.DefaultTransport.RoundTrip(r)
-}
-
-func TestEuroDNSListerPagination(t *testing.T) {
-	var domains []string
-	for i := range 7 {
-		domains = append(domains, "d"+strconv.Itoa(i)+".example")
+func TestProviderResolution(t *testing.T) {
+	a := &fakeLister{id: "a", names: []string{"shared.com", "a.com"}}
+	b := &fakeLister{id: "b", names: []string{"b.com", "x.fr"}}
+	c := &fakeLister{id: "c", names: []string{"shared.com", "only-c.fr"}}
+	d := New(Config{Sources: []Source{
+		{Provider: a, Include: []string{"*.com"}},
+		{Provider: b, Include: []string{"*"}, Exclude: []string{"*.fr"}},
+		{Provider: c, Include: []string{"*.fr", "shared.com"}},
+	}})
+	ctx := context.Background()
+	if _, err := d.Provider("x.org"); err != nil {
+		t.Fatalf("single filter match before listing: %v", err)
 	}
-	n := 0
-	srv := searchServer(t, domains, false, &n)
-	defer srv.Close()
-	l := &EuroDNSLister{BaseURL: srv.URL + "/", Transport: keyRT{}, PageSize: 3}
-	got, err := l.ListDomains(context.Background())
-	if err != nil {
+	if _, err := d.Provider("a.com"); err == nil {
+		t.Fatal("ambiguous before listing")
+	}
+	if err := d.Refresh(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(got, ",") != strings.Join(domains, ",") || n != 3 {
-		t.Fatalf("got %v in %d requests", got, n)
+	for zone, want := range map[string]string{"a.com": "a", "b.com": "b", "x.org": "b", "only-c.fr": "c", "x.fr": "c"} {
+		p, err := d.Provider(zone)
+		if err != nil || p.ID() != want {
+			t.Errorf("%s: %v %v, want %s", zone, p, err, want)
+		}
 	}
-	// Exactly a multiple of the page size: pagination-count stops the loop.
-	n = 0
-	srv2 := searchServer(t, domains[:6], false, &n)
-	defer srv2.Close()
-	l.BaseURL = srv2.URL
-	if got, err := l.ListDomains(context.Background()); err != nil || len(got) != 6 || n != 2 {
-		t.Fatalf("got %v, %v in %d requests", got, err, n)
+	if _, err := d.Provider("shared.com"); err == nil || !strings.Contains(err.Error(), "several providers") {
+		t.Fatalf("zone listed twice: %v", err)
 	}
-}
-
-func TestEuroDNSListerStopsWhenPaginationIgnored(t *testing.T) {
-	n := 0
-	srv := searchServer(t, []string{"a.example", "b.example", "c.example", "d.example"}, true, &n)
-	defer srv.Close()
-	l := &EuroDNSLister{BaseURL: srv.URL, Transport: keyRT{}, PageSize: 2}
-	if _, err := l.ListDomains(context.Background()); err == nil || !strings.Contains(err.Error(), "repeats") {
-		t.Fatalf("err = %v", err)
+	if _, err := d.Provider("new.com"); err == nil {
+		t.Fatal("zone selected by a and b, listed by none")
 	}
-	if n != 2 {
-		t.Fatalf("requests = %d, want 2", n)
+	if !d.Discovered("only-c.fr") || d.Discovered("x.fr") {
+		t.Fatal("discovered")
 	}
-}
-
-func TestEuroDNSListerHTTPError(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "forbidden", http.StatusForbidden)
-	}))
-	defer srv.Close()
-	l := &EuroDNSLister{BaseURL: srv.URL, Transport: http.DefaultTransport}
-	if _, err := l.ListDomains(context.Background()); err == nil || !strings.Contains(err.Error(), "403") {
-		t.Fatalf("err = %v", err)
+	b.err = errors.New("down")
+	_ = d.Refresh(ctx)
+	st := d.Status()
+	if !st.Loaded || st.Err == nil || len(st.Providers) != 3 || st.Providers[1].Err == nil || st.Count != 4 {
+		t.Fatalf("status %+v", st)
 	}
 }

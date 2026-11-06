@@ -13,11 +13,12 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/config"
-	"github.com/KamorionLabs/eurodns-gate/internal/identity"
-	"github.com/KamorionLabs/eurodns-gate/internal/policy"
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
-	"github.com/KamorionLabs/eurodns-gate/internal/zonewrite"
+	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/identity"
+	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/tfexport"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
+	"github.com/KamorionLabs/dns-gate/internal/zonewrite"
 )
 
 type fakeOps struct {
@@ -26,6 +27,15 @@ type fakeOps struct {
 	applied  [][]uiapi.RRsetChange
 	adopted  []uiapi.AdoptApply
 	conflict bool
+	// applyErrs are returned by the next ApplyRRsets calls, in order.
+	applyErrs []error
+	calls     []int64
+}
+
+func (f *fakeOps) ZoneVersion(ctx context.Context, zone string) (int64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.version, nil
 }
 
 func (f *fakeOps) PreviewAdopt(ctx context.Context, s *identity.Subject, zone string, sel uiapi.AdoptSelection) (*uiapi.AdoptPreview, error) {
@@ -54,7 +64,15 @@ func (f *fakeOps) PlanRRsets(ctx context.Context, s *identity.Subject, zone stri
 func (f *fakeOps) ApplyRRsets(ctx context.Context, s *identity.Subject, zone string, changes []uiapi.RRsetChange, v int64) (*uiapi.PlanResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if v != f.version {
+	f.calls = append(f.calls, v)
+	if len(f.applyErrs) > 0 {
+		err := f.applyErrs[0]
+		f.applyErrs = f.applyErrs[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
+	if v > 0 && v != f.version {
 		return nil, &zonewrite.Error{Reason: zonewrite.ReasonPrecondition, Message: "zone changed since the plan"}
 	}
 	f.version++
@@ -67,7 +85,7 @@ func (f *fakeOps) terraform(ctx context.Context, s *identity.Subject, zone strin
 	for _, r := range flt.RRsets {
 		refs = append(refs, r.Host+"/"+r.Type)
 	}
-	return "# zone " + zone + " team=" + flt.Team + " hosts=" + strings.Join(flt.Hosts, ",") + " types=" + strings.Join(flt.Types, ",") + " rrsets=" + strings.Join(refs, ",") + "\n", nil
+	return "# zone " + zone + " provider=" + string(flt.Provider) + " team=" + flt.Team + " hosts=" + strings.Join(flt.Hosts, ",") + " types=" + strings.Join(flt.Types, ",") + " rrsets=" + strings.Join(refs, ",") + "\n", nil
 }
 
 func mcpEnv(t *testing.T, writes bool) *env {
@@ -281,7 +299,7 @@ func TestAdoptEndpoints(t *testing.T) {
 		t.Fatalf("preview without adopt: %d", r.StatusCode)
 	}
 	// Humans need a recent authentication to adopt.
-	old := e.idp.Sign(map[string]any{"sub": "human-adopter", "aud": "eurodns-gate", "kind": "user", "auth_time": time.Now().Add(-time.Hour).Unix()})
+	old := e.idp.Sign(map[string]any{"sub": "human-adopter", "aud": "dns-gate", "kind": "user", "auth_time": time.Now().Add(-time.Hour).Unix()})
 	e.ops.conflict = false
 	if r = e.do(t, "POST", "/api/v1/zones/example.com/adopt", old, body, nil); r.StatusCode != 403 || reason(t, r) != "reauth_required" {
 		t.Fatalf("step-up: %d", r.StatusCode)
@@ -297,6 +315,14 @@ func TestAdoptEndpoints(t *testing.T) {
 	b, _ = io.ReadAll(r.Body)
 	if r.StatusCode != 200 || !strings.Contains(string(b), "hosts=www,api,mail types=A,CNAME,MX rrsets=www/A,@/MX,api/CNAME") {
 		t.Fatalf("terraform lists: %d %s", r.StatusCode, b)
+	}
+	r = e.do(t, "GET", "/api/v1/zones/example.com/terraform?provider=eurodns", tok, "", nil)
+	b, _ = io.ReadAll(r.Body)
+	if r.StatusCode != 200 || !strings.Contains(string(b), "provider=eurodns ") {
+		t.Fatalf("terraform provider: %d %s", r.StatusCode, b)
+	}
+	if r = e.do(t, "GET", "/api/v1/zones/example.com/terraform?provider=route53", tok, "", nil); r.StatusCode != 400 {
+		t.Fatalf("unknown provider: %d", r.StatusCode)
 	}
 	if r = e.do(t, "GET", "/api/v1/zones/example.com/terraform?rrsets=www", tok, "", nil); r.StatusCode != 400 {
 		t.Fatalf("bad rrsets: %d", r.StatusCode)
@@ -334,19 +360,23 @@ func cookiejarNew() (*cookiejar.Jar, error) { return cookiejar.New(nil) }
 func TestInventoryTerraform(t *testing.T) {
 	render := InventoryTerraform(&fakeEngine{})
 	out, err := render(context.Background(), &identity.Subject{}, "example.com", TerraformFilter{Team: "web", Types: []string{"A"}})
-	if err != nil || !strings.Contains(out, "eurodns_record_set") || !strings.Contains(out, "192.0.2.1") && !strings.Contains(out, `"www"`) {
+	if err != nil || !strings.Contains(out, "dnsgate_record_set") || !strings.Contains(out, "192.0.2.1") && !strings.Contains(out, `"www"`) {
 		t.Fatalf("render: %v\n%s", err, out)
 	}
+	out, _ = render(context.Background(), &identity.Subject{}, "example.com", TerraformFilter{Provider: tfexport.ProviderEuroDNS})
+	if !strings.Contains(out, `resource "eurodns_record_set" "www_a"`) {
+		t.Fatalf("eurodns export:\n%s", out)
+	}
 	out, _ = render(context.Background(), &identity.Subject{}, "example.com", TerraformFilter{RRsets: []uiapi.RRsetRef{{Host: "WWW", Type: "a"}}, Types: []string{"MX"}})
-	if !strings.Contains(out, "eurodns_record_set") {
+	if !strings.Contains(out, "dnsgate_record_set") {
 		t.Fatalf("exact selection must take precedence over types:\n%s", out)
 	}
 	out, _ = render(context.Background(), &identity.Subject{}, "example.com", TerraformFilter{RRsets: []uiapi.RRsetRef{{Host: "api", Type: "A"}}})
-	if strings.Contains(out, "eurodns_record_set\" ") {
+	if strings.Contains(out, "dnsgate_record_set\" ") {
 		t.Fatalf("unselected RRset exported:\n%s", out)
 	}
 	out, _ = render(context.Background(), &identity.Subject{}, "example.com", TerraformFilter{Team: "other"})
-	if strings.Contains(out, "eurodns_record_set\" ") {
+	if strings.Contains(out, "dnsgate_record_set\" ") {
 		t.Fatalf("team filter ignored:\n%s", out)
 	}
 }

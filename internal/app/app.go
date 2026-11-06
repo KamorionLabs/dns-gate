@@ -1,5 +1,5 @@
 // Package app wires the gate components from a configuration. It is shared
-// by the eurodns-gate command and the end-to-end tests.
+// by the dns-gate command and the end-to-end tests.
 package app
 
 import (
@@ -11,17 +11,20 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/audit"
-	"github.com/KamorionLabs/eurodns-gate/internal/authn"
-	"github.com/KamorionLabs/eurodns-gate/internal/config"
-	"github.com/KamorionLabs/eurodns-gate/internal/discovery"
-	"github.com/KamorionLabs/eurodns-gate/internal/policy"
-	"github.com/KamorionLabs/eurodns-gate/internal/server"
-	"github.com/KamorionLabs/eurodns-gate/internal/store"
-	"github.com/KamorionLabs/eurodns-gate/internal/version"
-	"github.com/KamorionLabs/eurodns-gate/internal/zonewrite"
-	"github.com/KamorionLabs/eurodns-gate/web"
-	eurodns "github.com/KamorionLabs/eurodns-go"
+	"github.com/KamorionLabs/dns-gate/internal/audit"
+	"github.com/KamorionLabs/dns-gate/internal/authn"
+	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/discovery"
+	"github.com/KamorionLabs/dns-gate/internal/eurodnsapi"
+	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/provider"
+	eurodnsprov "github.com/KamorionLabs/dns-gate/internal/provider/eurodns"
+	route53prov "github.com/KamorionLabs/dns-gate/internal/provider/route53"
+	"github.com/KamorionLabs/dns-gate/internal/server"
+	"github.com/KamorionLabs/dns-gate/internal/store"
+	"github.com/KamorionLabs/dns-gate/internal/version"
+	"github.com/KamorionLabs/dns-gate/internal/zonewrite"
+	"github.com/KamorionLabs/dns-gate/web"
 )
 
 // Options tune runtime behaviour that is not part of the configuration file.
@@ -40,34 +43,35 @@ type App struct {
 	Store  store.Store
 	Engine zonewrite.Engine
 	Policy *policy.Holder
-	// Discovery lists the zones of the EuroDNS account, nil unless
-	// zones_discovery is enabled.
+	// Discovery lists the zones of every provider account and resolves the
+	// provider of each zone.
 	Discovery *discovery.Discoverer
 	authz     *policy.Engine
 	handler   http.Handler
 	opts      Options
 	log       *slog.Logger
+
+	// PlanGC deletes the expired RRset plans of MCP and of the REST API;
+	// Run and Maintenance call it when set. New sets it to GCPlans.
+	PlanGC func(context.Context) error
 }
 
 // New builds every component; background loops start with Run.
 func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options) (*App, error) {
-	transport := eurodns.NewTransport(
-		eurodns.WithAuth(eurodns.APIKeyAuth{AppID: cfg.Upstream.AppID, APIKey: cfg.Upstream.APIKey}),
-		eurodns.WithRateLimit(cfg.Upstream.Rate.Every.D(), cfg.Upstream.Rate.Burst),
-		eurodns.WithMaxRetries(*cfg.Upstream.MaxRetries),
-		eurodns.WithUserAgent("eurodns-gate/"+version.Version),
-	)
-	client, err := eurodns.New(
-		eurodns.WithBaseURL(cfg.Upstream.BaseURL),
-		eurodns.WithTransport(transport),
-		eurodns.WithUserAgent("eurodns-gate/"+version.Version),
-	)
-	if err != nil {
-		return nil, err
+	var sources []discovery.Source
+	hasEuroDNS := false
+	for _, pc := range cfg.Providers {
+		p, err := newProvider(ctx, pc)
+		if err != nil {
+			return nil, err
+		}
+		hasEuroDNS = hasEuroDNS || pc.Kind == config.KindEuroDNS
+		sources = append(sources, discovery.Source{Provider: p, Include: pc.Zones.Include, Exclude: pc.Zones.Exclude, Refresh: pc.Zones.Refresh.D()})
 	}
+	disc := discovery.New(discovery.Config{Sources: sources, Logger: log})
 
 	if cfg.SingleReplicaStore() {
-		if n, err := strconv.Atoi(os.Getenv("EURODNS_GATE_REPLICAS")); err == nil && n > 1 {
+		if n, err := strconv.Atoi(os.Getenv("DNS_GATE_REPLICAS")); err == nil && n > 1 {
 			log.Error("store does not support several replicas: ownership and locks would diverge", "store", cfg.Store.Type, "replicas", n)
 		}
 	}
@@ -86,17 +90,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 	if err != nil {
 		return nil, err
 	}
-	var disc *discovery.Discoverer
-	if cfg.ZonesDiscovery.Enabled {
-		disc = discovery.New(discovery.Config{
-			Lister:  &discovery.EuroDNSLister{BaseURL: cfg.Upstream.BaseURL, Transport: transport},
-			Include: cfg.ZonesDiscovery.Include,
-			Exclude: cfg.ZonesDiscovery.Exclude,
-			Refresh: cfg.ZonesDiscovery.Refresh.D(),
-			Logger:  log,
-		})
-		holder.SetDiscovery(disc)
-	}
+	holder.SetDiscovery(disc)
 	if err := holder.Refresh(ctx, st); err != nil {
 		log.Error("managed policy not loaded, serving the base policy", "err", err)
 	}
@@ -108,7 +102,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		opts.Holder, _ = os.Hostname()
 	}
 	eng, err := zonewrite.New(zonewrite.Config{
-		Client:       client,
+		Providers:    disc,
 		Store:        st,
 		Authz:        authz,
 		Audit:        auditLog,
@@ -136,36 +130,77 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		Engine:      eng,
 		Audit:       auditLog,
 		AuditReader: st,
-		Upstream:    transport,
 		Policy:      holder,
 		PolicyStore: st,
 		Ownership:   st,
 		Ops:         eng,
 		Terraform:   server.InventoryTerraform(eng),
+		Plans:       st,
+		Versions:    st,
 		UIFiles:     web.FS(),
+		Discovery:   disc,
 		Log:         log,
 	}
-	if disc != nil {
-		scfg.Discovery = disc
+	if hasEuroDNS {
+		scfg.EuroDNS = eurodnsapi.New(eurodnsapi.Config{Engine: eng, Authz: authz, Providers: disc, Log: log})
 	}
 	srv, err := server.New(scfg)
 	if err != nil {
 		return nil, err
 	}
-	return &App{Config: cfg, Store: st, Engine: eng, Policy: holder, Discovery: disc, authz: authz, handler: srv.Handler(), opts: opts, log: log}, nil
+	a := &App{Config: cfg, Store: st, Engine: eng, Policy: holder, Discovery: disc, authz: authz, handler: srv.Handler(), opts: opts, log: log}
+	a.PlanGC = a.GCPlans
+	return a, nil
+}
+
+// GCPlans purges the expired RRset plans of the store.
+func (a *App) GCPlans(ctx context.Context) error {
+	n, err := a.Store.GCPlans(ctx, time.Now())
+	if n > 0 {
+		a.log.Info("plan gc", "removed", n)
+	}
+	return err
 }
 
 // Handler is the HTTP handler of the gate.
 func (a *App) Handler() http.Handler { return a.handler }
 
-// Run starts the policy reload, zone discovery and reconcile loops; they
-// stop with ctx. Reconcile follows the managed zones of the current policy.
+// Run starts the policy reload, zone discovery, reconcile and plan GC
+// loops; they stop with ctx. Reconcile follows the managed zones of the
+// current policy. It is the container mode; Maintenance is the one-pass
+// equivalent for AWS Lambda.
 func (a *App) Run(ctx context.Context) {
 	go a.Policy.Run(ctx, a.Store, a.opts.PolicyReloadInterval, a.log)
 	if a.Discovery != nil {
 		go a.Discovery.Run(ctx)
 	}
 	go zonewrite.RunReconciler(ctx, a.Engine, a.authz.ManagedZones, a.Config.ReconcileInterval.D(), a.log)
+	if a.PlanGC != nil {
+		go a.runPlanGC(ctx, a.PlanGC)
+	}
+}
+
+// newProvider builds the adapter of a configured provider.
+func newProvider(ctx context.Context, pc config.Provider) (provider.Provider, error) {
+	switch pc.Kind {
+	case config.KindEuroDNS:
+		e := pc.EuroDNS
+		return eurodnsprov.New(pc.ID, eurodnsprov.Config{
+			BaseURL: e.BaseURL, AppID: e.AppID, APIKey: e.APIKey,
+			RateEvery: e.Rate.Every.D(), RateBurst: e.Rate.Burst, MaxRetries: *e.MaxRetries,
+			UserAgent: "dns-gate/" + version.Version,
+		})
+	case config.KindRoute53:
+		r := pc.Route53
+		if r == nil {
+			r = &config.Route53Config{}
+		}
+		return route53prov.New(ctx, pc.ID, route53prov.Config{
+			Region: r.Region, AssumeRoleARN: r.AssumeRoleARN, ExternalID: r.ExternalID,
+			HostedZones: r.HostedZones, IncludePrivate: r.IncludePrivate,
+		})
+	}
+	return nil, fmt.Errorf("provider %s: unknown kind %q", pc.ID, pc.Kind)
 }
 
 func openStore(ctx context.Context, cfg *config.Config, log *slog.Logger) (store.Store, error) {

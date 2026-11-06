@@ -14,25 +14,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          path: eurodns-gate
+          path: dns-gate
       - uses: actions/setup-go@v5
         with:
-          go-version-file: eurodns-gate/go.mod
-          cache-dependency-path: eurodns-gate/go.sum
+          go-version-file: dns-gate/go.mod
+          cache-dependency-path: dns-gate/go.sum
       - name: generated route table is up to date
-        working-directory: eurodns-gate
+        working-directory: dns-gate
         run: |
           make spec
           go generate ./internal/routes
           git diff --exit-code internal/routes/zz_generated.go
       - name: gofmt
-        working-directory: eurodns-gate
+        working-directory: dns-gate
         run: test -z "$(gofmt -l $(git ls-files '*.go'))"
       - name: vet
-        working-directory: eurodns-gate
+        working-directory: dns-gate
         run: go vet ./...
       - name: test
-        working-directory: eurodns-gate
+        working-directory: dns-gate
         run: go test -race ./...
 
   web:
@@ -59,8 +59,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
-      - run: helm lint charts/eurodns-gate
-      - run: helm template charts/eurodns-gate --set networkPolicy.enabled=true --set eurodns.existingSecret=eurodns-api-key > /dev/null
+      - run: helm lint charts/dns-gate
+      - run: helm template charts/dns-gate --set networkPolicy.enabled=true --set eurodns.existingSecret=eurodns-api-key > /dev/null
 
   e2e:
     runs-on: ubuntu-latest
@@ -70,15 +70,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          path: eurodns-gate
+          path: dns-gate
       - uses: actions/checkout@v4
         with:
           repository: KamorionLabs/terraform-provider-eurodns
           path: terraform-provider-eurodns
+      - uses: actions/checkout@v4
+        with:
+          repository: KamorionLabs/terraform-provider-dnsgate
+          path: terraform-provider-dnsgate
       - uses: actions/setup-go@v5
         with:
-          go-version-file: eurodns-gate/go.mod
-          cache-dependency-path: eurodns-gate/go.sum
+          go-version-file: dns-gate/go.mod
+          cache-dependency-path: dns-gate/go.sum
       - uses: hashicorp/setup-terraform@v3
         if: matrix.cli == 'terraform'
         with:
@@ -88,5 +92,5 @@ jobs:
         with:
           tofu_wrapper: false
       - name: end-to-end (provider -> gate -> EuroDNS fake)
-        working-directory: eurodns-gate
+        working-directory: dns-gate
         run: E2E_TERRAFORM="$(command -v ${{ matrix.cli }})" go test -tags e2e -count=1 -v ./e2e/...

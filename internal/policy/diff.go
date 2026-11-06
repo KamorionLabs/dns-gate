@@ -7,7 +7,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 )
 
 // DocumentYAML renders a managed document as YAML with the JSON field

@@ -10,57 +10,69 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/audit"
-	"github.com/KamorionLabs/eurodns-gate/internal/authn"
-	"github.com/KamorionLabs/eurodns-gate/internal/config"
-	"github.com/KamorionLabs/eurodns-gate/internal/identity"
-	"github.com/KamorionLabs/eurodns-gate/internal/mcpb"
-	"github.com/KamorionLabs/eurodns-gate/internal/oidctest"
-	"github.com/KamorionLabs/eurodns-gate/internal/policy"
-	"github.com/KamorionLabs/eurodns-gate/internal/store"
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
-	"github.com/KamorionLabs/eurodns-gate/internal/zonewrite"
+	"github.com/KamorionLabs/dns-gate/internal/audit"
+	"github.com/KamorionLabs/dns-gate/internal/authn"
+	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/dns"
+	"github.com/KamorionLabs/dns-gate/internal/eurodnsapi"
+	"github.com/KamorionLabs/dns-gate/internal/identity"
+	"github.com/KamorionLabs/dns-gate/internal/mcpb"
+	"github.com/KamorionLabs/dns-gate/internal/oidctest"
+	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/provider"
+	eurodnsprov "github.com/KamorionLabs/dns-gate/internal/provider/eurodns"
+	"github.com/KamorionLabs/dns-gate/internal/store"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
+	"github.com/KamorionLabs/dns-gate/internal/zonewrite"
 	eurodns "github.com/KamorionLabs/eurodns-go"
 )
 
 type fakeEngine struct {
 	zonewrite.Engine
-	extra     []uiapi.ZoneSummary // appended to Zones (unmanaged zones)
+	extra []uiapi.ZoneSummary // appended to Zones (unmanaged zones)
+}
+
+// fakeFacade answers the engine-backed EuroDNS operations; passthrough goes
+// through the real facade, towards the test upstream.
+type fakeFacade struct {
+	*eurodnsapi.Facade
 	mu        sync.Mutex
 	lastMatch string
-	lastZone  *eurodns.Zone
 	saveErr   error
 }
 
-func (f *fakeEngine) GetZone(ctx context.Context, s *identity.Subject, zone string) (*eurodns.Zone, error) {
-	return &eurodns.Zone{Name: zone, Records: []eurodns.Record{{Type: "A", Host: "www", TTL: 600, RData: "192.0.2.1"}}, ETag: `"v7"`}, nil
-}
-
-func (f *fakeEngine) SaveZone(ctx context.Context, s *identity.Subject, zone string, z *eurodns.Zone, ifMatch string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.lastMatch, f.lastZone = ifMatch, z
-	return f.saveErr
-}
-
-func (f *fakeEngine) AddRecords(ctx context.Context, s *identity.Subject, zone string, recs []eurodns.Record, ifMatch string) (*eurodns.Zone, error) {
-	return &eurodns.Zone{Name: zone, Records: recs, ETag: "v8"}, nil
-}
-
-func (f *fakeEngine) DeleteRecord(ctx context.Context, s *identity.Subject, zone string, id int64, ifMatch string) (*eurodns.Zone, error) {
-	if id != 42 {
-		return nil, &zonewrite.Error{Reason: zonewrite.ReasonForeignRRset, Message: "record not owned by the gate"}
+func (f *fakeFacade) Do(ctx context.Context, s *identity.Subject, c eurodnsapi.Call) (*eurodnsapi.Reply, error) {
+	switch c.Op {
+	case "getDnsZone":
+		return &eurodnsapi.Reply{Status: http.StatusOK, ETag: `"v7"`, Body: map[string]any{"name": c.Zone,
+			"records": []map[string]any{{"type": "A", "host": "www", "ttl": 600, "rdata": "192.0.2.1"}}}}, nil
+	case "saveDnsZone":
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.lastMatch = c.IfMatch
+		if f.saveErr != nil {
+			return nil, f.saveErr
+		}
+		return &eurodnsapi.Reply{Status: http.StatusNoContent}, nil
+	case "addDnsRecords":
+		return &eurodnsapi.Reply{Status: http.StatusOK, ETag: "v8", Body: map[string]any{"name": c.Zone, "records": c.Body}}, nil
+	case "deleteDnsRecord":
+		if c.Params["record-id"] != "42" {
+			return nil, &zonewrite.Error{Reason: zonewrite.ReasonForeignRRset, Message: "record not owned by the gate"}
+		}
+		return &eurodnsapi.Reply{Status: http.StatusOK, Body: map[string]any{"name": c.Zone}}, nil
 	}
-	return &eurodns.Zone{Name: zone}, nil
+	return nil, &eurodnsapi.BadRequestError{Message: "unexpected " + c.Op}
 }
 
-func (f *fakeEngine) Adopt(ctx context.Context, s *identity.Subject, zone string, req eurodns.AdoptRequest) error {
+func (f *fakeFacade) AdoptJSON(ctx context.Context, s *identity.Subject, zone string, body json.RawMessage) error {
 	return nil
 }
 
@@ -69,7 +81,17 @@ func (f *fakeEngine) Zones(ctx context.Context, s *identity.Subject) ([]uiapi.Zo
 }
 
 func (f *fakeEngine) Inventory(ctx context.Context, s *identity.Subject, zone string) (*uiapi.ZoneInventory, error) {
-	return &uiapi.ZoneInventory{Zone: zone, RRsets: []uiapi.RRset{{Host: "www", Type: "A", Status: uiapi.StatusManaged, Owner: "web"}}}, nil
+	return &uiapi.ZoneInventory{Zone: zone, RRsets: []uiapi.RRset{{Host: "www", Type: "A", TTL: 600, Values: []string{"192.0.2.1"}, Status: uiapi.StatusManaged, Owner: "web"}}}, nil
+}
+
+func (f *fakeEngine) RRset(ctx context.Context, s *identity.Subject, zone string, key dns.Key) (*uiapi.RRset, error) {
+	inv, _ := f.Inventory(ctx, s, zone)
+	for _, rs := range inv.RRsets {
+		if rs.Host == key.Host && rs.Type == key.Type {
+			return &rs, nil
+		}
+	}
+	return nil, &zonewrite.Error{Reason: zonewrite.ReasonNotFound, Message: "no RRset " + key.String() + " in " + zone}
 }
 
 type memAudit struct {
@@ -93,6 +115,7 @@ type env struct {
 	srv      *httptest.Server
 	idp      *oidctest.Provider
 	engine   *fakeEngine
+	facade   *fakeFacade
 	audit    *memAudit
 	upstream *httptest.Server
 	upReq    chan *http.Request
@@ -104,15 +127,6 @@ type env struct {
 }
 
 func (e *env) clock() time.Time { return time.Now().Add(e.offset) }
-
-// keyTransport plays the role of eurodns.Transport: it injects the API key.
-type keyTransport struct{}
-
-func (keyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	r = r.Clone(r.Context())
-	r.Header.Set("X-API-KEY", "upstream-secret")
-	return http.DefaultTransport.RoundTrip(r)
-}
 
 func newEnv(t *testing.T) *env { return newEnvWith(t, nil) }
 
@@ -133,13 +147,19 @@ func newEnvDisc(t *testing.T, tweak func(*config.Config), disc ZoneDiscovery) *e
 		_, _ = w.Write([]byte(`[{"id":1}]`))
 	}))
 	t.Cleanup(e.upstream.Close)
+	client, err := eurodns.New(eurodns.WithBaseURL(e.upstream.URL), eurodns.WithAuth(eurodns.APIKeyAuth{AppID: "gate", APIKey: "upstream-secret"}),
+		eurodns.WithRateLimit(time.Microsecond, 100))
+	if err != nil {
+		t.Fatal(err)
+	}
+	prov := provider.Single(eurodnsprov.NewWithClient("eurodns", e.upstream.URL, client))
+	e.facade = &fakeFacade{Facade: eurodnsapi.New(eurodnsapi.Config{Providers: prov})}
 
 	cfg := &config.Config{
-		Zones:    []string{"example.com", "example.org"},
-		Limits:   config.Limits{MaxBodyBytes: 4096, MaxChangesPerRequest: 20},
-		Upstream: config.Upstream{BaseURL: e.upstream.URL},
+		Zones:  []string{"example.com", "example.org"},
+		Limits: config.Limits{MaxBodyBytes: 4096, MaxChangesPerRequest: 20},
 		Issuers: []config.Issuer{{
-			Name: "idp", Issuer: e.idp.URL, Audiences: []string{"eurodns-gate"}, Category: "pipeline",
+			Name: "idp", Issuer: e.idp.URL, Audiences: []string{"dns-gate"}, Category: "pipeline",
 			NameClaim: "email", Algorithms: config.DefaultAlgorithms, ClockSkew: config.Duration(time.Minute),
 		}},
 		Roles: map[string]config.Role{
@@ -177,8 +197,8 @@ func newEnvDisc(t *testing.T, tweak func(*config.Config), disc ZoneDiscovery) *e
 	s, err := New(Config{
 		Config: cfg, Authn: an, Authz: policy.New(h), Engine: e.engine, Audit: e.audit, AuditReader: e.audit,
 		Policy: h, PolicyStore: e.store, Ownership: e.store, Now: func() time.Time { return e.clock() },
-		Ops: e.ops, Terraform: e.ops.terraform, Discovery: disc,
-		Upstream: keyTransport{}, HTTPClient: e.idp.Client(),
+		Ops: e.ops, Terraform: e.ops.terraform, Discovery: disc, Versions: e.ops,
+		EuroDNS: e.facade, HTTPClient: e.idp.Client(),
 		UIFiles: fstest.MapFS{"index.html": {Data: []byte("<html>ui</html>")}, "assets/app.js": {Data: []byte("js")}},
 	})
 	if err != nil {
@@ -190,7 +210,7 @@ func newEnvDisc(t *testing.T, tweak func(*config.Config), disc ZoneDiscovery) *e
 }
 
 func (e *env) token(sub string) string {
-	return e.idp.Sign(map[string]any{"sub": sub, "aud": "eurodns-gate", "email": sub + "@example.com"})
+	return e.idp.Sign(map[string]any{"sub": sub, "aud": "dns-gate", "email": sub + "@example.com"})
 }
 
 func (e *env) do(t *testing.T, method, path, tok, body string, hdr map[string]string) *http.Response {
@@ -229,15 +249,15 @@ func TestEngineRoutes(t *testing.T) {
 	}
 
 	r = e.do(t, "PUT", "/dns-zones/example.com", tok, `{"records":[],"urlForwards":[],"mailForwards":[]}`, map[string]string{"If-Match": `W/"v7"`})
-	if r.StatusCode != 204 || e.engine.lastMatch != "v7" {
-		t.Fatalf("save: %d if-match=%q", r.StatusCode, e.engine.lastMatch)
+	if r.StatusCode != 204 || e.facade.lastMatch != "v7" {
+		t.Fatalf("save: %d if-match=%q", r.StatusCode, e.facade.lastMatch)
 	}
 
-	e.engine.saveErr = &zonewrite.Error{Reason: zonewrite.ReasonPrecondition, Message: "zone changed"}
+	e.facade.saveErr = &zonewrite.Error{Reason: zonewrite.ReasonPrecondition, Message: "zone changed"}
 	if r = e.do(t, "PUT", "/dns-zones/example.com", tok, `{}`, nil); r.StatusCode != 412 || reason(t, r) != "precondition" {
 		t.Fatalf("precondition: %d", r.StatusCode)
 	}
-	e.engine.saveErr = &zonewrite.Error{Reason: zonewrite.ReasonTainted, Message: "x"}
+	e.facade.saveErr = &zonewrite.Error{Reason: zonewrite.ReasonTainted, Message: "x"}
 	if r = e.do(t, "PUT", "/dns-zones/example.com", tok, `{}`, nil); r.StatusCode != 409 {
 		t.Fatalf("tainted: %d", r.StatusCode)
 	}
@@ -312,24 +332,24 @@ func TestVirtualKeyNotForwarded(t *testing.T) {
 
 func TestGateInfoAndAdopt(t *testing.T) {
 	e := newEnv(t)
-	r := e.do(t, "GET", eurodns.GateInfoPath, "", "", nil)
-	var info eurodns.GateInfo
+	r := e.do(t, "GET", GateInfoPath, "", "", nil)
+	var info GateInfo
 	_ = json.NewDecoder(r.Body).Decode(&info)
-	if r.StatusCode != 200 || !info.HasFeature(eurodns.FeatureOwnership) {
+	if r.StatusCode != 200 || !slices.Contains(info.Features, FeatureOwnership) {
 		t.Fatalf("gate info: %d %+v", r.StatusCode, info)
 	}
 	body := `{"rrsets":[{"host":"www","type":"A"}]}`
-	if r = e.do(t, "POST", eurodns.GateInfoPath+"/zones/example.org/adopt", e.token("writer"), body, nil); r.StatusCode != 403 {
+	if r = e.do(t, "POST", GateInfoPath+"/zones/example.org/adopt", e.token("writer"), body, nil); r.StatusCode != 403 {
 		t.Fatalf("adopt without adopt nor write: %d", r.StatusCode)
 	}
 	// A writer reaches the engine: importing its own RRsets is a no-op there.
-	if r = e.do(t, "POST", eurodns.GateInfoPath+"/zones/example.com/adopt", e.token("writer"), body, nil); r.StatusCode != 204 {
+	if r = e.do(t, "POST", GateInfoPath+"/zones/example.com/adopt", e.token("writer"), body, nil); r.StatusCode != 204 {
 		t.Fatalf("no-op adopt by the owner team: %d", r.StatusCode)
 	}
-	if r = e.do(t, "POST", eurodns.GateInfoPath+"/zones/example.com/adopt", e.token("admin"), body, nil); r.StatusCode != 204 {
+	if r = e.do(t, "POST", GateInfoPath+"/zones/example.com/adopt", e.token("admin"), body, nil); r.StatusCode != 204 {
 		t.Fatalf("adopt: %d", r.StatusCode)
 	}
-	if r = e.do(t, "POST", eurodns.GateInfoPath+"/zones/example.com/delete", e.token("admin"), body, nil); r.StatusCode != 404 {
+	if r = e.do(t, "POST", GateInfoPath+"/zones/example.com/delete", e.token("admin"), body, nil); r.StatusCode != 404 {
 		t.Fatalf("unknown extension: %d", r.StatusCode)
 	}
 }
@@ -584,7 +604,7 @@ func TestUIAPIClaudeDesktopExtension(t *testing.T) {
 	}
 	r := e.do(t, "GET", path, e.token("writer"), "", nil)
 	b, _ := io.ReadAll(r.Body)
-	if r.StatusCode != 200 || r.Header.Get("Content-Type") != "application/zip" || r.Header.Get("Content-Disposition") != `attachment; filename=eurodns-gate-gate.example.com.mcpb` {
+	if r.StatusCode != 200 || r.Header.Get("Content-Type") != "application/zip" || r.Header.Get("Content-Disposition") != `attachment; filename=dns-gate-gate.example.com.mcpb` {
 		t.Fatalf("extension: %d %v", r.StatusCode, r.Header)
 	}
 	zr, err := zip.NewReader(bytes.NewReader(b), int64(len(b)))
@@ -600,8 +620,8 @@ func TestUIAPIClaudeDesktopExtension(t *testing.T) {
 		}
 	}
 	env := m.Server.MCPConfig.Env
-	if err != nil || env["EURODNS_GATE_MCP_URL"] != "https://gate.example.com/mcp" || env["EURODNS_GATE_ISSUER"] != e.idp.URL ||
-		env["EURODNS_GATE_CLIENT_ID"] != e.idp.ClientID || env["EURODNS_GATE_SCOPE"] != e.idp.ClientID+"/.default" || m.DisplayName != "EuroDNS gate (gate.example.com)" {
+	if err != nil || env["DNS_GATE_MCP_URL"] != "https://gate.example.com/mcp" || env["DNS_GATE_ISSUER"] != e.idp.URL ||
+		env["DNS_GATE_CLIENT_ID"] != e.idp.ClientID || env["DNS_GATE_SCOPE"] != e.idp.ClientID+"/.default" || m.DisplayName != "EuroDNS gate (gate.example.com)" {
 		t.Fatalf("manifest: %v %+v", err, m)
 	}
 }

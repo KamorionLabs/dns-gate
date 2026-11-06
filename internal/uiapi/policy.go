@@ -134,7 +134,7 @@ type VirtualKey struct {
 
 // PolicyDocument is the managed (editable) layer. Zones are brought under
 // management in addition to the base zones; each must match
-// policy.bounds.zones and exist in the EuroDNS account (zones_discovery).
+// policy.bounds.zones and exist in a provider account (zone discovery).
 // Delegated holds the roles and bindings owned by policy delegations: they
 // are changed only through the delegation API, and a proposal that omits
 // the section keeps the delegated objects of the active revision.
@@ -305,7 +305,7 @@ type BaseLayer struct {
 	Document   PolicyDocument `json:"document"` // base groups, roles, bindings, keys
 	// Delegations are the policy.delegations of the file.
 	Delegations []Delegation `json:"delegations,omitempty"`
-	// Discovery is the zones_discovery state, absent when disabled.
+	// Discovery is the state of the zone listing of the provider accounts.
 	Discovery *ZonesDiscovery `json:"zones_discovery,omitempty"`
 }
 
@@ -319,6 +319,22 @@ type ZonesDiscovery struct {
 	Count         int        `json:"count"`  // zones discovered after include/exclude
 	LastRefreshAt *time.Time `json:"last_refresh_at,omitempty"`
 	Error         string     `json:"error,omitempty"` // last listing error, if it failed
+	// Providers details the listing of each provider account; Include,
+	// Exclude and Refresh above merge them (union, shortest refresh).
+	Providers []ProviderDiscovery `json:"providers,omitempty"`
+}
+
+// ProviderDiscovery is the zone listing of one provider account.
+type ProviderDiscovery struct {
+	ID            string     `json:"id"`
+	Kind          string     `json:"kind"`
+	Include       []string   `json:"include"`
+	Exclude       []string   `json:"exclude"`
+	Refresh       string     `json:"refresh"`
+	Loaded        bool       `json:"loaded"`
+	Count         int        `json:"count"`
+	LastRefreshAt *time.Time `json:"last_refresh_at,omitempty"`
+	Error         string     `json:"error,omitempty"`
 }
 
 // PolicySettings mirrors the policy section of the config.

@@ -1,6 +1,6 @@
 # Configuration reference
 
-eurodns-gate reads one YAML file (`-config`, default `/etc/eurodns-gate/config.yaml`, or `EURODNS_GATE_CONFIG`). Decoding is strict: an unknown field stops the gate at startup. `eurodns-gate -check -config file.yaml` validates a file and exits.
+dns-gate reads one YAML file (`-config`, default `/etc/dns-gate/config.yaml`, or `DNS_GATE_CONFIG_URI` / `DNS_GATE_CONFIG`): a file path, `s3://bucket/key` or `ssm:/parameter/name`. Decoding is strict: an unknown field stops the gate at startup. `dns-gate -check -config file.yaml` validates a file and exits.
 
 A complete example is in [`examples/config.yaml`](../examples/config.yaml).
 
@@ -10,15 +10,21 @@ Secrets never live in the YAML file. Each one is read from an environment variab
 
 | Variable | Used for | Required |
 |---|---|---|
-| `EURODNS_API_KEY` | EuroDNS `X-API-KEY` | yes |
-| `EURODNS_APP_ID` | EuroDNS `X-APP-ID`, overrides `upstream.app_id` | if `upstream.app_id` is empty |
-| `EURODNS_GATE_POSTGRES_DSN` | Postgres connection string | with `store.type: postgres` |
-| `EURODNS_GATE_SESSION_KEY` | 32-byte key (hex or base64) encrypting UI cookies | with `ui.enabled` |
-| `EURODNS_GATE_UI_CLIENT_SECRET` | OIDC client secret of the UI | no (public client with PKCE) |
+| `EURODNS_<ID>_API_KEY`, else `EURODNS_API_KEY` | EuroDNS `X-API-KEY` of the provider `<ID>` | with a `eurodns` provider |
+| `EURODNS_<ID>_APP_ID`, else `EURODNS_APP_ID` | EuroDNS `X-APP-ID`, overrides `eurodns.app_id` | if `eurodns.app_id` is empty |
+| `DNS_GATE_POSTGRES_DSN` | Postgres connection string | with `store.type: postgres` |
+| `DNS_GATE_SESSION_KEY` | 32-byte key (hex or base64) encrypting UI cookies | with `ui.enabled` |
+| `DNS_GATE_UI_CLIENT_SECRET` | OIDC client secret of the UI | no (public client with PKCE) |
+| `DNS_GATE_SAML_SP_KEY`, `DNS_GATE_SAML_SP_CERT` | PEM key (RSA or ECDSA) and certificate of the SAML service provider, signing the AuthnRequests | no (unsigned requests) |
+| `DNS_GATE_TOKEN_SIGNING_KEY` | PEM key (EC P-256 or Ed25519) signing [gate-issued tokens](#gate-issued-tokens) | with an issuer `self: true` |
 
-Other environment variables: `POD_NAME` (lock holder id, defaults to the hostname) and `EURODNS_GATE_REPLICAS` (only used to warn when a single-replica store runs with several replicas).
+`<ID>` is the provider id in upper case, every character other than a letter or a digit replaced by `_` (`eu-2` gives `EURODNS_EU_2_API_KEY`); the unprefixed variables serve every EuroDNS provider without its own. Route53 providers use the default AWS credential chain (IRSA, Pod Identity, instance role, environment), optionally assuming a role.
 
-Generate a session key with `openssl rand -hex 32`.
+`DNS_GATE_SECRETS_ARN` names a Secrets Manager secret holding a JSON object of these variables (`{"EURODNS_API_KEY":"…"}`), loaded into the environment at startup; a variable already set wins. See [DEPLOY-LAMBDA.md](DEPLOY-LAMBDA.md#configuration).
+
+Other environment variables: `POD_NAME` (lock holder id, defaults to the hostname) and `DNS_GATE_REPLICAS` (only used to warn when a single-replica store runs with several replicas).
+
+Generate a session key with `openssl rand -hex 32`, a token signing key with `openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256` (or `-algorithm ed25519`).
 
 ## Top level
 
@@ -26,42 +32,62 @@ Generate a session key with `openssl rand -hex 32`.
 |---|---|---|
 | `listen.address` | `:8080` | HTTP listen address. TLS is terminated in front of the gate. |
 | `listen.trusted_proxies` | `[]` | CIDRs of reverse proxies allowed to set `X-Forwarded-For`. The rightmost untrusted hop is the client address (used by `virtual_keys[].allowed_cidrs`). |
-| `upstream.base_url` | `https://rest-api.eurodns.com` | EuroDNS API. HTTPS is required (loopback excepted, for tests). |
-| `upstream.app_id` | | EuroDNS application id. |
-| `upstream.rate.every`, `upstream.rate.burst` | `1.1s`, `5` | Client-side limiter shared by every upstream call. EuroDNS allows 10 requests per 10 seconds per IP and bans progressively: keep the default unless EuroDNS raised your quota. |
-| `upstream.max_retries` | `3` | Retries on 429, 5xx and network errors (idempotent requests). |
-| `zones` | (required without `zones_discovery`) | Managed zones of the base layer. Zones listed by the active [managed policy](#managed-policy-editing-from-the-ui) revision are added to them. Requests for any other zone are refused before authorization (zones found by [zone discovery](#zone-discovery) are readable only). |
-| `zones_discovery.*` | disabled | Lists the zones of the EuroDNS account, see [Zone discovery](#zone-discovery). |
-| `check_on_write` | `true` | Validate every zone with EuroDNS `check` before saving it. |
+| `providers` | (required) | The DNS accounts the gate fronts, see [Providers](#providers). |
+| `zones` | `[]` | Managed zones of the base layer. Zones listed by the active [managed policy](#managed-policy-editing-from-the-ui) revision are added to them. Requests for any other zone are refused before authorization (zones found by [zone discovery](#zone-discovery) are readable only). Each zone must be selected by a provider. |
+| `check_on_write` | `true` | Run the provider dry run (EuroDNS `check`) before every write; providers without one (Route53) are not affected. |
 | `reconcile_interval` | `15m` | Drift detection period per zone (minimum `1m`). |
 | `limits.max_body_bytes` | `1048576` | Request body limit. |
 | `limits.max_changes_per_request` | `20` | Default blast-radius limit (RRset changes per request). |
 | `lock.ttl`, `lock.wait` | `60s`, `30s` | Per-zone write lease and how long a request waits for it (then `503 zone_locked`). |
 
-## Zone discovery
+## Providers
 
-Without discovery the gate only knows `zones`. With it, the gate lists the domains of the EuroDNS account, shows those it does not manage as **unmanaged** (in the UI and in the MCP `list_zones` tool) and lets policy administrators bring them under management from the UI, through a [managed policy](#managed-policy-editing-from-the-ui) revision, without a configuration change.
+A provider is one DNS account: a EuroDNS account or an AWS account for Route53. The gate alone holds its credentials. Each zone is served by exactly one provider: the one whose `zones` filter selects it, or, when the filters of several providers select it, the only one of them whose account lists it. A zone listed by two providers that both select it is served by neither (an error is logged): exclude it from all but one. Ownership, locks and audit stay keyed by zone name.
 
 | Field | Default | Description |
 |---|---|---|
-| `zones_discovery.enabled` | `false` | List the account domains (`POST /domains/search`, `searchDomains`). |
-| `zones_discovery.include` | `["*"]` | Zone globs (`*` wildcards) a discovered zone must match. |
-| `zones_discovery.exclude` | `[]` | Zone globs removed from the list; they win over `include`. |
-| `zones_discovery.refresh` | `1h` | Listing period (minimum `5m`). A failed listing is retried after 5 minutes and the previous list is kept. |
+| `providers[].id` | (required) | Unique lowercase identifier, shown in the UI, the audit (`provider`) and zone summaries. |
+| `providers[].kind` | (required) | `eurodns` or `route53` ([providers/route53.md](providers/route53.md)). |
+| `providers[].zones.include` | `["*"]` | Zone globs (`*` wildcards) the provider serves. |
+| `providers[].zones.exclude` | `[]` | Zone globs removed; they win over `include`. |
+| `providers[].zones.refresh` | `1h` | Account listing period (minimum `5m`), see [Zone discovery](#zone-discovery). |
+| `providers[].eurodns.base_url` | `https://rest-api.eurodns.com` | EuroDNS API. HTTPS is required (loopback excepted, for tests). |
+| `providers[].eurodns.app_id` | | EuroDNS application id (or the variables of [Secrets](#secrets)). |
+| `providers[].eurodns.rate.every`, `.burst` | `1.1s`, `5` | Client-side limiter shared by every call to this account (reads, writes, checks, listing, passthrough). EuroDNS allows 10 requests per 10 seconds per IP and bans progressively: keep the default unless EuroDNS raised your quota. |
+| `providers[].eurodns.max_retries` | `3` | Retries on 429, 5xx and network errors (idempotent requests). |
+| `providers[].route53.region` | SDK default | AWS region of the API calls. |
+| `providers[].route53.assume_role_arn` | | IAM role assumed in the account holding the hosted zones. |
+| `providers[].route53.external_id` | | External id of the assumed role (requires `assume_role_arn`). |
+| `providers[].route53.hosted_zones` | `{}` | Zone name to hosted zone id, to pin a name with several hosted zones or skip the listing of the account. |
+| `providers[].route53.include_private` | `false` | Serve private hosted zones too. |
 
 ```yaml
-zones: [example.com]
-zones_discovery:
-  enabled: true
-  include: ["*"]
-  exclude: ["*.internal.example", "legacy-*.example"]
-  refresh: 1h
+providers:
+  - id: eurodns
+    kind: eurodns
+    zones: {include: ["*"], exclude: ["*.example.net"]}
+    eurodns: {app_id: acme-gate}
+  - id: route53-prod
+    kind: route53
+    zones: {include: ["*.example.net"]}
+    route53:
+      region: eu-west-3
+      assume_role_arn: arn:aws:iam::123456789012:role/dns-gate
+      hosted_zones: {"example.net": Z0123456789ABC}
 ```
 
-- **Upstream load**: a listing costs one request per 100 domains, through the shared rate-limited transport, once per `refresh` and per replica (the list is held in memory). When a policy proposal names a zone not seen yet, the gate lists the account once more, at most once a minute, so that a domain added just before is found.
+What a provider can write is reported by the gate and enforced by the engine: alias RRsets only where the provider supports them (Route53), accepted TTLs (EuroDNS: a fixed list), read-only RRsets (`read_only` in the inventory: SOA and locked records at EuroDNS, `relative_target` for a EuroDNS RRset holding a target without ending dot, routing policies at Route53), which are never written nor adopted. The [EuroDNS-compatible API](#endpoints) only serves zones of a `eurodns` provider; the RRset API under `/api/v1` serves every zone.
+
+Desired targets (CNAME, MX, NS, SRV, PTR) are read the same way for every provider: a name of several labels is absolute (`target.example.net` is written `target.example.net.`), a single label is refused as ambiguous. Values already stored are never rewritten.
+
+### Zone discovery
+
+The gate lists every provider account each `zones.refresh`, keeps the zones its `zones` filter selects, shows those it does not manage as **unmanaged** (in the UI and in the MCP `list_zones` tool) and lets policy administrators bring them under management from the UI, through a [managed policy](#managed-policy-editing-from-the-ui) revision, without a configuration change. The lists also tell which provider serves a zone selected by several filters.
+
+- **Upstream load**: a EuroDNS listing costs one request per 100 domains (`POST /domains/search`), through the shared rate-limited transport, once per `refresh` and per replica (the lists are held in memory). When a policy proposal names a zone not seen yet, the gate lists the accounts once more, at most once a minute, so that a domain added just before is found. A failed listing is retried after 5 minutes and the previous list is kept.
 - **Unmanaged zones are read-only.** Their RRsets are readable with `dns.read` on the zone (UI and MCP; the UI also requires `ui.read`), evaluated by RBAC as usual: the zone globs of the role rules apply, so `zones: ["*"]` in a read role covers every discovered zone. They are never writable nor adoptable, the EuroDNS-compatible API (`/dns-zones/...`), the Terraform export and adoption refuse them, and reconcile does not run on them. Their content is read on demand, when someone opens the zone, and reused for `reconcile_interval`; listing zones never reads them.
-- **Bringing a zone under management**: add it to the `zones` list of the managed policy (the UI offers "Manage this zone" to policy administrators), then approve and activate as any revision. It must match `policy.bounds.zones` and be in the discovered list (after `include` and `exclude`). Once active, the zone behaves as a base zone: writes within the roles, adoption, reconcile. `include`/`exclude` therefore also bound what can be managed from the UI.
-- The listing uses the EuroDNS key of the gate: its EuroDNS user must be allowed to search domains. Domains whose DNS is not hosted at EuroDNS are listed too; reading them fails upstream.
+- **Bringing a zone under management**: add it to the `zones` list of the managed policy (the UI offers "Manage this zone" to policy administrators), then approve and activate as any revision. It must match `policy.bounds.zones` and be in a discovered list. Once active, the zone behaves as a base zone: writes within the roles, adoption, reconcile. The `zones` filters of the providers therefore also bound what can be managed from the UI.
+- The EuroDNS listing uses the key of the provider: its EuroDNS user must be allowed to search domains. Domains whose DNS is not hosted at EuroDNS are listed too: exclude them, reading them fails upstream.
 
 ## Store
 
@@ -70,7 +96,7 @@ zones_discovery:
 | `store.type` | `memory` | `memory`, `sqlite`, `postgres` or `dynamodb`. |
 | `store.audit_retention` | `9600h` (400 days) | Audit events older than this are purged (minimum `24h`). |
 | `store.sqlite.path` | | Database file, on a persistent volume. |
-| `store.postgres.max_conns` | `5` | Pool size (1 to 100). The DSN comes from `EURODNS_GATE_POSTGRES_DSN`. |
+| `store.postgres.max_conns` | `5` | Pool size (1 to 100). The DSN comes from `DNS_GATE_POSTGRES_DSN`. |
 | `store.dynamodb.table`, `region`, `endpoint` | | Single-table backend; credentials from the default AWS chain (EKS Pod Identity, IRSA, environment). |
 
 `memory` loses ownership on restart: tests only. `memory` and `sqlite` support **one replica** (the chart refuses `replicaCount > 1` with them); use `postgres` or `dynamodb` to run several replicas.
@@ -94,12 +120,40 @@ Trusted OIDC token issuers, for bearer tokens (`Authorization: Bearer <JWT>`) an
 | `category_claim`, `category_map` | | Derive the category from a claim value, e.g. `idtyp` with `{app: pipeline, user: human}`; unmapped values fall back to `category`. |
 | `algorithms` | all asymmetric | Allowed `alg`; HMAC algorithms are refused. |
 | `clock_skew` | `60s` | Leeway on `exp`, `nbf`, `iat` (maximum `5m`). |
+| `self` | `false` | This issuer is the gate itself, see [Gate-issued tokens](#gate-issued-tokens). |
+| `token_ttl` | `1h` | Lifetime of gate-issued tokens (`self: true` only, 1m to 24h). |
 
 Tokens must carry `exp` and the subject claim(s). Keys are cached and refetched on an unknown `kid` (at most every 30 s).
 
 Claim matching (`bound_claims`, `bindings[].subjects[].claims`): a string claim must match one of the globs; an array claim (Entra `roles`, `groups`) matches when **it contains** a value matching one of the globs. Booleans and numbers are compared as text; other types never match.
 
 Examples: AWS IAM outbound identity federation (`sts:GetWebIdentityToken`, the issuer URL is given by `aws iam get-outbound-web-identity-federation-info`, `sub` is the role ARN), GitHub Actions (`https://token.actions.githubusercontent.com`), Kubernetes projected service account tokens (cluster OIDC issuer, custom audience), any corporate IdP.
+
+### Gate-issued tokens
+
+Humans signed in to the UI with [SAML](#saml-login) have no access token of their own for the API, the MCP endpoint or Terraform. The gate then issues its own: declare one issuer with `self: true`.
+
+```yaml
+issuers:
+  - name: gate
+    self: true
+    issuer: https://dns.example.com   # public origin of the gate, no path
+    # audiences: [https://dns.example.com]   (default: the issuer URL)
+    # token_ttl: 1h
+```
+
+- The signing key comes from `DNS_GATE_TOKEN_SIGNING_KEY` (or `_FILE`): EC P-256 (`ES256`) or Ed25519 (`EdDSA`), PEM (SEC 1 or PKCS #8). Every instance of the gate (replicas, Lambda) uses the same key. The public key is published at `GET /.well-known/jwks.json` (`kid` = RFC 7638 thumbprint). Changing the key invalidates the tokens in circulation, which last `token_ttl` at most.
+- A token has `iss` = `issuer`, `aud` = the first audience, `exp` = `token_ttl` from issuance but never after the end of the session it comes from, a `jti`, and the claims of that session: `sub`, the mapped claims (`email`, `name`, `groups`...), `auth_time` and `amr`, plus `gate_iss` (the issuer of the session, e.g. `identity-center`) and `gate_cat` (`human`).
+- The gate verifies its tokens with its own key (no JWKS fetch) and **binds them as the issuer of the session** (`gate_iss`): the subject is `identity-center:alice@example.com`, the bindings and groups of `identity-center` apply, with that issuer's `bound_claims`, `team_claim` and `name_claim`. The `gate` issuer itself is never named in bindings or groups (refused at load). Since roles are recomputed at every request, a binding removed takes effect on the next request of a token.
+- Step-up (`policy.edit_max_age`, `policy.require_amr`) uses the `auth_time` and `amr` of the session, so a token obtained right after a re-authentication can mutate the policy, as the session itself.
+- Every issuance is audited (`token.issue`, with `jti`, expiry, `via`: `api`, `authorization_code` or `refresh_token`, and `client_id`).
+
+Tokens are obtained:
+
+- by a signed-in browser session: `POST /api/v1/tokens` (session cookie, `X-Gate-CSRF` header and same-origin `Origin`, as every UI mutation) answers `{"access_token", "token_type": "Bearer", "expires_in", "expires_at", "issuer"}`. Bearer tokens and virtual keys cannot get one (`403 session_required`): a token never extends itself;
+- by the [Claude Desktop extension](#claude-desktop-extension) and other native clients, through the gate authorization server: `GET /.well-known/openid-configuration` (also `/.well-known/oauth-authorization-server`) describes `/oauth/authorize` and `/oauth/token`. Only the public client `dns-gate-relay` with a loopback redirect `http://localhost:<port>` or `http://127.0.0.1:<port>` (no path) is accepted, with PKCE S256 required. `/oauth/authorize` sends a user without session through the UI login (SAML or OIDC), then shows a consent page ("Allow" posts back with the CSRF token and the origin checked). The authorization code (2 minutes) and the refresh token (until the end of the session) are sealed with the session key: nothing is stored, any instance redeems them. A code is not single-use within its 2 minutes, but it is useless without the PKCE verifier that only the client holds. The refresh grant re-checks the bindings of the subject before signing a new token.
+
+The authorization server also works with an OIDC UI login, but the Claude Desktop extension keeps signing in with the OIDC issuer in that case.
 
 ### Entra ID
 
@@ -109,7 +163,7 @@ Azure Managed Identity, AKS Workload Identity and Azure DevOps service connectio
 issuers:
   - name: entra
     issuer: https://login.microsoftonline.com/<tenant-id>/v2.0
-    audiences: ["api://eurodns-gate", "<gate-application-id>"]
+    audiences: ["api://dns-gate", "<gate-application-id>"]
     subject_template: "{{tid}}/{{oid}}"
     bound_claims: {tid: "<tenant-id>"}
     category_claim: idtyp
@@ -118,7 +172,7 @@ issuers:
 ```
 
 - Issuers are fixed tenants only: `/common`, `/organizations` and `/consumers` are refused (their `iss` is not fixed). v2 (`https://login.microsoftonline.com/<tid>/v2.0`) and v1 (`https://sts.windows.net/<tid>/`) are accepted when configured explicitly; for v1 the JWKS URL defaults to the tenant keys (`https://login.microsoftonline.com/<tid>/discovery/v2.0/keys`). Entra audiences must be the application id (GUID) or an `api://` URI.
-- App registration of the gate: expose an Application ID URI (`api://eurodns-gate`), set `accessTokenAcceptedVersion: 2` in the manifest (tokens then carry the v2 issuer), declare **app roles** (for example `DNS.Write`, `DNS.Read` for applications, `DNS.Admin` for users) and set *Assignment required* on the enterprise application so only assigned identities obtain a token.
+- App registration of the gate: expose an Application ID URI (`api://dns-gate`), set `accessTokenAcceptedVersion: 2` in the manifest (tokens then carry the v2 issuer), declare **app roles** (for example `DNS.Write`, `DNS.Read` for applications, `DNS.Admin` for users) and set *Assignment required* on the enterprise application so only assigned identities obtain a token.
 - Bind on `oid` (object id of the managed identity or service principal, stable) or on `roles` (app roles assigned in Entra). `sub` is pairwise per application and `appid`/`azp` identify the client application, not the identity.
 
 ```yaml
@@ -149,7 +203,7 @@ Azure DevOps step:
     scriptType: bash
     scriptLocation: inlineScript
     inlineScript: |
-      export EURODNS_GATE_TOKEN=$(az account get-access-token --scope api://eurodns-gate/.default --query accessToken -o tsv)
+      export DNS_GATE_TOKEN=$(az account get-access-token --scope api://dns-gate/.default --query accessToken -o tsv)
       terraform apply -auto-approve
 ```
 
@@ -168,14 +222,14 @@ issuers:
     audiences: ["api://AzureADTokenExchange"]
     bound_claims:
       sub:
-        - sc://<organization>/<project>/eurodns-gate-certificates-prd
+        - sc://<organization>/<project>/dns-gate-certificates-prd
     category: pipeline
 bindings:
   - role: acm-validation
     team: platform
     subjects:
       - issuer: azure-devops
-        claims: {sub: [sc://<organization>/<project>/eurodns-gate-certificates-prd]}
+        claims: {sub: [sc://<organization>/<project>/dns-gate-certificates-prd]}
 ```
 
 In the pipeline:
@@ -185,14 +239,14 @@ In the pipeline:
 
   ```yaml
   - task: cURLUploader@2
-    displayName: Reference the eurodns-gate service connection
+    displayName: Reference the dns-gate service connection
     condition: false
     inputs:
       files: none
       authType: ServiceEndpoint
-      serviceEndpoint: eurodns-gate-certificates-prd
+      serviceEndpoint: dns-gate-certificates-prd
   ```
-- the provider takes the connection id from `service_connection_id`, or from `EURODNS_GATE_ADO_SERVICE_CONNECTION_ID`, which a variable group named after the pipeline can carry so that nothing holds an id.
+- the provider takes the connection id from `service_connection_id`, or from `DNS_GATE_ADO_SERVICE_CONNECTION_ID`, which a variable group named after the pipeline can carry so that nothing holds an id.
 
 One binding for every dedicated service connection, each one owning its records (team = service connection name), so that a new pipeline needs a service connection but no gate change:
 
@@ -202,16 +256,16 @@ issuers:
     issuer: https://vstoken.dev.azure.com/<organization-id>
     audiences: ["api://AzureADTokenExchange"]
     bound_claims:
-      sub: ["sc://<organization>/<project>/eurodns-gate-*"]   # prefix dedicated to the gate
+      sub: ["sc://<organization>/<project>/dns-gate-*"]   # prefix dedicated to the gate
     category: pipeline
 bindings:
   - role: pipeline-writer
     team_from:
       claim: sub
-      regex: "^sc://[^/]+/[^/]+/(eurodns-gate-[a-z0-9-]+)$"   # team eurodns-gate-<name>
+      regex: "^sc://[^/]+/[^/]+/(dns-gate-[a-z0-9-]+)$"   # team dns-gate-<name>
     subjects:
       - issuer: azure-devops
-        claims: {sub: ["sc://<organization>/<project>/eurodns-gate-*"]}
+        claims: {sub: ["sc://<organization>/<project>/dns-gate-*"]}
 ```
 
 The glob turns the right to create service connections into the right to mint gate identities: see the trade-off under [Team derived from a claim](#team-derived-from-a-claim).
@@ -289,7 +343,7 @@ Binding pipeline identities one by one is heavy when each pipeline should own it
 issuers:
   - name: github
     issuer: https://token.actions.githubusercontent.com
-    audiences: [eurodns-gate]
+    audiences: [dns-gate]
     bound_claims: {sub: ["repo:acme/*"]}         # globs: new repositories need no gate change
 
 bindings:
@@ -315,7 +369,7 @@ Other subjects that encode one pipeline per value: Kubernetes service accounts (
 
 With Azure DevOps, the glob means that anyone allowed to **create a service connection** in the project with a name under the prefix, and to **authorize it for a pipeline they control**, mints a new trusted gate identity. That identity gets its own team, so it cannot change or delete the records of other teams, but it can create any not-yet-existing name its role allows. Mitigations:
 
-- keep the glob prefix (`eurodns-gate-*`) dedicated to the gate, and make sure no Entra federated credential, AWS role or other federation trusts subjects under it;
+- keep the glob prefix (`dns-gate-*`) dedicated to the gate, and make sure no Entra federated credential, AWS role or other federation trusts subjects under it;
 - restrict who may create service connections in the project (*Endpoint Creators* and *Endpoint Administrators* of the project, and organization-level service connection permissions) to the people who would otherwise change the gate configuration;
 - require approvals and checks on the service connections (or on the environments the pipelines deploy to), so a new pipeline cannot use one unreviewed;
 - watch the audit log: every write carries the subject (`azure-devops:sc://...`) and the derived team, and a team that appears for the first time is a new service connection.
@@ -383,11 +437,11 @@ policy:
           types: [CNAME, TXT]
         binding_subjects:             # identities a delegated binding may target
           - issuer: azure-devops
-            claims: {sub: ["sc://<organization>/<project>/eurodns-gate-*"]}
+            claims: {sub: ["sc://<organization>/<project>/dns-gate-*"]}
         teams:
           from_subject:               # the team is derived from the bound subject
             claim: sub
-            regex: "^sc://[^/]+/[^/]+/(eurodns-gate-[a-z0-9-]+)$"
+            regex: "^sc://[^/]+/[^/]+/(dns-gate-[a-z0-9-]+)$"
           # names: ["shared-*"]       # and/or fixed team names (globs)
         roles: []                     # existing base or managed roles delegated bindings may also grant
         groups: []                    # groups delegated bindings may target
@@ -402,7 +456,7 @@ policy:
 | `allow.zones` | (required) | Zone globs delegated role rules may target; each must be covered by `policy.bounds.zones`. |
 | `allow.actions` | (required) | Actions delegated role rules may grant; within `policy.bounds.actions`, `policy.*` refused. |
 | `allow.records.hosts`, `allow.records.types` | | When set, every delegated rule must name hosts (types) and each must be covered by these patterns (same host syntax as rules; `*` for any type). Without it, a delegated rule may cover whole zones. |
-| `allow.binding_subjects[]` | (required) | Every subject of a delegated binding must be covered by one of these matchers: same issuer, and each claim of the matcher constrained by the binding with patterns it covers (`sc://o/p/eurodns-gate-web` and `sc://o/p/eurodns-gate-*` are covered by `sc://o/p/eurodns-gate-*`; `sc://o/*` is not). `*` alone is refused. |
+| `allow.binding_subjects[]` | (required) | Every subject of a delegated binding must be covered by one of these matchers: same issuer, and each claim of the matcher constrained by the binding with patterns it covers (`sc://o/p/dns-gate-web` and `sc://o/p/dns-gate-*` are covered by `sc://o/p/dns-gate-*`; `sc://o/*` is not). `*` alone is refused. |
 | `allow.teams.from_subject` | | The "team from the subject" rule (`claim`, `regex`, `prefix`, as [`team_from`](#team-derived-from-a-claim)). A delegated binding either sets exactly this `team_from`, or a fixed `team` equal to the team this rule derives from its subject (each subject must then carry exactly one literal value of the claim, and the binding no groups). |
 | `allow.teams.names` | | Team globs a delegated binding may set as a fixed `team` (`*` alone refused). At least one of `from_subject` and `names`. |
 | `allow.roles` | `[]` | Base or managed roles a delegated binding may grant besides the roles of the delegation; each of their rules must still be within `allow`. |
@@ -418,14 +472,14 @@ Delegated roles and bindings live in the managed document, in its `delegated` se
 ```yaml
 delegated:
   roles:
-    eurodns-gate-web:
+    dns-gate-web:
       rules: [{zones: [example.com], actions: [dns.read, dns.record.write], records: {hosts: [web.apps], types: [CNAME]}}]
       owner: {delegation: workloads-pipelines, managed_by: terraform, created_by: "azure-devops:sc://...", created_at: ..., updated_by: ..., updated_at: ...}
   bindings:
-    eurodns-gate-web:
-      role: eurodns-gate-web
-      team: eurodns-gate-web
-      subjects: [{issuer: azure-devops, claims: {sub: ["sc://<organization>/<project>/eurodns-gate-web"]}}]
+    dns-gate-web:
+      role: dns-gate-web
+      team: dns-gate-web
+      subjects: [{issuer: azure-devops, claims: {sub: ["sc://<organization>/<project>/dns-gate-web"]}}]
       owner: {...}
 ```
 
@@ -467,12 +521,12 @@ The limits are checked when an object is written and again on every later revisi
 
 Adoption brings RRsets created outside the gate (foreign) under the ownership of a team, so that the gate can then manage them. It requires `dns.record.adopt` on each RRset and never applies to protected or server-managed (SOA, locked) records.
 
-1. `POST /api/v1/zones/{zone}/adopt/preview` with a selection (`rrsets`, or `hosts` globs and `types`, plus an optional `owner` team): returns the candidates, whether each is adoptable (or why not: `protected`, `server_managed`, `owned_by_other_team`, `already_owned`, `forbidden`, `relative_target`) and a `preview_token` bound to the exact upstream content.
+1. `POST /api/v1/zones/{zone}/adopt/preview` with a selection (`rrsets`, or `hosts` globs and `types`, plus an optional `owner` team): returns the candidates, whether each is adoptable (or why not: `protected`, `owned_by_other_team`, `already_owned`, `forbidden`, `not_found`, the read-only reason of the RRset such as `server_managed` or `relative_target`, or `invalid` when the provider would refuse its content) and a `preview_token` bound to the exact upstream content.
 2. `POST /api/v1/zones/{zone}/adopt` with the chosen `rrsets`, the `preview_token` and a mandatory `comment`. All or nothing: if any RRset changed since the preview or is no longer adoptable, nothing is adopted and the answer is `409 adopt_conflict`.
 
 Both are mutations for CSRF (cookie sessions) and the apply requires the same recent authentication as policy changes for humans.
 
-`GET /api/v1/zones/{zone}/terraform?team=&hosts=&types=` (`ui.read`) downloads the **managed** RRsets of a zone as Terraform/OpenTofu configuration for the `kamorionlabs/eurodns` provider: one `eurodns_record_set` per RRset plus `import` blocks, so a team can move what it adopted into its own stack. `hosts` (host globs) and `types` accept comma-separated values or repeated parameters; `rrsets=www/A,@/MX` exports exactly that selection (for example what was just adopted) and takes precedence over `hosts` and `types`.
+`GET /api/v1/zones/{zone}/terraform?team=&hosts=&types=&provider=` (`ui.read`) downloads the **managed** RRsets of a zone as Terraform/OpenTofu configuration: one resource per RRset plus `import` blocks (id `<zone>/<host>/<type>`), so a team can move what it adopted into its own stack. By default the resources are `dnsgate_record_set` of the `KamorionLabs/dnsgate` provider, which talks to the gate REST API and works for every DNS provider behind the gate (attributes `zone`, `name`, `type`, `ttl`, `values`, or an `alias` block `{name, zone_id, evaluate_target_health}`); `provider=eurodns` exports `eurodns_record_set` of the `kamorionlabs/eurodns` provider instead (EuroDNS-compatible API, alias RRsets skipped). `hosts` (host globs) and `types` accept comma-separated values or repeated parameters; `rrsets=www/A,@/MX` exports exactly that selection (for example what was just adopted) and takes precedence over `hosts` and `types`.
 
 ## MCP
 
@@ -482,7 +536,7 @@ Both are mutations for CSRF (cookie sessions) and the apply requires the same re
 |---|---|---|
 | `mcp.enabled` | `false` | Serves `/mcp` and `/.well-known/oauth-protected-resource`. |
 | `mcp.allow_writes` | `false` | Adds the write tools (plan/apply, adoption). Without it, the server is read-only. |
-| `mcp.plan_ttl` | `10m` | Lifetime of a plan returned by `plan_rrset_change` (1m to 1h). |
+| `mcp.plan_ttl` | `10m` | Lifetime of a plan returned by `plan_rrset_change` or `POST /api/v1/zones/{zone}/plan` (1m to 1h). |
 | `mcp.requests_per_minute` | `120` | Rate limit per subject (`429` beyond). |
 | `mcp.public_url` | UI origin, else the request host | Public base URL of the gate, advertised in the protected resource metadata and shown on the Connect page. |
 
@@ -501,7 +555,7 @@ Tools:
 | `apply_rrset_change` | write | Applies a plan exactly as planned; refused when expired, used, owned by another caller, or when the zone changed since (`precondition`). |
 | `adopt_preview`, `adopt_apply` | dry run, write | Adoption as above. |
 
-There is no policy tool: policy changes stay with humans in the UI, with step-up. Plans live in the memory of the replica that created them: with several replicas, route `/mcp` to a single replica or accept that a plan must be applied where it was made.
+There is no policy tool: policy changes stay with humans in the UI, with step-up. Plans are kept in the store, shared by every replica, and taken once: a plan made on one replica can be applied on another. The same plans back `POST /api/v1/zones/{zone}/plan` and `/apply` ([API.md](API.md)). Expired plans are purged every 15 minutes by the gate (SQL stores) or by the DynamoDB TTL.
 
 ### Connecting an assistant
 
@@ -510,7 +564,7 @@ The **Connect** page of the UI (`/ui/#/connect`, data from `GET /api/v1/connect`
 Claude Code, with a `headersHelper` that Claude Code runs again on each connection and on a `401` or `403`, so the token never goes stale (needs the Azure CLI signed in to the gate's tenant, `az login --tenant <tenant-id>`, and `jq`):
 
 ```sh
-claude mcp add-json eurodns-gate '{"type":"http","url":"https://gate.example.com/mcp","headersHelper":"az account get-access-token --scope api://<client-id>/.default --query accessToken -o tsv | jq -Rc \"{Authorization: (\\\"Bearer \\\" + .)}\""}' --scope user
+claude mcp add-json dns-gate '{"type":"http","url":"https://gate.example.com/mcp","headersHelper":"az account get-access-token --scope api://<client-id>/.default --query accessToken -o tsv | jq -Rc \"{Authorization: (\\\"Bearer \\\" + .)}\""}' --scope user
 ```
 
 The helper must print `{"Authorization":"Bearer <token>"}`. With another issuer, replace the `az` command by any command printing an access token.
@@ -519,12 +573,14 @@ The helper must print `{"Authorization":"Bearer <token>"}`. With another issuer,
 
 For Claude Desktop, the Connect page offers a **Claude Desktop extension**: the user downloads it, double-clicks it (or drags it into Claude Desktop, Settings, Extensions) and clicks Install. No terminal, Azure CLI, `jq` or Node.js is needed: the extension runs on the Node.js runtime shipped with Claude Desktop.
 
-The file comes from `GET /api/v1/connect/claude-desktop.mcpb` (same authentication as `/api/v1/connect`), offered when `mcp.enabled` and the UI login are both on; `/api/v1/connect` then returns its URL in `claude_desktop_extension_url` (empty otherwise, and the download answers `404`). It is an [MCP Bundle](https://github.com/modelcontextprotocol/mcpb) (manifest `0.3`, `eurodns-gate-<host>.mcpb`) generated on the fly with the MCP URL, the UI issuer, `ui.client_id` and the token scope (from `ui.cli_scope`, see Entra ID below) baked in. It holds no secret and is the same for every user of the gate.
+With a [SAML UI login](#saml-login), the extension signs in at the gate itself: the bundle carries the [gate issuer](#gate-issued-tokens) URL and the client id `dns-gate-relay`, the relay is unchanged (OIDC discovery on the gate, authorization code with PKCE on a loopback redirect, refresh token), and the browser goes through the SAML login and a consent page. The extension is then offered only when an issuer with `self: true` is configured. Nothing has to be registered at the identity provider for it.
+
+The file comes from `GET /api/v1/connect/claude-desktop.mcpb` (same authentication as `/api/v1/connect`), offered when `mcp.enabled` and the UI login are both on; `/api/v1/connect` then returns its URL in `claude_desktop_extension_url` (empty otherwise, and the download answers `404`). It is an [MCP Bundle](https://github.com/modelcontextprotocol/mcpb) (manifest `0.3`, `dns-gate-<host>.mcpb`) generated on the fly with the MCP URL, the UI issuer, `ui.client_id` and the token scope (from `ui.cli_scope`, see Entra ID below) baked in. It holds no secret and is the same for every user of the gate.
 
 Its local server, `internal/mcpb/relay.js` (one file, Node.js 18 or later, no dependency), forwards every MCP message to `/mcp` over Streamable HTTP (JSON and SSE answers, `Mcp-Session-Id`, messages the gate sends on its own) with the user's access token:
 
 - Sign-in uses the system browser on the issuer (authorization code with PKCE S256, `state` and `nonce`, scopes `openid offline_access <scope>`, see below), back to a loopback redirect `http://localhost:<ephemeral port>`, without a path. Without a usable token, `initialize` and the list requests (`tools/list`, `prompts/list`, `resources/list`, `resources/templates/list`) are answered at once, the lists empty, since Claude Desktop gives up on a request after about a minute; the sign-in then runs in the background and the relay sends `notifications/tools/list_changed` once signed in, so Claude fetches the tools again. Conversations already open keep the tool list they started with: start a new conversation after the first sign-in. A tool call made before that waits for the sign-in. A sign-in not completed within 5 minutes, or refused, fails the waiting requests with a JSON-RPC error; asking again starts a new one. With a usable token, every message goes straight to the gate.
-- The tokens are kept in `~/.eurodns-gate/<host>.json` (mode `0600`). The access token is refreshed silently with the refresh token; the browser opens again only when the refresh is refused (expired or revoked session).
+- The tokens are kept in `~/.dns-gate/<host>.json` (mode `0600`). The access token is refreshed silently with the refresh token; the browser opens again only when the refresh is refused (expired or revoked session).
 - Tokens are never written to the logs (Claude Desktop keeps the server's stderr in its MCP logs). When the browser cannot be opened, the sign-in URL is in those logs.
 
 The identity provider must accept `ui.client_id` as a **public client** for this flow:
@@ -538,7 +594,7 @@ With Entra ID, on the gate app registration (the one of `ui.client_id`):
 
 - add the platform **Mobile and desktop applications** with the redirect URI exactly `http://localhost`: Entra ignores the port of loopback redirects but not the path, so do not add `/callback` or a trailing slash; in Terraform (`azuread_application`), `public_client { redirect_uris = ["http://localhost"] }`. The web redirect `https://<gate>/auth/callback` of the UI stays as it is;
 - set **Allow public client flows** to *Yes* (`fallback_public_client_enabled = true`), so Entra treats the code and refresh token requests, which carry no client secret, as coming from a public client;
-- the token is requested for `ui.cli_scope` (`api://<client_id>/.default` by default). The extension signs in as `ui.client_id` itself, and Entra refuses a token an application requests for itself through its App ID URI (`AADSTS90009`): the bundle therefore carries a `ui.cli_scope` of the form `api://<client_id>/<scope>` as `<client_id>/<scope>`, the GUID form Entra requires; other scopes are kept as they are, and `ui.cli_scope` itself is unchanged for the Azure CLI. A custom App ID URI of the same application (`api://eurodns-gate/.default`) is not rewritten and hits the same error: keep `ui.cli_scope` under `api://<client_id>/` for the extension. The application must expose a delegated scope that users may consent to, or that an administrator consented to tenant-wide, and the issuer must list the application id in `audiences` with `accessTokenAcceptedVersion: 2`, as for the Azure CLI below. *Assignment required* applies as for the UI.
+- the token is requested for `ui.cli_scope` (`api://<client_id>/.default` by default). The extension signs in as `ui.client_id` itself, and Entra refuses a token an application requests for itself through its App ID URI (`AADSTS90009`): the bundle therefore carries a `ui.cli_scope` of the form `api://<client_id>/<scope>` as `<client_id>/<scope>`, the GUID form Entra requires; other scopes are kept as they are, and `ui.cli_scope` itself is unchanged for the Azure CLI. A custom App ID URI of the same application (`api://dns-gate/.default`) is not rewritten and hits the same error: keep `ui.cli_scope` under `api://<client_id>/` for the extension. The application must expose a delegated scope that users may consent to, or that an administrator consented to tenant-wide, and the issuer must list the application id in `audiences` with `accessTokenAcceptedVersion: 2`, as for the Azure CLI below. *Assignment required* applies as for the UI.
 
 The bundle is not signed (`mcpb sign`): organizations that restrict Claude Desktop to approved or signed extensions must allow it.
 
@@ -549,7 +605,7 @@ Claude Desktop without the extension, and other clients that only start local se
 ```json
 {
   "mcpServers": {
-    "eurodns-gate": {
+    "dns-gate": {
       "command": "npx",
       "args": ["-y", "mcp-remote", "https://gate.example.com/mcp", "--header", "Authorization:${AUTH_HEADER}"],
       "env": { "AUTH_HEADER": "Bearer <access token>" }
@@ -571,9 +627,10 @@ Read-only web UI under `/ui/` and its JSON API under `/api/v1` (action `ui.read`
 | Field | Default | Description |
 |---|---|---|
 | `ui.enabled` | `false` | Enables `/ui/`, `/auth/*` and session cookies. |
-| `ui.issuer` | (required) | Name of a configured issuer used for the login. |
-| `ui.client_id` | (required) | OIDC client id registered at the IdP. |
-| `ui.redirect_url` | (required) | `https://<gate>/auth/callback`, registered at the IdP. |
+| `ui.issuer` | (required for OIDC) | Name of a configured issuer used for the login. |
+| `ui.client_id` | (required for OIDC) | OIDC client id registered at the IdP. |
+| `ui.redirect_url` | (required for OIDC) | `https://<gate>/auth/callback`, registered at the IdP. |
+| `ui.saml` | | SAML 2.0 login instead of OIDC, see [SAML login](#saml-login). |
 | `ui.scopes` | `openid profile email` | Must include `openid`; add the scope that carries the claims used in bindings (for example `groups`). |
 | `ui.session_ttl` | `8h` | Session lifetime (1m to 24h). |
 | `ui.cli_scope` | `api://<client_id>/.default` with an Entra v2 issuer, else empty | OAuth scope a command-line tool requests to get a token for the gate, shown on the Connect page (`az account get-access-token --scope ...`, Terraform `azure_identity.scope`). One scope of letters, digits and `. _ ~ : / % -`, so it can be pasted into shell commands as is. Set it when the Application ID URI of the gate is not `api://<client_id>`. |
@@ -586,18 +643,75 @@ With [zone discovery](#zone-discovery), the zones view also lists the unmanaged 
 
 Audit events of zones the user cannot read are filtered out; events without a zone (authentication failures) are shown only to users who can read every managed zone.
 
+### SAML login
+
+`ui.saml` replaces the OIDC login with SAML 2.0 (HTTP-Redirect or HTTP-POST request, HTTP-POST response); `ui.issuer`, `ui.client_id` and `ui.redirect_url` must then be empty. Setup with AWS IAM Identity Center: [IDENTITY-CENTER.md](IDENTITY-CENTER.md).
+
+```yaml
+ui:
+  enabled: true
+  saml:
+    issuer: identity-center             # name used in bindings and groups
+    entity_id: dns-gate                 # SP entity id = audience of the assertions
+    acs_url: https://dns.example.com/auth/saml/acs
+    idp_metadata_url: https://portal.sso.eu-west-3.amazonaws.com/saml/metadata/<id>
+    # idp_metadata: |                   # or the metadata XML inline
+    name_id_format: email
+    attributes: {email: email, name: name, groups: groups}
+    groups_from_identity_store:
+      identity_store_id: d-1234567890
+      region: eu-west-3
+      assume_role_arn: arn:aws:iam::111111111111:role/dns-gate-identity-store
+bindings:
+  - role: dns-admin
+    team: platform
+    subjects:
+      - issuer: identity-center
+        claims: {groups: [DNS-Admins]}
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `ui.saml.issuer` | (required) | Name under which SAML users are bound (`<issuer>:<NameID>` in the audit log). Not the name of a token issuer. |
+| `ui.saml.entity_id` | (required) | SP entity id, which the IdP puts in the assertion audience. |
+| `ui.saml.acs_url` | (required) | `https://<gate>/auth/saml/acs`; its origin is the origin of the UI (CSRF checks, cookies). |
+| `ui.saml.idp_metadata_url`, `ui.saml.idp_metadata` | (one required) | IdP metadata, fetched over HTTPS (cached per instance for 24 h, the previous copy kept when a refresh fails) or inline XML. It gives the IdP entity id, its signing certificates and its single sign-on URL. |
+| `ui.saml.name_id_format` | `unspecified` | `unspecified`, `email`, `persistent` or `transient`, requested in the AuthnRequest. The NameID is the subject id (`sub`): avoid `transient`, whose value changes at each login. |
+| `ui.saml.attributes` | `{email: email, name: name, groups: groups}` | Claim to SAML attribute (`Name` or `FriendlyName`) mapping; the given entries are added to the defaults. A single value becomes a string claim, several a list; `groups` is always a list. An `amr` entry feeds the authentication methods instead of a claim. Unmapped attributes are dropped. |
+| `ui.saml.team_claim` | | As `issuers[].team_claim`. |
+| `ui.saml.groups_from_identity_store.identity_store_id` | | Identity store (`d-xxxxxxxxxx`) whose groups are looked up at login. |
+| `...region` | (required) | Region of the IAM Identity Center instance. |
+| `...assume_role_arn` | | Role assumed for the lookup (the identity store lives in the management or delegated administrator account); the gate's own credentials otherwise. |
+| `...user_attribute` | `userName` | `userName` or `email`: identity store attribute matched with the value of `user_claim`. |
+| `...user_claim` | `sub` | Claim holding that value (the NameID by default). |
+| `...cache_ttl` | `5m` | Per-instance cache of the groups of a user and of group names (at most `1h`). |
+
+The display name of every group the user belongs to (`identitystore:GetUserId`, `ListGroupMembershipsForMember`, `DescribeGroup`) is added to the `groups` claim, together with the `groups` attribute of the assertion if the IdP sends one. A user missing from the identity store just gets no extra group; any other lookup error fails the login (`502 groups_unavailable`). Groups are resolved at login and kept in the session: a membership change applies at the next login.
+
+Validation of the response posted to `/auth/saml/acs`: XML signature of the response or of the assertion with a certificate of the IdP metadata (unsigned responses refused, encrypted assertions decrypted with the SP key when configured), response `Destination` and assertion `Recipient` equal to `acs_url`, `InResponseTo` equal to the id of the AuthnRequest kept in the sealed login cookie, `RelayState` equal to the random state of that cookie, issuer equal to the IdP entity id, every `AudienceRestriction` equal to `entity_id` (at least one required), `IssueInstant` at most 90 s old, `NotBefore`/`NotOnOrAfter` with 3 minutes of clock skew, a bearer `SubjectConfirmation` and a non-empty NameID. The session then follows the OIDC rules: `sub` = NameID, mapped claims, `auth_time` = `AuthnInstant`, `amr` = the `AuthnContextClassRef` (and the `amr` attribute if mapped), lifetime `ui.session_ttl` capped by `SessionNotOnOrAfter`.
+
+- The login state cookie must come back on the cross-site POST of the IdP: it is `SameSite=None; Secure` when `acs_url` is HTTPS (plain HTTP only works with an IdP on the same site, for tests). A response posted without it is refused (`400 login_state`), except an unsolicited one (no `InResponseTo`, an IdP-initiated login from a portal), which is answered with a redirect to `/auth/login` so that a proper SP-initiated login starts.
+- Replay: the gate keeps no record of the assertions it consumed (it runs stateless, also on Lambda). A response is only accepted with the login cookie of the browser that started that very login, which is cleared on first use, and within 90 s of its issuance. Someone who captured both the cookie and the response within those 90 s could replay them; TLS and the `HttpOnly` cookie make that a browser or proxy compromise.
+- Step-up: `/auth/login?reauth=1` sends `ForceAuthn="true"`. The `AuthnInstant` returned by the IdP is what counts for `policy.edit_max_age`: an IdP that ignores `ForceAuthn` and returns an older instant keeps the user out of policy mutations until they sign in again at the IdP. Identity Center reports `urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport`-style context classes rather than `mfa`: set `policy.require_amr` only to values the IdP actually sends.
+- With `DNS_GATE_SAML_SP_KEY` and `DNS_GATE_SAML_SP_CERT`, requests are signed (RSA-SHA256 or ECDSA-SHA256) and the metadata lists the certificate; without them, requests are unsigned, which Identity Center accepts.
+- `GET /auth/saml/metadata` serves the SP metadata (entity id, ACS URL, NameID format, certificate) to import at the IdP.
+
 ## Endpoints
 
 | Path | Description |
 |---|---|
-| EuroDNS API paths | Opened operations: `getDnsZone`, `saveDnsZone`, `checkDnsZone`, `addDnsRecords`, `deleteDnsRecord` (zone engine), `listDnsZoneSnapshots`, `getSnapShot`, `getDnssecStatus`, `getDomain` (proxied). Every other operation returns `403 operation_denied`. Query strings, encoded separators and dot segments are refused. |
-| `GET /.well-known/eurodns-gate` | Version and features (`if-match`, `ownership`, `adopt`, `policy-delegation`), unauthenticated. |
-| `POST /.well-known/eurodns-gate/zones/{zone}/adopt` | Adopt RRsets (used by the Terraform provider on import). Foreign RRsets need `dns.record.adopt`; RRsets already owned by one of the caller's teams are a no-op and only need `dns.record.write` on the zone. |
+| EuroDNS API paths | Opened operations, for zones of a `eurodns` provider only (`404 zone_not_eurodns` otherwise): `getDnsZone`, `saveDnsZone`, `checkDnsZone`, `addDnsRecords`, `deleteDnsRecord` (zone engine), `listDnsZoneSnapshots`, `getSnapShot`, `getDnssecStatus`, `getDomain` (proxied to the account of the zone). Every other operation returns `403 operation_denied`. Query strings, encoded separators and dot segments are refused. |
+| `GET /.well-known/dns-gate` | Version and features (`if-match`, `ownership`, `adopt`, `policy-delegation`), unauthenticated. |
+| `POST /.well-known/dns-gate/zones/{zone}/adopt` | Adopt RRsets of a EuroDNS zone (used by the eurodns Terraform provider on import). Foreign RRsets need `dns.record.adopt`; RRsets already owned by one of the caller's teams are a no-op and only need `dns.record.write` on the zone. |
 | `/api/v1/me`, `/api/v1/connect`, `/api/v1/zones`, `/api/v1/zones/{zone}/rrsets`, `/api/v1/audit` | UI API (`ui.read`; `/zones` lists managed zones then unmanaged ones (`"unmanaged": true`), whose `rrsets` need `dns.read`; `/me` for any bound subject, with its groups and effective permissions; `/connect` returns the public URL, the MCP state, the login issuer and `ui.cli_scope` for the Connect page). |
 | `GET /api/v1/connect/claude-desktop.mcpb` | Claude Desktop extension of the gate (`ui.read`), when MCP and the UI login are enabled, see [Claude Desktop extension](#claude-desktop-extension). |
 | `/api/v1/policy`, `/api/v1/policy/revisions[/{id}[/approve\|reject\|activate\|rollback\|export]]`, `/api/v1/policy/explain`, `/api/v1/policy/who-can`, `/api/v1/policy/virtual-keys/generate` | Policy API, see `internal/uiapi/policy.go`. |
 | `/api/v1/policy/delegated[/roles\|bindings/{name}]` | [Delegation API](#delegation-api) (`GET`, `PUT`, `DELETE`). |
-| `/auth/login`, `/auth/callback`, `/auth/logout` | UI login. |
+| `/auth/login`, `/auth/callback`, `/auth/logout` | UI login (`/auth/callback` with OIDC only). |
+| `POST /auth/saml/acs`, `GET /auth/saml/metadata` | SAML assertion consumer service and SP metadata, with `ui.saml`. |
+| `POST /api/v1/tokens` | Gate token for the UI session, see [Gate-issued tokens](#gate-issued-tokens). |
+| `GET /.well-known/jwks.json` | Public key of the gate issuer. |
+| `GET /.well-known/openid-configuration`, `/.well-known/oauth-authorization-server`, `/oauth/authorize`, `POST /oauth/token` | Gate authorization server for native clients (Claude Desktop extension), with a gate issuer and the UI login. |
 | `/healthz`, `/readyz` | Probes. |
 
-`GET` on a zone returns an `ETag`; send it back in `If-Match` on writes to get `412 precondition` instead of overwriting a concurrent change. Errors are JSON `{"reason": "...", "message": "..."}`: `forbidden`, `not_owner`, `too_many_changes` (403), `foreign_rrset`, `tainted` (409), `precondition` (412), `invalid_zone` (400), `zone_locked` (503, `Retry-After`), `upstream` (502).
+`GET` on a zone returns an `ETag`; send it back in `If-Match` on writes to get `412 precondition` instead of overwriting a concurrent change. Errors are JSON `{"reason": "...", "message": "..."}`: `forbidden`, `not_owner`, `too_many_changes` (403), `not_found`, `zone_not_eurodns` (404), `foreign_rrset`, `tainted` (409), `precondition` (412), `invalid_zone` (400), `zone_locked` (503, `Retry-After`), `upstream` (502).

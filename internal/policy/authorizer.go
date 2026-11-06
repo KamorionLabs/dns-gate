@@ -4,8 +4,8 @@ package policy
 import (
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/identity"
-	"github.com/KamorionLabs/eurodns-go/rrset"
+	"github.com/KamorionLabs/dns-gate/internal/dns"
+	"github.com/KamorionLabs/dns-gate/internal/identity"
 )
 
 // Actions.
@@ -25,7 +25,7 @@ type Authorizer interface {
 	Allow(s *identity.Subject, action, zone string) bool
 	// AllowRRset checks an action on one RRset (zone, host, type), including
 	// the protected-records list (protected wins over any role).
-	AllowRRset(s *identity.Subject, action, zone string, key rrset.Key) bool
+	AllowRRset(s *identity.Subject, action, zone string, key dns.Key) bool
 	// OwnerTeam returns the team that will own an RRset created by s in this
 	// zone (first of s.Teams allowed for the zone), false if none.
 	OwnerTeam(s *identity.Subject, zone string) (string, bool)
@@ -38,5 +38,5 @@ type Authorizer interface {
 	// this duration (0 = permanent). Used for ACME challenge records.
 	EphemeralTTL(s *identity.Subject) time.Duration
 	// IsProtected reports whether an RRset is in the protected list.
-	IsProtected(zone string, key rrset.Key) bool
+	IsProtected(zone string, key dns.Key) bool
 }

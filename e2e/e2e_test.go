@@ -1,7 +1,9 @@
 //go:build e2e
 
 // Package e2e runs Terraform (and OpenTofu when available) with the real
-// provider against a real gate in front of the EuroDNS fake.
+// providers (eurodns from E2E_PROVIDER_SRC, dnsgate from
+// E2E_DNSGATE_PROVIDER_SRC, sibling directories by default) against a real
+// gate in front of the EuroDNS fake.
 //
 //	go test -tags e2e ./e2e/...
 package e2e
@@ -25,10 +27,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/app"
-	"github.com/KamorionLabs/eurodns-gate/internal/config"
-	"github.com/KamorionLabs/eurodns-gate/internal/oidctest"
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
+	"github.com/KamorionLabs/dns-gate/internal/app"
+	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/oidctest"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 	eurodns "github.com/KamorionLabs/eurodns-go"
 	"github.com/KamorionLabs/eurodns-go/eurodnstest"
 )
@@ -74,6 +76,7 @@ func TestEndToEnd(t *testing.T) {
 	t.Run("11_mcp", e.scenarioMCP)
 	t.Run("12_zone_discovery_and_team_from", e.scenarioDiscoveryTeamFrom)
 	t.Run("13_policy_delegation", e.scenarioDelegation)
+	t.Run("14_dnsgate_provider", e.scenarioDNSGateProvider)
 }
 
 func setup(t *testing.T) *env {
@@ -132,12 +135,14 @@ func (e *env) config(extra string) *config.Config {
 	sum := sha256.Sum256([]byte(acmeKey))
 	yaml := fmt.Sprintf(`
 listen: {address: "127.0.0.1:0"}
-upstream:
-  base_url: %[1]s
-  app_id: %[2]s
-  rate: {every: 5ms, burst: 50}
+providers:
+  - id: eurodns
+    kind: eurodns
+    eurodns:
+      base_url: %[1]s
+      app_id: %[2]s
+      rate: {every: 5ms, burst: 50}
 zones: [%[3]s]
-zones_discovery: {enabled: true}
 check_on_write: true
 reconcile_interval: 1h
 limits: {max_changes_per_request: 20}
@@ -148,7 +153,7 @@ store:
 issuers:
   - name: ci
     issuer: %[5]s
-    audiences: [eurodns-gate]
+    audiences: [dns-gate]
     category: pipeline
 virtual_keys:
   - id: vk-acme
@@ -212,9 +217,9 @@ policy:
         zones: [%[3]s]
         actions: [dns.read, dns.record.write, ui.read]
         records: {hosts: ["**.wl"], types: [CNAME, TXT]}
-        binding_subjects: [{issuer: ci, claims: {sub: ["sc://org/proj/eurodns-gate-*"]}}]
+        binding_subjects: [{issuer: ci, claims: {sub: ["sc://org/proj/dns-gate-*"]}}]
         teams:
-          from_subject: {claim: sub, regex: "^sc://[^/]+/[^/]+/(eurodns-gate-[a-z0-9-]+)$"}
+          from_subject: {claim: sub, regex: "^sc://[^/]+/[^/]+/(dns-gate-[a-z0-9-]+)$"}
 %[8]s
 `, e.upstream.URL, upstreamApp, zone, filepath.Join(t.TempDir(), "gate.db"), e.idp.URL, acmeAppID, hex.EncodeToString(sum[:]), extra, discoveredZone, workloadsSubject)
 	cfg, err := config.Parse([]byte(yaml), func(k string) string {
@@ -231,7 +236,7 @@ policy:
 
 // token returns a fresh JWT for sub and a file holding it.
 func (e *env) token(sub string) (string, string) {
-	tok := e.idp.Sign(map[string]any{"sub": sub, "aud": "eurodns-gate"})
+	tok := e.idp.Sign(map[string]any{"sub": sub, "aud": "dns-gate"})
 	path := filepath.Join(e.tokens, strings.NewReplacer("/", "_", ":", "_").Replace(sub)+".jwt")
 	if err := os.WriteFile(path, []byte(tok), 0o600); err != nil {
 		e.t.Fatal(err)
@@ -434,9 +439,16 @@ func (e *env) scenarioTainted(t *testing.T) {
 
 func (e *env) scenarioProtected(t *testing.T) {
 	c := e.bearerClient("ci-admin")
-	err := c.Adopt(context.Background(), zone, eurodns.AdoptRequest{RRsets: []eurodns.AdoptRRset{{Host: "@", Type: "NS"}}})
-	if !eurodns.IsForbidden(err) {
-		t.Errorf("adopting apex NS: want 403, got %v", err)
+	tok, _ := e.token("ci-admin")
+	req, _ := http.NewRequest(http.MethodPost, e.gate.URL+"/.well-known/dns-gate/zones/"+zone+"/adopt", strings.NewReader(`{"rrsets":[{"host":"@","type":"NS"}]}`))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusForbidden {
+		t.Errorf("adopting apex NS: want 403, got %v %v", resp, err)
+	}
+	if resp != nil {
+		resp.Body.Close()
 	}
 	_, err = c.AddRecords(context.Background(), zone, []eurodns.Record{{Type: "MX", Host: "@", TTL: 3600, RData: "5 evil.example.net."}})
 	if err == nil {

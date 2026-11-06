@@ -79,6 +79,9 @@ type loginState struct {
 	Verifier string `json:"v"`
 	Next     string `json:"x"`
 	Expires  int64  `json:"exp"`
+	// RequestID is the id of the SAML AuthnRequest the response must
+	// answer (InResponseTo).
+	RequestID string `json:"q,omitempty"`
 }
 
 type cookieNames struct {
@@ -94,9 +97,9 @@ const (
 
 func newCookieNames(secure bool) cookieNames {
 	if secure {
-		return cookieNames{session: "__Host-eurodns-gate-session", login: "__Host-eurodns-gate-login", secure: true}
+		return cookieNames{session: "__Host-dns-gate-session", login: "__Host-dns-gate-login", secure: true}
 	}
-	return cookieNames{session: "eurodns-gate-session", login: "eurodns-gate-login"}
+	return cookieNames{session: "dns-gate-session", login: "dns-gate-login"}
 }
 
 func (c cookieNames) cookie(name, value string, maxAge time.Duration) *http.Cookie {
@@ -109,6 +112,24 @@ func (c cookieNames) cookie(name, value string, maxAge time.Duration) *http.Cook
 		Secure:   c.secure,
 		SameSite: http.SameSiteLaxMode,
 	}
+}
+
+// crossSite is a cookie the browser sends back on the cross-site POST of a
+// SAML response: SameSite=None, which requires Secure (plain HTTP keeps Lax).
+func (c cookieNames) crossSite(name, value string, maxAge time.Duration) *http.Cookie {
+	ck := c.cookie(name, value, maxAge)
+	if c.secure {
+		ck.SameSite = http.SameSiteNoneMode
+	}
+	return ck
+}
+
+func (c cookieNames) clearCrossSite(name string) *http.Cookie {
+	ck := c.clear(name)
+	if c.secure {
+		ck.SameSite = http.SameSiteNoneMode
+	}
+	return ck
 }
 
 func (c cookieNames) clear(name string) *http.Cookie {

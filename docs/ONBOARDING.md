@@ -90,18 +90,22 @@ The export contains one resource and one `import` block per RRset:
 
 ```hcl
 import {
-  to = eurodns_record_set.www_cname
+  to = dnsgate_record_set.www_cname
   id = "example.com/www/CNAME"
 }
 
-resource "eurodns_record_set" "www_cname" {
+resource "dnsgate_record_set" "www_cname" {
   zone   = "example.com"
-  host   = "www"
+  name   = "www"
   type   = "CNAME"
   ttl    = 3600
   values = ["web-lb.example.net."]
 }
 ```
+
+The resources target the `KamorionLabs/dnsgate` provider, which works for every
+DNS provider behind the gate. Add `&provider=eurodns` to the URL to export
+`eurodns_record_set` resources of the `kamorionlabs/eurodns` provider instead.
 
 Move it into the team's stack, with the provider in gate mode (see the provider
 README) and the team's pipeline identity.

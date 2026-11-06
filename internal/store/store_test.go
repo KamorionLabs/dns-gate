@@ -12,8 +12,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb/types"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/audit"
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
+	"github.com/KamorionLabs/dns-gate/internal/audit"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 )
 
 type fakeClock struct {
@@ -153,6 +153,7 @@ func conformance(t *testing.T, s Store, clock *fakeClock) {
 	})
 
 	t.Run("policy", func(t *testing.T) { policyConformance(t, s) })
+	t.Run("plans", func(t *testing.T) { planConformance(t, s, clock) })
 
 	t.Run("lock", func(t *testing.T) {
 		z := "lock.example.com"
@@ -199,7 +200,7 @@ func TestDynamoDB(t *testing.T) {
 	t.Setenv("AWS_ACCESS_KEY_ID", "test")
 	t.Setenv("AWS_SECRET_ACCESS_KEY", "test")
 	ctx := context.Background()
-	table := "eurodns-gate-test-" + time.Now().Format("150405.000000")
+	table := "dns-gate-test-" + time.Now().Format("150405.000000")
 	st, err := NewDynamoDB(ctx, DynamoDBConfig{Table: table, Region: "us-east-1", Endpoint: endpoint})
 	if err != nil {
 		t.Fatal(err)
@@ -296,7 +297,7 @@ func TestPostgres(t *testing.T) {
 func testSQLMigrationsAndPurge(t *testing.T, s *sqlStore, clock *fakeClock) {
 	ctx := context.Background()
 	var n int
-	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&n); err != nil || n != 2 {
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&n); err != nil || n != 3 {
 		t.Fatalf("schema_migrations %d %v", n, err)
 	}
 	if err := s.migrate(ctx); err != nil {
@@ -466,5 +467,83 @@ func policyConformance(t *testing.T, s Store) {
 	actives, _, _ := s.ListRevisions(ctx, revisionActive, 0, "")
 	if len(actives) != 1 {
 		t.Fatalf("%d active revisions", len(actives))
+	}
+}
+
+func planConformance(t *testing.T, s Store, clock *fakeClock) {
+	ctx := context.Background()
+	now := clock.Now()
+	changes := []uiapi.RRsetChange{{Host: "www", Type: "A", TTL: 600, Values: []string{"192.0.2.1"}, ExpectedHash: "h1"}}
+	p := Plan{ID: "plan-a", Subject: "idp:alice", Zone: "example.com", Changes: changes, ZoneVersion: 7, CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute)}
+	if err := s.PutPlan(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutPlan(ctx, p); !errors.Is(err, ErrConflict) {
+		t.Fatalf("duplicate plan: %v", err)
+	}
+	if _, err := s.TakePlan(ctx, "plan-a", "idp:mallory", now); !errors.Is(err, ErrPlanOwner) {
+		t.Fatalf("foreign take: %v", err)
+	}
+	got, err := s.TakePlan(ctx, "plan-a", "idp:alice", now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Zone != "example.com" || got.ZoneVersion != 7 || len(got.Changes) != 1 || got.Changes[0].ExpectedHash != "h1" || got.Changes[0].Values[0] != "192.0.2.1" ||
+		!got.ExpiresAt.Equal(p.ExpiresAt.Truncate(time.Millisecond)) {
+		t.Fatalf("taken plan %+v", got)
+	}
+	if _, err := s.TakePlan(ctx, "plan-a", "idp:alice", now); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("second take: %v", err)
+	}
+
+	if err := s.PutPlan(ctx, Plan{ID: "plan-b", Subject: "idp:alice", Zone: "example.com", CreatedAt: now, ExpiresAt: now.Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.TakePlan(ctx, "plan-b", "idp:alice", now.Add(2*time.Minute)); !errors.Is(err, ErrPlanExpired) {
+		t.Fatalf("expired take: %v", err)
+	}
+	if _, err := s.TakePlan(ctx, "plan-b", "idp:alice", now); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("expired plan kept: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	if err := s.PutPlan(ctx, Plan{ID: "plan-c", Subject: "idp:alice", Zone: "example.com", CreatedAt: now, ExpiresAt: now.Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	taken := 0
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := s.TakePlan(ctx, "plan-c", "idp:alice", now); err == nil {
+				mu.Lock()
+				taken++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	if taken != 1 {
+		t.Fatalf("plan taken %d times", taken)
+	}
+
+	for _, id := range []string{"plan-d", "plan-e"} {
+		if err := s.PutPlan(ctx, Plan{ID: id, Subject: "idp:bob", Zone: "example.com", CreatedAt: now, ExpiresAt: now.Add(time.Minute)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.PutPlan(ctx, Plan{ID: "plan-f", Subject: "idp:bob", Zone: "example.com", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.GCPlans(ctx, now.Add(2*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, isDynamo := s.(*dynamo); !isDynamo && n != 2 {
+		t.Fatalf("gc removed %d plans", n)
+	}
+	if _, err := s.TakePlan(ctx, "plan-f", "idp:bob", now); err != nil {
+		t.Fatalf("gc removed a live plan: %v", err)
 	}
 }

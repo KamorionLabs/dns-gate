@@ -10,16 +10,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/audit"
-	"github.com/KamorionLabs/eurodns-gate/internal/authn"
-	"github.com/KamorionLabs/eurodns-gate/internal/config"
-	"github.com/KamorionLabs/eurodns-gate/internal/identity"
-	"github.com/KamorionLabs/eurodns-gate/internal/mcpb"
-	"github.com/KamorionLabs/eurodns-gate/internal/policy"
-	"github.com/KamorionLabs/eurodns-gate/internal/store"
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
-	"github.com/KamorionLabs/eurodns-gate/internal/version"
-	"github.com/KamorionLabs/eurodns-gate/internal/zonewrite"
+	"github.com/KamorionLabs/dns-gate/internal/audit"
+	"github.com/KamorionLabs/dns-gate/internal/authn"
+	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/identity"
+	"github.com/KamorionLabs/dns-gate/internal/mcpb"
+	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/store"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
+	"github.com/KamorionLabs/dns-gate/internal/version"
+	"github.com/KamorionLabs/dns-gate/internal/zonewrite"
 )
 
 // uiSubject authenticates a UI API request: session cookie first, then
@@ -55,12 +55,15 @@ func (s *Server) uiSubject(r *http.Request) (*identity.Subject, *session, *authn
 }
 
 func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
-	rest := strings.TrimPrefix(r.URL.Path, "/api/v1")
-	isPolicy := rest == "/policy" || strings.HasPrefix(rest, "/policy/")
-	isAdopt := strings.HasPrefix(rest, "/zones/") && (strings.HasSuffix(rest, "/adopt") || strings.HasSuffix(rest, "/adopt/preview"))
-	isDelegated := strings.HasPrefix(rest, "/policy/delegated/")
-	if r.Method != http.MethodGet && !((isPolicy || isAdopt) && r.Method == http.MethodPost) &&
-		!(isDelegated && (r.Method == http.MethodPut || r.Method == http.MethodDelete)) {
+	if p := r.URL.Path; len(p) > len("/api/v1/") && strings.HasSuffix(p, "/") && !strings.HasSuffix(p, "//") {
+		r.URL.Path = strings.TrimSuffix(p, "/")
+	}
+	pattern, params, status := matchAPIRoute(r.Method, r.URL.Path)
+	switch status {
+	case http.StatusNotFound:
+		writeError(w, http.StatusNotFound, "not_found", "unknown API endpoint")
+		return
+	case http.StatusMethodNotAllowed:
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
@@ -76,12 +79,25 @@ func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
 	authn.StripCredentials(r.Header)
 	ctx := identity.With(r.Context(), subj)
 	r = r.WithContext(ctx)
-	if isPolicy {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/v1")
+	switch {
+	case pattern == routePolicy || strings.HasPrefix(pattern, routePolicy+"/"):
 		s.handlePolicyAPI(w, r, subj, sess, strings.TrimPrefix(rest, "/policy"))
 		return
-	}
-	if zp := strings.Split(strings.TrimPrefix(rest, "/zones/"), "/"); strings.HasPrefix(rest, "/zones/") && len(zp) >= 2 && zp[1] != "rrsets" {
-		s.handleZoneOps(w, r, subj, sess, zp[0], strings.Join(zp[1:], "/"))
+	case pattern == routeTokens:
+		s.handleIssueToken(w, r, subj, sess)
+		return
+	case pattern == routeRRset:
+		s.handleRRset(w, r, subj, sess, params["zone"], params["host"], params["type"])
+		return
+	case pattern == routePlan:
+		s.handlePlan(w, r, subj, params["zone"])
+		return
+	case pattern == routeApply:
+		s.handleApply(w, r, subj, sess, params["zone"])
+		return
+	case pattern != routeZoneRRsets && strings.HasPrefix(pattern, routeZoneOps):
+		s.handleZoneOps(w, r, subj, sess, params["zone"], strings.TrimPrefix(pattern, routeZoneOps))
 		return
 	}
 
@@ -148,6 +164,12 @@ func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
 		if inv.RRsets == nil {
 			inv.RRsets = []uiapi.RRset{}
 		}
+		fillHashes(inv.RRsets)
+		if s.cfg.Versions != nil {
+			if v, err := s.cfg.Versions.ZoneVersion(ctx, zone); err == nil {
+				w.Header().Set("ETag", zoneETag(v))
+			}
+		}
 		writeJSON(w, http.StatusOK, inv)
 	case rest == "/audit":
 		s.handleAudit(w, r, readable)
@@ -185,7 +207,17 @@ func (s *Server) connectInfo(r *http.Request) uiapi.Connect {
 	if s.claudeDesktopAvailable() {
 		out.ClaudeDesktopExtensionURL = base + "/api/v1" + claudeDesktopExtensionPath
 	}
-	if s.ui != nil {
+	t := s.cfg.Authn.TokenIssuer()
+	if t != nil && s.ui != nil {
+		out.TokensURL = base + "/api/v1/tokens"
+	}
+	switch {
+	case s.ui != nil && s.ui.saml != nil:
+		out.Issuer = &uiapi.ConnectIssuer{Kind: "saml"}
+		if t != nil {
+			out.Issuer.URL, out.ClientID = t.URL(), RelayClientID
+		}
+	case s.ui != nil:
 		out.ClientID = c.UI.ClientID
 		out.Issuer = &uiapi.ConnectIssuer{URL: s.ui.issuer.Issuer, Kind: "oidc"}
 		if tid, ok := config.EntraTenant(s.ui.issuer.Issuer); ok {
@@ -195,14 +227,33 @@ func (s *Server) connectInfo(r *http.Request) uiapi.Connect {
 	return out
 }
 
+// extensionLogin returns the issuer and client the Claude Desktop extension
+// signs in with: the UI OIDC issuer and client, or the gate issuer when the
+// UI login is SAML.
+func (s *Server) extensionLogin() (issuer, clientID, scope string, ok bool) {
+	if s.ui == nil {
+		return "", "", "", false
+	}
+	if s.ui.saml != nil {
+		if t := s.cfg.Authn.TokenIssuer(); t != nil {
+			return t.URL(), RelayClientID, "", true
+		}
+		return "", "", "", false
+	}
+	c := s.cfg.Config.UI
+	return s.ui.issuer.Issuer, c.ClientID, c.CLIScope, c.ClientID != ""
+}
+
 // claudeDesktopExtensionPath serves the Claude Desktop extension, under /api/v1.
 const claudeDesktopExtensionPath = "/connect/claude-desktop.mcpb"
 
 // claudeDesktopAvailable reports whether the Claude Desktop extension can be
-// offered: it needs the MCP endpoint and the UI login (issuer and client id),
-// whose client also signs the extension in.
+// offered: it needs the MCP endpoint and the UI login (OIDC issuer and
+// client id, or SAML with the gate issuer), which also signs the extension
+// in.
 func (s *Server) claudeDesktopAvailable() bool {
-	return s.mcp != nil && s.ui != nil && s.cfg.Config.UI.ClientID != ""
+	_, _, _, ok := s.extensionLogin()
+	return s.mcp != nil && ok
 }
 
 // serveClaudeDesktopExtension returns the Claude Desktop extension (MCP
@@ -213,12 +264,13 @@ func (s *Server) serveClaudeDesktopExtension(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	base := s.publicBaseURL(r)
+	issuer, clientID, scope, _ := s.extensionLogin()
 	bundle, err := mcpb.Build(mcpb.Params{
 		GateURL:  base,
 		MCPURL:   base + mcpPath,
-		Issuer:   s.ui.issuer.Issuer,
-		ClientID: s.cfg.Config.UI.ClientID,
-		Scope:    s.cfg.Config.UI.CLIScope,
+		Issuer:   issuer,
+		ClientID: clientID,
+		Scope:    scope,
 		Version:  version.Version,
 	})
 	if err != nil {
@@ -352,6 +404,7 @@ func toAuditEntry(e audit.Event) uiapi.AuditEntry {
 		Decision:   e.Decision,
 		Reason:     e.Reason,
 		Changes:    e.Changes,
+		Provider:   e.Provider,
 		SnapshotID: e.SnapshotID,
 	}
 }

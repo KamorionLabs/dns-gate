@@ -2,9 +2,6 @@ package server
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -15,17 +12,16 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/audit"
-	"github.com/KamorionLabs/eurodns-gate/internal/authn"
-	"github.com/KamorionLabs/eurodns-gate/internal/glob"
-	"github.com/KamorionLabs/eurodns-gate/internal/identity"
-	"github.com/KamorionLabs/eurodns-gate/internal/policy"
-	"github.com/KamorionLabs/eurodns-gate/internal/requestid"
-	"github.com/KamorionLabs/eurodns-gate/internal/store"
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
-	"github.com/KamorionLabs/eurodns-gate/internal/version"
-	"github.com/KamorionLabs/eurodns-gate/internal/zonewrite"
-	eurodns "github.com/KamorionLabs/eurodns-go"
+	"github.com/KamorionLabs/dns-gate/internal/audit"
+	"github.com/KamorionLabs/dns-gate/internal/authn"
+	"github.com/KamorionLabs/dns-gate/internal/glob"
+	"github.com/KamorionLabs/dns-gate/internal/identity"
+	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/requestid"
+	"github.com/KamorionLabs/dns-gate/internal/store"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
+	"github.com/KamorionLabs/dns-gate/internal/version"
+	"github.com/KamorionLabs/dns-gate/internal/zonewrite"
 )
 
 const (
@@ -37,24 +33,22 @@ const (
 	subjectRefHeader = "X-Gate-Internal-Subject-Ref"
 )
 
-const recordRules = "Hosts are relative to the zone, \"@\" is the apex. Targets of CNAME, MX, NS, SRV and PTR records must be fully qualified with a trailing dot (\"target.example.net.\"), otherwise EuroDNS appends the zone. TXT values are raw text, without surrounding quotes. TTL must be one of 600, 900, 1800, 3600, 7200, 14400, 21600, 43200, 86400, 172800, 432000, 604800."
+const recordRules = "Hosts are relative to the zone, \"@\" is the apex. Targets of CNAME, MX, NS, SRV and PTR records must be fully qualified with a trailing dot (\"target.example.net.\"), otherwise EuroDNS appends the zone. TXT values are raw text, without surrounding quotes. Accepted TTLs depend on the provider of the zone (list_zones gives it): EuroDNS only accepts 600, 900, 1800, 3600, 7200, 14400, 21600, 43200, 86400, 172800, 432000, 604800."
 
 type mcpServer struct {
 	s       *Server
 	handler http.Handler
 	refs    sync.Map // ref -> *identity.Subject
-	plans   *planStore
 	limiter *subjectLimiter
 }
 
 func (s *Server) newMCP() *mcpServer {
 	m := &mcpServer{
 		s:       s,
-		plans:   newPlanStore(s.cfg.Config.MCP.PlanTTL.D(), s.now),
 		limiter: newSubjectLimiter(s.cfg.Config.MCP.RequestsPerMinute, s.now),
 	}
-	srv := mcp.NewServer(&mcp.Implementation{Name: "eurodns-gate", Version: version.Version}, &mcp.ServerOptions{
-		Instructions: "eurodns-gate manages EuroDNS zones under RBAC and record ownership. Read tools are always available; changes are made with plan_rrset_change then apply_rrset_change, and only on RRsets owned by your team. " + recordRules,
+	srv := mcp.NewServer(&mcp.Implementation{Name: "dns-gate", Version: version.Version}, &mcp.ServerOptions{
+		Instructions: "dns-gate manages DNS zones (EuroDNS, Route53) under RBAC and record ownership. Read tools are always available; changes are made with plan_rrset_change then apply_rrset_change, and only on RRsets owned by your team. " + recordRules,
 	})
 	m.addReadTools(srv)
 	if s.cfg.Config.MCP.AllowWrites && s.cfg.Ops != nil {
@@ -76,10 +70,10 @@ func (m *mcpServer) serveResourceMetadata(w http.ResponseWriter, r *http.Request
 		"authorization_servers":    []string{},
 		"bearer_methods_supported": []string{"header"},
 		"scopes_supported":         []string{},
-		"resource_name":            "eurodns-gate",
+		"resource_name":            "dns-gate",
 	}
-	if m.s.ui != nil {
-		doc["authorization_servers"] = []string{m.s.ui.issuer.Issuer}
+	if issuer, _, _, ok := m.s.extensionLogin(); ok {
+		doc["authorization_servers"] = []string{issuer}
 	}
 	writeJSON(w, http.StatusOK, doc)
 }
@@ -283,7 +277,7 @@ type adoptApplyIn struct {
 func (m *mcpServer) addReadTools(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_zones",
-		Description: "List the DNS zones you can read, with counts of managed, foreign, tainted and pending RRsets. Zones flagged unmanaged exist in the EuroDNS account but are not managed by the gate: their RRsets are readable (list_rrsets, get_rrset) but cannot be changed or adopted until a policy administrator brings them under management.",
+		Description: "List the DNS zones you can read, with counts of managed, foreign, tainted and pending RRsets. Zones flagged unmanaged exist in a provider account but are not managed by the gate: their RRsets are readable (list_rrsets, get_rrset) but cannot be changed or adopted until a policy administrator brings them under management.",
 		Annotations: readOnly("List zones"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, listZonesOut, error) {
 		subj, err := m.subject(ctx, req)
@@ -469,7 +463,7 @@ func (m *mcpServer) addReadTools(srv *mcp.Server) {
 func (m *mcpServer) addWriteTools(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name: "plan_rrset_change",
-		Description: "Dry run of RRset changes in a zone: checks RBAC, ownership and EuroDNS validation without writing, and returns the changes and a plan_id valid for a few minutes. Each change is the full desired state of one RRset (host, type, ttl, values) or delete=true. " +
+		Description: "Dry run of RRset changes in a zone: checks RBAC, ownership and the provider validation without writing, and returns the changes and a plan_id valid for a few minutes. Each change is the full desired state of one RRset (host, type, ttl, values) or delete=true. " +
 			recordRules + " Only RRsets owned by your team, or new ones in your scope, can change. Show the plan to the user before applying it.",
 		Annotations: readOnly("Plan RRset changes"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in planIn) (*mcp.CallToolResult, uiapi.PlanResult, error) {
@@ -490,7 +484,10 @@ func (m *mcpServer) addWriteTools(srv *mcp.Server) {
 			return nil, uiapi.PlanResult{}, toolError(err)
 		}
 		if plan.Allowed {
-			plan.PlanID = m.plans.put(subj.String(), zone, in.Changes, plan.ZoneVersion)
+			if plan.PlanID, err = m.s.savePlan(ctx, subj, zone, in.Changes, plan.ZoneVersion); err != nil {
+				m.s.log.Error("save plan", "zone", zone, "err", err)
+				return nil, uiapi.PlanResult{}, errors.New("plan storage unavailable")
+			}
 		}
 		m.audit(ctx, req, subj, "plan_rrset_change", zone, "allow", plan.Reason, map[string]any{"plan_id": plan.PlanID, "allowed": plan.Allowed})
 		return nil, *plan, nil
@@ -505,17 +502,18 @@ func (m *mcpServer) addWriteTools(srv *mcp.Server) {
 		if err != nil {
 			return nil, uiapi.PlanResult{}, err
 		}
-		p, err := m.plans.take(in.PlanID, subj.String())
+		p, err := m.s.takePlan(ctx, in.PlanID, subj)
 		if err != nil {
-			m.audit(ctx, req, subj, "apply_rrset_change", "", "deny", err.Error(), map[string]any{"plan_id": in.PlanID})
-			return nil, uiapi.PlanResult{}, err
+			_, reason := planErrorStatus(err)
+			m.audit(ctx, req, subj, "apply_rrset_change", "", "deny", reason, map[string]any{"plan_id": in.PlanID})
+			return nil, uiapi.PlanResult{}, fmt.Errorf("%s: %w", reason, err)
 		}
-		res, err := m.s.cfg.Ops.ApplyRRsets(ctx, subj, p.zone, p.changes, p.version)
+		res, err := m.s.cfg.Ops.ApplyRRsets(ctx, subj, p.Zone, p.Changes, p.ZoneVersion)
 		if err != nil {
-			m.audit(ctx, req, subj, "apply_rrset_change", p.zone, "error", reasonOf(err), map[string]any{"plan_id": in.PlanID})
+			m.audit(ctx, req, subj, "apply_rrset_change", p.Zone, "error", reasonOf(err), map[string]any{"plan_id": in.PlanID})
 			return nil, uiapi.PlanResult{}, toolError(err)
 		}
-		m.audit(ctx, req, subj, "apply_rrset_change", p.zone, "allow", "", map[string]any{"plan_id": in.PlanID})
+		m.audit(ctx, req, subj, "apply_rrset_change", p.Zone, "allow", "", map[string]any{"plan_id": in.PlanID})
 		res.PlanID = in.PlanID
 		return nil, *res, nil
 	})
@@ -582,74 +580,7 @@ func toolError(err error) error {
 	if ze, ok := zonewrite.AsError(err); ok {
 		return fmt.Errorf("%s: %s", ze.Reason, ze.Message)
 	}
-	var ae *eurodns.APIError
-	if errors.As(err, &ae) {
-		return errors.New("upstream: EuroDNS returned an error")
-	}
 	return errors.New("internal error")
-}
-
-// planStore keeps plans in memory, bound to subject, zone, changes and zone
-// version; single use. Plans do not survive a restart and are local to the
-// replica.
-type planStore struct {
-	mu    sync.Mutex
-	ttl   time.Duration
-	now   func() time.Time
-	plans map[string]storedPlan
-}
-
-type storedPlan struct {
-	subject, zone string
-	changes       []uiapi.RRsetChange
-	version       int64
-	expires       time.Time
-}
-
-var (
-	errPlanUnknown = errors.New("unknown or already used plan_id: plan again")
-	errPlanExpired = errors.New("plan expired: plan again")
-	errPlanOwner   = errors.New("plan belongs to another caller")
-)
-
-func newPlanStore(ttl time.Duration, now func() time.Time) *planStore {
-	return &planStore{ttl: ttl, now: now, plans: map[string]storedPlan{}}
-}
-
-func (p *planStore) put(subject, zone string, changes []uiapi.RRsetChange, version int64) string {
-	var b [16]byte
-	_, _ = rand.Read(b[:])
-	id := "plan-" + hex.EncodeToString(b[:])
-	cp, _ := json.Marshal(changes)
-	var frozen []uiapi.RRsetChange
-	_ = json.Unmarshal(cp, &frozen)
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	now := p.now()
-	for k, v := range p.plans {
-		if now.After(v.expires) {
-			delete(p.plans, k)
-		}
-	}
-	p.plans[id] = storedPlan{subject: subject, zone: zone, changes: frozen, version: version, expires: now.Add(p.ttl)}
-	return id
-}
-
-func (p *planStore) take(id, subject string) (storedPlan, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	sp, ok := p.plans[id]
-	switch {
-	case !ok:
-		return storedPlan{}, errPlanUnknown
-	case sp.subject != subject:
-		return storedPlan{}, errPlanOwner
-	case p.now().After(sp.expires):
-		delete(p.plans, id)
-		return storedPlan{}, errPlanExpired
-	}
-	delete(p.plans, id)
-	return sp, nil
 }
 
 // subjectLimiter is a token bucket per subject.

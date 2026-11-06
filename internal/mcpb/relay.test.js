@@ -13,7 +13,7 @@ const test = require('node:test');
 
 const RELAY = path.join(__dirname, 'relay.js');
 // Loading relay.js as a library must not start the relay on the test's stdio.
-process.env.EURODNS_GATE_RELAY_NO_MAIN = '1';
+process.env.DNS_GATE_RELAY_NO_MAIN = '1';
 const b64url = (b) => Buffer.from(b).toString('base64url');
 
 // fakeServer plays both the OIDC provider and the gate's /mcp endpoint.
@@ -145,12 +145,12 @@ function startRelay(f, tokenDir, extraEnv = {}, args = [RELAY]) {
   const child = spawn(process.execPath, args, {
     env: {
       PATH: process.env.PATH,
-      EURODNS_GATE_MCP_URL: `${f.url}/mcp`,
-      EURODNS_GATE_ISSUER: f.url,
-      EURODNS_GATE_CLIENT_ID: f.clientID,
-      EURODNS_GATE_SCOPE: 'api://gate/.default',
-      EURODNS_GATE_TOKEN_DIR: tokenDir,
-      EURODNS_GATE_NO_BROWSER: '1',
+      DNS_GATE_MCP_URL: `${f.url}/mcp`,
+      DNS_GATE_ISSUER: f.url,
+      DNS_GATE_CLIENT_ID: f.clientID,
+      DNS_GATE_SCOPE: 'api://gate/.default',
+      DNS_GATE_TOKEN_DIR: tokenDir,
+      DNS_GATE_NO_BROWSER: '1',
       ...extraEnv,
     },
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -234,7 +234,7 @@ test('relay', async (t) => {
     try {
       r.send(init());
       const res = await r.response(1);
-      assert.equal(res.result.serverInfo.name, 'eurodns-gate', 'answered locally before sign-in');
+      assert.equal(res.result.serverInfo.name, 'dns-gate', 'answered locally before sign-in');
       assert.equal(res.result.capabilities.tools.listChanged, true);
       assert.equal(f.mcp.length, 0, 'no gate call before a request needs it');
       r.send({ jsonrpc: '2.0', method: 'notifications/initialized' });
@@ -324,7 +324,7 @@ test('relay', async (t) => {
     const r = startRelay(f, dir);
     try {
       r.send(init());
-      assert.equal((await r.response(1)).result.serverInfo.name, 'eurodns-gate');
+      assert.equal((await r.response(1)).result.serverInfo.name, 'dns-gate');
       r.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
       assert.deepEqual((await r.response(2)).result, { tools: [] });
       r.send({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'list_zones', arguments: {} } });
@@ -340,7 +340,7 @@ test('relay', async (t) => {
   });
 
   await t.test('times out a sign-in nobody completes', async () => {
-    const r = startRelay(f, fs.mkdtempSync(path.join(dir, 'empty-')), { EURODNS_GATE_LOGIN_TIMEOUT: '1' });
+    const r = startRelay(f, fs.mkdtempSync(path.join(dir, 'empty-')), { DNS_GATE_LOGIN_TIMEOUT: '1' });
     try {
       r.send(init());
       await r.response(1);
@@ -362,7 +362,7 @@ test('starts when loaded by a host module, as in a Claude Desktop utility proces
   const r = startRelay(f, dir, {}, ['-e', `require(${JSON.stringify(RELAY)})`]);
   try {
     r.send(init());
-    assert.equal((await r.response(1)).result.serverInfo.name, 'eurodns-gate');
+    assert.equal((await r.response(1)).result.serverInfo.name, 'dns-gate');
   } finally {
     await r.stop();
     f.server.closeAllConnections();
@@ -373,8 +373,8 @@ test('starts when loaded by a host module, as in a Claude Desktop utility proces
 
 test('rejects plain http towards a remote host', async () => {
   const { loadConfig } = require('./relay.js');
-  assert.throws(() => loadConfig({ EURODNS_GATE_MCP_URL: 'http://gate.example.com/mcp', EURODNS_GATE_ISSUER: 'https://idp.example.com', EURODNS_GATE_CLIENT_ID: 'x' }), /must use https/);
-  const c = loadConfig({ EURODNS_GATE_MCP_URL: 'https://gate.example.com/mcp', EURODNS_GATE_ISSUER: 'https://idp.example.com/', EURODNS_GATE_CLIENT_ID: 'x', EURODNS_GATE_TOKEN_DIR: '/t' });
+  assert.throws(() => loadConfig({ DNS_GATE_MCP_URL: 'http://gate.example.com/mcp', DNS_GATE_ISSUER: 'https://idp.example.com', DNS_GATE_CLIENT_ID: 'x' }), /must use https/);
+  const c = loadConfig({ DNS_GATE_MCP_URL: 'https://gate.example.com/mcp', DNS_GATE_ISSUER: 'https://idp.example.com/', DNS_GATE_CLIENT_ID: 'x', DNS_GATE_TOKEN_DIR: '/t' });
   assert.equal(c.scope, 'openid offline_access');
   assert.equal(c.issuer, 'https://idp.example.com');
   assert.equal(c.tokenFile, path.join('/t', 'gate.example.com.json'));

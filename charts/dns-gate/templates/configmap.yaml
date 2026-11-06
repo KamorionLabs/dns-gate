@@ -1,0 +1,10 @@
+{{- include "dns-gate.validate" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dns-gate.fullname" . }}
+  labels:
+    {{- include "dns-gate.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    {{- toYaml .Values.config | nindent 4 }}

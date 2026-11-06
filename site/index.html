@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>eurodns-gate · scoped, audited DNS changes on EuroDNS</title>
-<meta name="description" content="eurodns-gate holds the EuroDNS API key alone, lets pipelines, people and AI assistants in with short-lived identities, and lets each team change only the DNS records it owns.">
-<meta property="og:title" content="eurodns-gate">
-<meta property="og:description" content="Scoped, audited DNS changes on EuroDNS: OIDC, RBAC per zone, host and type, record ownership, safe writes, audit, web UI and MCP server.">
+<title>dns-gate · scoped, audited DNS changes on EuroDNS, Route53 and more</title>
+<meta name="description" content="dns-gate holds the credentials of your DNS providers (EuroDNS, Route53, more to come) alone, lets pipelines, people and AI assistants in with short-lived identities, and lets each team change only the DNS records it owns.">
+<meta property="og:title" content="dns-gate">
+<meta property="og:description" content="Scoped, audited DNS changes on EuroDNS, Route53 and more: OIDC, RBAC per zone, host and type, record ownership, safe writes, audit, REST API, web UI and MCP server.">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="style.css">
 </head>
@@ -26,14 +26,15 @@
 
 <header class="top">
   <div class="wrap">
-    <a class="brand" href="#"><svg width="22" height="22" aria-hidden="true"><use href="#seal-managed"/></svg>eurodns-gate</a>
+    <a class="brand" href="#"><svg width="22" height="22" aria-hidden="true"><use href="#seal-managed"/></svg>dns-gate</a>
     <nav class="nav" aria-label="Sections">
       <a href="#why">Why</a>
       <a href="#how">How it works</a>
       <a href="#ownership">Ownership</a>
       <a href="#policy">Policy</a>
       <a href="#run">Run it</a>
-      <a class="gh" href="https://github.com/KamorionLabs/eurodns-gate">GitHub</a>
+      <a href="api.html">API</a>
+      <a class="gh" href="https://github.com/KamorionLabs/dns-gate">GitHub</a>
     </nav>
   </div>
 </header>
@@ -43,13 +44,13 @@
 <section class="hero">
   <div class="wrap">
     <div>
-      <h1>Scoped, audited DNS changes on EuroDNS</h1>
-      <p class="lead">EuroDNS API keys open the whole account. eurodns-gate holds the key alone, lets pipelines, people and AI assistants in with short-lived identities, and lets each team change only the records it owns.</p>
+      <h1>Scoped, audited DNS changes, whatever the provider</h1>
+      <p class="lead">DNS provider credentials open far more than one record. dns-gate holds them alone, for EuroDNS and Route53 today and more to come, lets pipelines, people and AI assistants in with short-lived identities, and lets each team change only the records it owns.</p>
       <div class="actions">
         <a class="btn primary" href="#how">See how it works</a>
-        <a class="btn secondary" href="https://github.com/KamorionLabs/eurodns-gate">View on GitHub</a>
+        <a class="btn secondary" href="api.html">API reference</a>
       </div>
-      <p class="meta"><span>Go</span><span>Helm chart</span><span>OpenTofu provider</span><span>MCP server</span><span>MIT</span></p>
+      <p class="meta"><span>EuroDNS</span><span>Route53</span><span>Go</span><span>Helm chart</span><span>OpenTofu provider</span><span>REST API</span><span>MCP server</span><span>MIT</span></p>
     </div>
 
     <figure class="ledger" aria-label="A zone as the gate sees it: each record set with its owner team and custody state">
@@ -78,8 +79,8 @@
   <div class="wrap">
     <div class="sec-head">
       <p class="kicker">Why a gate</p>
-      <h2 class="sec-title">One EuroDNS key opens the whole account</h2>
-      <p class="sec-lead">The EuroDNS API authenticates with two headers and no scope. The key that adds a CNAME can also change the registrant contact, the nameservers or the renewal of every domain. A leaked key is a domain hijack, not just a DNS change.</p>
+      <h2 class="sec-title">One provider key opens the whole account</h2>
+      <p class="sec-lead">EuroDNS is the extreme case: its API authenticates with two headers and no scope, and the key that adds a CNAME can also change the registrant contact, the nameservers or the renewal of every domain. With any provider, the credential a pipeline needs for one record reaches much more, and nothing says which team owns which record. A leaked key is a domain hijack, not just a DNS change.</p>
     </div>
     <div class="fan">
       <figure>
@@ -127,12 +128,12 @@
   <div class="wrap">
     <div class="sec-head">
       <p class="kicker">How it works</p>
-      <h2 class="sec-title">Same EuroDNS API, one gate in front of it</h2>
-      <p class="sec-lead">Clients keep the EuroDNS API they already speak: only the base URL and the credentials change. Every request, read or write, walks the same seven checks before anything reaches EuroDNS.</p>
+      <h2 class="sec-title">One gate in front of your DNS providers</h2>
+      <p class="sec-lead">Clients use the gate REST API, the same for every provider, or keep the EuroDNS API they already speak: only the base URL and the credentials change. Every request, read or write, walks the same seven checks before anything reaches a provider.</p>
     </div>
     <div class="arch">
       <div class="col">
-        <div class="box"><h3>OpenTofu / Terraform</h3><p>provider in gate mode</p></div>
+        <div class="box"><h3>OpenTofu / Terraform</h3><p>dnsgate provider</p></div>
         <div class="box"><h3>CI pipelines</h3><p>GitHub, GitLab, Azure DevOps, AWS OIDC</p></div>
         <div class="box"><h3>People</h3><p>web UI, Entra ID SSO</p></div>
         <div class="box"><h3>AI assistants</h3><p>MCP server at <code>/mcp</code></p></div>
@@ -140,21 +141,21 @@
       </div>
       <div class="link"><small>token</small></div>
       <div class="gate">
-        <p class="name">eurodns-gate</p>
-        <p class="sub">sole holder of the EuroDNS key</p>
+        <p class="name">dns-gate</p>
+        <p class="sub">sole holder of the provider credentials</p>
         <ol>
           <li><div>Authenticate<span>issuer, signature, expiry, audience</span></div></li>
-          <li><div>Route<span>unknown EuroDNS operation: denied</span></div></li>
+          <li><div>Route<span>unknown operation: denied</span></div></li>
           <li><div>Zone<span>must be managed by the gate</span></div></li>
           <li><div>Authorize<span>zone, host pattern, record type</span></div></li>
           <li><div>Ownership<span>only record sets of the caller’s team</span></div></li>
-          <li><div>Safe write<span>zone lock, If-Match, dry run, change limit</span></div></li>
+          <li><div>Safe write<span>zone lock, If-Match on the record set, dry run, change limit</span></div></li>
           <li><div>Audit<span>who, what, diff, snapshot, allowed or denied</span></div></li>
         </ol>
       </div>
       <div class="right">
-        <div class="row"><div class="link"><small>one key</small></div><div class="box upstream"><h3>EuroDNS REST API</h3><p class="mono">rest-api.eurodns.com</p></div></div>
-        <div class="row"><div class="link both"><small>state</small></div><div class="box"><h3>Store</h3><p>ownership, zone locks, audit, policy revisions · DynamoDB, or memory for one replica</p></div></div>
+        <div class="row"><div class="link"><small>one key each</small></div><div class="box upstream"><h3>DNS providers</h3><p>EuroDNS · Route53 · more to come</p></div></div>
+        <div class="row"><div class="link both"><small>state</small></div><div class="box"><h3>Store</h3><p>ownership, zone locks, plans, audit, policy revisions · DynamoDB, PostgreSQL, or SQLite for one replica</p></div></div>
       </div>
     </div>
   </div>
@@ -167,8 +168,8 @@
       <h2 class="sec-title">A change goes through only when all three agree</h2>
     </div>
     <div class="layers">
-      <div class="nest" aria-label="Three nested layers: EuroDNS account scope, then RBAC, then ownership">
-        <p class="label"><span class="n">1</span>EuroDNS account scope</p>
+      <div class="nest" aria-label="Three nested layers: provider account scope, then RBAC, then ownership">
+        <p class="label"><span class="n">1</span>Provider account scope</p>
         <div class="nest">
           <p class="label"><span class="n">2</span>RBAC: zone, host, record type</p>
           <div class="nest">
@@ -181,7 +182,7 @@
         </div>
       </div>
       <div class="points">
-        <div class="point"><span class="n">1</span><div><h3>EuroDNS account scope</h3><p>The gate’s own EuroDNS user is limited in the EuroDNS console: a last line if the gate itself is compromised.</p></div></div>
+        <div class="point"><span class="n">1</span><div><h3>Provider account scope</h3><p>The gate’s own credentials are limited at the provider, a restricted EuroDNS user or an IAM role scoped to the hosted zones: a last line if the gate itself is compromised.</p></div></div>
         <div class="point"><span class="n">2</span><div><h3>RBAC</h3><p>Who may read or write which zone, host pattern and record type. Protected records, such as the apex NS, SOA, MX and CAA, win over any role.</p></div></div>
         <div class="point"><span class="n">3</span><div><h3>Ownership</h3><p>Only record sets created or adopted through the gate, owned by one of the caller’s teams, and unchanged since the gate last wrote them.</p></div></div>
       </div>
@@ -194,7 +195,7 @@
     <div class="sec-head">
       <p class="kicker">Ownership</p>
       <h2 class="sec-title">The gate only changes what it created</h2>
-      <p class="sec-lead">A EuroDNS record has no free field to carry an owner, so custody lives in the gate’s store, per record set (zone, host, type) and per team, with a hash of its content. Every record set carries one of these seals, in the UI and in the API.</p>
+      <p class="sec-lead">A DNS record has no free field to carry an owner, so custody lives in the gate’s store, per record set (zone, host, type) and per team, with a hash of its content. Every record set carries one of these seals, in the UI and in the API.</p>
     </div>
     <div class="seals">
       <div class="seal-card"><p class="top-line s-managed"><svg class="seal" width="18" height="18" aria-hidden="true"><use href="#seal-managed"/></svg>Held</p><p>Created or adopted through the gate. Its team may change it.</p></div>
@@ -224,14 +225,14 @@
   <div class="wrap">
     <div class="sec-head">
       <p class="kicker">Safe writes</p>
-      <h2 class="sec-title">Every write is one atomic zone save</h2>
-      <p class="sec-lead">EuroDNS has no record update endpoint. Adding, changing or deleting a record all become one checked save of the zone as it is now, under a lock, so a client holding a stale copy cannot wipe records it never saw.</p>
+      <h2 class="sec-title">Every write is checked against the zone as it is now</h2>
+      <p class="sec-lead">Adding, changing or deleting a record set is computed against the current zone, under a lock and with the expected content of each record set, so a client holding a stale copy cannot overwrite or wipe records it never saw. With EuroDNS, which has no record update endpoint, the write is one checked save of the whole zone:</p>
     </div>
     <div class="seq scroll">
       <svg viewBox="0 0 900 550" role="img" aria-label="Write sequence: the client sends a change; the gate locks the zone and compares the version in the store, reads the current zone from EuroDNS, checks the diff, writes a pending claim, runs the EuroDNS check, saves the whole zone and reads it back, then marks the claim active, bumps the version, unlocks and audits, and answers with the new ETag">
         <g font-size="14" font-weight="600" text-anchor="middle">
           <rect x="15" y="10" width="150" height="40" rx="6" class="f-well st-soft"/><text x="90" y="35" class="f-ink">Client</text>
-          <rect x="255" y="10" width="150" height="40" rx="6" class="f-gate st-seal" stroke-width="1"/><text x="330" y="35" class="f-on-gate">eurodns-gate</text>
+          <rect x="255" y="10" width="150" height="40" rx="6" class="f-gate st-seal" stroke-width="1"/><text x="330" y="35" class="f-on-gate">dns-gate</text>
           <rect x="495" y="10" width="150" height="40" rx="6" class="f-well st-soft"/><text x="570" y="35" class="f-ink">Store</text>
           <rect x="735" y="10" width="150" height="40" rx="6" class="f-well st-soft"/><text x="810" y="35" class="f-ink">EuroDNS</text>
         </g>
@@ -283,7 +284,7 @@
 <pre class="code"><code><span class="k">issuers:</span>
   - name: ci
     issuer: https://token.actions.githubusercontent.com
-    audiences: [eurodns-gate]
+    audiences: [dns-gate]
 <span class="k">roles:</span>
   site-records:
     rules:
@@ -304,7 +305,7 @@
         <div class="tier"><h3>Base <span class="where">git · config.yaml</span></h3><p>Issuers, zones, roles, bindings, protected records. Reviewed by pull request, and the only place that decides who may edit or approve the policy.</p></div>
         <div class="tier"><h3>Managed <span class="where">web UI · store</span></h3><p>Revisions on top of the base, with diff, impact analysis, approval by another approver, atomic activation and rollback. A fresh sign-in is required to change it, and a redeploy never erases it.</p></div>
         <div class="tier"><h3>Delegated <span class="where">a pipeline stack</span></h3><p>A stack that creates pipelines writes each one’s role and binding in the same apply, through the Terraform provider, within bounds set in the base file.</p></div>
-        <div class="tier"><h3>Discovery <span class="where">the whole account</span></h3><p>Every zone of the EuroDNS account is listed read-only and can be brought under management from the UI, without a redeploy.</p></div>
+        <div class="tier"><h3>Discovery <span class="where">the whole account</span></h3><p>Every zone of the provider accounts is listed read-only and can be brought under management from the UI, without a redeploy.</p></div>
       </div>
     </div>
   </div>
@@ -315,25 +316,29 @@
     <div class="sec-head">
       <p class="kicker">Callers</p>
       <h2 class="sec-title">Every caller brings its own short-lived identity</h2>
-      <p class="sec-lead">Pipelines and people never hold a EuroDNS secret. The same roles and the same ownership apply to all of them.</p>
+      <p class="sec-lead">Pipelines and people never hold a provider secret. The same roles and the same ownership apply to all of them.</p>
     </div>
     <div class="callers">
       <div class="caller wide">
         <h3>OpenTofu and Terraform</h3>
-        <p>One provider, direct to EuroDNS or through the gate, with the same resources. In gate mode, <code>terraform import</code> is an adoption, and a zone can be exported as HCL with <code>import</code> blocks whose first plan is empty.</p>
-<pre class="code"><code>provider "eurodns" {
-  gate {
-    url = "https://eurodns-gate.example.com"
-    auth { token_file = "/var/run/secrets/tokens/eurodns-gate" }
-  }
-}
-
-resource "eurodns_record_set" "www" {
+        <p>The <code>KamorionLabs/dnsgate</code> provider talks to the gate REST API, for every DNS provider behind it, alias records included. Writes carry the expected content of each record set, and a zone can be exported as HCL with <code>import</code> blocks whose first plan is empty.</p>
+<pre class="code"><code>resource "dnsgate_record_set" "www" {
   zone   = "example.com"
-  host   = "www"
+  name   = "www"
   type   = "CNAME"
   ttl    = 3600
   values = ["site.example.net."]
+}
+
+resource "dnsgate_record_set" "apex" {
+  zone = "example.com"
+  name = "@"
+  type = "A"
+
+  alias {
+    name    = "d111111abcdef8.cloudfront.net."
+    zone_id = "Z2FDTNDATAQYW2"
+  }
 }</code></pre>
       </div>
       <div class="caller">
@@ -370,31 +375,33 @@ resource "eurodns_record_set" "www" {
     <div class="run">
       <div>
         <h3>Locally</h3>
-<pre class="code"><code><span class="c"># EuroDNS credentials, held by the gate only</span>
+<pre class="code"><code><span class="c"># provider credentials, held by the gate only</span>
 export EURODNS_APP_ID=...
 export EURODNS_API_KEY=...
+<span class="c"># Route53: the AWS credential chain (role, profile)</span>
 
-go run ./cmd/eurodns-gate -check -config config.yaml   <span class="c"># validate only</span>
-go run ./cmd/eurodns-gate -config config.yaml</code></pre>
+go run ./cmd/dns-gate -check -config config.yaml   <span class="c"># validate only</span>
+go run ./cmd/dns-gate -config config.yaml</code></pre>
         <h3 style="margin-top:28px">On Kubernetes</h3>
-<pre class="code"><code>helm install eurodns-gate \
-  oci://ghcr.io/kamorionlabs/charts/eurodns-gate \
+<pre class="code"><code>helm install dns-gate \
+  oci://ghcr.io/kamorionlabs/charts/dns-gate \
   -f values.yaml
 
-<span class="c"># image: ghcr.io/kamorionlabs/eurodns-gate</span></code></pre>
+<span class="c"># image: ghcr.io/kamorionlabs/dns-gate</span></code></pre>
       </div>
       <div>
         <h3>Repositories</h3>
         <div class="repos">
-          <a class="repo" href="https://github.com/KamorionLabs/eurodns-gate"><span class="rn">eurodns-gate</span><span class="rv">this gateway</span><p>The gate, its web UI, MCP server, container image and Helm chart.</p></a>
-          <a class="repo" href="https://github.com/KamorionLabs/terraform-provider-eurodns"><span class="rn">terraform-provider-eurodns</span><span class="rv">kamorionlabs/eurodns</span><p>One Terraform and OpenTofu provider, direct to EuroDNS or through the gate.</p></a>
+          <a class="repo" href="https://github.com/KamorionLabs/dns-gate"><span class="rn">dns-gate</span><span class="rv">this gateway</span><p>The gate, its web UI, MCP server, container image and Helm chart.</p></a>
+          <a class="repo" href="https://github.com/KamorionLabs/terraform-provider-dnsgate"><span class="rn">terraform-provider-dnsgate</span><span class="rv">KamorionLabs/dnsgate</span><p>Terraform and OpenTofu provider for the gate REST API, whatever the DNS provider behind it.</p></a>
+          <a class="repo" href="https://github.com/KamorionLabs/terraform-provider-eurodns"><span class="rn">terraform-provider-eurodns</span><span class="rv">kamorionlabs/eurodns</span><p>EuroDNS provider, direct to EuroDNS or through the gate’s EuroDNS-compatible API.</p></a>
           <a class="repo" href="https://github.com/KamorionLabs/eurodns-go"><span class="rn">eurodns-go</span><span class="rv">Go module</span><p>Go client with a shared rate-limited transport, record set helpers, zone diff and an in-memory fake for tests.</p></a>
         </div>
         <div class="status">
           <svg class="seal s-managed" width="20" height="20" aria-hidden="true"><use href="#seal-managed"/></svg>
           <p><b>Beta, in production since November 2026</b> for one organization: 14 zones, OpenTofu pipelines writing certificate validation and site records, the web UI and the MCP server. Versions are still 0.x.</p>
         </div>
-        <p style="margin-top:20px;color:var(--ink-2);font-size:15px">Read more: <a href="https://github.com/KamorionLabs/eurodns-gate/blob/main/docs/DESIGN.md">design</a> · <a href="https://github.com/KamorionLabs/eurodns-gate/blob/main/docs/CONFIG.md">configuration</a> · <a href="https://github.com/KamorionLabs/eurodns-gate/blob/main/docs/THREAT-MODEL.md">threat model</a> · <a href="https://github.com/KamorionLabs/eurodns-gate/blob/main/docs/ONBOARDING.md">onboarding existing zones</a></p>
+        <p style="margin-top:20px;color:var(--ink-2);font-size:15px">Read more: <a href="api.html">API reference</a> · <a href="https://github.com/KamorionLabs/dns-gate/blob/main/docs/API.md">API guide</a> · <a href="https://github.com/KamorionLabs/dns-gate/blob/main/docs/DESIGN.md">design</a> · <a href="https://github.com/KamorionLabs/dns-gate/blob/main/docs/CONFIG.md">configuration</a> · <a href="https://github.com/KamorionLabs/dns-gate/blob/main/docs/THREAT-MODEL.md">threat model</a> · <a href="https://github.com/KamorionLabs/dns-gate/blob/main/docs/ONBOARDING.md">onboarding existing zones</a></p>
       </div>
     </div>
   </div>
@@ -404,7 +411,7 @@ go run ./cmd/eurodns-gate -config config.yaml</code></pre>
 
 <footer class="foot">
   <div class="wrap">
-    <span><a href="https://github.com/KamorionLabs/eurodns-gate">github.com/KamorionLabs/eurodns-gate</a> · MIT</span>
+    <span><a href="https://github.com/KamorionLabs/dns-gate">github.com/KamorionLabs/dns-gate</a> · MIT</span>
     <span>Made with <span role="img" aria-label="love">❤️</span> by <a href="https://kamorion.com">Kamorion</a></span>
   </div>
 </footer>

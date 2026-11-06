@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/audit"
+	"github.com/KamorionLabs/dns-gate/internal/audit"
 )
 
 type memKey struct{ zone, host, typ string }
@@ -25,6 +25,7 @@ type memory struct {
 
 	revisions      map[string]PolicyRevision
 	activeRevision string
+	plans          map[string]Plan
 	now            func() time.Time
 }
 
@@ -34,6 +35,7 @@ func newMemory(now func() time.Time) *memory {
 		versions:  map[string]int64{},
 		locks:     map[string]memLock{},
 		revisions: map[string]PolicyRevision{},
+		plans:     map[string]Plan{},
 		now:       now,
 	}
 }

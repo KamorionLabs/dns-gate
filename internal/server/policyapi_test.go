@@ -12,9 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/config"
-	"github.com/KamorionLabs/eurodns-gate/internal/policy"
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
+	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 )
 
 func policyEnv(t *testing.T, requireApproval bool) *env {
@@ -41,11 +41,11 @@ func (e *env) human(sub string, age time.Duration, roles ...string) string {
 	for i, x := range roles {
 		r[i] = x
 	}
-	return e.idp.Sign(map[string]any{"sub": sub, "aud": "eurodns-gate", "kind": "user", "email": sub + "@example.com", "roles": r, "auth_time": time.Now().Add(-age).Unix()})
+	return e.idp.Sign(map[string]any{"sub": sub, "aud": "dns-gate", "kind": "user", "email": sub + "@example.com", "roles": r, "auth_time": time.Now().Add(-age).Unix()})
 }
 
 func (e *env) pipeline(sub string) string {
-	return e.idp.Sign(map[string]any{"sub": sub, "aud": "eurodns-gate"})
+	return e.idp.Sign(map[string]any{"sub": sub, "aud": "dns-gate"})
 }
 
 func managedDoc(host string) uiapi.PolicyDocument {
@@ -195,7 +195,7 @@ func TestPolicyStepUpAndPipelines(t *testing.T) {
 	if r, _ := propose(t, e, old, "", managedDoc("*.staging")); r.StatusCode != 403 || r.Header.Get("X-Test-Reason") != "reauth_required" {
 		t.Fatalf("stale login: %d", r.StatusCode)
 	}
-	noAuthTime := e.idp.Sign(map[string]any{"sub": "alice", "aud": "eurodns-gate", "kind": "user", "roles": []any{"Gate.PolicyAdmin"}})
+	noAuthTime := e.idp.Sign(map[string]any{"sub": "alice", "aud": "dns-gate", "kind": "user", "roles": []any{"Gate.PolicyAdmin"}})
 	if r, _ := propose(t, e, noAuthTime, "", managedDoc("*.staging")); r.StatusCode != 403 {
 		t.Fatalf("no auth_time: %d", r.StatusCode)
 	}

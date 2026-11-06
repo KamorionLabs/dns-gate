@@ -10,17 +10,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/config"
-	"github.com/KamorionLabs/eurodns-gate/internal/policy"
-	"github.com/KamorionLabs/eurodns-gate/internal/store"
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
-	"github.com/KamorionLabs/eurodns-go/rrset"
+	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/dns"
+	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/store"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 )
 
 const (
 	workloadsSC = "sc://org/proj/workloads-pipelines"
-	pipelineX   = "sc://org/proj/eurodns-gate-x"
-	teamRegex   = "^sc://[^/]+/[^/]+/(eurodns-gate-[a-z0-9-]+)$"
+	pipelineX   = "sc://org/proj/dns-gate-x"
+	teamRegex   = "^sc://[^/]+/[^/]+/(dns-gate-[a-z0-9-]+)$"
 )
 
 func delegationEnv(t *testing.T, requireApproval bool) *env {
@@ -45,7 +45,7 @@ func delegationEnv(t *testing.T, requireApproval bool) *env {
 					Zones:           []string{"example.com"},
 					Actions:         []string{policy.ActionDNSRead, policy.ActionRecordWrite, policy.ActionUIRead},
 					Records:         &config.RecordScope{Hosts: []string{"**.apps"}, Types: []string{"CNAME", "TXT"}},
-					BindingSubjects: []config.Subject{{Issuer: "idp", Claims: map[string]config.StringList{"sub": {"sc://org/proj/eurodns-gate-*"}}}},
+					BindingSubjects: []config.Subject{{Issuer: "idp", Claims: map[string]config.StringList{"sub": {"sc://org/proj/dns-gate-*"}}}},
 					Teams:           config.DelegationTeams{FromSubject: &config.TeamFrom{Claim: "sub", Regex: teamRegex}},
 					Roles:           []string{"apps-writer"},
 					MaxObjects:      6,
@@ -106,7 +106,7 @@ func TestDelegatedRoleAndBinding(t *testing.T) {
 		t.Fatalf("index: %d %+v", r.StatusCode, idx)
 	}
 
-	r, res, eb := e.put(t, ci, "/api/v1/policy/delegated/roles/eurodns-gate-x", pipelineRole("x.apps"), map[string]string{"If-None-Match": "*"})
+	r, res, eb := e.put(t, ci, "/api/v1/policy/delegated/roles/dns-gate-x", pipelineRole("x.apps"), map[string]string{"If-None-Match": "*"})
 	if r.StatusCode != 200 || !res.Changed || res.Object == nil || res.Object.Owner.Delegation != "workloads-pipelines" || res.Object.Owner.ManagedBy != "terraform" || res.Object.Owner.CreatedBy != "idp:"+workloadsSC {
 		t.Fatalf("put role: %d %+v %+v", r.StatusCode, res, eb)
 	}
@@ -116,39 +116,39 @@ func TestDelegatedRoleAndBinding(t *testing.T) {
 	roleETag := res.Object.ETag
 
 	// Idempotent: the same body changes nothing and creates no revision.
-	r, again, _ := e.put(t, ci, "/api/v1/policy/delegated/roles/eurodns-gate-x", pipelineRole("x.apps"), nil)
+	r, again, _ := e.put(t, ci, "/api/v1/policy/delegated/roles/dns-gate-x", pipelineRole("x.apps"), nil)
 	if r.StatusCode != 200 || again.Changed || again.RevisionID != res.RevisionID || again.Object.ETag != roleETag {
 		t.Fatalf("idempotent put: %d %+v", r.StatusCode, again)
 	}
 	// Create-only on an existing role, and a stale If-Match.
-	if r, _, eb := e.put(t, ci, "/api/v1/policy/delegated/roles/eurodns-gate-x", pipelineRole("x.apps"), map[string]string{"If-None-Match": "*"}); r.StatusCode != 412 || eb.Reason != "precondition" {
+	if r, _, eb := e.put(t, ci, "/api/v1/policy/delegated/roles/dns-gate-x", pipelineRole("x.apps"), map[string]string{"If-None-Match": "*"}); r.StatusCode != 412 || eb.Reason != "precondition" {
 		t.Fatalf("if-none-match on existing: %d %s", r.StatusCode, eb.Reason)
 	}
-	if r, _, eb := e.put(t, ci, "/api/v1/policy/delegated/roles/eurodns-gate-x", pipelineRole("y.apps"), map[string]string{"If-Match": `"stale"`}); r.StatusCode != 412 || eb.Reason != "precondition" {
+	if r, _, eb := e.put(t, ci, "/api/v1/policy/delegated/roles/dns-gate-x", pipelineRole("y.apps"), map[string]string{"If-Match": `"stale"`}); r.StatusCode != 412 || eb.Reason != "precondition" {
 		t.Fatalf("stale if-match: %d %s", r.StatusCode, eb.Reason)
 	}
 
 	// Binding: team derived from the bound subject.
-	r, bres, eb := e.put(t, ci, "/api/v1/policy/delegated/bindings/eurodns-gate-x", pipelineBinding("eurodns-gate-x", pipelineX, "eurodns-gate-x"), map[string]string{"If-None-Match": "*"})
+	r, bres, eb := e.put(t, ci, "/api/v1/policy/delegated/bindings/dns-gate-x", pipelineBinding("dns-gate-x", pipelineX, "dns-gate-x"), map[string]string{"If-None-Match": "*"})
 	if r.StatusCode != 200 || !bres.Changed {
 		t.Fatalf("put binding: %d %+v", r.StatusCode, eb)
 	}
 	// The same binding with team_from equal to the delegation rule is valid too.
-	tf := fmt.Sprintf(`{"role":"eurodns-gate-x","team":"","team_from":{"claim":"sub","regex":%q},"subjects":[{"issuer":"idp","claims":{"sub":[%q]}}]}`, teamRegex, pipelineX)
-	if r, _, eb := e.put(t, ci, "/api/v1/policy/delegated/bindings/eurodns-gate-x-tf", tf, nil); r.StatusCode != 200 {
+	tf := fmt.Sprintf(`{"role":"dns-gate-x","team":"","team_from":{"claim":"sub","regex":%q},"subjects":[{"issuer":"idp","claims":{"sub":[%q]}}]}`, teamRegex, pipelineX)
+	if r, _, eb := e.put(t, ci, "/api/v1/policy/delegated/bindings/dns-gate-x-tf", tf, nil); r.StatusCode != 200 {
 		t.Fatalf("put binding team_from: %d %+v", r.StatusCode, eb)
 	}
 
 	// The bound pipeline gets the role and its own team; it can write x.apps CNAME only.
 	snap := e.holder.Current()
 	res2 := snap.Resolve("idp", map[string]any{"sub": pipelineX})
-	if len(res2.Roles) != 1 || res2.Roles[0] != "eurodns-gate-x" || len(res2.Teams) != 1 || res2.Teams[0] != "eurodns-gate-x" {
+	if len(res2.Roles) != 1 || res2.Roles[0] != "dns-gate-x" || len(res2.Teams) != 1 || res2.Teams[0] != "dns-gate-x" {
 		t.Fatalf("resolve: %+v", res2)
 	}
-	if !snap.Decide(res2.Roles, policy.ActionRecordWrite, "example.com", &rrset.Key{Host: "x.apps", Type: "CNAME"}).Allowed {
+	if !snap.Decide(res2.Roles, policy.ActionRecordWrite, "example.com", &dns.Key{Host: "x.apps", Type: "CNAME"}).Allowed {
 		t.Fatal("bound pipeline cannot write its own name")
 	}
-	if snap.Decide(res2.Roles, policy.ActionRecordWrite, "example.com", &rrset.Key{Host: "y.apps", Type: "CNAME"}).Allowed {
+	if snap.Decide(res2.Roles, policy.ActionRecordWrite, "example.com", &dns.Key{Host: "y.apps", Type: "CNAME"}).Allowed {
 		t.Fatal("bound pipeline can write another name")
 	}
 	me := e.do(t, "GET", "/api/v1/me", e.pipeline(pipelineX), "", nil)
@@ -157,10 +157,10 @@ func TestDelegatedRoleAndBinding(t *testing.T) {
 	}
 
 	// GET with ETag.
-	r = e.do(t, "GET", "/api/v1/policy/delegated/bindings/eurodns-gate-x", ci, "", nil)
+	r = e.do(t, "GET", "/api/v1/policy/delegated/bindings/dns-gate-x", ci, "", nil)
 	var obj uiapi.DelegatedObject
 	_ = json.NewDecoder(r.Body).Decode(&obj)
-	if r.StatusCode != 200 || obj.Binding == nil || obj.Binding.Team != "eurodns-gate-x" || r.Header.Get("ETag") != obj.ETag {
+	if r.StatusCode != 200 || obj.Binding == nil || obj.Binding.Team != "dns-gate-x" || r.Header.Get("ETag") != obj.ETag {
 		t.Fatalf("get binding: %d %+v", r.StatusCode, obj)
 	}
 
@@ -182,21 +182,21 @@ func TestDelegatedRoleAndBinding(t *testing.T) {
 	r = e.do(t, "GET", "/api/v1/policy/revisions/"+bres.RevisionID, alice, "", nil)
 	var det uiapi.RevisionDetail
 	_ = json.NewDecoder(r.Body).Decode(&det)
-	if !strings.Contains(det.DiffYAML, "eurodns-gate-x") || det.Status != uiapi.RevisionSuperseded || det.Author.Subject != "idp:"+workloadsSC {
+	if !strings.Contains(det.DiffYAML, "dns-gate-x") || det.Status != uiapi.RevisionSuperseded || det.Author.Subject != "idp:"+workloadsSC {
 		t.Fatalf("revision detail: %s %s\n%s", det.Status, det.Author.Subject, det.DiffYAML)
 	}
 
 	// Delete: the role is still used by bindings.
-	r = e.do(t, "DELETE", "/api/v1/policy/delegated/roles/eurodns-gate-x", ci, "", nil)
+	r = e.do(t, "DELETE", "/api/v1/policy/delegated/roles/dns-gate-x", ci, "", nil)
 	if r.StatusCode != 400 || reason(t, r) != "invalid_policy" {
 		t.Fatalf("delete used role: %d", r.StatusCode)
 	}
-	for _, p := range []string{"bindings/eurodns-gate-x", "bindings/eurodns-gate-x-tf", "roles/eurodns-gate-x"} {
+	for _, p := range []string{"bindings/dns-gate-x", "bindings/dns-gate-x-tf", "roles/dns-gate-x"} {
 		if r := e.do(t, "DELETE", "/api/v1/policy/delegated/"+p, ci, "", nil); r.StatusCode != 200 {
 			t.Fatalf("delete %s: %d %s", p, r.StatusCode, reason(t, r))
 		}
 	}
-	if r := e.do(t, "DELETE", "/api/v1/policy/delegated/roles/eurodns-gate-x", ci, "", nil); r.StatusCode != 404 {
+	if r := e.do(t, "DELETE", "/api/v1/policy/delegated/roles/dns-gate-x", ci, "", nil); r.StatusCode != 404 {
 		t.Fatalf("delete missing: %d", r.StatusCode)
 	}
 	if res := e.holder.Current().Resolve("idp", map[string]any{"sub": pipelineX}); len(res.Roles) != 0 {
@@ -220,12 +220,12 @@ func TestDelegatedLimits(t *testing.T) {
 		{"whole zone", "roles/r5", `{"rules":[{"zones":["example.com"],"actions":["dns.record.write"]}]}`, "invalid_policy"},
 		{"type outside delegation", "roles/r6", `{"rules":[{"zones":["example.com"],"actions":["dns.record.write"],"records":{"hosts":["a.apps"],"types":["A"]}}]}`, "invalid_policy"},
 		{"base role name", "roles/writer", pipelineRole("x.apps"), "name_taken"},
-		{"subject outside delegation", "bindings/b1", pipelineBinding("ok", "sc://org/proj/other", "eurodns-gate-x"), "invalid_policy"},
-		{"glob wider than delegation", "bindings/b2", pipelineBinding("ok", "sc://org/*", "eurodns-gate-x"), "invalid_policy"},
-		{"team of another pipeline", "bindings/b3", pipelineBinding("ok", pipelineX, "eurodns-gate-y"), "invalid_policy"},
+		{"subject outside delegation", "bindings/b1", pipelineBinding("ok", "sc://org/proj/other", "dns-gate-x"), "invalid_policy"},
+		{"glob wider than delegation", "bindings/b2", pipelineBinding("ok", "sc://org/*", "dns-gate-x"), "invalid_policy"},
+		{"team of another pipeline", "bindings/b3", pipelineBinding("ok", pipelineX, "dns-gate-y"), "invalid_policy"},
 		{"fixed team outside names", "bindings/b4", pipelineBinding("ok", pipelineX, "web"), "invalid_policy"},
 		{"other team_from", "bindings/b5", fmt.Sprintf(`{"role":"ok","team":"","team_from":{"claim":"sub","regex":"^(.+)$"},"subjects":[{"issuer":"idp","claims":{"sub":[%q]}}]}`, pipelineX), "invalid_policy"},
-		{"base role not allowed", "bindings/b6", pipelineBinding("writer", pipelineX, "eurodns-gate-x"), "invalid_policy"},
+		{"base role not allowed", "bindings/b6", pipelineBinding("writer", pipelineX, "dns-gate-x"), "invalid_policy"},
 		{"unknown field", "bindings/b7", `{"role":"ok","team":"x","bogus":1}`, "bad_request"},
 	}
 	for _, c := range cases {
@@ -235,7 +235,7 @@ func TestDelegatedLimits(t *testing.T) {
 		}
 	}
 	// allow.roles: a base role within the delegation may be bound.
-	if r, _, eb := e.put(t, ci, "/api/v1/policy/delegated/bindings/shared", pipelineBinding("apps-writer", pipelineX, "eurodns-gate-x"), nil); r.StatusCode != 200 {
+	if r, _, eb := e.put(t, ci, "/api/v1/policy/delegated/bindings/shared", pipelineBinding("apps-writer", pipelineX, "dns-gate-x"), nil); r.StatusCode != 200 {
 		t.Fatalf("allowed base role: %d %+v", r.StatusCode, eb)
 	}
 	// max_objects: 6.
@@ -266,10 +266,10 @@ func TestDelegatedObjectsAndHumans(t *testing.T) {
 	alice := e.human("alice", time.Minute, "Gate.PolicyAdmin")
 	bob := e.human("bob", time.Minute, "Gate.PolicyAdmin")
 	carol := e.human("carol", time.Minute)
-	if r, _, eb := e.put(t, ci, "/api/v1/policy/delegated/roles/eurodns-gate-x", pipelineRole("x.apps"), nil); r.StatusCode != 200 {
+	if r, _, eb := e.put(t, ci, "/api/v1/policy/delegated/roles/dns-gate-x", pipelineRole("x.apps"), nil); r.StatusCode != 200 {
 		t.Fatalf("put role: %d %+v", r.StatusCode, eb)
 	}
-	_, res, _ := e.put(t, ci, "/api/v1/policy/delegated/bindings/eurodns-gate-x", pipelineBinding("eurodns-gate-x", pipelineX, "eurodns-gate-x"), nil)
+	_, res, _ := e.put(t, ci, "/api/v1/policy/delegated/bindings/dns-gate-x", pipelineBinding("dns-gate-x", pipelineX, "dns-gate-x"), nil)
 	active := res.RevisionID
 
 	// A human proposal from the UI omits the delegated section: it is kept.
@@ -296,7 +296,7 @@ func TestDelegatedObjectsAndHumans(t *testing.T) {
 	}
 	// A managed binding cannot use a delegated role.
 	doc = managedDoc("*.staging")
-	doc.Bindings = append(doc.Bindings, uiapi.Binding{Role: "eurodns-gate-x", Team: "web", Groups: []string{"operators"}})
+	doc.Bindings = append(doc.Bindings, uiapi.Binding{Role: "dns-gate-x", Team: "web", Groups: []string{"operators"}})
 	if r, _ := propose(t, e, alice, active, doc); r.StatusCode != 400 {
 		t.Fatalf("managed binding on a delegated role: %d", r.StatusCode)
 	}
@@ -304,9 +304,9 @@ func TestDelegatedObjectsAndHumans(t *testing.T) {
 	// Take over: policy.approve only.
 	takeOver := func(tok string) (*http.Response, uiapi.RevisionDetail) {
 		doc := managedDoc("*.staging")
-		doc.Roles["eurodns-gate-x"] = uiapi.Role{Rules: []uiapi.Rule{{Zones: []string{"example.com"}, Actions: []string{policy.ActionRecordWrite}, Records: &uiapi.RecordScope{Hosts: []string{"x.apps"}, Types: []string{"CNAME"}}}}}
-		doc.Bindings = append(doc.Bindings, uiapi.Binding{Role: "eurodns-gate-x", Team: "eurodns-gate-x", Subjects: []uiapi.SubjectMatcher{{Issuer: "idp", Claims: map[string][]string{"sub": {pipelineX}}}}})
-		b, _ := json.Marshal(uiapi.ProposeRequest{ParentID: active, Document: doc, Comment: "take over", TakeOver: []string{"roles/eurodns-gate-x", "bindings/eurodns-gate-x"}})
+		doc.Roles["dns-gate-x"] = uiapi.Role{Rules: []uiapi.Rule{{Zones: []string{"example.com"}, Actions: []string{policy.ActionRecordWrite}, Records: &uiapi.RecordScope{Hosts: []string{"x.apps"}, Types: []string{"CNAME"}}}}}
+		doc.Bindings = append(doc.Bindings, uiapi.Binding{Role: "dns-gate-x", Team: "dns-gate-x", Subjects: []uiapi.SubjectMatcher{{Issuer: "idp", Claims: map[string][]string{"sub": {pipelineX}}}}})
+		b, _ := json.Marshal(uiapi.ProposeRequest{ParentID: active, Document: doc, Comment: "take over", TakeOver: []string{"roles/dns-gate-x", "bindings/dns-gate-x"}})
 		r := e.do(t, "POST", "/api/v1/policy/revisions", tok, string(b), nil)
 		var d uiapi.RevisionDetail
 		_ = json.NewDecoder(r.Body).Decode(&d)
@@ -327,10 +327,10 @@ func TestDelegatedObjectsAndHumans(t *testing.T) {
 		t.Fatalf("activate take over: %d %s", code, why)
 	}
 	// The pipeline no longer owns the objects.
-	if r := e.do(t, "GET", "/api/v1/policy/delegated/roles/eurodns-gate-x", ci, "", nil); r.StatusCode != 404 {
+	if r := e.do(t, "GET", "/api/v1/policy/delegated/roles/dns-gate-x", ci, "", nil); r.StatusCode != 404 {
 		t.Fatalf("get taken over role: %d", r.StatusCode)
 	}
-	if r, _, eb := e.put(t, ci, "/api/v1/policy/delegated/roles/eurodns-gate-x", pipelineRole("x.apps"), map[string]string{"If-None-Match": "*"}); r.StatusCode != 409 || eb.Reason != "name_taken" {
+	if r, _, eb := e.put(t, ci, "/api/v1/policy/delegated/roles/dns-gate-x", pipelineRole("x.apps"), map[string]string{"If-None-Match": "*"}); r.StatusCode != 409 || eb.Reason != "name_taken" {
 		t.Fatalf("recreate taken over role: %d %s", r.StatusCode, eb.Reason)
 	}
 }
@@ -343,7 +343,7 @@ func TestDelegatedRollbackKeepsDelegatedObjects(t *testing.T) {
 	if code, _ := post(t, e, alice, "/api/v1/policy/revisions/"+d.ID+"/activate"); code != 200 {
 		t.Fatal("activate")
 	}
-	_, res, _ := e.put(t, ci, "/api/v1/policy/delegated/roles/eurodns-gate-x", pipelineRole("x.apps"), nil)
+	_, res, _ := e.put(t, ci, "/api/v1/policy/delegated/roles/dns-gate-x", pipelineRole("x.apps"), nil)
 	r := e.do(t, "POST", "/api/v1/policy/revisions/"+d.ID+"/rollback", alice, `{"comment":"back"}`, nil)
 	var rb uiapi.RevisionDetail
 	_ = json.NewDecoder(r.Body).Decode(&rb)
@@ -405,7 +405,7 @@ func TestDelegatedConcurrency(t *testing.T) {
 	e.server.cfg.PolicyStore = cs
 
 	// Lost activations are retried server-side on the new active revision.
-	if r, res, eb := e.put(t, ci, "/api/v1/policy/delegated/roles/eurodns-gate-x", pipelineRole("x.apps"), nil); r.StatusCode != 200 || !res.Changed {
+	if r, res, eb := e.put(t, ci, "/api/v1/policy/delegated/roles/dns-gate-x", pipelineRole("x.apps"), nil); r.StatusCode != 200 || !res.Changed {
 		t.Fatalf("put after conflicts: %d %+v", r.StatusCode, eb)
 	}
 	revs, _, _ := e.store.ListRevisions(context.Background(), uiapi.RevisionProposed, 50, "")
@@ -415,7 +415,7 @@ func TestDelegatedConcurrency(t *testing.T) {
 	cs.mu.Lock()
 	cs.n = maxDelegatedAttempts
 	cs.mu.Unlock()
-	if r, _, eb := e.put(t, ci, "/api/v1/policy/delegated/roles/eurodns-gate-y", pipelineRole("y.apps"), nil); r.StatusCode != 409 || eb.Reason != "policy_busy" {
+	if r, _, eb := e.put(t, ci, "/api/v1/policy/delegated/roles/dns-gate-y", pipelineRole("y.apps"), nil); r.StatusCode != 409 || eb.Reason != "policy_busy" {
 		t.Fatalf("exhausted retries: %d %s", r.StatusCode, eb.Reason)
 	}
 
@@ -429,7 +429,7 @@ func TestDelegatedConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			body := pipelineBinding("eurodns-gate-x", fmt.Sprintf("sc://org/proj/eurodns-gate-p%d", i), fmt.Sprintf("eurodns-gate-p%d", i))
+			body := pipelineBinding("dns-gate-x", fmt.Sprintf("sc://org/proj/dns-gate-p%d", i), fmt.Sprintf("dns-gate-p%d", i))
 			req, _ := http.NewRequest("PUT", e.srv.URL+fmt.Sprintf("/api/v1/policy/delegated/bindings/p%d", i), strings.NewReader(body))
 			req.Header.Set("Authorization", "Bearer "+ci)
 			req.Header.Set("Content-Type", "application/json")

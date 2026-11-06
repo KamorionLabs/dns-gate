@@ -11,9 +11,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/config"
-	"github.com/KamorionLabs/eurodns-gate/internal/store"
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
+	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/store"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 )
 
 // ReloadInterval is how often each replica checks the active revision.
@@ -32,16 +32,19 @@ type Holder struct {
 	disc Discovery
 	cur  atomic.Pointer[Snapshot]
 	mu   sync.Mutex // serializes refreshes
+	now  func() time.Time
+	// checkedAt is the start of the last Refresh, successful or not.
+	checkedAt time.Time
 }
 
 // NewHolder compiles the base layer.
 func NewHolder(c *config.Config) (*Holder, error) {
-	h := &Holder{cfg: c, base: BaseDocument(c)}
+	h := &Holder{cfg: c, base: BaseDocument(c), now: time.Now}
 	h.cur.Store(compile(c, h.base, nil, "", nil))
 	return h, nil
 }
 
-// SetDiscovery attaches the account zone list (zones_discovery): discovered
+// SetDiscovery attaches the provider zone lists (zone discovery): discovered
 // zones that are not managed become readable. Call it before serving.
 func (h *Holder) SetDiscovery(d Discovery) {
 	h.mu.Lock()
@@ -51,7 +54,7 @@ func (h *Holder) SetDiscovery(d Discovery) {
 	h.cur.Store(compile(h.cfg, h.base, cur.Managed, cur.RevisionID, d))
 }
 
-// Discovery returns the account zone list, nil without zones_discovery.
+// Discovery returns the provider zone lists, nil when not attached.
 func (h *Holder) Discovery() Discovery { return h.disc }
 
 // Config returns the loaded configuration.
@@ -84,6 +87,31 @@ func (h *Holder) CompileUnchecked(doc *uiapi.PolicyDocument, revisionID string) 
 func (h *Holder) Refresh(ctx context.Context, src ActiveSource) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	return h.refreshLocked(ctx, src)
+}
+
+// RefreshIfStale refreshes when the last refresh started more than maxAge
+// ago (ReloadInterval when <= 0); like Run, a failed refresh is retried
+// after maxAge while the previous snapshot is served. It replaces Run where
+// no goroutine may live between requests (AWS Lambda).
+func (h *Holder) RefreshIfStale(ctx context.Context, src ActiveSource, maxAge time.Duration) error {
+	if maxAge <= 0 {
+		maxAge = ReloadInterval
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.checkedAt.IsZero() && h.now().Sub(h.checkedAt) < maxAge {
+		return nil
+	}
+	return h.refreshLocked(ctx, src)
+}
+
+func (h *Holder) refreshLocked(ctx context.Context, src ActiveSource) error {
+	h.checkedAt = h.now()
+	return h.load(ctx, src)
+}
+
+func (h *Holder) load(ctx context.Context, src ActiveSource) error {
 	rev, err := src.ActiveRevision(ctx)
 	if errors.Is(err, store.ErrNotFound) {
 		if h.Current().RevisionID != "" {

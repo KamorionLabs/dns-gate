@@ -1,0 +1,10 @@
+apiVersion: v2
+name: dns-gate
+description: OIDC-authenticated, RBAC-enforcing gate in front of the EuroDNS API
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/KamorionLabs/dns-gate
+sources:
+  - https://github.com/KamorionLabs/dns-gate
+license: MIT

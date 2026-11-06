@@ -3,18 +3,18 @@ package zonewrite
 import (
 	"context"
 	"encoding/base64"
-	"fmt"
+	"errors"
 	"slices"
 	"sort"
 	"strings"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/identity"
-	"github.com/KamorionLabs/eurodns-gate/internal/policy"
-	"github.com/KamorionLabs/eurodns-gate/internal/store"
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
-	eurodns "github.com/KamorionLabs/eurodns-go"
-	"github.com/KamorionLabs/eurodns-go/rrset"
-	"github.com/KamorionLabs/eurodns-go/zonediff"
+	"github.com/KamorionLabs/dns-gate/internal/dns"
+	"github.com/KamorionLabs/dns-gate/internal/glob"
+	"github.com/KamorionLabs/dns-gate/internal/identity"
+	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/provider"
+	"github.com/KamorionLabs/dns-gate/internal/store"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 )
 
 // Adoption refusal reasons (uiapi.AdoptCandidate.Reason).
@@ -24,28 +24,24 @@ const (
 	adoptOtherTeam     = "owned_by_other_team"
 	adoptAlreadyOwned  = "already_owned"
 	adoptForbidden     = "forbidden"
-	adoptRelative      = "relative_target"
+	adoptInvalid       = "invalid"
 	adoptNotFound      = "not_found"
 )
 
 const defaultTTL = 3600
 
-func refKey(zone string, r uiapi.RRsetRef) rrset.Key {
-	return rrset.Key{Host: rrset.NormalizeHost(r.Host, zone), Type: strings.ToUpper(strings.TrimSpace(r.Type))}
+func refKey(zone string, r uiapi.RRsetRef) dns.Key {
+	return dns.Key{Host: dns.NormalizeHost(r.Host, zone), Type: strings.ToUpper(strings.TrimSpace(r.Type))}
 }
 
-func uiChanges(changes []zonediff.Change) []uiapi.Change {
-	out := make([]uiapi.Change, 0, len(changes))
-	for _, c := range changes {
-		out = append(out, uiChange(string(c.Op), c.Key, c.Old, c.New))
-	}
-	return out
-}
-
-// rrsetPlan turns desired RRset states into changes against the current sets.
-func rrsetPlan(zone string, sets map[rrset.Key]rrset.Set, changes []uiapi.RRsetChange) (*plan, error) {
-	p := &plan{}
-	seen := map[rrset.Key]bool{}
+// rrsetPlan turns desired RRset states into changes against the current
+// sets, enforcing the per-RRset preconditions: MustNotExist on an existing
+// RRset is foreign_rrset when the gate does not own it, precondition when it
+// does; an ExpectedHash mismatch is precondition.
+func rrsetPlan(zone string, p provider.Provider, sets map[dns.Key]dns.RRset, owns map[dns.Key]store.Ownership, changes []uiapi.RRsetChange) (*Plan, error) {
+	plan := &Plan{}
+	seen := map[dns.Key]bool{}
+	caps := p.Capabilities()
 	for _, c := range changes {
 		key := refKey(zone, uiapi.RRsetRef{Host: c.Host, Type: c.Type})
 		if key.Type == "" {
@@ -55,40 +51,56 @@ func rrsetPlan(zone string, sets map[rrset.Key]rrset.Set, changes []uiapi.RRsetC
 			return nil, fail(ReasonInvalid, "%s appears twice in the request", keyString(key))
 		}
 		seen[key] = true
-		old, exists := sets[key]
-		if c.Delete || len(c.Values) == 0 {
+		old, key, exists := findSet(sets, key)
+		if c.MustNotExist && exists {
+			if _, owned := owns[key]; !owned {
+				return nil, fail(ReasonForeignRRset, "%s exists and is not managed by the gate", keyString(key))
+			}
+			return nil, fail(ReasonPrecondition, "%s already exists", keyString(key))
+		}
+		if c.ExpectedHash != "" && (!exists || dns.ContentHash(old) != c.ExpectedHash) {
+			return nil, fail(ReasonPrecondition, "%s changed: its content hash is no longer %s", keyString(key), c.ExpectedHash)
+		}
+		if c.Delete || (len(c.Values) == 0 && c.Alias == nil) {
 			if exists {
 				o := old
-				p.changes = append(p.changes, zonediff.Change{Op: zonediff.OpDelete, Key: key, Old: &o})
+				plan.Changes = append(plan.Changes, dns.Change{Op: dns.OpDelete, Key: key, Old: &o})
 			}
 			continue
 		}
+		if c.Alias != nil && !caps.Alias {
+			return nil, fail(ReasonInvalid, "%s: provider %s does not support alias records", keyString(key), p.ID())
+		}
 		ttl := c.TTL
-		if ttl == 0 {
+		if ttl == 0 && c.Alias == nil {
 			ttl = defaultTTL
 			if exists {
 				ttl = old.TTL
 			}
 		}
-		if !slices.Contains(eurodns.AllowedTTLs, ttl) {
-			return nil, fail(ReasonInvalid, "%s: TTL %d is not accepted by EuroDNS (allowed: %v)", keyString(key), ttl, eurodns.AllowedTTLs)
+		n := dns.RRset{Key: key, TTL: ttl, Alias: c.Alias}
+		if c.Alias == nil {
+			n.Values = slices.Clone(c.Values)
+			sort.Strings(n.Values)
+			n.Values = slices.Compact(n.Values)
 		}
-		values := slices.Clone(c.Values)
-		sort.Strings(values)
-		values = slices.Compact(values)
-		n := &rrset.Set{Key: key, TTL: ttl, Values: values}
+		norm, err := p.Normalize(zone, n)
+		if err != nil {
+			return nil, upstreamError("normalize", err)
+		}
+		norm.Key = key
 		if !exists {
-			p.changes = append(p.changes, zonediff.Change{Op: zonediff.OpCreate, Key: key, New: n})
+			plan.Changes = append(plan.Changes, dns.Change{Op: dns.OpCreate, Key: key, New: &norm})
 			continue
 		}
-		if old.TTL == ttl && slices.Equal(old.Values, values) {
+		if dns.ContentHash(old) == dns.ContentHash(norm) {
 			continue
 		}
 		o := old
-		p.changes = append(p.changes, zonediff.Change{Op: zonediff.OpUpdate, Key: key, Old: &o, New: n})
+		plan.Changes = append(plan.Changes, dns.Change{Op: dns.OpUpdate, Key: key, Old: &o, New: &norm})
 	}
-	sort.Slice(p.changes, func(i, j int) bool { return keyString(p.changes[i].Key) < keyString(p.changes[j].Key) })
-	return p, nil
+	sort.Slice(plan.Changes, func(i, j int) bool { return plan.Changes[i].Key.Less(plan.Changes[j].Key) })
+	return plan, nil
 }
 
 func (e *engine) PlanRRsets(ctx context.Context, s *identity.Subject, zoneIn string, changes []uiapi.RRsetChange) (*uiapi.PlanResult, error) {
@@ -111,7 +123,11 @@ func (e *engine) PlanRRsets(ctx context.Context, s *identity.Subject, zoneIn str
 	if !e.cfg.Authz.Allow(s, policy.ActionRecordWrite, zone) {
 		return refuse(fail(ReasonForbidden, "not allowed to write in zone %s", zone))
 	}
-	cur, err := e.fetch(ctx, zone)
+	p, err := e.provider(zone)
+	if err != nil {
+		return nil, err
+	}
+	cur, err := e.fetch(ctx, p, zone)
 	if err != nil {
 		return nil, err
 	}
@@ -119,73 +135,72 @@ func (e *engine) PlanRRsets(ctx context.Context, s *identity.Subject, zoneIn str
 	if err != nil {
 		return nil, err
 	}
-	p, err := rrsetPlan(zone, userSets(zone, cur.Records), changes)
+	sets := index(cur)
+	plan, err := rrsetPlan(zone, p, sets, owns, changes)
 	if err != nil {
 		return refuse(err)
 	}
-	res.Changes = uiChanges(p.changes)
-	if len(p.changes) == 0 {
+	res.Changes = uiChanges(plan.Changes)
+	if len(plan.Changes) == 0 {
 		res.Allowed = true
 		return res, nil
 	}
-	if _, err := e.validate(ctx, s, zone, cur, owns, p, true); err != nil {
+	if _, err := e.validate(ctx, s, p, zone, sets, owns, plan, true); err != nil {
 		return refuse(err)
 	}
-	if e.cfg.CheckOnWrite {
-		checked, err := e.cfg.Client.CheckZone(ctx, zone, zonediff.Apply(zone, cur, p.changes))
-		if err != nil {
-			return refuse(upstreamError("check zone", err))
-		}
-		changed := map[rrset.Key]bool{}
-		for _, c := range p.changes {
-			changed[c.Key] = true
-		}
-		if checked != nil {
-			if problems := blockingProblems(zone, checked.Report, changed); len(problems) > 0 {
-				return refuse(fail(ReasonInvalid, "EuroDNS validation: %s", strings.Join(problems, "; ")))
-			}
-		}
+	res.Changes = uiChanges(plan.Changes)
+	if err := e.check(ctx, p, zone, cur, plan.Changes); err != nil {
+		return refuse(err)
 	}
 	res.Allowed = true
 	return res, nil
 }
 
-func parseETag(tag string) int64 {
-	var v int64
-	_, _ = fmt.Sscanf(strings.TrimPrefix(tag, "W/"), "\"v%d\"", &v)
-	return v
-}
-
 func (e *engine) ApplyRRsets(ctx context.Context, s *identity.Subject, zoneIn string, changes []uiapi.RRsetChange, expectedZoneVersion int64) (*uiapi.PlanResult, error) {
-	var applied []zonediff.Change
-	z, err := e.mutate(ctx, s, zoneIn, etag(expectedZoneVersion), "applyRRsets", func(_ *eurodns.Zone, sets map[rrset.Key]rrset.Set) (*plan, error) {
-		p, err := rrsetPlan(normZone(zoneIn), sets, changes)
-		if err == nil {
-			applied = p.changes
+	var plan *Plan
+	ifMatch := ""
+	if expectedZoneVersion > 0 {
+		ifMatch = etag(expectedZoneVersion)
+	}
+	zone := normZone(zoneIn)
+	_, version, err := e.Write(ctx, s, zone, ifMatch, "applyRRsets", func(cur *dns.Zone) (*Plan, error) {
+		p, err := e.provider(zone)
+		if err != nil {
+			return nil, err
 		}
-		return p, err
+		owns, err := e.ownerships(ctx, zone)
+		if err != nil {
+			return nil, err
+		}
+		plan, err = rrsetPlan(zone, p, index(cur), owns, changes)
+		return plan, err
 	})
 	if err != nil {
 		return nil, err
 	}
-	return &uiapi.PlanResult{Zone: normZone(zoneIn), Allowed: true, Changes: uiChanges(applied), ZoneVersion: parseETag(z.ETag)}, nil
+	var applied []dns.Change
+	if plan != nil {
+		applied = plan.Changes
+	}
+	return &uiapi.PlanResult{Zone: zone, Allowed: true, Changes: uiChanges(applied), ZoneVersion: version}, nil
 }
 
 type adoptCandidate struct {
 	uiapi.AdoptCandidate
-	key  rrset.Key
+	key  dns.Key
 	hash string
 }
 
 // adoptCandidates evaluates the selected RRsets: explicit refs first, then
-// filter matches over user RRsets (everything when nothing is selected).
-func (e *engine) adoptCandidates(s *identity.Subject, zone string, cur *eurodns.Zone, owns map[rrset.Key]store.Ownership,
+// filter matches over the RRsets that are not server-managed (everything
+// when nothing is selected); other read-only RRsets are listed with their
+// reason.
+func (e *engine) adoptCandidates(s *identity.Subject, p provider.Provider, zone string, cur *dns.Zone, owns map[dns.Key]store.Ownership,
 	refs []uiapi.RRsetRef, hosts, types []string) []adoptCandidate {
-	all := rrset.Group(zone, cur.Records)
-	managed := managedKeys(zone, cur.Records)
-	var keys []rrset.Key
-	picked := map[rrset.Key]bool{}
-	pick := func(k rrset.Key) {
+	all := index(cur)
+	var keys []dns.Key
+	picked := map[dns.Key]bool{}
+	pick := func(k dns.Key) {
 		if !picked[k] {
 			picked[k] = true
 			keys = append(keys, k)
@@ -195,10 +210,12 @@ func (e *engine) adoptCandidates(s *identity.Subject, zone string, cur *eurodns.
 		pick(refKey(zone, r))
 	}
 	if len(hosts) > 0 || len(types) > 0 || len(refs) == 0 {
-		user := userSets(zone, cur.Records)
-		var filtered []rrset.Key
-		for k := range user {
-			hostOK := len(hosts) == 0 || slices.ContainsFunc(hosts, func(h string) bool { return rrset.MatchHost(rrset.NormalizeHost(h, zone), k.Host) })
+		var filtered []dns.Key
+		for k, set := range all {
+			if readOnly(k, &set) == readOnlySOA {
+				continue
+			}
+			hostOK := len(hosts) == 0 || slices.ContainsFunc(hosts, func(h string) bool { return glob.MatchHost(dns.NormalizeHost(h, zone), k.Host) })
 			typeOK := len(types) == 0 || slices.ContainsFunc(types, func(t string) bool { return strings.EqualFold(strings.TrimSpace(t), k.Type) })
 			if hostOK && typeOK {
 				filtered = append(filtered, k)
@@ -218,12 +235,13 @@ func (e *engine) adoptCandidates(s *identity.Subject, zone string, cur *eurodns.
 			out = append(out, c)
 			continue
 		}
-		c.TTL, c.Values, c.hash = set.TTL, slices.Clone(set.Values), rrset.ContentHash(set)
+		c.TTL, c.Values, c.Alias, c.hash = set.TTL, slices.Clone(set.Values), set.Alias, dns.ContentHash(set)
 		o, owned := owns[k]
 		c.Status = statusOf(o, owned, set, true)
+		ro := readOnly(k, &set)
 		switch {
-		case managed[k] || k.Type == "SOA":
-			c.Reason = adoptServerManaged
+		case ro != "":
+			c.Reason = ro
 		case e.cfg.Authz.IsProtected(zone, k):
 			c.Reason = adoptProtected
 		case owned && !slices.Contains(s.Teams, o.Owner):
@@ -232,14 +250,29 @@ func (e *engine) adoptCandidates(s *identity.Subject, zone string, cur *eurodns.
 			c.Reason = adoptAlreadyOwned
 		case !e.cfg.Authz.AllowRRset(s, policy.ActionRecordAdopt, zone, k):
 			c.Reason = adoptForbidden
-		case len(relativeTargets(zonediff.Change{Key: k, New: &set})) > 0:
-			c.Reason = adoptRelative
+		case invalidReason(p, zone, set) != "":
+			c.Reason = invalidReason(p, zone, set)
 		default:
 			c.Adoptable = true
 		}
 		out = append(out, c)
 	}
 	return out
+}
+
+// invalidReason tells why the provider would refuse to write set back as
+// is ("" when it would accept it): such an RRset could never be changed by
+// its owner, so it is not adoptable.
+func invalidReason(p provider.Provider, zone string, set dns.RRset) string {
+	_, err := p.Normalize(zone, set)
+	if err == nil {
+		return ""
+	}
+	var ie *provider.InvalidError
+	if errors.As(err, &ie) && ie.Code != "" {
+		return ie.Code
+	}
+	return adoptInvalid
 }
 
 // previewToken binds an apply to the previewed owner and the content of every
@@ -256,7 +289,7 @@ func previewToken(zone, owner string, cands []adoptCandidate) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(zone + "\n" + owner + "\n" + strings.Join(lines, "\n")))
 }
 
-func parsePreviewToken(tok string) (zone, owner string, hashes map[rrset.Key]string, ok bool) {
+func parsePreviewToken(tok string) (zone, owner string, hashes map[dns.Key]string, ok bool) {
 	raw, err := base64.RawURLEncoding.DecodeString(tok)
 	if err != nil {
 		return "", "", nil, false
@@ -265,13 +298,13 @@ func parsePreviewToken(tok string) (zone, owner string, hashes map[rrset.Key]str
 	if len(parts) < 2 {
 		return "", "", nil, false
 	}
-	hashes = map[rrset.Key]string{}
+	hashes = map[dns.Key]string{}
 	for _, l := range parts[2:] {
 		f := strings.Split(l, "\t")
 		if len(f) != 3 {
 			continue
 		}
-		hashes[rrset.Key{Host: f[0], Type: f[1]}] = f[2]
+		hashes[dns.Key{Host: f[0], Type: f[1]}] = f[2]
 	}
 	return parts[0], parts[1], hashes, true
 }
@@ -299,7 +332,11 @@ func (e *engine) PreviewAdopt(ctx context.Context, s *identity.Subject, zoneIn s
 	if err != nil {
 		return nil, err
 	}
-	cur, err := e.fetch(ctx, zone)
+	p, err := e.provider(zone)
+	if err != nil {
+		return nil, err
+	}
+	cur, err := e.fetch(ctx, p, zone)
 	if err != nil {
 		return nil, err
 	}
@@ -307,7 +344,7 @@ func (e *engine) PreviewAdopt(ctx context.Context, s *identity.Subject, zoneIn s
 	if err != nil {
 		return nil, err
 	}
-	cands := e.adoptCandidates(s, zone, cur, owns, sel.RRsets, sel.Hosts, sel.Types)
+	cands := e.adoptCandidates(s, p, zone, cur, owns, sel.RRsets, sel.Hosts, sel.Types)
 	out := &uiapi.AdoptPreview{Zone: zone, Owner: owner, Candidates: make([]uiapi.AdoptCandidate, 0, len(cands)),
 		PreviewToken: previewToken(zone, owner, cands)}
 	for _, c := range cands {
@@ -336,12 +373,16 @@ func (e *engine) AdoptMany(ctx context.Context, s *identity.Subject, zoneIn stri
 	if err != nil {
 		return nil, e.deny(ctx, s, action, zone, err)
 	}
+	p, err := e.provider(zone)
+	if err != nil {
+		return nil, e.deny(ctx, s, action, zone, err)
+	}
 	unlock, err := e.lock(ctx, zone)
 	if err != nil {
 		return nil, e.deny(ctx, s, action, zone, err)
 	}
 	defer unlock()
-	cur, err := e.fetch(ctx, zone)
+	cur, err := e.fetch(ctx, p, zone)
 	if err != nil {
 		return nil, e.deny(ctx, s, action, zone, err)
 	}
@@ -349,13 +390,14 @@ func (e *engine) AdoptMany(ctx context.Context, s *identity.Subject, zoneIn stri
 	if err != nil {
 		return nil, e.deny(ctx, s, action, zone, err)
 	}
-	e.resolvePending(ctx, zone, userSets(zone, cur.Records), owns)
+	sets := index(cur)
+	e.resolvePending(ctx, zone, sets, owns)
 
 	tokZone, tokOwner, hashes, ok := parsePreviewToken(req.PreviewToken)
 	if !ok || tokZone != zone || tokOwner != owner {
 		return nil, e.deny(ctx, s, action, zone, fail(ReasonAdoptConflict, "the preview token does not match this zone and owner; preview again"))
 	}
-	cands := e.adoptCandidates(s, zone, cur, owns, req.RRsets, nil, nil)
+	cands := e.adoptCandidates(s, p, zone, cur, owns, req.RRsets, nil, nil)
 	var conflicts []string
 	for _, c := range cands {
 		switch {
@@ -372,7 +414,6 @@ func (e *engine) AdoptMany(ctx context.Context, s *identity.Subject, zoneIn stri
 
 	now := e.now()
 	rid := RequestID(ctx)
-	sets := rrset.Group(zone, cur.Records)
 	type write struct {
 		prev *store.Ownership
 		next store.Ownership
@@ -418,6 +459,6 @@ func (e *engine) AdoptMany(ctx context.Context, s *identity.Subject, zoneIn stri
 		res.Adopted = append(res.Adopted, uiapi.RRsetRef{Host: c.key.Host, Type: c.key.Type})
 		changes = append(changes, uiChange("adopt", c.key, nil, &set))
 	}
-	e.emit(ctx, s, action, zone, "allow", "", changes, nil, map[string]any{"comment": req.Comment, "owner": owner})
+	e.emit(ctx, s, action, zone, "allow", "", changes, "", map[string]any{"comment": req.Comment, "owner": owner})
 	return res, nil
 }

@@ -13,9 +13,9 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/config"
-	"github.com/KamorionLabs/eurodns-gate/internal/identity"
-	"github.com/KamorionLabs/eurodns-gate/internal/oidctest"
+	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/identity"
+	"github.com/KamorionLabs/dns-gate/internal/oidctest"
 )
 
 func setup(t *testing.T) (*Authenticator, *oidctest.Provider) {
@@ -28,7 +28,7 @@ func setup(t *testing.T) (*Authenticator, *oidctest.Provider) {
 	c := &config.Config{
 		Listen: config.Listen{TrustedProxies: []string{"10.0.0.0/8"}},
 		Issuers: []config.Issuer{{
-			Name: "ci", Issuer: p.URL, Audiences: []string{"eurodns-gate"},
+			Name: "ci", Issuer: p.URL, Audiences: []string{"dns-gate"},
 			BoundClaims: map[string]config.StringList{"repository_owner": {"acme"}},
 			NameClaim:   "workflow", TeamClaim: "teams", Category: "pipeline",
 			Algorithms: config.DefaultAlgorithms, ClockSkew: config.Duration(time.Minute),
@@ -57,7 +57,7 @@ func bearer(tok string) *http.Request {
 }
 
 func good() map[string]any {
-	return map[string]any{"sub": "repo:acme/web:ref:refs/heads/main", "aud": "eurodns-gate", "repository_owner": "acme", "workflow": "deploy", "teams": []any{"Edge"}}
+	return map[string]any{"sub": "repo:acme/web:ref:refs/heads/main", "aud": "dns-gate", "repository_owner": "acme", "workflow": "deploy", "teams": []any{"Edge"}}
 }
 
 func status(err error) int {
@@ -220,23 +220,23 @@ func TestTeamFromSubject(t *testing.T) {
 	t.Cleanup(p.Close)
 	c := &config.Config{
 		Issuers: []config.Issuer{{
-			Name: "ci", Issuer: p.URL, Audiences: []string{"eurodns-gate"},
+			Name: "ci", Issuer: p.URL, Audiences: []string{"dns-gate"},
 			BoundClaims: map[string]config.StringList{"sub": {"sc://org/project/*"}},
 			Category:    "pipeline", Algorithms: config.DefaultAlgorithms, ClockSkew: config.Duration(time.Minute),
 		}},
 		Roles: map[string]config.Role{"pipeline-writer": {}},
 		Bindings: []config.Binding{{
 			Role:     "pipeline-writer",
-			TeamFrom: &config.TeamFrom{Claim: "sub", Regex: `^sc://[^/]+/[^/]+/(eurodns-gate-.+)$`},
-			Subjects: []config.Subject{{Issuer: "ci", Claims: map[string]config.StringList{"sub": {"sc://org/project/eurodns-gate-*"}}}},
+			TeamFrom: &config.TeamFrom{Claim: "sub", Regex: `^sc://[^/]+/[^/]+/(dns-gate-.+)$`},
+			Subjects: []config.Subject{{Issuer: "ci", Claims: map[string]config.StringList{"sub": {"sc://org/project/dns-gate-*"}}}},
 		}},
 	}
 	a, err := New(c, p.Client(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for sub, team := range map[string]string{"sc://org/project/eurodns-gate-web": "eurodns-gate-web", "sc://org/project/eurodns-gate-shop": "eurodns-gate-shop"} {
-		s, err := a.Authenticate(bearer(p.Sign(map[string]any{"sub": sub, "aud": "eurodns-gate"})))
+	for sub, team := range map[string]string{"sc://org/project/dns-gate-web": "dns-gate-web", "sc://org/project/dns-gate-shop": "dns-gate-shop"} {
+		s, err := a.Authenticate(bearer(p.Sign(map[string]any{"sub": sub, "aud": "dns-gate"})))
 		if err != nil {
 			t.Fatalf("%s: %v", sub, err)
 		}
@@ -245,15 +245,15 @@ func TestTeamFromSubject(t *testing.T) {
 		}
 	}
 	// Matching the issuer but not the binding: no role.
-	if _, err := a.Authenticate(bearer(p.Sign(map[string]any{"sub": "sc://org/project/other", "aud": "eurodns-gate"}))); status(err) != http.StatusForbidden {
+	if _, err := a.Authenticate(bearer(p.Sign(map[string]any{"sub": "sc://org/project/other", "aud": "dns-gate"}))); status(err) != http.StatusForbidden {
 		t.Fatalf("unbound subject: %v", err)
 	}
 	// Derived team that is not a valid team name: the binding does not apply.
-	if _, err := a.Authenticate(bearer(p.Sign(map[string]any{"sub": "sc://org/project/eurodns-gate-a b", "aud": "eurodns-gate"}))); status(err) != http.StatusForbidden {
+	if _, err := a.Authenticate(bearer(p.Sign(map[string]any{"sub": "sc://org/project/dns-gate-a b", "aud": "dns-gate"}))); status(err) != http.StatusForbidden {
 		t.Fatalf("invalid derived team: %v", err)
 	}
 	// Outside the issuer bound claim glob.
-	if _, err := a.Authenticate(bearer(p.Sign(map[string]any{"sub": "sc://org/other/eurodns-gate-web", "aud": "eurodns-gate"}))); status(err) != http.StatusForbidden {
+	if _, err := a.Authenticate(bearer(p.Sign(map[string]any{"sub": "sc://org/other/dns-gate-web", "aud": "dns-gate"}))); status(err) != http.StatusForbidden {
 		t.Fatalf("bound claims: %v", err)
 	}
 }

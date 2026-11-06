@@ -1,0 +1,1362 @@
+openapi: 3.1.0
+info:
+  title: dns-gate API
+  version: "1"
+  summary: Security gateway in front of DNS provider APIs (EuroDNS, Route53).
+  description: |
+    The gate's own API: zone inventory with ownership, RRset reads and writes
+    with content-hash preconditions, plan/apply, audit log, adoption of records
+    created outside the gate, Terraform export and the policy API (delegations
+    used by Terraform pipelines, and the policy editor of the web UI).
+
+    Every write goes through the gate engine: RBAC (zone, host pattern, record
+    type), ownership by team, per-zone lock, protected records, blast-radius
+    limits and audit. A guide with examples is in
+    [docs/API.md](https://github.com/KamorionLabs/dns-gate/blob/main/docs/API.md).
+
+    **Authentication.** A bearer token (JWT from an issuer declared in the gate
+    configuration), a virtual key (`X-App-Id` + `X-Api-Key`), or the web UI
+    session cookie. With the session cookie, every request other than GET must
+    carry the `X-Gate-CSRF` header (equal to the `gate_csrf` cookie) and a
+    same-origin `Origin` header; humans need a recent login for writes
+    (`403 reauth_required` otherwise).
+
+    **Errors** are `{"reason", "message", "details"}`; `reason` is stable and
+    meant for programs.
+
+    **EuroDNS-compatible API.** Every other path of the gate is the EuroDNS
+    API, served under RBAC and ownership for the zones of EuroDNS providers
+    (`404 zone_not_eurodns` for a zone of another provider); it is
+    documented by EuroDNS at <https://docapi.eurodns.com/> and not repeated
+    here.
+
+    **Gate tokens and OAuth.** With an issuer marked `self: true`, the gate
+    signs its own tokens: `POST /api/v1/tokens` issues one to a web UI
+    session, and its keys are served at `/.well-known/jwks.json`. With a SAML
+    UI login, the gate also runs a stateless OAuth 2.0 authorization server
+    for the Claude Desktop extension (`/.well-known/oauth-authorization-server`,
+    `/.well-known/openid-configuration`, `/oauth/authorize`, `/oauth/token`),
+    standard OAuth 2.0 with PKCE not described here.
+  license:
+    name: MIT
+    url: https://github.com/KamorionLabs/dns-gate/blob/main/LICENSE
+externalDocs:
+  description: dns-gate documentation
+  url: https://github.com/KamorionLabs/dns-gate#documentation
+servers:
+  - url: https://{gate}
+    variables:
+      gate:
+        default: dns-gate.example.com
+        description: Host name of the gate.
+security:
+  - bearer: []
+  - virtualKey: []
+    virtualKeyApp: []
+  - session: []
+tags:
+  - name: discovery
+    description: Gate detection.
+  - name: identity
+    description: Who is calling, how to connect, and gate-issued tokens.
+  - name: zones
+    description: Zones and their RRsets.
+  - name: rrsets
+    description: Single RRset reads and writes, with content-hash preconditions.
+  - name: plans
+    description: Dry runs persisted as single-use plans, then applied.
+  - name: adoption
+    description: Take over RRsets created outside the gate, and export them to Terraform.
+  - name: audit
+    description: Audit log.
+  - name: delegation
+    description: Policy delegation API, used by the Terraform provider to manage roles and bindings.
+  - name: policy
+    description: Policy editor of the web UI (managed layer, revisions, approvals).
+
+paths:
+  /.well-known/dns-gate:
+    get:
+      tags: [discovery]
+      operationId: getGateInfo
+      summary: Gate detection and features
+      description: The only path clients use to detect a gate. No authentication.
+      security: []
+      responses:
+        "200":
+          description: Gate version and features.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GateInfo" }
+
+  /.well-known/jwks.json:
+    get:
+      tags: [discovery]
+      operationId: getJWKS
+      summary: Public keys of gate-issued tokens
+      description: "Served when an issuer has `self: true` (404 otherwise). No authentication."
+      security: []
+      responses:
+        "200":
+          description: JSON Web Key Set.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [keys]
+                properties:
+                  keys: { type: array, items: { type: object } }
+        "404": { $ref: "#/components/responses/Error" }
+
+  /api/v1/tokens:
+    post:
+      tags: [identity]
+      operationId: issueToken
+      summary: A gate token for the web UI session
+      description: |
+        Issues a bearer token signed by the gate issuer (`self: true`) for the
+        signed-in UI user, with the identity of the session, to use with curl
+        or the Terraform provider. Session cookie only (`403 session_required`
+        for a bearer token or a virtual key), with `X-Gate-CSRF`; `404
+        not_found` when no issuer has `self: true`. The lifetime is the
+        issuer's `token_ttl`, capped by the session.
+      security:
+        - session: []
+      responses:
+        "200":
+          description: Token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IssuedToken" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/me:
+    get:
+      tags: [identity]
+      operationId: getMe
+      summary: The authenticated subject and its effective permissions
+      responses:
+        "200":
+          description: Subject.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Me" }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /api/v1/connect:
+    get:
+      tags: [identity]
+      operationId: getConnect
+      summary: How clients reach the gate (base URL, MCP, issuer)
+      description: Requires ui.read on at least one zone.
+      responses:
+        "200":
+          description: Connection information.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Connect" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/connect/claude-desktop.mcpb:
+    get:
+      tags: [identity]
+      operationId: getClaudeDesktopExtension
+      summary: Claude Desktop extension of this gate
+      description: Available when MCP and the UI login are enabled; 404 otherwise.
+      responses:
+        "200":
+          description: MCP Bundle.
+          content:
+            application/zip:
+              schema: { type: string, contentMediaType: application/zip }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/zones:
+    get:
+      tags: [zones]
+      operationId: listZones
+      summary: Zones the caller can read
+      description: Managed zones, and zones discovered in the provider accounts but not managed (`unmanaged`, read-only). Requires ui.read.
+      responses:
+        "200":
+          description: Zones.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ZoneSummary" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/zones/{zone}/rrsets:
+    parameters:
+      - $ref: "#/components/parameters/Zone"
+    get:
+      tags: [zones]
+      operationId: getZoneInventory
+      summary: RRsets of a zone with their ownership
+      description: Requires ui.read on the zone. The ETag is the gate version of the zone.
+      responses:
+        "200":
+          description: Inventory.
+          headers:
+            ETag:
+              description: Zone version, `"v<n>"`.
+              schema: { type: string, examples: ['"v42"'] }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ZoneInventory" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/zones/{zone}/rrsets/{host}/{type}:
+    parameters:
+      - $ref: "#/components/parameters/Zone"
+      - $ref: "#/components/parameters/Host"
+      - $ref: "#/components/parameters/Type"
+    get:
+      tags: [rrsets]
+      operationId: getRRset
+      summary: One RRset
+      description: Requires ui.read or dns.read on the zone.
+      responses:
+        "200":
+          description: The RRset; the ETag is its content hash.
+          headers:
+            ETag: { $ref: "#/components/headers/RRsetETag" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RRset" }
+        default: { $ref: "#/components/responses/Error" }
+    put:
+      tags: [rrsets]
+      operationId: putRRset
+      summary: Create or replace an RRset
+      description: |
+        Sets the full desired state of the RRset: `ttl` and `values`, or `alias`
+        (providers with alias records, such as Route53). The engine checks RBAC
+        (dns.record.write on the zone, host and type), ownership (the RRset must
+        be new or owned by the caller's team) and the preconditions under the
+        zone lock, against a fresh read of the provider. `If-None-Match: *`
+        creates only: `409 foreign_rrset` when an RRset created outside the
+        gate exists, `412 precondition` when the gate owns one. `If-Match:
+        "<hash>"` replaces only the RRset with that content hash. Writes to
+        other RRsets of the zone in between do not refuse the request.
+
+        Values are in zone file presentation format; TXT values are the text
+        itself, unquoted, at any length (the gate or the provider splits them
+        in 255-byte strings). Targets without a trailing dot are absolute; a
+        single-label target is refused (`400 relative_target`).
+      parameters:
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IfNoneMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RRsetPut" }
+            examples:
+              values:
+                value: { ttl: 3600, values: ["192.0.2.10", "192.0.2.11"] }
+              alias:
+                value: { alias: { target: "d111111abcdef8.cloudfront.net.", hosted_zone_id: "Z2FDTNDATAQYW2", evaluate_target_health: false } }
+      responses:
+        "200":
+          description: The RRset as written; the ETag is its new content hash.
+          headers:
+            ETag: { $ref: "#/components/headers/RRsetETag" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RRset" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "412": { $ref: "#/components/responses/Error" }
+        "423": { $ref: "#/components/responses/Locked" }
+        "502": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [rrsets]
+      operationId: deleteRRset
+      summary: Delete an RRset
+      description: Deleting an RRset that does not exist succeeds. `If-Match` deletes only the RRset with that content hash.
+      parameters:
+        - $ref: "#/components/parameters/IfMatch"
+      responses:
+        "204":
+          description: Deleted.
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "412": { $ref: "#/components/responses/Error" }
+        "423": { $ref: "#/components/responses/Locked" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/zones/{zone}/plan:
+    parameters:
+      - $ref: "#/components/parameters/Zone"
+    post:
+      tags: [plans]
+      operationId: planRRsets
+      summary: Dry run of RRset changes
+      description: |
+        Checks RBAC, ownership, preconditions and provider validation without
+        writing. A refusal is `200` with `allowed: false`, `reason` and
+        `message`. An allowed plan gets a `plan_id`, bound to the caller, the
+        zone and the zone version, valid for `mcp.plan_ttl` (10 minutes by
+        default) and usable once, on any gate instance.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PlanRequest" }
+      responses:
+        "200":
+          description: Plan.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlanResult" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/zones/{zone}/apply:
+    parameters:
+      - $ref: "#/components/parameters/Zone"
+    post:
+      tags: [plans]
+      operationId: applyPlan
+      summary: Apply a plan, exactly as planned
+      description: |
+        Fails with `412 precondition` when the zone changed since the plan,
+        `410 plan_expired` when the plan expired, `404 plan_not_found` for an
+        unknown or already applied plan or the plan of another zone (plan
+        again in these three cases), and `403 forbidden` for the plan of
+        another caller.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ApplyRequest" }
+      responses:
+        "200":
+          description: Applied changes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PlanResult" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "412": { $ref: "#/components/responses/Error" }
+        "423": { $ref: "#/components/responses/Locked" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/zones/{zone}/adopt/preview:
+    parameters:
+      - $ref: "#/components/parameters/Zone"
+    post:
+      tags: [adoption]
+      operationId: previewAdopt
+      summary: Preview the adoption of foreign RRsets
+      description: Requires dns.record.adopt.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdoptSelection" }
+      responses:
+        "200":
+          description: Candidates and a preview token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdoptPreview" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/zones/{zone}/adopt:
+    parameters:
+      - $ref: "#/components/parameters/Zone"
+    post:
+      tags: [adoption]
+      operationId: adopt
+      summary: Adopt RRsets of a preview, all or nothing
+      description: Requires dns.record.adopt and a comment. `409 adopt_conflict` when any RRset changed since the preview.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AdoptApply" }
+      responses:
+        "200":
+          description: Adopted RRsets.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AdoptResult" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/zones/{zone}/terraform:
+    parameters:
+      - $ref: "#/components/parameters/Zone"
+    get:
+      tags: [adoption]
+      operationId: exportTerraform
+      summary: Managed RRsets as Terraform/OpenTofu configuration
+      description: |
+        One resource and one `import` block (id `<zone>/<host>/<type>`) per
+        managed RRset. `provider=dnsgate` (default) exports
+        `dnsgate_record_set` of the `KamorionLabs/dnsgate` provider, for any DNS
+        provider behind the gate; `provider=eurodns` exports
+        `eurodns_record_set` of the `kamorionlabs/eurodns` provider (no alias
+        RRsets). Requires ui.read.
+      parameters:
+        - name: provider
+          in: query
+          schema: { type: string, enum: [dnsgate, eurodns], default: dnsgate }
+        - name: team
+          in: query
+          description: Owner team.
+          schema: { type: string }
+        - name: hosts
+          in: query
+          description: Host globs, comma-separated or repeated.
+          schema: { type: array, items: { type: string } }
+          style: form
+          explode: true
+        - name: types
+          in: query
+          description: Record types, comma-separated or repeated.
+          schema: { type: array, items: { type: string } }
+          style: form
+          explode: true
+        - name: rrsets
+          in: query
+          description: Exact selection `host/type`, comma-separated or repeated; takes precedence over hosts and types.
+          schema: { type: array, items: { type: string, examples: ["www/A"] } }
+          style: form
+          explode: true
+      responses:
+        "200":
+          description: HCL.
+          content:
+            text/plain:
+              schema: { type: string }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/audit:
+    get:
+      tags: [audit]
+      operationId: listAudit
+      summary: Audit events, newest first
+      description: Events of zones the caller cannot read are filtered out.
+      parameters:
+        - { name: zone, in: query, schema: { type: string } }
+        - { name: host, in: query, schema: { type: string } }
+        - { name: type, in: query, schema: { type: string } }
+        - { name: subject, in: query, description: "Case-insensitive substring of the subject or its name.", schema: { type: string } }
+        - { name: category, in: query, schema: { type: string, enum: [human, pipeline, key] } }
+        - { name: decision, in: query, schema: { type: string, enum: [allow, deny, error] } }
+        - { name: since, in: query, schema: { type: string, format: date-time } }
+        - { name: until, in: query, schema: { type: string, format: date-time } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 50 } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Page of events.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuditPage" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/policy/delegated:
+    get:
+      tags: [delegation]
+      operationId: listDelegated
+      summary: Delegations of the caller and their objects
+      description: Every delegation for policy.read holders.
+      responses:
+        "200":
+          description: Index.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DelegatedIndex" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/policy/delegated/roles/{name}:
+    parameters:
+      - $ref: "#/components/parameters/DelegatedName"
+    get:
+      tags: [delegation]
+      operationId: getDelegatedRole
+      summary: A delegated role
+      responses:
+        "200":
+          description: Role.
+          headers:
+            ETag: { $ref: "#/components/headers/ObjectETag" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DelegatedObject" }
+        default: { $ref: "#/components/responses/Error" }
+    put:
+      tags: [delegation]
+      operationId: putDelegatedRole
+      summary: Create or replace a delegated role
+      description: Validated against the delegation limits, then activated as a new managed revision without approval.
+      parameters:
+        - $ref: "#/components/parameters/IfMatchObject"
+        - $ref: "#/components/parameters/IfNoneMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DelegatedRoleRequest" }
+      responses:
+        "200":
+          description: Result.
+          headers:
+            ETag: { $ref: "#/components/headers/ObjectETag" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DelegatedResult" }
+        default: { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [delegation]
+      operationId: deleteDelegatedRole
+      summary: Delete a delegated role
+      parameters:
+        - $ref: "#/components/parameters/IfMatchObject"
+        - $ref: "#/components/parameters/Delegation"
+      responses:
+        "200":
+          description: Result.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DelegatedResult" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/policy/delegated/bindings/{name}:
+    parameters:
+      - $ref: "#/components/parameters/DelegatedName"
+    get:
+      tags: [delegation]
+      operationId: getDelegatedBinding
+      summary: A delegated binding
+      responses:
+        "200":
+          description: Binding.
+          headers:
+            ETag: { $ref: "#/components/headers/ObjectETag" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DelegatedObject" }
+        default: { $ref: "#/components/responses/Error" }
+    put:
+      tags: [delegation]
+      operationId: putDelegatedBinding
+      summary: Create or replace a delegated binding
+      parameters:
+        - $ref: "#/components/parameters/IfMatchObject"
+        - $ref: "#/components/parameters/IfNoneMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DelegatedBindingRequest" }
+      responses:
+        "200":
+          description: Result.
+          headers:
+            ETag: { $ref: "#/components/headers/ObjectETag" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DelegatedResult" }
+        default: { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [delegation]
+      operationId: deleteDelegatedBinding
+      summary: Delete a delegated binding
+      parameters:
+        - $ref: "#/components/parameters/IfMatchObject"
+        - $ref: "#/components/parameters/Delegation"
+      responses:
+        "200":
+          description: Result.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DelegatedResult" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/policy:
+    get:
+      tags: [policy]
+      operationId: getEffectivePolicy
+      summary: Effective policy (base file and active managed revision)
+      description: Requires policy.read.
+      responses:
+        "200":
+          description: Effective policy.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyObject" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/policy/revisions:
+    get:
+      tags: [policy]
+      operationId: listRevisions
+      summary: Managed policy revisions, newest first
+      parameters:
+        - { name: status, in: query, schema: { type: string, enum: [proposed, approved, rejected, active, superseded] } }
+        - { name: limit, in: query, schema: { type: integer } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Page of revisions.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyObject" }
+        default: { $ref: "#/components/responses/Error" }
+    post:
+      tags: [policy]
+      operationId: proposeRevision
+      summary: Propose a managed policy revision
+      description: Requires policy.propose.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PolicyObject" }
+      responses:
+        "201":
+          description: Proposed revision.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyObject" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/policy/revisions/{id}:
+    parameters:
+      - $ref: "#/components/parameters/RevisionID"
+    get:
+      tags: [policy]
+      operationId: getRevision
+      summary: A revision with its document, diff and impact
+      responses:
+        "200":
+          description: Revision.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyObject" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/policy/revisions/{id}/export:
+    parameters:
+      - $ref: "#/components/parameters/RevisionID"
+    get:
+      tags: [policy]
+      operationId: exportRevision
+      summary: Managed document of a revision as YAML
+      responses:
+        "200":
+          description: YAML.
+          content:
+            application/yaml:
+              schema: { type: string }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/policy/revisions/{id}/approve:
+    parameters:
+      - $ref: "#/components/parameters/RevisionID"
+    post:
+      tags: [policy]
+      operationId: approveRevision
+      summary: Approve a revision (policy.approve, another approver than the author)
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DecisionRequest" }
+      responses:
+        "200":
+          description: Revision.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyObject" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/policy/revisions/{id}/reject:
+    parameters:
+      - $ref: "#/components/parameters/RevisionID"
+    post:
+      tags: [policy]
+      operationId: rejectRevision
+      summary: Reject a revision (policy.approve)
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DecisionRequest" }
+      responses:
+        "200":
+          description: Revision.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyObject" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/policy/revisions/{id}/activate:
+    parameters:
+      - $ref: "#/components/parameters/RevisionID"
+    post:
+      tags: [policy]
+      operationId: activateRevision
+      summary: Activate a revision
+      responses:
+        "200":
+          description: Revision.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyObject" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/policy/revisions/{id}/rollback:
+    parameters:
+      - $ref: "#/components/parameters/RevisionID"
+    post:
+      tags: [policy]
+      operationId: rollbackRevision
+      summary: Propose a new revision copying revision {id}
+      responses:
+        "201":
+          description: Proposed revision.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyObject" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/policy/explain:
+    post:
+      tags: [policy]
+      operationId: explain
+      summary: Simulate an authorization decision
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PolicyObject" }
+      responses:
+        "200":
+          description: Decision and its reasons.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyObject" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/policy/who-can:
+    get:
+      tags: [policy]
+      operationId: whoCan
+      summary: Bindings and keys allowed to perform an action on an RRset
+      parameters:
+        - { name: zone, in: query, required: true, schema: { type: string } }
+        - { name: host, in: query, schema: { type: string } }
+        - { name: type, in: query, schema: { type: string } }
+        - { name: action, in: query, schema: { type: string, default: dns.record.write } }
+      responses:
+        "200":
+          description: Grants.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyObject" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/policy/virtual-keys/generate:
+    post:
+      tags: [policy]
+      operationId: generateVirtualKey
+      summary: Generate a virtual key (shown once, only its hash goes in a proposal)
+      responses:
+        "200":
+          description: Key.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  app_id: { type: string }
+                  key: { type: string }
+                  key_sha256: { type: string }
+        default: { $ref: "#/components/responses/Error" }
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Token of an issuer declared in the gate configuration (Entra ID, GitHub Actions, GitLab, Azure DevOps, any OIDC issuer).
+    virtualKey:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: Virtual key, with its application id in X-App-Id.
+    virtualKeyApp:
+      type: apiKey
+      in: header
+      name: X-App-Id
+    session:
+      type: apiKey
+      in: cookie
+      name: __Host-dns-gate-session
+      description: Web UI session. Requests other than GET also need X-Gate-CSRF and a same-origin Origin.
+
+  parameters:
+    Zone:
+      name: zone
+      in: path
+      required: true
+      description: Zone name, e.g. `example.com`.
+      schema: { type: string }
+    Host:
+      name: host
+      in: path
+      required: true
+      description: Host relative to the zone, `@` for the apex; `*` is allowed as the first label (`*.app`).
+      schema: { type: string, examples: ["www", "@", "*.app", "_acme-challenge.www"] }
+    Type:
+      name: type
+      in: path
+      required: true
+      description: Record type, case-insensitive.
+      schema: { type: string, examples: ["A", "CNAME", "TXT"] }
+    IfMatch:
+      name: If-Match
+      in: header
+      description: '`"<hash>"`: the RRset must have this content hash (`412 precondition` otherwise).'
+      schema: { type: string }
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      description: '`*`: create only (`412 precondition` if the object exists).'
+      schema: { type: string, enum: ["*"] }
+    IfMatchObject:
+      name: If-Match
+      in: header
+      description: ETag of the delegated object (`412 precondition` otherwise).
+      schema: { type: string }
+    DelegatedName:
+      name: name
+      in: path
+      required: true
+      schema: { type: string, pattern: "^[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?$" }
+    Delegation:
+      name: delegation
+      in: query
+      description: Delegation acting, when the caller matches several.
+      schema: { type: string }
+    RevisionID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, pattern: "^[a-z0-9-]{8,64}$" }
+
+  headers:
+    RRsetETag:
+      description: Content hash of the RRset, `"<hash>"`, to send back in If-Match.
+      schema: { type: string }
+    ObjectETag:
+      description: ETag of the delegated object.
+      schema: { type: string }
+
+  responses:
+    Error:
+      description: Error.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Locked:
+      description: The zone is locked by another write; retry after Retry-After seconds.
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [reason, message]
+      properties:
+        reason:
+          type: string
+          description: |
+            Stable machine-readable reason; clients should treat an unknown
+            value by its HTTP status. Status by reason:
+            400 invalid, relative_target, bad_request, invalid_policy,
+            delegation_required;
+            401 unauthenticated;
+            403 forbidden, not_owner, too_many_changes, reauth_required, csrf,
+            no_binding, bound_claims, source_ip, policy_not_editable,
+            self_approval, delegated_object, session_required;
+            404 not_found, plan_not_found, zone_not_eurodns;
+            405 method_not_allowed;
+            409 foreign_rrset, tainted, adopt_conflict, not_owner (delegated
+            object of another delegation), policy_busy, conflict, name_taken,
+            stale_revision, approval_required, invalid_status, already_decided;
+            410 plan_expired; 412 precondition; 413 too_large; 415 bad_request;
+            423 zone_locked; 429 rate_limited; 500 internal;
+            501 not_implemented; 502 upstream; 503 store_unavailable; 504 timeout.
+          enum:
+            - invalid
+            - relative_target
+            - bad_request
+            - invalid_policy
+            - delegation_required
+            - unauthenticated
+            - forbidden
+            - not_owner
+            - too_many_changes
+            - reauth_required
+            - csrf
+            - no_binding
+            - bound_claims
+            - source_ip
+            - policy_not_editable
+            - self_approval
+            - delegated_object
+            - session_required
+            - not_found
+            - plan_not_found
+            - zone_not_eurodns
+            - method_not_allowed
+            - foreign_rrset
+            - tainted
+            - adopt_conflict
+            - policy_busy
+            - conflict
+            - name_taken
+            - stale_revision
+            - approval_required
+            - invalid_status
+            - already_decided
+            - plan_expired
+            - precondition
+            - too_large
+            - zone_locked
+            - rate_limited
+            - internal
+            - not_implemented
+            - upstream
+            - store_unavailable
+            - timeout
+        message: { type: string }
+        details: {}
+        errors:
+          type: array
+          description: Validation errors of a policy document (reason invalid_policy).
+          items:
+            type: object
+            properties:
+              path: { type: string }
+              message: { type: string }
+
+    GateInfo:
+      type: object
+      required: [version, features]
+      properties:
+        version: { type: string }
+        features:
+          type: array
+          description: |
+            if-match, ownership, adopt (EuroDNS-compatible API extensions),
+            policy-delegation (/api/v1/policy/delegated), plans
+            (/api/v1/zones/{zone}/plan and apply), rrset-api
+            (/api/v1/zones/{zone}/rrsets/{host}/{type}).
+          items: { type: string }
+
+    Actor:
+      type: object
+      properties:
+        subject: { type: string, description: "issuer:id" }
+        name: { type: string }
+        category: { type: string, enum: [human, pipeline, key, system] }
+
+    Permission:
+      type: object
+      properties:
+        role: { type: string }
+        zones: { type: array, items: { type: string } }
+        actions: { type: array, items: { type: string } }
+        hosts: { type: array, items: { type: string } }
+        types: { type: array, items: { type: string } }
+
+    Me:
+      type: object
+      properties:
+        subject: { type: string }
+        name: { type: string }
+        category: { type: string }
+        roles: { type: array, items: { type: string } }
+        teams: { type: array, items: { type: string } }
+        groups: { type: array, items: { type: string } }
+        permissions: { type: array, items: { $ref: "#/components/schemas/Permission" } }
+
+    Connect:
+      type: object
+      properties:
+        base_url: { type: string }
+        mcp:
+          type: object
+          properties:
+            enabled: { type: boolean }
+            url: { type: string }
+            allow_writes: { type: boolean }
+        issuer:
+          type: object
+          properties:
+            url: { type: string }
+            kind: { type: string, enum: [entra, oidc, saml], description: "saml: url is the gate issuer, if any." }
+            tenant_id: { type: string }
+        client_id: { type: string }
+        cli_scope: { type: string }
+        claude_desktop_extension_url: { type: string }
+        tokens_url: { type: string, description: "POST here for a gate token (UI session); absent without a gate issuer." }
+
+    IssuedToken:
+      type: object
+      required: [access_token, token_type, expires_in, expires_at, issuer]
+      properties:
+        access_token: { type: string }
+        token_type: { type: string, enum: [Bearer] }
+        expires_in: { type: integer, description: "Seconds." }
+        expires_at: { type: string, format: date-time }
+        issuer: { type: string, description: "URL of the gate issuer." }
+
+    ZoneSummary:
+      type: object
+      required: [zone, provider, rrsets, managed, tainted, pending, foreign]
+      properties:
+        zone: { type: string }
+        provider: { type: string, description: "Provider instance id, e.g. eurodns or route53-prod." }
+        unmanaged: { type: boolean, description: "Discovered, not managed by the gate (read-only)." }
+        rrsets: { type: integer }
+        managed: { type: integer }
+        tainted: { type: integer }
+        pending: { type: integer }
+        foreign: { type: integer }
+        last_synced_at: { type: string, format: date-time }
+        last_write_at: { type: string, format: date-time }
+
+    Alias:
+      type: object
+      description: Provider alias target (Route53 alias records). An RRset with an alias has no values.
+      required: [target, hosted_zone_id]
+      properties:
+        target: { type: string, examples: ["d111111abcdef8.cloudfront.net."] }
+        hosted_zone_id: { type: string, examples: ["Z2FDTNDATAQYW2"] }
+        evaluate_target_health: { type: boolean, default: false }
+
+    RRset:
+      type: object
+      required: [host, type, ttl, values, hash, status, protected, adopted]
+      properties:
+        host: { type: string, description: "Relative to the zone, @ for the apex." }
+        type: { type: string }
+        ttl: { type: integer }
+        values: { type: array, items: { type: string } }
+        alias: { $ref: "#/components/schemas/Alias" }
+        read_only: { type: string, description: "Why the gate never writes this RRset (server_managed, routing_policy, relative_target...)." }
+        hash: { type: string, description: "Content hash (TTL and values or alias), the ETag of the RRset." }
+        status: { type: string, enum: [managed, tainted, pending, foreign, missing] }
+        protected: { type: boolean }
+        owner: { type: string, description: "Owner team." }
+        created_by: { $ref: "#/components/schemas/Actor" }
+        created_at: { type: string, format: date-time }
+        updated_by: { $ref: "#/components/schemas/Actor" }
+        updated_at: { type: string, format: date-time }
+        adopted: { type: boolean }
+        expires_at: { type: string, format: date-time }
+        last_request_id: { type: string }
+
+    ZoneInventory:
+      type: object
+      required: [zone, rrsets]
+      properties:
+        zone: { type: string }
+        provider: { type: string, description: "Provider instance id serving the zone." }
+        unmanaged: { type: boolean }
+        last_synced_at: { type: string, format: date-time }
+        rrsets: { type: array, items: { $ref: "#/components/schemas/RRset" } }
+
+    RRsetPut:
+      type: object
+      additionalProperties: false
+      description: "`values` (with `ttl`) or `alias`, not both. A missing ttl keeps the current one, or the provider default for a new RRset."
+      properties:
+        ttl: { type: integer, minimum: 1 }
+        values: { type: array, minItems: 1, items: { type: string } }
+        alias: { $ref: "#/components/schemas/Alias" }
+
+    RRsetChange:
+      type: object
+      required: [host, type]
+      description: Desired state of one RRset; delete removes it.
+      properties:
+        host: { type: string }
+        type: { type: string }
+        ttl: { type: integer }
+        values: { type: array, items: { type: string } }
+        alias: { $ref: "#/components/schemas/Alias" }
+        delete: { type: boolean }
+        expected_hash: { type: string, description: "The RRset must have this content hash." }
+        must_not_exist: { type: boolean, description: "The RRset must not exist." }
+
+    Change:
+      type: object
+      properties:
+        op: { type: string, enum: [create, update, delete, adopt, taint, expire] }
+        host: { type: string }
+        type: { type: string }
+        old_ttl: { type: integer }
+        old_values: { type: array, items: { type: string } }
+        old_alias: { $ref: "#/components/schemas/Alias" }
+        new_ttl: { type: integer }
+        new_values: { type: array, items: { type: string } }
+        new_alias: { $ref: "#/components/schemas/Alias" }
+
+    PlanRequest:
+      type: object
+      required: [changes]
+      additionalProperties: false
+      properties:
+        changes:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items: { $ref: "#/components/schemas/RRsetChange" }
+
+    ApplyRequest:
+      type: object
+      required: [plan_id]
+      additionalProperties: false
+      properties:
+        plan_id: { type: string }
+
+    PlanResult:
+      type: object
+      required: [zone, allowed, changes, zone_version]
+      properties:
+        zone: { type: string }
+        allowed: { type: boolean }
+        reason: { type: string, description: "Engine reason when refused." }
+        message: { type: string }
+        changes: { type: array, items: { $ref: "#/components/schemas/Change" } }
+        zone_version: { type: integer }
+        plan_id: { type: string }
+
+    RRsetRef:
+      type: object
+      required: [host, type]
+      properties:
+        host: { type: string }
+        type: { type: string }
+
+    AdoptSelection:
+      type: object
+      properties:
+        rrsets: { type: array, items: { $ref: "#/components/schemas/RRsetRef" } }
+        hosts: { type: array, items: { type: string }, description: "Host globs, combined with types." }
+        types: { type: array, items: { type: string } }
+        owner: { type: string, description: "Team; defaults to the caller's team." }
+
+    AdoptPreview:
+      type: object
+      properties:
+        zone: { type: string }
+        owner: { type: string }
+        candidates:
+          type: array
+          items:
+            type: object
+            properties:
+              host: { type: string }
+              type: { type: string }
+              ttl: { type: integer }
+              values: { type: array, items: { type: string } }
+              status: { type: string }
+              adoptable: { type: boolean }
+              reason: { type: string, enum: [protected, server_managed, owned_by_other_team, already_owned, forbidden, relative_target, not_found] }
+        preview_token: { type: string }
+
+    AdoptApply:
+      type: object
+      required: [rrsets, comment, preview_token]
+      properties:
+        rrsets: { type: array, items: { $ref: "#/components/schemas/RRsetRef" } }
+        owner: { type: string }
+        comment: { type: string, maxLength: 2000 }
+        preview_token: { type: string }
+
+    AdoptResult:
+      type: object
+      properties:
+        zone: { type: string }
+        owner: { type: string }
+        adopted: { type: array, items: { $ref: "#/components/schemas/RRsetRef" } }
+        request_id: { type: string }
+
+    AuditEntry:
+      type: object
+      properties:
+        time: { type: string, format: date-time }
+        request_id: { type: string }
+        actor: { $ref: "#/components/schemas/Actor" }
+        teams: { type: array, items: { type: string } }
+        action: { type: string }
+        zone: { type: string }
+        decision: { type: string, enum: [allow, deny, error] }
+        reason: { type: string }
+        changes: { type: array, items: { $ref: "#/components/schemas/Change" } }
+        provider: { type: string, description: "Provider instance id of the zone." }
+        snapshot_id: { type: string, description: "Provider snapshot taken before the write (EuroDNS)." }
+
+    AuditPage:
+      type: object
+      required: [entries]
+      properties:
+        entries: { type: array, items: { $ref: "#/components/schemas/AuditEntry" } }
+        next_cursor: { type: string }
+
+    SubjectMatcher:
+      type: object
+      required: [issuer]
+      properties:
+        issuer: { type: string }
+        claims:
+          type: object
+          additionalProperties: { type: array, items: { type: string } }
+
+    TeamFrom:
+      type: object
+      required: [claim, regex]
+      properties:
+        claim: { type: string }
+        regex: { type: string, description: "Anchored, exactly one capture group." }
+        prefix: { type: string }
+
+    Rule:
+      type: object
+      required: [zones, actions]
+      properties:
+        zones: { type: array, items: { type: string } }
+        actions: { type: array, items: { type: string, examples: ["dns.read", "dns.record.write", "ui.read"] } }
+        records:
+          type: object
+          properties:
+            hosts: { type: array, items: { type: string } }
+            types: { type: array, items: { type: string } }
+
+    Role:
+      type: object
+      required: [rules]
+      properties:
+        description: { type: string }
+        rules: { type: array, items: { $ref: "#/components/schemas/Rule" } }
+        rebase_on_save: { type: boolean }
+        ephemeral_ttl: { type: string, description: "Go duration." }
+        max_changes_per_request: { type: integer }
+
+    Binding:
+      type: object
+      required: [role]
+      properties:
+        role: { type: string }
+        team: { type: string }
+        team_from: { $ref: "#/components/schemas/TeamFrom" }
+        groups: { type: array, items: { type: string } }
+        subjects: { type: array, items: { $ref: "#/components/schemas/SubjectMatcher" } }
+
+    DelegatedRoleRequest:
+      allOf:
+        - $ref: "#/components/schemas/Role"
+        - type: object
+          properties:
+            delegation: { type: string, description: "Delegation acting, when the caller matches several." }
+            managed_by: { type: string, description: 'Client label, e.g. "terraform".' }
+
+    DelegatedBindingRequest:
+      allOf:
+        - $ref: "#/components/schemas/Binding"
+        - type: object
+          properties:
+            delegation: { type: string }
+            managed_by: { type: string }
+
+    DelegatedOwner:
+      type: object
+      properties:
+        delegation: { type: string }
+        managed_by: { type: string }
+        created_by: { type: string }
+        created_at: { type: string, format: date-time }
+        updated_by: { type: string }
+        updated_at: { type: string, format: date-time }
+
+    DelegatedObject:
+      type: object
+      required: [kind, name, owner, etag, revision_id]
+      properties:
+        kind: { type: string, enum: [role, binding] }
+        name: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+        binding: { $ref: "#/components/schemas/Binding" }
+        owner: { $ref: "#/components/schemas/DelegatedOwner" }
+        etag: { type: string }
+        revision_id: { type: string }
+
+    ImpactItem:
+      type: object
+      properties:
+        kind: { type: string, enum: [gain, loss, warning] }
+        who: { type: string }
+        role: { type: string }
+        zones: { type: array, items: { type: string } }
+        actions: { type: array, items: { type: string } }
+        message: { type: string }
+
+    DelegatedResult:
+      type: object
+      required: [changed, revision_id, impact]
+      properties:
+        object: { $ref: "#/components/schemas/DelegatedObject" }
+        changed: { type: boolean, description: "false: nothing to do, no revision created." }
+        revision_id: { type: string }
+        impact: { type: array, items: { $ref: "#/components/schemas/ImpactItem" } }
+
+    DelegatedIndex:
+      type: object
+      properties:
+        delegations:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              description: { type: string }
+              subjects: { type: array, items: { $ref: "#/components/schemas/SubjectMatcher" } }
+              allow:
+                type: object
+                description: Limits of the delegation (zones, actions, records, binding subjects, teams, roles, groups, max_objects).
+        objects: { type: array, items: { $ref: "#/components/schemas/DelegatedObject" } }
+        revision_id: { type: string }
+
+    DecisionRequest:
+      type: object
+      properties:
+        comment: { type: string }
+
+    PolicyObject:
+      type: object
+      description: |
+        Policy editor payload, consumed by the web UI. The exact shapes
+        (EffectivePolicy, RevisionPage, RevisionDetail, ProposeRequest,
+        ExplainRequest, ExplainResponse, WhoCanResponse) are documented in
+        internal/uiapi/policy.go and may change before 1.0.

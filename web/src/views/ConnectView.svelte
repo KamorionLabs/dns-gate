@@ -1,6 +1,8 @@
 <script lang="ts">
   import { api } from '../lib/api';
-  import type { Connect } from '../lib/types';
+  import type { Connect, IssuedToken, Me, ZoneSummary } from '../lib/types';
+  import TokenAction from '../components/TokenAction.svelte';
+  import { canWriteZone } from '../lib/rights';
   import { router } from '../lib/router.svelte';
   import {
     CLAUDE_DESKTOP_EXTENSION_PATH,
@@ -9,6 +11,7 @@
     curlCommand,
     desktopConfig,
     loginCommand,
+    TOKEN_ENV,
     terraformProvider,
     tokenCommand,
   } from '../lib/connect';
@@ -19,12 +22,25 @@
   let info = $state<Connect | null>(null);
   let error = $state<string | null>(null);
 
+  // The examples use a zone the user can write in, when there is one.
+  let zones = $state<ZoneSummary[]>([]);
+  // A token issued here stays shown while the page is open, across tabs.
+  let token = $state<IssuedToken | null>(null);
+  let me = $state<Me | null>(null);
+
   $effect(() => {
     api
       .connect()
       .then((c) => (info = c))
       .catch((e: Error) => (error = e.message));
+    api.zones().then((z) => (zones = z)).catch(() => {});
+    api.me().then((m) => (me = m)).catch(() => {});
   });
+
+  const managedZones = $derived(zones.filter((z) => !z.unmanaged));
+  const exampleZone = $derived(
+    (managedZones.find((z) => canWriteZone(me, z.zone) && !!me?.permissions) ?? managedZones[0])?.zone ?? 'example.com',
+  );
 
   // Claude Desktop first: the extension is the easiest path for most people.
   const tabs = [
@@ -57,6 +73,10 @@
     {/each}
   </div>
 
+  {#if info.tokens_url && (tab === 'terraform' || tab === 'api')}
+    <TokenAction {info} zone={exampleZone} bind:token />
+  {/if}
+
   <section class="panel" role="tabpanel">
     {#if tab === 'claude-code' || tab === 'desktop'}
       {#if !info.mcp.enabled}
@@ -81,7 +101,7 @@
           Add the server{#if !entra}, replacing <span class="mono">{TOKEN_COMMAND_PLACEHOLDER}</span>{/if}:
           <HclBlock hcl={claudeCodeCommand(info)} filename="shell" download={false} wrap />
         </li>
-        <li>In Claude Code, <span class="mono">/mcp</span> lists <span class="mono">eurodns-gate</span> as connected.</li>
+        <li>In Claude Code, <span class="mono">/mcp</span> lists <span class="mono">dns-gate</span> as connected.</li>
       </ol>
       {#if entra}
         <p class="hint">If <span class="mono">az</span> answers that consent is required (AADSTS65001), the gate application does not trust the Azure CLI yet: ask the gate administrators to pre-authorize it.</p>
@@ -112,16 +132,20 @@
         <p class="hint">The token lasts about an hour. To refresh it, run the token command again, replace <span class="mono">AUTH_HEADER</span> and restart the client; the extension and Claude Code refresh it on their own. Clients that speak Streamable HTTP and accept custom headers can use the endpoint directly with an <span class="mono">Authorization: Bearer</span> header.</p>
       </details>
     {:else if tab === 'terraform'}
-      <p class="lead">The <span class="mono">kamorionlabs/eurodns</span> provider in gate mode: the gate holds the EuroDNS key, Terraform only proves who runs it.</p>
-      <HclBlock hcl={terraformProvider(info)} filename="provider.tf" />
+      <p class="lead">The <span class="mono">KamorionLabs/dnsgate</span> provider talks to the gate, whatever the DNS provider behind a zone: the gate holds the provider credentials, Terraform only proves who runs it.</p>
+      <HclBlock hcl={terraformProvider(info, exampleZone)} filename="main.tf" />
       <p class="hint">
-        {#if entra}Locally, <span class="mono">azure_identity</span> uses your <span class="mono">az login</span>. In an Azure DevOps pipeline, uncomment <span class="mono">azure_devops</span> with the id of the service connection: it takes precedence inside the job.{/if}
+        {#if info.tokens_url}Terraform reads its token from <span class="mono">{TOKEN_ENV}</span>: get one with <strong>Get an API token</strong> above (valid up to one hour).
+        {:else}Terraform signs in with a token of the gate's issuer{#if entra} (locally, your <span class="mono">az login</span>: <span class="mono">{tokenCommand(info)}</span>){/if}; the provider documentation lists the supported sign-in methods.{/if}
         To move records the gate already holds into a stack, open a zone and use Export Terraform.
       </p>
     {:else if tab === 'api'}
-      <p class="lead">The API under <span class="mono">/api/v1</span> accepts the same bearer tokens. Who am I, with my roles and permissions:</p>
-      <HclBlock hcl={curlCommand(info)} filename="shell" download={false} />
-      <p class="hint">Also <span class="mono">/api/v1/zones</span>, <span class="mono">/api/v1/zones/&lbrace;zone&rbrace;/rrsets</span> and <span class="mono">/api/v1/audit</span>. EuroDNS clients use the gate URL as their base URL.</p>
+      <p class="lead">The REST API under <span class="mono">/api/v1</span> is the same for every DNS provider and accepts bearer tokens. A change is planned first, then that exact plan is applied:</p>
+      <HclBlock hcl={curlCommand(info, exampleZone)} filename="shell" download={false} />
+      <p class="hint">
+        Also <span class="mono">PUT</span> and <span class="mono">DELETE /api/v1/zones/&lbrace;zone&rbrace;/rrsets/&lbrace;host&rbrace;/&lbrace;type&rbrace;</span> for one record set, and <span class="mono">/api/v1/audit</span> for the journal.
+        A plan is valid for a few minutes, for the identity that made it, and only while the zone is unchanged.
+      </p>
     {/if}
   </section>
 

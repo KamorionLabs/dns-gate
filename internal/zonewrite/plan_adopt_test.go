@@ -6,9 +6,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/identity"
-	"github.com/KamorionLabs/eurodns-gate/internal/store"
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
+	"github.com/KamorionLabs/dns-gate/internal/identity"
+	eurodnsprov "github.com/KamorionLabs/dns-gate/internal/provider/eurodns"
+	"github.com/KamorionLabs/dns-gate/internal/store"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 	eurodns "github.com/KamorionLabs/eurodns-go"
 	"github.com/KamorionLabs/eurodns-go/eurodnstest"
 )
@@ -112,9 +113,9 @@ func TestPreviewAndAdoptMany(t *testing.T) {
 func TestAdoptCandidateRelativeTarget(t *testing.T) {
 	e := newEnv(t, eurodnstest.Options{})
 	eng := e.eng.(*engine)
-	cur := &eurodns.Zone{Name: zoneName, Records: []eurodns.Record{rec("MX", "sub", "10 mail"), rec("CNAME", "ok", "t.example.net.")}}
-	cands := eng.adoptCandidates(admin, zoneName, cur, nil, nil, nil, nil)
-	if len(cands) != 2 || cands[0].Host != "ok" || !cands[0].Adoptable || cands[1].Reason != adoptRelative {
+	cur := eurodnsprov.FromNative("eurodns", zoneName, &eurodns.Zone{Name: zoneName, Records: []eurodns.Record{rec("MX", "sub", "10 mail"), rec("CNAME", "ok", "t.example.net.")}})
+	cands := eng.adoptCandidates(admin, e.prov, zoneName, cur, nil, nil, nil, nil)
+	if len(cands) != 2 || cands[0].Host != "ok" || !cands[0].Adoptable || cands[1].Reason != eurodnsprov.CodeRelativeTarget {
 		t.Fatalf("%+v", cands)
 	}
 }
@@ -213,7 +214,7 @@ func TestPlanAndApplyRRsets(t *testing.T) {
 	}
 	e.srv.Seed(saved)
 
-	_, err = e.eng.ApplyRRsets(ctx, alice, zoneName, changes, 0)
+	_, err = e.eng.ApplyRRsets(ctx, alice, zoneName, changes, 7)
 	e.wantReason(err, ReasonPrecondition)
 	res, err := e.eng.ApplyRRsets(ctx, alice, zoneName, changes, 1)
 	if err != nil {
@@ -241,8 +242,8 @@ func TestAdoptOwnRRsetNeedsOnlyWrite(t *testing.T) {
 	e := newEnv(t, eurodnstest.Options{})
 	ctx := context.Background()
 	e.mustAdd(alice, rec("A", "www", "192.0.2.1"))
-	own := eurodns.AdoptRequest{RRsets: []eurodns.AdoptRRset{{Host: "www", Type: "A"}}}
-	if err := e.eng.Adopt(ctx, alice, zoneName, own); err != nil {
+	own := adoptRefs("www A")
+	if err := e.eng.Adopt(ctx, alice, zoneName, own, ""); err != nil {
 		t.Fatalf("import of an owned RRset by a writer: %v", err)
 	}
 	if len(e.audit.find("gate.adopt", "allow")) != 0 {
@@ -250,8 +251,8 @@ func TestAdoptOwnRRsetNeedsOnlyWrite(t *testing.T) {
 	}
 	// Still refused: someone else's RRset, a foreign one, or no write access.
 	e.mustAdd(bob, rec("A", "api", "192.0.2.2"))
-	e.wantReason(e.eng.Adopt(ctx, alice, zoneName, eurodns.AdoptRequest{RRsets: []eurodns.AdoptRRset{{Host: "api", Type: "A"}}}), ReasonForbidden)
-	e.wantReason(e.eng.Adopt(ctx, alice, zoneName, eurodns.AdoptRequest{RRsets: []eurodns.AdoptRRset{{Host: "legacy", Type: "CNAME"}}}), ReasonForbidden)
+	e.wantReason(e.eng.Adopt(ctx, alice, zoneName, adoptRefs("api A"), ""), ReasonForbidden)
+	e.wantReason(e.eng.Adopt(ctx, alice, zoneName, adoptRefs("legacy CNAME"), ""), ReasonForbidden)
 	reader := &identity.Subject{Issuer: "idp", ID: "ro", Teams: []string{"team-a"}}
-	e.wantReason(e.eng.Adopt(ctx, reader, zoneName, own), ReasonForbidden)
+	e.wantReason(e.eng.Adopt(ctx, reader, zoneName, own, ""), ReasonForbidden)
 }

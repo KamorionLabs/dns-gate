@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/config"
 )
 
 // The binary must expose adoption, the Terraform export and MCP writes:
@@ -23,7 +23,8 @@ func TestNewWiresOperations(t *testing.T) {
 	sum := sha256.Sum256([]byte("secret"))
 	keyHash := hex.EncodeToString(sum[:])
 	yaml := `
-upstream: {base_url: "http://127.0.0.1:1", app_id: app, max_retries: 0}
+providers:
+  - {id: eurodns, kind: eurodns, eurodns: {base_url: "http://127.0.0.1:1", app_id: app, max_retries: 0}}
 zones: [example.com]
 store: {type: sqlite, sqlite: {path: ` + filepath.Join(t.TempDir(), "g.db") + `}}
 mcp: {enabled: true, allow_writes: true}
@@ -62,8 +63,8 @@ roles:
 	}
 }
 
-// zones_discovery: the account listing goes through the shared upstream
-// transport and discovered zones are served read-only.
+// Zone discovery: the account listing goes through the shared upstream
+// transport of the provider and discovered zones are served read-only.
 func TestZonesDiscoveryWiring(t *testing.T) {
 	var searches atomic.Int32
 	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -87,9 +88,11 @@ func TestZonesDiscoveryWiring(t *testing.T) {
 	defer up.Close()
 	sum := sha256.Sum256([]byte("secret"))
 	yaml := `
-upstream: {base_url: "` + up.URL + `", app_id: app, rate: {every: 1ms, burst: 10}}
+providers:
+  - id: eurodns
+    kind: eurodns
+    eurodns: {base_url: "` + up.URL + `", app_id: app, rate: {every: 1ms, burst: 10}}
 zones: [example.com]
-zones_discovery: {enabled: true}
 virtual_keys:
   - {id: t, app_id: vk, key_sha256: ` + hex.EncodeToString(sum[:]) + `, roles: [reader], expires_at: 2099-01-01T00:00:00Z}
 roles:
@@ -127,13 +130,54 @@ roles:
 		a.Handler().ServeHTTP(rec, req)
 		return rec
 	}
-	if rec := get("/api/v1/zones"); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"zone":"other.org","unmanaged":true`) {
+	if rec := get("/api/v1/zones"); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"zone":"other.org","provider":"eurodns","unmanaged":true`) ||
+		!strings.Contains(rec.Body.String(), `"zone":"example.com","provider":"eurodns"`) {
 		t.Fatalf("zones: %d %s", rec.Code, rec.Body.String())
 	}
-	if rec := get("/api/v1/zones/other.org/rrsets"); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"unmanaged":true`) {
+	if rec := get("/api/v1/zones/other.org/rrsets"); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"provider":"eurodns","unmanaged":true`) {
 		t.Fatalf("rrsets: %d %s", rec.Code, rec.Body.String())
 	}
 	if rec := get("/dns-zones/other.org"); rec.Code != http.StatusForbidden {
 		t.Fatalf("EuroDNS API on an unmanaged zone: %d", rec.Code)
+	}
+}
+
+// A route53 provider is built from its configuration (no AWS call at
+// startup), and the plan GC of Run and Maintenance is the store's.
+func TestNewWiresRoute53AndPlanGC(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIDEXAMPLE")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "secret")
+	t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+	t.Setenv("AWS_CONFIG_FILE", filepath.Join(t.TempDir(), "none"))
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "none"))
+	yaml := `
+providers:
+  - id: r53
+    kind: route53
+    route53: {region: eu-west-3, hosted_zones: {example.com: Z1EXAMPLE}}
+zones: [example.com]
+issuers:
+  - {name: ci, issuer: "https://token.example.net", audiences: [dns-gate]}
+roles:
+  reader:
+    rules: [{zones: [example.com], actions: [dns.read]}]
+`
+	cfg, err := config.Parse([]byte(yaml), func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := New(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), Options{Holder: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := a.Discovery.Status()
+	if len(st.Providers) != 1 || st.Providers[0].ID != "r53" || st.Providers[0].Kind != "route53" {
+		t.Fatalf("providers %+v", st.Providers)
+	}
+	if a.PlanGC == nil {
+		t.Fatal("plan GC not wired")
+	}
+	if err := a.PlanGC(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }

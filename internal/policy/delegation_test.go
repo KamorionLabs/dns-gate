@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/config"
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
-	"github.com/KamorionLabs/eurodns-go/rrset"
+	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/dns"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 )
 
 func TestHostCovered(t *testing.T) {
@@ -106,7 +106,7 @@ func TestValidateDelegatedAndSnapshotRecheck(t *testing.T) {
 	if len(res.Roles) != 1 || res.Teams[0] != "team-a" {
 		t.Fatalf("resolve: %+v", res)
 	}
-	if !snap.Decide(res.Roles, ActionRecordWrite, "example.com", &rrset.Key{Host: "www", Type: "A"}).Allowed {
+	if !snap.Decide(res.Roles, ActionRecordWrite, "example.com", &dns.Key{Host: "www", Type: "A"}).Allowed {
 		t.Fatal("delegated rule not effective")
 	}
 	if got := snap.Resolve("idp", map[string]any{"sub": "ci"}).Delegations; len(got) != 1 || got[0] != "ci" {
@@ -121,7 +121,7 @@ func TestValidateDelegatedAndSnapshotRecheck(t *testing.T) {
 		t.Fatalf("unknown delegation: %+v", errs)
 	}
 	snap = compile(c, base, &gone, "r2", nil)
-	if snap.Decide([]string{"r"}, ActionRecordWrite, "example.com", &rrset.Key{Host: "www", Type: "A"}).Allowed {
+	if snap.Decide([]string{"r"}, ActionRecordWrite, "example.com", &dns.Key{Host: "www", Type: "A"}).Allowed {
 		t.Fatal("a rule of a removed delegation still grants")
 	}
 
@@ -134,7 +134,7 @@ func TestValidateDelegatedAndSnapshotRecheck(t *testing.T) {
 
 func TestConfigDelegationsValidation(t *testing.T) {
 	good := `
-upstream: {app_id: a}
+providers: [{id: eurodns, kind: eurodns, eurodns: {app_id: a}}]
 zones: [example.com]
 issuers:
   - {name: ci, issuer: "https://ci.example.net", audiences: [gate]}

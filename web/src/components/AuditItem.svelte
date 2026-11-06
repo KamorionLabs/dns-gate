@@ -50,7 +50,7 @@
         <dl>
           <dt>Identity</dt><dd><CopyText text={entry.actor.subject} label="subject" /></dd>
           <dt>Request</dt><dd><CopyText text={entry.request_id} label="request id" /></dd>
-          {#if entry.snapshot_id}<dt>Snapshot before</dt><dd><CopyText text={String(entry.snapshot_id)} label="EuroDNS snapshot id" /></dd>{/if}
+          {#if entry.snapshot_id}<dt>Snapshot before</dt><dd><CopyText text={entry.snapshot_id} label="provider snapshot id" /></dd>{/if}
           {#if entry.action !== actionLabel(entry.action)}<dt>Action</dt><dd class="mono">{entry.action}</dd>{/if}
         </dl>
       </details>

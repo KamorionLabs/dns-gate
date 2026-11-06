@@ -4,9 +4,9 @@ import (
 	"context"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/audit"
-	"github.com/KamorionLabs/eurodns-gate/internal/store"
-	"github.com/KamorionLabs/eurodns-go/zonediff"
+	"github.com/KamorionLabs/dns-gate/internal/audit"
+	"github.com/KamorionLabs/dns-gate/internal/dns"
+	"github.com/KamorionLabs/dns-gate/internal/store"
 )
 
 const (
@@ -31,11 +31,11 @@ func isWrite(ev audit.Event) bool {
 		return false
 	}
 	for _, c := range ev.Changes {
-		switch zonediff.Op(c.Op) {
-		case zonediff.OpCreate, zonediff.OpUpdate, zonediff.OpDelete:
+		switch dns.Op(c.Op) {
+		case dns.OpCreate, dns.OpUpdate, dns.OpDelete:
 			return true
 		case "expire":
-			if len(c.OldValues) > 0 {
+			if len(c.OldValues) > 0 || c.OldAlias != nil {
 				return true
 			}
 		}

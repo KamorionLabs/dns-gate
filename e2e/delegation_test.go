@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/KamorionLabs/eurodns-gate/internal/uiapi"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 	eurodns "github.com/KamorionLabs/eurodns-go"
 )
 
@@ -72,18 +72,18 @@ func (e *env) waitBound(t *testing.T, sub string, want bool) {
 }
 
 func (e *env) scenarioDelegation(t *testing.T) {
-	pipeline := "sc://org/proj/eurodns-gate-x"
+	pipeline := "sc://org/proj/dns-gate-x"
 	role := `{"rules":[{"zones":["example.com"],"actions":["dns.read","dns.record.write"],"records":{"hosts":["x.wl"],"types":["CNAME"]}}],"managed_by":"e2e"}`
-	binding := fmt.Sprintf(`{"role":"eurodns-gate-x","team":"eurodns-gate-x","subjects":[{"issuer":"ci","claims":{"sub":[%q]}}]}`, pipeline)
+	binding := fmt.Sprintf(`{"role":"dns-gate-x","team":"dns-gate-x","subjects":[{"issuer":"ci","claims":{"sub":[%q]}}]}`, pipeline)
 
 	// The pipeline has no gate identity before the delegated pipeline creates one.
 	if code, _ := e.delegated(t, pipeline, http.MethodGet, "", "", nil); code != http.StatusForbidden {
 		t.Fatalf("pipeline before delegation: %d", code)
 	}
-	if code, b := e.delegated(t, workloadsSubject, http.MethodPut, "roles/eurodns-gate-x", role, map[string]string{"If-None-Match": "*"}); code != http.StatusOK {
+	if code, b := e.delegated(t, workloadsSubject, http.MethodPut, "roles/dns-gate-x", role, map[string]string{"If-None-Match": "*"}); code != http.StatusOK {
 		t.Fatalf("delegated role: %d %s", code, b)
 	}
-	code, b := e.delegated(t, workloadsSubject, http.MethodPut, "bindings/eurodns-gate-x", binding, map[string]string{"If-None-Match": "*"})
+	code, b := e.delegated(t, workloadsSubject, http.MethodPut, "bindings/dns-gate-x", binding, map[string]string{"If-None-Match": "*"})
 	var res uiapi.DelegatedResult
 	_ = json.Unmarshal(b, &res)
 	if code != http.StatusOK || !res.Changed || res.RevisionID == "" {
@@ -147,10 +147,10 @@ func (e *env) scenarioDelegationTerraform(t *testing.T) {
 		t.Log("provider without eurodns_gate_role: Terraform part of the delegation scenario skipped")
 		return
 	}
-	pipeline := "sc://org/proj/eurodns-gate-z"
+	pipeline := "sc://org/proj/dns-gate-z"
 	stack := fmt.Sprintf(`
 resource "eurodns_gate_role" "z" {
-  name        = "eurodns-gate-z"
+  name        = "dns-gate-z"
   description = "DNS names of pipeline z"
   rules = [{
     zones   = [%[1]q]
@@ -161,9 +161,9 @@ resource "eurodns_gate_role" "z" {
 }
 
 resource "eurodns_gate_binding" "z" {
-  name = "eurodns-gate-z"
+  name = "dns-gate-z"
   role = eurodns_gate_role.z.name
-  team = "eurodns-gate-z"
+  team = "dns-gate-z"
   subjects = [{
     issuer = "ci"
     claims = { sub = [%[2]q] }
@@ -185,7 +185,7 @@ resource "eurodns_gate_binding" "z" {
 
 	// Drift: a change made outside Terraform shows up in the plan.
 	body := `{"rules":[{"zones":["example.com"],"actions":["dns.read"],"records":{"hosts":["z.wl"],"types":["CNAME"]}}]}`
-	if code, b := e.delegated(t, workloadsSubject, http.MethodPut, "roles/eurodns-gate-z", body, nil); code != http.StatusOK {
+	if code, b := e.delegated(t, workloadsSubject, http.MethodPut, "roles/dns-gate-z", body, nil); code != http.StatusOK {
 		t.Fatalf("out-of-band change: %d %s", code, b)
 	}
 	out, err := e.tf(t, dir, "plan", "-detailed-exitcode", "-no-color")
@@ -196,8 +196,8 @@ resource "eurodns_gate_binding" "z" {
 
 	// Import by name.
 	idir := e.workspace(t, workloadsSubject, stack)
-	e.mustTF(t, idir, "import", "-no-color", "eurodns_gate_role.z", "eurodns-gate-z")
-	e.mustTF(t, idir, "import", "-no-color", "eurodns_gate_binding.z", "eurodns-gate-z")
+	e.mustTF(t, idir, "import", "-no-color", "eurodns_gate_role.z", "dns-gate-z")
+	e.mustTF(t, idir, "import", "-no-color", "eurodns_gate_binding.z", "dns-gate-z")
 	if out := e.mustTF(t, idir, "plan", "-detailed-exitcode", "-no-color"); !strings.Contains(out, "No changes") {
 		t.Fatalf("plan after import is not empty:\n%s", out)
 	}
@@ -206,7 +206,7 @@ resource "eurodns_gate_binding" "z" {
 	e.mustTF(t, pdir, "destroy", "-auto-approve", "-no-color")
 	e.mustTF(t, dir, "destroy", "-auto-approve", "-no-color")
 	e.waitBound(t, pipeline, false)
-	if code, _ := e.delegated(t, workloadsSubject, http.MethodGet, "roles/eurodns-gate-z", "", nil); code != http.StatusNotFound {
+	if code, _ := e.delegated(t, workloadsSubject, http.MethodGet, "roles/dns-gate-z", "", nil); code != http.StatusNotFound {
 		t.Fatalf("role after destroy: %d", code)
 	}
 }
