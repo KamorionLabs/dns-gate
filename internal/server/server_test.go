@@ -37,6 +37,7 @@ import (
 type fakeEngine struct {
 	zonewrite.Engine
 	extra []uiapi.ZoneSummary // appended to Zones (unmanaged zones)
+	tombs []uiapi.Tombstone   // tombstones of every inventory
 }
 
 // fakeFacade answers the engine-backed EuroDNS operations; passthrough goes
@@ -81,7 +82,7 @@ func (f *fakeEngine) Zones(ctx context.Context, s *identity.Subject) ([]uiapi.Zo
 }
 
 func (f *fakeEngine) Inventory(ctx context.Context, s *identity.Subject, zone string) (*uiapi.ZoneInventory, error) {
-	return &uiapi.ZoneInventory{Zone: zone, RRsets: []uiapi.RRset{{Host: "www", Type: "A", TTL: 600, Values: []string{"192.0.2.1"}, Status: uiapi.StatusManaged, Owner: "web"}}}, nil
+	return &uiapi.ZoneInventory{Zone: zone, RRsets: []uiapi.RRset{{Host: "www", Type: "A", TTL: 600, Values: []string{"192.0.2.1"}, Status: uiapi.StatusManaged, Owner: "web"}}, Tombstones: f.tombs}, nil
 }
 
 func (f *fakeEngine) RRset(ctx context.Context, s *identity.Subject, zone string, key dns.Key) (*uiapi.RRset, error) {
