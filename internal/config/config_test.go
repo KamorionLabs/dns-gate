@@ -684,3 +684,44 @@ func TestForwardWriteWithoutHostsWarns(t *testing.T) {
 		t.Fatalf("warnings %q", w)
 	}
 }
+
+func TestPropagation(t *testing.T) {
+	key := env(map[string]string{"EURODNS_API_KEY": "k"})
+	c, err := Parse([]byte(base), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := c.Propagation
+	if !p.On() || len(p.Resolvers) != 0 || p.QueryTimeout.D() != 2*time.Second || p.Timeout.D() != 6*time.Second ||
+		p.Concurrency != 16 || p.CacheTTL.D() != 10*time.Second || p.RequestsPerMinute != 30 {
+		t.Fatalf("defaults: %+v", p)
+	}
+	c, err = Parse([]byte(base+`propagation:
+  enabled: false
+  resolvers:
+    - {name: Corp, address: 10.0.0.53, location: Paris, country: FR, region: europe}
+    - {name: Lab, address: "[2001:db8::53]:5353"}
+`), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Propagation.On() || len(c.Propagation.Resolvers) != 2 || c.Propagation.Resolvers[0].Location != "Paris" {
+		t.Fatalf("parsed: %+v", c.Propagation)
+	}
+	for name, doc := range map[string]string{
+		"host name":      "propagation: {resolvers: [{name: a, address: dns.google}]}\n",
+		"no name":        "propagation: {resolvers: [{address: 1.1.1.1}]}\n",
+		"duplicate":      "propagation: {resolvers: [{name: a, address: 1.1.1.1}, {name: a, address: 8.8.8.8}]}\n",
+		"port zero":      "propagation: {resolvers: [{name: a, address: \"1.1.1.1:0\"}]}\n",
+		"query timeout":  "propagation: {query_timeout: 20s}\n",
+		"timeout":        "propagation: {query_timeout: 3s, timeout: 2s}\n",
+		"concurrency":    "propagation: {concurrency: 100}\n",
+		"cache":          "propagation: {cache_ttl: 1h}\n",
+		"rate":           "propagation: {requests_per_minute: 1000}\n",
+		"unknown option": "propagation: {resolver: []}\n",
+	} {
+		if _, err := Parse([]byte(base+doc), key); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

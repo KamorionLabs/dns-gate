@@ -498,6 +498,59 @@ paths:
         "423": { $ref: "#/components/responses/Locked" }
         default: { $ref: "#/components/responses/Error" }
 
+  /api/v1/zones/{zone}/rrsets/{host}/{type}/propagation:
+    parameters:
+      - $ref: "#/components/parameters/Zone"
+      - $ref: "#/components/parameters/Host"
+      - $ref: "#/components/parameters/Type"
+      - $ref: "#/components/parameters/Team"
+    get:
+      tags: [rrsets]
+      operationId: checkPropagation
+      summary: DNS propagation of an RRset
+      description: |
+        Asks the authoritative name servers of the zone (its apex NS, without
+        recursion) and the public resolvers of `propagation.resolvers` for the
+        RRset, over UDP with EDNS0 and TCP when truncated, and compares each
+        answer with the RRset as read from the provider: `match`, `stale`
+        (other values, typically the previous content still cached), `missing`
+        (NXDOMAIN or NODATA while the RRset exists) or `error` (timeout,
+        SERVFAIL, REFUSED, a name server answering without authority). An
+        RRset that does not exist matches an empty answer, so a deletion can be
+        followed too. Alias RRsets (Route53) and EuroDNS APEX RRsets are
+        compared on the addresses of their target, as each resolver resolves
+        it.
+
+        Requires dns.read on the RRset, in a zone managed by the gate (never
+        an arbitrary name). Results are cached for `propagation.cache_ttl`
+        (default 10s) per RRset content; other checks are limited per caller
+        (`propagation.requests_per_minute`, 429). Public resolvers answer from
+        their cache until the TTL runs out: poll every few seconds, not in a
+        tight loop. No audit event is written.
+      parameters:
+        - name: expect
+          in: query
+          required: false
+          description: |
+            Content hash just written (the ETag of a PUT, quoted or not), or
+            `absent` after a deletion: `412 precondition` when the RRset of
+            the gate inventory differs.
+          schema: { type: string }
+      responses:
+        "200":
+          description: The answers of every server.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Propagation" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "412": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+        "501": { $ref: "#/components/responses/Error" }
+        "502": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+
   /api/v1/zones/{zone}/plan:
     parameters:
       - $ref: "#/components/parameters/Zone"
@@ -2116,6 +2169,58 @@ components:
         ttl: { type: integer, minimum: 1 }
         values: { type: array, minItems: 1, items: { type: string } }
         alias: { $ref: "#/components/schemas/Alias" }
+
+    Propagation:
+      type: object
+      required: [zone, host, type, name, query_type, expected, checked_at, cached, summary, answers]
+      properties:
+        zone: { type: string }
+        host: { type: string }
+        type: { type: string }
+        name: { type: string, description: "Absolute name asked, e.g. www.example.com." }
+        query_type: { type: string, description: "Type asked: the RRset type, A for a EuroDNS APEX RRset." }
+        expected:
+          type: object
+          required: [exists, values]
+          properties:
+            exists: { type: boolean, description: "False when the RRset does not exist (after a deletion)." }
+            hash: { type: string }
+            ttl: { type: integer }
+            values: { type: array, items: { type: string }, description: "Comparison form: sorted, names absolute and lowercase, TXT as raw content." }
+            alias_target: { type: string, description: "Target of an alias or APEX RRset, compared on its addresses." }
+        checked_at: { type: string, format: date-time }
+        cached: { type: boolean, description: "Served from the short cache of an identical check." }
+        summary:
+          type: object
+          required: [total, match, stale, missing, error, converged, max_ttl_left]
+          properties:
+            total: { type: integer }
+            match: { type: integer }
+            stale: { type: integer }
+            missing: { type: integer }
+            error: { type: integer }
+            converged: { type: boolean, description: "Every server that answered has the expected content." }
+            max_ttl_left: { type: integer, description: "Longest TTL left among the stale and missing answers, in seconds: when those caches expire at the latest." }
+        answers: { type: array, items: { $ref: "#/components/schemas/PropagationAnswer" } }
+
+    PropagationAnswer:
+      type: object
+      required: [kind, name, address, status, values, latency_ms]
+      properties:
+        kind: { type: string, enum: [authoritative, resolver] }
+        name: { type: string, description: "Name server host name, or resolver name." }
+        address: { type: string }
+        location: { type: string }
+        country: { type: string, description: "ISO 3166 code." }
+        region: { type: string }
+        status: { type: string, enum: [match, stale, missing, error] }
+        values: { type: array, items: { type: string } }
+        cnames: { type: array, items: { type: string }, description: "CNAME chain followed from the name." }
+        ttl_left: { type: integer, description: "Remaining TTL of the answer, or of a negative answer (SOA minimum), in seconds." }
+        rcode: { type: string }
+        latency_ms: { type: integer }
+        tcp: { type: boolean, description: "Answered over TCP after a truncated or failed UDP query." }
+        error: { type: string }
 
     RRsetChange:
       type: object

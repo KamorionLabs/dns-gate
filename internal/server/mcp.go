@@ -61,6 +61,9 @@ func (s *Server) newMCP() *mcpServer {
 			m.addProfileWriteTools(srv)
 		}
 	}
+	if s.cfg.Propagation != nil {
+		m.addPropagationTool(srv)
+	}
 	if s.cfg.Config.MCP.AllowWrites && s.cfg.Ops != nil {
 		m.addWriteTools(srv)
 	}

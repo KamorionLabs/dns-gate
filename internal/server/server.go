@@ -87,6 +87,10 @@ type Config struct {
 	SAMLGroups GroupLookup
 	Log        *slog.Logger
 	Now        func() time.Time
+
+	// Propagation checks the propagation of RRsets; nil builds the checker
+	// of the propagation section, unless disabled.
+	Propagation Propagator
 }
 
 // EuroDNSAPI is the EuroDNS-compatible API facade (internal/eurodnsapi).
@@ -152,6 +156,9 @@ func New(c Config) (*Server, error) {
 	}
 	if c.Plans == nil {
 		c.Plans = store.NewMemory()
+	}
+	if c.Propagation == nil {
+		c.Propagation = newPropagator(c)
 	}
 	if c.Policy == nil {
 		h, err := policy.NewHolder(c.Config)
