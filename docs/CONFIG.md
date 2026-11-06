@@ -119,7 +119,7 @@ Trusted OIDC token issuers, for bearer tokens (`Authorization: Bearer <JWT>`) an
 | `bound_claims` | `{}` | Claim globs every token of this issuer must match (`claim: pattern` or a list, any match). |
 | `subject_claim` | `sub` | Claim used as subject id (`<name>:<id>` in the audit log). |
 | `subject_template` | | Composite subject id instead of `subject_claim`, e.g. `"{{tid}}/{{oid}}"`; every referenced claim must be a non-empty string. |
-| `team_claim` | | Claim (string or list) whose values are added to the subject teams. |
+| `team_claim` | | Claim (string or list) whose values are added to the subject teams. Once a [`teams`](#teams) block exists, only declared teams (or members of a `team_from` family) are kept. |
 | `name_claim` | subject id | Claim shown as display name in the UI and the audit log. |
 | `category` | `pipeline` | `human` or `pipeline`, static. UI sessions are always `human`. |
 | `category_claim`, `category_map` | | Derive the category from a claim value, e.g. `idtyp` with `{app: pipeline, user: human}`; unmapped values fall back to `category`. |
@@ -318,7 +318,7 @@ Static credentials, declared in the file, for clients that only speak the EuroDN
 | `id` | Identifier, shown as `virtual-key:<id>`. |
 | `app_id` | Value expected in `X-APP-ID`. |
 | `key_sha256` | Lowercase hex SHA-256 of the key (`printf %s "$KEY" \| sha256sum`). Generate keys with `openssl rand -base64 32`. |
-| `roles`, `teams` | Granted directly (no binding). |
+| `roles`, `teams` | Granted directly (no binding). The teams must be declared once a [`teams`](#teams) block exists. |
 | `expires_at` | RFC 3339 expiry. Strongly recommended. |
 | `allowed_cidrs` | Source addresses allowed to use the key. |
 
@@ -333,14 +333,14 @@ A map of named roles. Deny by default: an action is allowed only if a rule of on
 | Field | Description |
 |---|---|
 | `rules[].zones` | Zone globs (`*` matches any sequence, `*` alone any managed zone, and for `dns.read` and `ui.read` any [discovered](#zone-discovery) zone). |
-| `rules[].actions` | `dns.read`, `dns.record.write`, `dns.record.adopt`, `dns.zone.admin`, `domain.read`, `ui.read`, `gate.apikey.manage` (manage the [API keys](API.md#api-keys) of the subject's teams whose role zones it covers). |
+| `rules[].actions` | `dns.read`, `dns.record.write`, `dns.record.adopt`, `dns.zone.admin`, `dns.ownership.approve`, `domain.read`, `ui.read`, `gate.apikey.manage` (manage the [API keys](API.md#api-keys) of the subject's teams whose role zones it covers). |
 | `rules[].records.hosts` | Host patterns relative to the zone, `@` is the apex. `*` matches one label, `**` one or more labels (a bare `**` matches every host, apex included). |
 | `rules[].records.types` | Record types, `*` for any. Omit `records` to cover the whole zone. |
 | `rebase_on_save` | On a full-zone PUT, ignore differences outside the role's scope instead of refusing them (stale zones sent by ACME clients). Granted if any role of the subject enables it. |
 | `ephemeral_ttl` | RRsets created by the role expire and are garbage-collected after this duration (ACME challenges); a write adding a value pushes the expiry back, never beyond the creation plus `limits.ephemeral_lifetime_factor` TTLs. Applies only if every write role of the subject is ephemeral. Required by the [ACME endpoints](ACME.md). |
 | `max_changes_per_request` | `0` = global default, `-1` = unlimited, otherwise a limit. The most permissive role of the subject wins. |
 
-`dns.record.write` and `dns.record.adopt` are further limited by ownership: the gate only modifies or deletes RRsets it created or adopted, owned by one of the subject's teams.
+`dns.record.write` and `dns.record.adopt` are further limited by ownership: the gate only modifies or deletes RRsets it created or adopted, owned by one of the subject's teams. `dns.ownership.approve` lets a subject adopt RRsets for a team it is not a member of and approve the [ownership transfers](#ownership) of the zone: give it to the people who arbitrate between teams.
 
 ## Groups
 
@@ -361,18 +361,66 @@ groups:
 
 With Entra ID, prefer **app roles** (`roles` claim) assigned to Entra groups. If you match Entra group object ids (`groups` claim), set `groupMembershipClaims: ApplicationGroup` on the gate app registration so only groups assigned to the application are emitted and tokens never hit the groups overage (more than 200 groups replaces the claim by a link the gate does not follow).
 
+## Teams
+
+A team owns RRsets: only its members may change or delete them. `teams` declares each team with the people and the pipelines that act for it, so that a team matches a project (the web shop with its developers and its deployment pipelines, the corporate sites with theirs):
+
+```yaml
+teams:
+  web:
+    description: Web shop, people and pipelines
+    members:
+      groups: [dns-web]
+      subjects:
+        - issuer: azure-devops
+          claims: {sub: ["sc://org/project/dns-gate-web-*"]}
+  corporate:
+    description: Corporate sites
+    members:
+      groups: [dns-corporate]
+
+bindings:
+  - role: web-records
+    team: web            # the members of web get web-records, acting for web
+  - role: corporate-records
+    team: corporate
+```
+
+| Field | Description |
+|---|---|
+| `description` | Free text, up to 500 characters. |
+| `members.groups` | Groups whose members belong to the team. |
+| `members.subjects` | Subject matchers (issuer and claim globs, as in bindings). |
+
+A binding that names a team **without** `groups` or `subjects` grants its role to the members of the team. A binding with its own `groups` or `subjects` binds those only (they act for the team without being listed as its members), as before; a team without members is only named by such bindings.
+
+**Strict references.** Once the file has a `teams` block (even `teams: {}`), every team named by a binding, a virtual key or a delegation (`allow.teams.names` without wildcard, and the fixed team of delegated bindings) must be declared, in the file or in the managed layer: a typo is refused instead of silently creating a new team. Teams derived from claims are accepted as members of their family: `team_from` declares the family `<prefix>*`, and the values of an issuer `team_claim` are kept only when declared or in a family. Without a `teams` block, the referenced teams are declared automatically and the gate logs a warning for each (`dns-gate --check` prints them): see [MIGRATION-0.x.md](MIGRATION-0.x.md#teams-block).
+
+**Several teams.** A subject collects the teams of its bindings in order (base bindings first, in file order). It writes for the first one, its **default team** (`default_team` of `GET /api/v1/me`), and may change the RRsets of all of them. On the gate API it can act for one of its teams only with the `X-DNS-Gate-Team` header or the `team` field of a plan (`403 not_team_member` when it is not a member); the EuroDNS-compatible API always uses the default team.
+
+`GET /api/v1/teams` lists the teams (declared, referenced, families, claim issuers, and owners found in the store that nothing declares), `GET /api/v1/teams/{team}` what a team owns. Teams can also be declared in the [managed layer](#managed-policy-editing-from-the-ui).
+
+## Ownership
+
+| Field | Default | Description |
+|---|---|---|
+| `ownership.tombstone_ttl` | `168h` | How long a deleted RRset stays reserved for the team that owned it: meanwhile only that team may create it again (a member of several teams re-creates it for that team) or adopt it, other teams go through a transfer (or a `dns.ownership.approve` holder adopts it for them). `0s` disables tombstones. RRsets of ephemeral roles (ACME challenges) leave none. |
+| `ownership.transfer_ttl` | `168h` | How long a transfer request waits for its approval (1h to 2160h). |
+
+**Transfers.** `POST /api/v1/zones/{zone}/transfers` asks to move RRsets of one team (owned, or reserved by a tombstone) to another; the caller needs `dns.record.write` or `dns.ownership.approve` on the zone and must be a member of one of the two teams unless it holds `dns.ownership.approve`. A member of the owner team, or a `dns.ownership.approve` holder, approves it, never the requester (who may withdraw it); the approval moves every RRset in one store transaction, under the zone lock, provided none changed since the request (owner, state, content hash in the store and upstream). `POST /api/v1/teams/{team}/rename` moves every RRset and tombstone of a team in every managed zone, for migrations: proposed by a `policy.propose` holder and approved by another `policy.approve` holder; change the bindings in a policy revision as well. Audit events: `gate.transfer.propose`, `gate.transfer.approve`, `gate.transfer.reject`, `gate.transfer.apply`, `gate.transfer.expire`. See [API.md](API.md#ownership-transfers).
+
 ## Bindings
 
 | Field | Description |
 |---|---|
 | `role` | Role granted. |
-| `team` | Owner team of the RRsets created through this binding. Required to write (or `team_from`). |
+| `team` | Owner team of the RRsets created through this binding. Required to write (or `team_from`). Must be [declared](#teams) once a `teams` block exists; without `groups` and `subjects`, the role goes to the members of the team. |
 | `team_from.claim`, `team_from.regex`, `team_from.prefix` | Derive the owner team from a claim of each subject instead of a fixed `team`, see below. Exclusive with `team`. |
 | `groups` | Groups whose members get the role. |
 | `subjects[].issuer` | Issuer name. |
 | `subjects[].claims` | Claim globs, all must match (at least one claim, typically `sub`). |
 
-A binding needs `groups`, `subjects` or both (a subject matching either is bound). A subject collects every matching binding (roles and teams, base bindings first in file order, then managed ones; the first team owns new RRsets). A valid token with no binding gets `403 no_binding`.
+A binding needs `groups`, `subjects` or both (a subject matching either is bound), or a declared team with members. A subject collects every matching binding (roles and teams, base bindings first in file order, then managed ones; the first team owns new RRsets). A valid token with no binding gets `403 no_binding`.
 
 ### Team derived from a claim
 
@@ -422,11 +470,12 @@ With Azure DevOps, the glob means that anyone allowed to **create a service conn
 The policy has two layers, merged at evaluation:
 
 - **base**: this file (GitOps). Issuers, UI, store, protected records, `policy.bounds` and every `policy.*` grant live only here.
-- **managed**: a document of zones, groups, roles, bindings and virtual keys stored as immutable **revisions** in the store and edited from the UI (or the API).
+- **managed**: a document of zones, teams, groups, roles, bindings and virtual keys stored as immutable **revisions** in the store and edited from the UI (or the API).
 
 Rules of the managed layer:
 
-- a managed role or group cannot reuse a base name;
+- a managed role, group or team cannot reuse a base name;
+- managed teams follow the revision cycle like the rest of the document; a proposal without a `teams` field keeps the teams of the active revision (`"teams": {}` removes them), and the impact analysis reports declared, removed and changed teams;
 - managed rules cannot grant `policy.*` actions and must stay within `policy.bounds` (zone globs, actions); a managed binding may reuse a base role only if that role also stays within the bounds;
 - protected records still win over everything;
 - managed `zones` are brought under management in addition to the base `zones`: each must match `policy.bounds.zones` and, when it is not managed yet, exist in a provider account ([zone discovery](#zone-discovery) must be enabled); a zone already managed by the active revision is not checked again, so a domain removed from the account does not block unrelated changes;
@@ -560,7 +609,7 @@ The limits are checked when an object is written and again on every later revisi
 
 Adoption brings RRsets created outside the gate (foreign) under the ownership of a team, so that the gate can then manage them. It requires `dns.record.adopt` on each RRset and never applies to protected or server-managed (SOA, locked) records.
 
-1. `POST /api/v1/zones/{zone}/adopt/preview` with a selection (`rrsets`, or `hosts` globs and `types`, plus an optional `owner` team): returns the candidates, whether each is adoptable (or why not: `protected`, `owned_by_other_team`, `already_owned`, `forbidden`, `not_found`, the read-only reason of the RRset such as `server_managed` or `relative_target`, or `invalid` when the provider would refuse its content) and a `preview_token` bound to the exact upstream content.
+1. `POST /api/v1/zones/{zone}/adopt/preview` with a selection (`rrsets`, or `hosts` globs and `types`, plus an optional `owner` team: one of the caller's teams, or any team for a holder of `dns.ownership.approve` on the zone): returns the candidates, whether each is adoptable (or why not: `protected`, `owned_by_other_team`, `reserved_for_other_team` (deleted recently by another team, see [tombstones](#ownership)), `already_owned`, `forbidden`, `not_found`, the read-only reason of the RRset such as `server_managed` or `relative_target`, or `invalid` when the provider would refuse its content) and a `preview_token` bound to the exact upstream content.
 2. `POST /api/v1/zones/{zone}/adopt` with the chosen `rrsets`, the `preview_token` and a mandatory `comment`. All or nothing: if any RRset changed since the preview or is no longer adoptable, nothing is adopted and the answer is `409 adopt_conflict`.
 
 Both are mutations for CSRF (cookie sessions) and the apply requires the same recent authentication as policy changes for humans.
@@ -746,6 +795,8 @@ Validation of the response posted to `/auth/saml/acs`: XML signature of the resp
 | `GET /api/v1/connect/claude-desktop.mcpb` | Claude Desktop extension of the gate (`ui.read`), when MCP and the UI login are enabled, see [Claude Desktop extension](#claude-desktop-extension). |
 | `/api/v1/policy`, `/api/v1/policy/revisions[/{id}[/approve\|reject\|activate\|rollback\|export]]`, `/api/v1/policy/explain`, `/api/v1/policy/who-can`, `/api/v1/policy/virtual-keys/generate` | Policy API, see `internal/uiapi/policy.go`. |
 | `/api/v1/policy/delegated[/roles\|bindings/{name}]` | [Delegation API](#delegation-api) (`GET`, `PUT`, `DELETE`). |
+| `GET /api/v1/teams[/{team}]`, `POST /api/v1/teams/{team}/rename` | [Teams](#teams) and team renames. |
+| `POST /api/v1/zones/{zone}/transfers`, `GET /api/v1/transfers[/{id}]`, `POST /api/v1/transfers/{id}/approve\|reject` | [Ownership transfers](#ownership). |
 | `/auth/login`, `/auth/callback`, `/auth/logout` | UI login (`/auth/callback` with OIDC only). |
 | `POST /auth/saml/acs`, `GET /auth/saml/metadata` | SAML assertion consumer service and SP metadata, with `ui.saml`. |
 | `POST /api/v1/tokens` | Gate token for the UI session, see [Gate-issued tokens](#gate-issued-tokens). |

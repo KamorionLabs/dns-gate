@@ -81,3 +81,48 @@ names from the time the project was called eurodns-gate (`EURODNS_GATE_*`) when 
   now written absolute (`target.example.net.`) instead of being refused; a single label
   (`mail`) is still refused. Stored values are never rewritten.
 - Adopting a SOA or locked RRset returns `403 forbidden` instead of `404 not_found`.
+
+## Teams block
+
+Teams used to be plain strings in `bindings[].team`, `virtual_keys[].teams`,
+issuer `team_claim` and delegations. They are now declared in a
+[`teams` block](CONFIG.md#teams), with their members. The migration takes one minor
+version:
+
+- **A file without `teams` keeps working unchanged.** Every team it names is
+  declared automatically, and the gate logs one warning per team at startup
+  (`configuration accepted with a warning`; `dns-gate --check` prints them).
+  Bindings, ownership and the audit behave as before. `GET /api/v1/teams` lists these
+  teams as `auto`, and the teams found in the store that nothing names as `store`.
+- **Adding a `teams` block makes references strict**: every team named by a binding,
+  a virtual key, a delegation or the managed layer must be declared there (or in the
+  managed layer), otherwise the file or the revision is refused. Values of an issuer
+  `team_claim` are kept only for declared teams and `team_from` families. Declare
+  every team the warnings listed, plus the store owners `GET /api/v1/teams` shows as
+  `store`, before adding the block; or rename them with
+  `POST /api/v1/teams/{team}/rename` (two policy administrators).
+- A later version will refuse undeclared teams even without the block.
+
+To declare the teams of an existing file, copy the team names from the warnings:
+
+```yaml
+teams:
+  web: {description: Web shop}
+  ops: {description: Operations}
+```
+
+Bindings keep their `groups` and `subjects`. Moving the people and pipelines of a
+team into `teams.<name>.members` and removing them from the bindings (a binding with
+a team and no groups or subjects applies to the team members) is optional.
+
+Other changes of the same version:
+
+- Adopting RRsets for another team than one's own (`owner` of the adopt endpoints and
+  of the EuroDNS adopt extension) requires the new action `dns.ownership.approve` on
+  the zone; it was accepted from anyone allowed to adopt.
+- A deleted RRset stays reserved for its team for `ownership.tombstone_ttl` (7 days by
+  default): other teams can no longer re-create it at once (`403 not_owner`), they ask
+  for a transfer. Set `ownership.tombstone_ttl: 0s` to keep the previous behaviour.
+- SQL stores get migration `0004` (tables `ownership_tombstone` and
+  `ownership_transfer`, column `rrset_plan.team`), applied at startup. DynamoDB needs
+  no change (new `TOMB#` and `TR#` items, the existing `ttl` attribute).

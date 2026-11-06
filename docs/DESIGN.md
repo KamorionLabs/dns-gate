@@ -270,7 +270,8 @@ An ownership entry (`store.Ownership`):
 
 | Situation | Result | Reason code / HTTP |
 |---|---|---|
-| Create an RRset that does not exist upstream | allowed if RBAC allows; claim written for the caller's team (`Authorizer.OwnerTeam`) | — |
+| Create an RRset that does not exist upstream | allowed if RBAC allows; claim written for the caller's team (`Authorizer.OwnerTeam`, the default team or the one selected with `X-DNS-Gate-Team`) | — |
+| Create an RRset deleted less than `ownership.tombstone_ttl` ago by a team the caller is not a member of | refused, the RRset is reserved for that team (tombstone); a transfer moves it | `not_owner` / 403 |
 | Create/modify an RRset that exists upstream but has no ownership entry | refused, never mixed with foreign records | `foreign_rrset` / 409 |
 | Modify/delete an RRset owned by another team | refused | `not_owner` / 403 |
 | Modify/delete an owned RRset whose upstream content no longer matches `ContentHash` | refused, entry marked `tainted` | `tainted` / 409 |
@@ -293,9 +294,34 @@ Records that existed before the gate are foreign and read-only through the gate.
 `POST /.well-known/dns-gate/zones/{domain}/adopt` (action `dns.record.adopt`,
 admin role) creates ownership entries for listed RRsets, with their current content
 hash and `Adopted = true`. Adopting an RRset already owned by the caller's team is
-a no-op. In gate mode, `terraform import` of an `eurodns_record_set` calls adopt.
+a no-op. The owner is one of the caller's teams; another team requires
+`dns.ownership.approve` on the zone, as does adopting an RRset reserved for another
+team by a tombstone. In gate mode, `terraform import` of an `eurodns_record_set` calls adopt.
 Bulk adoption with preview, Terraform export and onboarding of whole zones are
 described in section 16.
+
+### 6.3.1 Teams, tombstones and transfers
+
+Teams are declared in the `teams` block (base file or managed layer) with their
+members; a binding naming a team without groups or subjects grants its role to the
+members. Once the block exists, references to undeclared teams are refused; before,
+they are declared automatically with a warning (migration).
+
+Deleting an owned RRset (gate write, or a pending delete settled by the reconciler)
+writes a tombstone (`ZONE#<zone>`/`TOMB#<host>#<type>` in DynamoDB, table
+`ownership_tombstone` in SQL) with the team, the deleter and an expiry. Until it
+expires, only that team may create or adopt the RRset again; ephemeral RRsets leave
+no tombstone.
+
+A transfer request lists RRsets of one team (owned or tombstoned) and a target team,
+with their content hash. The approval, by a member of the owner team or a holder of
+`dns.ownership.approve` on the zone and never by the requester, takes the zone lock,
+reads the zone, checks that every entry still has the team, the state and the
+content hash of the request (store and upstream), then changes them all in one store
+transaction (`Store.Reassign`: SQL transaction, DynamoDB `TransactWriteItems` with a
+version or team condition per item, at most 100 items). A team rename does the same
+for every RRset and tombstone of a team, zone by zone, approved by a second policy
+approver.
 
 ### 6.4 Rebase on full-zone PUT
 
