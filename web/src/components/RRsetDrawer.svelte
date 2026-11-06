@@ -17,6 +17,7 @@
   import Icon from './Icon.svelte';
   import { teamFromText, teamLabel } from '../lib/team';
   import HclBlock from './HclBlock.svelte';
+  import PropagationPanel from './PropagationPanel.svelte';
   import { readOnlyLabel, writeAction } from '../lib/rights';
   import { isForward, modeLabel, typeLabel } from '../lib/forwards';
   import type { StagedKind } from '../lib/staging';
@@ -215,6 +216,13 @@
           <div><span class="eyebrow">Last request</span><CopyText text={rr.last_request_id} label="request id" /></div>
         {/if}
       </section>
+
+      {#if !unmanaged}
+        <section>
+          <h3 class="eyebrow">Propagation</h3>
+          <PropagationPanel {zone} host={rr.host} type={rr.type} />
+        </section>
+      {/if}
 
       {#if rr.created_by || rr.updated_by}
         <section>

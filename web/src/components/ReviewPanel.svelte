@@ -11,6 +11,7 @@
   import CopyText from './CopyText.svelte';
   import Seal from './Seal.svelte';
   import Icon from './Icon.svelte';
+  import PropagationPanel from './PropagationPanel.svelte';
 
   let {
     zone,
@@ -40,6 +41,7 @@
   let refusal = $state<{ reason?: string; message?: string; stale: boolean } | null>(null);
   let dropped = $state<StagedChange[]>([]);
   let reloading = $state(false);
+  let propIndex = $state(0);
 
   // With several teams, the team the changes are made for (new record sets go to it).
   let chosen = $state<string | undefined>(undefined);
@@ -140,6 +142,22 @@
         {#each result.changes as c, i (i)}<div class="diff"><ChangeDiff change={shownPlanChange(c)} {zone} /></div>{/each}
       </div>
       <p class="dim small">Resolvers may keep the old answer for up to its previous TTL.</p>
+      {#if result.changes.length}
+        {@const c = result.changes[Math.min(propIndex, result.changes.length - 1)]}
+        <section class="prop">
+          <h3 class="eyebrow">Propagation</h3>
+          {#if result.changes.length > 1}
+            <div class="pick" role="group" aria-label="Record set to check">
+              {#each result.changes as p, i (i)}
+                <button class="btn small" class:on={propIndex === i} type="button" aria-pressed={propIndex === i} onclick={() => (propIndex = i)}>
+                  <span class="mono">{p.host} {p.type}</span>
+                </button>
+              {/each}
+            </div>
+          {/if}
+          {#if c}<PropagationPanel {zone} host={c.host} type={c.type} auto />{/if}
+        </section>
+      {/if}
       <button class="btn" type="button" onclick={onclose}>Close</button>
     </section>
   {:else}
@@ -419,5 +437,27 @@
   .big {
     font-size: var(--t-lead);
     font-weight: 600;
+  }
+  .prop {
+    display: grid;
+    gap: var(--s2);
+    padding-top: var(--s2);
+    border-top: 1px solid var(--rule-soft);
+  }
+  .prop h3 {
+    font-weight: 500;
+  }
+  .pick {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s1);
+  }
+  .pick .btn.on {
+    border-color: var(--seal-ink);
+    background: var(--seal-ink-wash);
+    color: var(--seal-ink);
+  }
+  .pick .mono {
+    font-size: 12px;
   }
 </style>

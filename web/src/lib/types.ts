@@ -727,3 +727,49 @@ export interface TransferQuery {
   limit?: number;
   cursor?: string;
 }
+
+// DNS propagation (GET /api/v1/zones/{zone}/rrsets/{host}/{type}/propagation, internal/propagation)
+
+export type PropagationStatus = 'match' | 'stale' | 'missing' | 'error';
+
+export interface PropagationAnswer {
+  kind: 'authoritative' | 'resolver';
+  name: string;
+  address: string;
+  location?: string;
+  country?: string;
+  region?: string;
+  status: PropagationStatus;
+  values: string[];
+  cnames?: string[];
+  ttl_left?: number;
+  rcode?: string;
+  latency_ms: number;
+  tcp?: boolean;
+  error?: string;
+}
+
+export interface PropagationSummary {
+  total: number;
+  match: number;
+  stale: number;
+  missing: number;
+  error: number;
+  /** Every server that answered has the expected content. */
+  converged: boolean;
+  /** Longest TTL left among the stale and missing answers, in seconds. */
+  max_ttl_left: number;
+}
+
+export interface Propagation {
+  zone: string;
+  host: string;
+  type: string;
+  name: string;
+  query_type: string;
+  expected: { exists: boolean; hash?: string; ttl?: number; values: string[]; alias_target?: string };
+  checked_at: string;
+  cached: boolean;
+  summary: PropagationSummary;
+  answers: PropagationAnswer[];
+}

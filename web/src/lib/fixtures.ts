@@ -48,6 +48,7 @@ import { toYAML } from './yaml';
 import { claimMatch, hostMatch, zoneMatch } from './glob';
 import { rbacAllows } from './rights';
 import { URLFWD, isForward, urlError } from './forwards';
+import { fixturePropagation } from './propagationFixture';
 
 const now = Date.now();
 const ago = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
@@ -1869,6 +1870,8 @@ export const fixtureBackend = {
   adoptPreview: async (zone: string, sel: AdoptSelection) => delay(adoptPreview(zone, sel), 450),
   adopt: async (zone: string, req: AdoptApply) => delay(adoptApply(zone, req), 500),
   terraform: async (zone: string, q: TerraformQuery) => delay(terraform(zone, q), 200),
+  propagation: async (zone: string, host: string, type: string) =>
+    delay(fixturePropagation(zone, host, type, findInv(zone)?.rrsets.find((r) => r.host === host && r.type === type)), 700),
   issueToken: async () => {
     const b64 = (o: object) => btoa(JSON.stringify(o)).replace(/=+$/, '').replaceAll('+', '-').replaceAll('/', '_');
     const exp = Math.floor(Date.now() / 1000) + 3600;

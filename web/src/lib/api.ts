@@ -17,6 +17,7 @@ import type {
   IssuedToken,
   Me,
   PlanResult,
+  Propagation,
   ProposeRequest,
   RevisionDetail,
   RevisionPage,
@@ -59,6 +60,7 @@ export interface Backend {
   terraform(zone: string, q: TerraformQuery): Promise<string>;
   plan(zone: string, changes: RRsetChange[], team?: string): Promise<PlanResult>;
   apply(zone: string, planId: string, team?: string): Promise<PlanResult>;
+  propagation(zone: string, host: string, type: string, expect?: string): Promise<Propagation>;
   issueToken(): Promise<IssuedToken>;
   teams(): Promise<TeamList>;
   team(name: string): Promise<TeamDetail>;
@@ -153,6 +155,11 @@ const http: Backend = {
     ),
   plan: writes.plan,
   apply: writes.apply,
+  propagation: (zone, host, type, expect) =>
+    request(
+      'GET',
+      `/api/v1/zones/${encodeURIComponent(zone)}/rrsets/${encodeURIComponent(host)}/${encodeURIComponent(type)}/propagation` + query({ expect }),
+    ),
   issueToken: () => issueToken(request),
   ...teamCalls,
   ...forwardCalls,
