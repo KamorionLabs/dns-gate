@@ -108,7 +108,7 @@ version:
 - **Check the active managed revision** before deploying a base file with a new
   `teams` block: a managed binding or key naming an undeclared team makes the active
   revision invalid against the new base, and the gate then serves the base policy
-  only (managed grants missing: error logs, `/healthz` and `/readyz` say so). Run
+  only (managed grants missing: error logs and `load_error` of `GET /api/v1/policy` give the reason, `/healthz` and `/readyz` say that the managed policy is not served). Run
   `dns-gate --check` with the new file and access to the store: it validates the
   active revision and fails when it would be refused. Propose a revision that
   declares the teams first, or declare them in the file.

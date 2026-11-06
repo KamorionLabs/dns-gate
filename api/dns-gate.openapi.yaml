@@ -896,7 +896,10 @@ paths:
       tags: [policy]
       operationId: getEffectivePolicy
       summary: Effective policy (base file and active managed revision)
-      description: Requires policy.read.
+      description: |
+        Requires policy.read. `load_error` tells why this replica does not
+        serve the active managed revision (the health probes only say that it
+        does not).
       responses:
         "200":
           description: Effective policy.

@@ -374,6 +374,9 @@ type EffectivePolicy struct {
 	Active   *RevisionSummary `json:"active,omitempty"`  // nil when no managed revision is active
 	Managed  *PolicyDocument  `json:"managed,omitempty"` // document of the active revision
 	Me       MyPolicyRights   `json:"me"`
+	// LoadError tells why this replica does not serve the active managed
+	// revision (the last policy refresh failed); empty when it does.
+	LoadError string `json:"load_error,omitempty"`
 }
 
 // Approval is one decision on a revision.

@@ -262,8 +262,14 @@ func TestHealthReportsAnUnloadedManagedPolicy(t *testing.T) {
 	for _, path := range []string{"/healthz", "/readyz"} {
 		r := e.do(t, "GET", path, "", "", nil)
 		b, _ := io.ReadAll(r.Body)
-		if r.StatusCode != 200 || !strings.Contains(string(b), "rev-broken") {
-			t.Fatalf("%s: %d %q", path, r.StatusCode, b)
+		if r.StatusCode != 200 || !strings.Contains(string(b), "managed policy not served") || strings.Contains(string(b), "rev-broken") || strings.Contains(string(b), "ghost") {
+			t.Fatalf("%s must report the problem without its details: %d %q", path, r.StatusCode, b)
 		}
+	}
+	r := e.do(t, "GET", "/api/v1/policy", e.human("alice", time.Minute, "Gate.PolicyAdmin"), "", nil)
+	var eff uiapi.EffectivePolicy
+	_ = json.NewDecoder(r.Body).Decode(&eff)
+	if r.StatusCode != 200 || !strings.Contains(eff.LoadError, "rev-broken") {
+		t.Fatalf("policy.read holders get the details: %d %q", r.StatusCode, eff.LoadError)
 	}
 }

@@ -233,7 +233,7 @@ func (s *Server) policyEffective(w http.ResponseWriter, r *http.Request, subj *i
 	if e := s.requireMeta(subj, uiapi.ActionPolicyRead); e != nil {
 		return e
 	}
-	out := uiapi.EffectivePolicy{Settings: s.settings(), Base: s.baseLayer(), Me: s.rights(subj)}
+	out := uiapi.EffectivePolicy{Settings: s.settings(), Base: s.baseLayer(), Me: s.rights(subj), LoadError: s.cfg.Policy.LoadError()}
 	rev, err := s.cfg.PolicyStore.ActiveRevision(r.Context())
 	switch {
 	case err == nil:
