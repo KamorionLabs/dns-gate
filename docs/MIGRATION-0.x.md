@@ -159,3 +159,24 @@ Other changes of the same version:
   keys, 0.7.0), `0004` is applied then, migrations being recorded one by one. The DynamoDB
   table needs no change (new `TOMB#` and `TR#` items, the existing `ttl` attribute);
   the gate role needs `dynamodb:Scan` on it for team renames.
+
+## URL forwards (0.9)
+
+URL forwards (EuroDNS HTTP redirects) become owned objects, written with the new
+action `dns.forward.write` ([CONFIG.md](CONFIG.md#roles), [API.md](API.md#url-forwards)).
+
+- Inventories, plans, adoption previews, the audit and the MCP tools list forwards
+  as RRsets of type `URLFWD` (no TTL nor values, a `forward` object). Clients that
+  list every RRset of a EuroDNS zone see them; the zone summary counts them.
+- Through the EuroDNS-compatible full-zone PUT, a forward change used to require
+  `dns.zone.admin` and ignored ownership. It is now a forward write: new forwards
+  are owned by the caller's team, owned forwards follow the ownership rules
+  (`403 not_owner` for another team), and `dns.zone.admin` still changes or deletes
+  the forwards the gate does not own, which stay unowned. Clients that send the
+  forwards back unchanged are not affected; mail forwards and the other zone
+  settings still require `dns.zone.admin`.
+- Grant `dns.forward.write` to the roles that manage redirects (add it to
+  `policy.bounds.actions` for managed roles and to delegations where needed), and
+  adopt existing forwards with `dns.record.adopt` (type `URLFWD`).
+- The HTTPS status of forwards is read from the EuroDNS subscriptions; with an API
+  key not allowed to list them it is `unknown`.
