@@ -350,8 +350,12 @@ type Issuer struct {
 	Audiences   []string              `yaml:"audiences"`
 	BoundClaims map[string]StringList `yaml:"bound_claims"`
 	TeamClaim   string                `yaml:"team_claim"`
-	NameClaim   string                `yaml:"name_claim"` // display name claim (default: the subject)
-	Category    string                `yaml:"category"`   // human | pipeline (default pipeline)
+	// TeamClaimPrefix is prepended to every team_claim value: the teams of
+	// the claim form the family <prefix>* of this issuer. Required once a
+	// teams block exists.
+	TeamClaimPrefix string `yaml:"team_claim_prefix"`
+	NameClaim       string `yaml:"name_claim"` // display name claim (default: the subject)
+	Category        string `yaml:"category"`   // human | pipeline (default pipeline)
 
 	// SubjectClaim is the claim used as subject id (default "sub").
 	// SubjectTemplate builds a composite id instead, e.g. "{{tid}}/{{oid}}".
@@ -868,6 +872,9 @@ func (c *Config) Validate() error {
 				add("%s.subject_template: %v", at, err)
 			}
 		}
+		if is.TeamClaimPrefix != "" && (is.TeamClaim == "" || !teamPrefixRe.MatchString(is.TeamClaimPrefix)) {
+			add("%s.team_claim_prefix: %q needs team_claim and up to 32 characters [a-z0-9._-], starting with a letter or digit", at, is.TeamClaimPrefix)
+		}
 		if len(is.CategoryMap) > 0 && is.CategoryClaim == "" {
 			add("%s.category_map: category_claim required", at)
 		}
@@ -1203,21 +1210,63 @@ func (c *Config) teamRefChecker(add func(string, ...any)) func(at, team string) 
 	}
 }
 
-// TeamFamilies returns the prefixes of the teams derived from claims:
-// bindings[].team_from and policy.delegations[].allow.teams.from_subject.
-func (c *Config) TeamFamilies() []string {
-	var out []string
-	for _, b := range c.Bindings {
-		if b.TeamFrom != nil {
-			out = append(out, b.TeamFrom.Prefix)
+// TeamFamily is a source of teams derived from claims: Key identifies the
+// derivation (the same team_from used by several bindings is one family),
+// Prefix starts every team it derives.
+type TeamFamily struct {
+	Key    string
+	Prefix string
+	At     string
+}
+
+// TeamFromKey identifies a team_from derivation.
+func TeamFromKey(claim, regex, prefix string) string {
+	return "team_from " + claim + " ~ " + regex + " prefix " + prefix
+}
+
+// TeamFamilyList returns the families of the file: bindings[].team_from,
+// policy.delegations[].allow.teams.from_subject and issuers[].team_claim.
+func (c *Config) TeamFamilyList() []TeamFamily {
+	var out []TeamFamily
+	for i, b := range c.Bindings {
+		if t := b.TeamFrom; t != nil {
+			out = append(out, TeamFamily{TeamFromKey(t.Claim, t.Regex, t.Prefix), t.Prefix, fmt.Sprintf("bindings[%d].team_from", i)})
 		}
 	}
-	for _, d := range c.Policy.Delegations {
-		if fs := d.Allow.Teams.FromSubject; fs != nil {
-			out = append(out, fs.Prefix)
+	for i, d := range c.Policy.Delegations {
+		if t := d.Allow.Teams.FromSubject; t != nil {
+			out = append(out, TeamFamily{TeamFromKey(t.Claim, t.Regex, t.Prefix), t.Prefix, fmt.Sprintf("policy.delegations[%d].allow.teams.from_subject", i)})
+		}
+	}
+	for _, is := range c.AllIssuers() {
+		if is.TeamClaim != "" {
+			out = append(out, TeamFamily{"team_claim of issuer " + is.Name, is.TeamClaimPrefix, "issuer " + is.Name + " team_claim_prefix"})
 		}
 	}
 	return out
+}
+
+// TeamFamilies returns the prefixes of the families of TeamFamilyList.
+func (c *Config) TeamFamilies() []string {
+	var out []string
+	for _, f := range c.TeamFamilyList() {
+		out = append(out, f.Prefix)
+	}
+	return out
+}
+
+// OverlappingFamilies reports two families of different derivations whose
+// prefixes overlap (one starts with the other): a claim value could then
+// produce a team of the other family.
+func OverlappingFamilies(fams []TeamFamily) (TeamFamily, TeamFamily, bool) {
+	for i, a := range fams {
+		for _, b := range fams[i+1:] {
+			if a.Key != b.Key && (strings.HasPrefix(a.Prefix, b.Prefix) || strings.HasPrefix(b.Prefix, a.Prefix)) {
+				return a, b, true
+			}
+		}
+	}
+	return TeamFamily{}, TeamFamily{}, false
 }
 
 // InTeamFamily reports whether a team name could be derived by a family
@@ -1248,6 +1297,14 @@ func (c *Config) validateTeamFamilies(add func(string, ...any)) {
 		if fs := d.Allow.Teams.FromSubject; fs != nil && fs.Prefix == "" {
 			add("policy.delegations[%d].allow.teams.from_subject.prefix: required once a teams block exists (a derived team must not take the name of a declared team)", i)
 		}
+	}
+	for _, is := range c.AllIssuers() {
+		if is.TeamClaim != "" && is.TeamClaimPrefix == "" {
+			add("issuer %s: team_claim_prefix is required with team_claim once a teams block exists (the teams of a claim form their own family)", is.Name)
+		}
+	}
+	if a, b, ok := OverlappingFamilies(c.TeamFamilyList()); ok {
+		add("%s: prefix %q overlaps the prefix %q of %s: families of teams derived from claims must not overlap", a.At, a.Prefix, b.Prefix, b.At)
 	}
 	fams := c.TeamFamilies()
 	check := func(at, team string) {

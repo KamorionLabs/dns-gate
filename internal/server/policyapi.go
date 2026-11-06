@@ -316,10 +316,20 @@ func (s *Server) detail(ctx context.Context, rev *store.PolicyRevision, doc uiap
 		RevisionSummary: summary(rev),
 		Document:        doc,
 		DiffYAML:        policy.UnifiedDiff(a, b, parentName, "revision "+rev.ID),
-		Impact:          policy.Impact(h.CompileUnchecked(parentDoc, rev.ParentID), h.CompileUnchecked(&doc, rev.ID), s.ownedCounter(ctx)),
+		Impact:          s.impact(ctx, h.CompileUnchecked(parentDoc, rev.ParentID), h.CompileUnchecked(&doc, rev.ID)),
 		Stale:           (rev.Status == uiapi.RevisionProposed || rev.Status == uiapi.RevisionApproved) && rev.ParentID != activeID,
 	}
 	return out, nil
+}
+
+// impact is the impact analysis of a revision, with the store teams a new
+// family would take over.
+func (s *Server) impact(ctx context.Context, prev, next *policy.Snapshot) []uiapi.ImpactItem {
+	all := map[string]bool{}
+	for _, z := range s.pol.ManagedZones() {
+		all[z] = true
+	}
+	return append(policy.FamilyTakeovers(prev, next, s.storeOwners(ctx, all)), policy.Impact(prev, next, s.ownedCounter(ctx))...)
 }
 
 func (s *Server) ownedCounter(ctx context.Context) policy.OwnedCounter {

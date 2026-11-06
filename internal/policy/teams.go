@@ -1,6 +1,7 @@
 package policy
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 
@@ -75,18 +76,50 @@ func (s *Snapshot) familyOf(name string) *uiapi.TeamFrom {
 	for _, name := range s.delegationNames {
 		consider(uiTeamFrom(s.delegations[name].Allow.Teams.FromSubject))
 	}
+	for _, is := range s.issuers {
+		if is.TeamClaim != "" {
+			consider(&uiapi.TeamFrom{Claim: is.TeamClaim, Prefix: is.TeamClaimPrefix})
+		}
+	}
 	return best
 }
 
 // ClaimTeamAllowed reports whether a team taken from the team_claim of an
-// issuer is kept: always before the teams block exists; afterwards only a
-// member of a family that is not a declared team, so that a claim never
-// makes its holder a member of a declared team.
-func (s *Snapshot) ClaimTeamAllowed(name string) bool {
+// issuer (its team_claim_prefix already prepended) is kept: always before the
+// teams block exists; afterwards only a valid team name in the family of
+// that issuer, never a declared team.
+func (s *Snapshot) ClaimTeamAllowed(issuer, name string) bool {
 	if !s.strict {
 		return true
 	}
-	return nameRe.MatchString(name) && s.teams[name] == nil && s.familyOf(name) != nil
+	is, ok := s.issuers[issuer]
+	if !ok || is.TeamClaimPrefix == "" || len(name) <= len(is.TeamClaimPrefix) || !strings.HasPrefix(name, is.TeamClaimPrefix) {
+		return false
+	}
+	return nameRe.MatchString(name) && s.teams[name] == nil
+}
+
+// FamilyTakeovers warns when a family of next derives the name of a team
+// that owns RRsets (owners, from the store) and that no family, declaration
+// or binding of prev covered: the identities of the new family would get
+// write access to those RRsets.
+func FamilyTakeovers(prev, next *Snapshot, owners []string) []uiapi.ImpactItem {
+	var out []uiapi.ImpactItem
+	refs := prev.referencedTeams()
+	sorted := append([]string(nil), owners...)
+	sort.Strings(sorted)
+	for _, o := range sorted {
+		tf := next.familyOf(o)
+		if tf == nil || prev.familyOf(o) != nil || prev.teams[o] != nil || next.teams[o] != nil {
+			continue
+		}
+		if _, named := refs[o]; named {
+			continue
+		}
+		out = append(out, uiapi.ImpactItem{Kind: "warning", Who: "team " + o,
+			Message: fmt.Sprintf("team %s owns RRsets but nothing named it: the new family %s* would take them over (rename the team first, or choose another prefix)", o, tf.Prefix)})
+	}
+	return out
 }
 
 // referencedTeams returns the fixed teams named by bindings and virtual
@@ -183,11 +216,8 @@ func (s *Snapshot) TeamInfos(storeOwners []string, withMembers bool) []uiapi.Tea
 	}
 	for _, name := range sortedKeys(s.issuers) {
 		if is := s.issuers[name]; is.TeamClaim != "" {
-			ti := uiapi.TeamInfo{Name: "*", Kind: uiapi.TeamKindClaim, Issuer: name, Roles: []string{},
+			ti := uiapi.TeamInfo{Name: is.TeamClaimPrefix + "*", Kind: uiapi.TeamKindClaim, Issuer: name, Roles: []string{},
 				Description: "teams of claim " + is.TeamClaim + " of issuer " + name}
-			if s.strict {
-				ti.Warning = "only members of a team_from family are kept, never a declared team"
-			}
 			out = append(out, ti)
 		}
 	}

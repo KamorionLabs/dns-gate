@@ -43,6 +43,9 @@ type UISAML struct {
 	Attributes map[string]string `yaml:"attributes"`
 	// TeamClaim derives teams from a claim, as for OIDC issuers.
 	TeamClaim string `yaml:"team_claim"`
+	// TeamClaimPrefix is prepended to every team_claim value, as for OIDC
+	// issuers.
+	TeamClaimPrefix string `yaml:"team_claim_prefix"`
 	// GroupsFromIdentityStore resolves the "groups" claim server-side when
 	// the IdP does not send group membership.
 	GroupsFromIdentityStore *IdentityStoreGroups `yaml:"groups_from_identity_store"`
@@ -105,7 +108,7 @@ func (c *Config) AllIssuers() []Issuer {
 		}
 		out = append(out, Issuer{
 			Name: s.Issuer, Category: "human", SubjectClaim: "sub", NameClaim: "name",
-			TeamClaim: s.TeamClaim, SAML: true,
+			TeamClaim: s.TeamClaim, TeamClaimPrefix: s.TeamClaimPrefix, SAML: true,
 		})
 	}
 	return out

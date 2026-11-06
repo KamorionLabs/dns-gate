@@ -265,10 +265,21 @@ func validateManagedFamilies(v *verrs, c *config.Config, d uiapi.PolicyDocument,
 		return
 	}
 	fams := c.TeamFamilies()
-	for _, b := range d.Bindings {
-		if b.TeamFrom != nil && b.TeamFrom.Prefix != "" {
-			fams = append(fams, b.TeamFrom.Prefix)
+	known := c.TeamFamilyList()
+	for i, b := range d.Bindings {
+		t := b.TeamFrom
+		if t == nil || t.Prefix == "" {
+			continue
 		}
+		fams = append(fams, t.Prefix)
+		f := config.TeamFamily{Key: config.TeamFromKey(t.Claim, t.Regex, t.Prefix), Prefix: t.Prefix, At: fmt.Sprintf("bindings[%d].team_from", i)}
+		for _, o := range known {
+			if _, _, overlap := config.OverlappingFamilies([]config.TeamFamily{o, f}); overlap {
+				v.add(f.At, "prefix %q overlaps the prefix %q of %s: families of teams derived from claims must not overlap", f.Prefix, o.Prefix, o.At)
+				break
+			}
+		}
+		known = append(known, f)
 	}
 	if d.Delegated != nil {
 		for _, b := range d.Delegated.Bindings {

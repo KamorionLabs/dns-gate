@@ -273,3 +273,24 @@ func TestHealthReportsAnUnloadedManagedPolicy(t *testing.T) {
 		t.Fatalf("policy.read holders get the details: %d %q", r.StatusCode, eff.LoadError)
 	}
 }
+
+func TestNewFamilyTakingOverStoreTeamsIsReported(t *testing.T) {
+	e := policyEnv(t, false)
+	now := time.Now()
+	if err := e.store.Put(context.Background(), store.Ownership{Zone: "example.com", Host: "old", Type: "A", Owner: "ci-legacy", State: store.StateActive, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	doc := managedDoc("*.staging")
+	doc.Bindings = append(doc.Bindings, uiapi.Binding{Role: "web-writer", TeamFrom: &uiapi.TeamFrom{Claim: "sub", Regex: "^repo:(.+)$", Prefix: "ci-"}, Groups: []string{"operators"}})
+	r, d := propose(t, e, e.human("carol", time.Minute), "", doc)
+	if r.StatusCode != 201 {
+		t.Fatalf("propose: %d %s", r.StatusCode, r.Header.Get("X-Test-Reason"))
+	}
+	found := false
+	for _, it := range d.Impact {
+		found = found || (it.Kind == "warning" && strings.Contains(it.Message, "ci-legacy"))
+	}
+	if !found {
+		t.Fatalf("a new family silently takes over the RRsets of a store team: %+v", d.Impact)
+	}
+}

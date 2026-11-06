@@ -96,17 +96,18 @@ func TestBearerOK(t *testing.T) {
 func TestClaimTeamsStrict(t *testing.T) {
 	a, p := setupWith(t, func(c *config.Config) {
 		c.Teams = map[string]config.Team{"web": {}, "ops": {}}
-		c.Bindings = append(c.Bindings, config.Binding{Role: "writer", TeamFrom: &config.TeamFrom{Claim: "workflow", Regex: "^(nomatch)$", Prefix: "ci-"},
+		c.Issuers[0].TeamClaimPrefix = "claim-"
+		c.Bindings = append(c.Bindings, config.Binding{Role: "writer", TeamFrom: &config.TeamFrom{Claim: "workflow", Regex: "^(nomatch)$", Prefix: "pipe-"},
 			Subjects: []config.Subject{{Issuer: "ci", Claims: map[string]config.StringList{"sub": {"none"}}}}})
 	})
 	claims := good()
-	claims["teams"] = []any{"Edge", "OPS", "ci-deploy"}
+	claims["teams"] = []any{"Edge", "OPS", "pipe-deploy"}
 	s, err := a.Authenticate(bearer(p.Sign(claims)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(s.Teams, ",") != "web,ci-deploy" {
-		t.Fatalf("a claim may only add family members, never a declared team: %v", s.Teams)
+	if strings.Join(s.Teams, ",") != "web,claim-edge,claim-ops,claim-pipe-deploy" {
+		t.Fatalf("claim values must stay in the family of their issuer: %v", s.Teams)
 	}
 }
 

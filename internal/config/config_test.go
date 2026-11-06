@@ -435,3 +435,30 @@ func TestTeamFamiliesStrict(t *testing.T) {
 		t.Fatalf("an empty prefix stays accepted without a teams block: %v", err)
 	}
 }
+
+func TestTeamClaimFamilies(t *testing.T) {
+	e := env(map[string]string{"EURODNS_API_KEY": "k"})
+	strict := base + "teams:\n  web: {}\n"
+	withClaim := strings.Replace(strict, "    audiences: [dns-gate]\n", "    audiences: [dns-gate]\n    team_claim: teams\n    team_claim_prefix: idp-\n", 1)
+	if _, err := Parse([]byte(withClaim), e); err != nil {
+		t.Fatal(err)
+	}
+	fam := func(prefix string) string {
+		return "  - role: writer\n    team_from: {claim: sub, regex: \"^repo:acme/([a-z0-9-]+):.*$\", prefix: " + prefix + "}\n    subjects:\n      - issuer: ci\n        claims: {sub: \"repo:acme/*\"}\n"
+	}
+	addBinding := func(doc, b string) string { return strings.Replace(doc, "\nteams:", "\n"+b+"teams:", 1) }
+	ok := addBinding(withClaim, fam("gh-")+fam("gh-"))
+	if _, err := Parse([]byte(ok), e); err != nil {
+		t.Fatalf("two bindings of one family: %v", err)
+	}
+	for name, doc := range map[string]string{
+		"claim without prefix":          strings.Replace(withClaim, "    team_claim_prefix: idp-\n", "", 1),
+		"claim family = binding family": addBinding(withClaim, fam("idp-")),
+		"nested prefixes":               addBinding(withClaim, fam("gh-")+strings.Replace(fam("gh-web-"), "acme/", "acme2/", 1)),
+		"bad claim prefix":              strings.Replace(withClaim, "team_claim_prefix: idp-", "team_claim_prefix: \"IDP \"", 1),
+	} {
+		if _, err := Parse([]byte(doc), e); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+}

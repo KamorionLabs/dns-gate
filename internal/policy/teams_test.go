@@ -177,6 +177,9 @@ func TestValidateManagedTeamFamilies(t *testing.T) {
 		"managed family without prefix": {func(d *uiapi.PolicyDocument) {
 			d.Bindings = append(d.Bindings, uiapi.Binding{Role: "web-writer", TeamFrom: &uiapi.TeamFrom{Claim: "sub", Regex: "^(.+)$"}, Groups: []string{"operators"}})
 		}, "bindings[2].team_from"},
+		"managed family overlapping a base family": {func(d *uiapi.PolicyDocument) {
+			d.Bindings = append(d.Bindings, uiapi.Binding{Role: "web-writer", TeamFrom: &uiapi.TeamFrom{Claim: "sub", Regex: "^(.+)$", Prefix: "gh-x-"}, Groups: []string{"operators"}})
+		}, "bindings[2].team_from"},
 		"managed team in a family": {func(d *uiapi.PolicyDocument) {
 			d.Teams = map[string]uiapi.Team{"gh-ops": {Members: uiapi.TeamMembers{Groups: []string{"operators"}}}}
 		}, "teams.gh-ops"},

@@ -354,7 +354,10 @@ func (a *Authenticator) resolve(snap *policy.Snapshot, is *issuer, s *identity.S
 	if is.cfg.TeamClaim != "" {
 		for _, t := range policy.ClaimStrings(claims[is.cfg.TeamClaim]) {
 			t = strings.ToLower(t)
-			if t != "" && !teams[t] && !snap.ClaimTeamAllowed(t) {
+			if t != "" {
+				t = is.cfg.TeamClaimPrefix + t
+			}
+			if t != "" && !teams[t] && !snap.ClaimTeamAllowed(is.cfg.Name, t) {
 				a.warnOnce("claim:"+is.cfg.Name+":"+t, "team claim value ignored: not a member of a team_from family, or the name of a declared team", "issuer", is.cfg.Name, "team", t)
 				continue
 			}
