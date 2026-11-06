@@ -352,8 +352,13 @@ curl -sS "${auth[@]}" -H 'Content-Type: application/json' -X PUT "$P/42" -d @pro
 curl -sS "${auth[@]}" -X DELETE "$P/42"
 ```
 
-`{provider}` is a provider id of the configuration; a provider of another kind
-answers `400 invalid_provider`. EuroDNS refusals are `400 rejected`, with the
+`{provider}` is a provider id of the configuration with
+`eurodns.zone_profiles: true` (`403 zone_profiles_disabled` otherwise); a
+provider of another kind answers `400 invalid_provider`. Writes need a recent
+login from humans (`403 reauth_required`); a record of the protected list is
+refused (`403 protected`), on check too; each subject may run 60 zone profile
+operations per minute (`429 rate_limited`). An update is audited with the
+previous content and the changed records. EuroDNS refusals are `400 rejected`, with the
 EuroDNS report or errors in `details`. EuroDNS clients can also use the
 EuroDNS routes (`/zone-profiles`, `/zone-profiles/check`, `/zone-profiles/{id}`,
 pagination headers passed through) on the gate, with the same rule; when the gate
@@ -371,12 +376,13 @@ Errors are JSON, with a stable `reason` for programs:
 |---|---|
 | 400 | `invalid` (request or provider validation), `relative_target` (single-label target), `bad_request`, `team_mismatch`, `rejected` (zone profile refused by EuroDNS), `invalid_provider` (zone profiles on a provider that is not EuroDNS) |
 | 401 | `unauthenticated` (also an unknown, revoked, expired or rotated API key) |
-| 403 | `forbidden` (RBAC, protected record, plan of another caller), `not_owner` (another team), `too_many_changes`, `reauth_required`, `csrf`, `session_required`, `source_ip` (key used outside its CIDRs), `role_widened` (API key whose role grew), `ephemeral_required` (ACME endpoints), `not_team_member` |
+| 403 | `forbidden` (RBAC, protected record, plan of another caller), `protected`, `zone_profiles_disabled` (zone profiles), `not_owner` (another team), `too_many_changes`, `reauth_required`, `csrf`, `session_required`, `source_ip` (key used outside its CIDRs), `role_widened` (API key whose role grew), `ephemeral_required` (ACME endpoints), `not_team_member` |
 | 404 | `not_found` (zone not managed, RRset unknown), `plan_not_found`, `zone_not_eurodns` (EuroDNS-compatible API on a zone of another provider) |
 | 409 | `foreign_rrset` (created outside the gate: adopt it first), `tainted` (changed outside the gate), `adopt_conflict`, `immutable`, `revoked` (API keys), `too_many_values`, `too_many_registrations`, `value_taken` (ACME endpoints) |
 | 410 | `plan_expired`, `expired` (transfer request) |
 | 412 | `precondition` (If-Match, If-None-Match, `expected_hash`, `must_not_exist`, zone changed since the plan, transfer already decided or RRsets changed since the request) |
 | 423 | `zone_locked`, with `Retry-After` |
+| 429 | `rate_limited` (zone profiles, with `Retry-After`) |
 | 502 | `upstream` (provider error) |
 
 The full list is in the `Error` schema of the OpenAPI document.

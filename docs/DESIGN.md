@@ -259,6 +259,15 @@ content; nothing ties it to a domain, nor names a default profile.
   the check of the account-wide API key administrators); a narrower grant has no
   effect and is flagged at load. Reads need it too: profiles may carry
   verification tokens.
+- **Opt-in per account.** `providers[].eurodns.zone_profiles: true` opens the
+  profiles of one EuroDNS account; the grant on `"*"` covers the opted-in
+  accounts only.
+- **Same guards as other sensitive writes.** Writes need a recent login from
+  humans (`stepUp`, with the session or the token `auth_time`) on every channel;
+  profile records matching the protected list are refused whatever the zones of
+  the entry (the profile may land on any domain), on check too; a per-subject
+  limiter (60 operations a minute, all channels) keeps one caller from draining
+  the account's EuroDNS budget, and listings stop at 20 pages of 100.
 - **No ownership.** The gate cannot attribute a profile to the team of the domains
   it will serve, so it keeps no ownership for profiles and no state: any holder of
   the action may change any profile of the account. The action is meant for the
@@ -272,8 +281,10 @@ content; nothing ties it to a domain, nor names a default profile.
   `/api/v1`. The provider is the only `eurodns` provider, the one named by
   `X-DNS-Gate-Provider`, or `{provider}` of
   `/api/v1/providers/{provider}/zone-profiles`; any other kind is refused.
-- **Audit.** Every operation is audited with the provider and the profile id;
-  writes carry the profile content (a delete reads it first), never credentials.
+- **Audit.** Every operation is audited with the provider and the profile id,
+  refusals included (malformed requests as `bad_request`); writes carry the
+  profile content (an update and a delete read it first: `previous`), and a
+  per-record summary in `changes` for the journal; never credentials.
 - **After the arrival.** The records EuroDNS creates from a profile are foreign to
   the gate: they are adopted by their teams once the zone is managed (6.3).
 

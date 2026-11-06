@@ -60,6 +60,7 @@ A provider is one DNS account: a EuroDNS account or an AWS account for Route53. 
 | `providers[].eurodns.app_id` | | EuroDNS application id (or the variables of [Secrets](#secrets)). |
 | `providers[].eurodns.rate.every`, `.burst` | `1.1s`, `5` | Client-side limiter shared by every call to this account (reads, writes, checks, listing, passthrough). EuroDNS allows 10 requests per 10 seconds per IP and bans progressively: keep the default unless EuroDNS raised your quota. |
 | `providers[].eurodns.max_retries` | `3` | Retries on 429, 5xx and network errors (idempotent requests). |
+| `providers[].eurodns.zone_profiles` | `false` | Serves the [zone profiles](#zone-profiles) of the account through the gate; off, they are refused (`403 zone_profiles_disabled`) even to holders of `dns.zone.profile`. |
 | `providers[].route53.region` | SDK default | AWS region of the API calls. |
 | `providers[].route53.assume_role_arn` | | IAM role assumed in the account holding the hosted zones. |
 | `providers[].route53.external_id` | | External id of the assumed role (requires `assume_role_arn`). |
@@ -348,7 +349,9 @@ A map of named roles. Deny by default: an action is allowed only if a rule of on
 
 A EuroDNS zone profile is a template of the account (records, URL and mail forwards) that EuroDNS applies to a domain when it arrives on its nameservers: a domain transferred to EuroDNS, or a Premium DNS subscription ordered with the profile's id. Preparing a transfer means creating the profile and checking it before the domain arrives. The gate serves the zone profile operations of every `eurodns` provider ([API.md](API.md#zone-profiles), MCP tools below, and the EuroDNS-compatible `/zone-profiles` routes) under the action `dns.zone.profile`.
 
-A profile names no domain (its hosts are relative to whatever domain it is applied to) and the domain it prepares is not in the account yet, so zone globs cannot scope it: **`dns.zone.profile` only counts in a rule whose `zones` contain `"*"` and that has no `records` scope**; granted on narrower zones it has no effect and the gate warns at load. Every operation needs it, reads included (a profile may hold verification tokens), and a write applies to any profile of the account: there is no ownership by team. Give it to the administrators of the EuroDNS account only:
+Each EuroDNS provider opts in with `providers[].eurodns.zone_profiles: true` (off by default): a grant then covers the profiles of every opted-in account, and only of those.
+
+A profile names no domain (its hosts are relative to whatever domain it is applied to) and the domain it prepares is not in the account yet, so zone globs cannot scope it: **`dns.zone.profile` only counts in a rule whose `zones` cover every zone (`"*"`, `"**"`) and that has no `records` scope**; granted on narrower zones it has no effect, and the gate warns at load (base file) and in the impact analysis (managed revisions), and also when no provider opts in. Every operation needs it, reads included (a profile may hold verification tokens), and a write applies to any profile of the account: there is no ownership by team. Give it to the administrators of the EuroDNS account only:
 
 ```yaml
 roles:
@@ -361,6 +364,8 @@ bindings:
     team: platform
     subjects: [{issuer: entra, claims: {groups: ["<dns admins group id>"]}}]
 ```
+
+Writes (create, update, delete) need a recent login from humans, like policy changes (`policy.edit_max_age`, `policy.require_amr`; `403 reauth_required`), on every channel: the UI session, bearer tokens (their `auth_time`) on the REST and EuroDNS routes, and MCP. A profile holding a record of the [protected list](#protected-records) is refused (`403 protected`) on create, update and check, whatever the zones of the protected entry, since the profile may be applied to any domain. Each subject may run 60 zone profile operations per minute, all channels together (`429 rate_limited`), as they share the EuroDNS rate limit of the account; listings are capped at 100 profiles per page and 2000 in all. Updates are audited with the previous content (`previous`) and, like creations and deletions, a per-record summary in `changes` shown by the journal.
 
 The records EuroDNS applies from a profile are created outside the gate: the domain then shows them as foreign RRsets, adopted by the teams that will manage them once the zone is managed ([adoption](#adoption-and-terraform-export)). The managed policy can grant `dns.zone.profile` only when `policy.bounds` allow it on `"*"`.
 
@@ -671,7 +676,7 @@ Tools:
 | `apply_rrset_change` | write | Applies a plan exactly as planned, for its team; refused when expired, used, owned by another caller, planned for another team (`team_mismatch`), or when the zone changed since (`precondition`). |
 | `adopt_preview`, `adopt_apply` | dry run, write | Adoption as above, with an optional `team`. |
 | `list_zone_profiles`, `get_zone_profile`, `check_zone_profile` | read | [Zone profiles](#zone-profiles) of a EuroDNS provider (`provider` optional with one EuroDNS provider); `check_zone_profile` validates with EuroDNS without saving. `dns.zone.profile` on `*`. |
-| `create_zone_profile`, `update_zone_profile`, `delete_zone_profile` | write | Zone profile writes, audited with the profile content. |
+| `create_zone_profile`, `update_zone_profile`, `delete_zone_profile` | write | Zone profile writes, audited with the profile content; humans need a recent login. `update_zone_profile` keeps the forwards it is not given (`[]` removes them). |
 | `transfer_propose`, `transfer_approve`, `transfer_reject` | write | Ownership transfers with the REST rules ([transfers](#ownership)): one owner team per request, approved by someone who may write every RRset through the owner team or holds `dns.ownership.approve` on it (humans only unless `ownership.machine_approvers`), another person with `ownership.require_second_approver`, otherwise possibly the requester (`transfer_propose` with `apply: true`); the requester may reject (withdraw) it. An approval the gate cannot complete at once, and every rename, leaves the transfer `applying`, applied in the background. |
 
 There is no policy tool: policy changes stay with humans in the UI, with step-up. Plans are kept in the store, shared by every replica, and taken once: a plan made on one replica can be applied on another. The same plans back `POST /api/v1/zones/{zone}/plan` and `/apply` ([API.md](API.md)). Expired plans are purged every 15 minutes by the gate (SQL stores) or by the DynamoDB TTL.
