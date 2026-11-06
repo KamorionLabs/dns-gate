@@ -11,6 +11,7 @@
 package propagation
 
 import (
+	"container/list"
 	"context"
 	"errors"
 	"fmt"
@@ -43,6 +44,10 @@ const (
 	// StatusError: no usable answer (timeout, SERVFAIL, REFUSED, lame name
 	// server).
 	StatusError = "error"
+	// StatusIndeterminate: an alias answer whose addresses could not be
+	// tied to its target (a CDN answering per location, a target the
+	// resolver could not resolve). Never counted as up to date.
+	StatusIndeterminate = "indeterminate"
 )
 
 // Kinds of the servers asked.
@@ -53,14 +58,20 @@ const (
 
 // Defaults of Options.
 const (
-	DefaultQueryTimeout      = 2 * time.Second
-	DefaultTimeout           = 6 * time.Second
+	DefaultQueryTimeout      = 1500 * time.Millisecond
+	DefaultTimeout           = 4 * time.Second
 	DefaultConcurrency       = 16
 	DefaultCacheTTL          = 10 * time.Second
 	DefaultRequestsPerMinute = 30
-	maxNameServers           = 8
-	maxCNAMEChain            = 8
-	maxCacheEntries          = 1024
+	DefaultMaxInFlight       = 3
+	DefaultMaxSubjects       = 4096
+	// MaxValues and MaxValueBytes bound what an answer reports; longer
+	// answers are cut and flagged truncated.
+	MaxValues       = 32
+	MaxValueBytes   = 512
+	maxNameServers  = 8
+	maxCNAMEChain   = 8
+	maxCacheEntries = 1024
 )
 
 var (
@@ -69,6 +80,9 @@ var (
 	ErrRateLimited = errors.New("propagation: too many checks, retry in a few seconds")
 	// ErrUnsupportedType is returned for a record type that cannot be asked.
 	ErrUnsupportedType = errors.New("propagation: record type not supported")
+	// ErrBusy is returned when MaxInFlight checks already run in this
+	// process.
+	ErrBusy = errors.New("propagation: too many checks running, retry in a few seconds")
 
 	errInvalidValue = errors.New("invalid value")
 )
@@ -95,6 +109,12 @@ type Options struct {
 	// RequestsPerMinute bounds the checks of one subject that are not
 	// served from the cache.
 	RequestsPerMinute int
+	// MaxInFlight bounds the checks running at once in this process
+	// (ErrBusy beyond).
+	MaxInFlight int
+	// MaxSubjects bounds the subjects whose rate limit is remembered; the
+	// least recently seen are forgotten first.
+	MaxSubjects int
 	// Lookup resolves the name servers, net.DefaultResolver when nil.
 	Lookup Lookup
 	// NameServerPort is the port of the authoritative servers (53).
@@ -156,6 +176,11 @@ type Answer struct {
 	LatencyMS int64  `json:"latency_ms"`
 	TCP       bool   `json:"tcp,omitempty"`
 	Error     string `json:"error,omitempty"`
+	// Filtering marks a resolver that blocks some names (malware, phishing):
+	// its negative answers may be a filter decision.
+	Filtering bool `json:"filtering,omitempty"`
+	// Truncated: values were left out or cut (MaxValues, MaxValueBytes).
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 // Summary counts the answers.
@@ -165,6 +190,9 @@ type Summary struct {
 	Stale   int `json:"stale"`
 	Missing int `json:"missing"`
 	Error   int `json:"error"`
+	// Indeterminate counts alias answers that could not be tied to the
+	// target.
+	Indeterminate int `json:"indeterminate"`
 	// Converged: every server that answered has the expected content.
 	Converged bool `json:"converged"`
 	// MaxTTLLeft is the longest TTL left among the stale and missing
@@ -188,11 +216,13 @@ type Result struct {
 
 // Checker runs checks. It is safe for concurrent use.
 type Checker struct {
-	opt     Options
-	group   singleflight.Group
-	mu      sync.Mutex
-	cache   map[string]cached
-	buckets map[string]*bucket
+	opt      Options
+	group    singleflight.Group
+	inflight chan struct{}
+	mu       sync.Mutex
+	cache    map[string]cached
+	buckets  map[string]*list.Element
+	subjects *list.List
 }
 
 type cached struct {
@@ -201,8 +231,9 @@ type cached struct {
 }
 
 type bucket struct {
-	tokens float64
-	last   time.Time
+	subject string
+	tokens  float64
+	last    time.Time
 }
 
 // New returns a Checker.
@@ -225,6 +256,12 @@ func New(opt Options) *Checker {
 	if opt.RequestsPerMinute <= 0 {
 		opt.RequestsPerMinute = DefaultRequestsPerMinute
 	}
+	if opt.MaxInFlight <= 0 {
+		opt.MaxInFlight = DefaultMaxInFlight
+	}
+	if opt.MaxSubjects <= 0 {
+		opt.MaxSubjects = DefaultMaxSubjects
+	}
 	if opt.Lookup == nil {
 		opt.Lookup = net.DefaultResolver
 	}
@@ -237,7 +274,8 @@ func New(opt Options) *Checker {
 	if opt.Log == nil {
 		opt.Log = slog.Default()
 	}
-	return &Checker{opt: opt, cache: map[string]cached{}, buckets: map[string]*bucket{}}
+	return &Checker{opt: opt, inflight: make(chan struct{}, opt.MaxInFlight), cache: map[string]cached{},
+		buckets: map[string]*list.Element{}, subjects: list.New()}
 }
 
 // Resolvers returns the public resolvers asked.
@@ -263,7 +301,9 @@ func QueryType(typ string) (uint16, error) {
 
 // Check checks an RRset for subject. A result computed less than CacheTTL
 // ago for the same content is returned with Cached set; other checks count
-// against the rate limit of subject.
+// against the rate limit of subject (ErrRateLimited) and against
+// MaxInFlight (ErrBusy). Cache, limits and in-flight count are per process:
+// several replicas or Lambda instances each have their own.
 func (c *Checker) Check(ctx context.Context, subject string, req Request) (*Result, error) {
 	qtype, err := QueryType(req.Type)
 	if err != nil {
@@ -280,6 +320,12 @@ func (c *Checker) Check(ctx context.Context, subject string, req Request) (*Resu
 		if res, ok := c.cached(key); ok {
 			return res, nil
 		}
+		select {
+		case c.inflight <- struct{}{}:
+		default:
+			return nil, ErrBusy
+		}
+		defer func() { <-c.inflight }()
 		res := c.run(context.WithoutCancel(ctx), req, qtype)
 		c.store(key, *res)
 		return res, nil
@@ -331,24 +377,26 @@ func (c *Checker) store(key string, res Result) {
 }
 
 // allow is a token bucket per subject: RequestsPerMinute, with a burst of a
-// quarter of it (at least 5).
+// quarter of it (at least 5). At most MaxSubjects buckets are kept, the
+// least recently used dropped first.
 func (c *Checker) allow(subject string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.opt.Now()
 	rate := float64(c.opt.RequestsPerMinute) / 60
 	burst := max(float64(c.opt.RequestsPerMinute)/4, 5)
-	b := c.buckets[subject]
-	if b == nil {
-		if len(c.buckets) > 10000 {
-			for k, o := range c.buckets {
-				if now.Sub(o.last) > 10*time.Minute {
-					delete(c.buckets, k)
-				}
-			}
+	var b *bucket
+	if el, ok := c.buckets[subject]; ok {
+		c.subjects.MoveToFront(el)
+		b = el.Value.(*bucket)
+	} else {
+		for c.subjects.Len() >= c.opt.MaxSubjects {
+			old := c.subjects.Back()
+			delete(c.buckets, old.Value.(*bucket).subject)
+			c.subjects.Remove(old)
 		}
-		b = &bucket{tokens: burst, last: now}
-		c.buckets[subject] = b
+		b = &bucket{subject: subject, tokens: burst, last: now}
+		c.buckets[subject] = c.subjects.PushFront(b)
 	}
 	b.tokens = min(burst, b.tokens+now.Sub(b.last).Seconds()*rate)
 	b.last = now
@@ -388,7 +436,7 @@ func (c *Checker) run(ctx context.Context, req Request, qtype uint16) *Result {
 	auth := len(servers)
 	for _, r := range c.opt.Resolvers {
 		servers = append(servers, server{addr: resolverAddr(r.Address), Answer: Answer{
-			Kind: KindResolver, Name: r.Name, Address: r.Address, Location: r.Location, Country: r.Country, Region: r.Region,
+			Kind: KindResolver, Name: r.Name, Address: r.Address, Location: r.Location, Country: r.Country, Region: r.Region, Filtering: r.Filtering,
 		}})
 	}
 
@@ -396,6 +444,14 @@ func (c *Checker) run(ctx context.Context, req Request, qtype uint16) *Result {
 	targets := make([]reply, len(servers))
 	sem := make(chan struct{}, c.opt.Concurrency)
 	var wg sync.WaitGroup
+	var resolved []string
+	if exp.AliasTarget != "" {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resolved = c.resolveTarget(ctx, exp.AliasTarget, qtype)
+		}()
+	}
 	for i := range servers {
 		wg.Add(1)
 		go func() {
@@ -416,27 +472,22 @@ func (c *Checker) run(ctx context.Context, req Request, qtype uint16) *Result {
 	}
 	wg.Wait()
 
-	var authAddrs []string
 	answers := make([]Answer, len(servers))
-	for i, s := range servers {
-		a := s.Answer
-		fill(&a, name, qtype, replies[i], i < auth)
+	budget := maxResultBytes
+	for i, srv := range servers {
+		a := srv.Answer
+		authoritative := i < auth
+		fill(&a, name, qtype, replies[i], authoritative)
+		if a.Status == "" {
+			switch {
+			case exp.AliasTarget != "":
+				a.Status = aliasStatus(&a, authoritative, resolved, targets[i], exp.AliasTarget, qtype)
+			default:
+				a.Status = valueStatus(&a, exp, authoritative)
+			}
+		}
+		budget = capValues(&a, budget)
 		answers[i] = a
-		if i < auth && a.Status == "" && len(a.CNAMEs) == 0 {
-			authAddrs = append(authAddrs, a.Values...)
-		}
-	}
-	for i := range answers {
-		a := &answers[i]
-		if a.Status != "" {
-			continue
-		}
-		switch {
-		case exp.AliasTarget != "":
-			a.Status = aliasStatus(a, i < auth, authAddrs, targets[i], exp.AliasTarget, qtype)
-		default:
-			a.Status = valueStatus(a, exp)
-		}
 	}
 	res.Answers = answers
 	res.Summary = summarize(answers)
@@ -530,7 +581,7 @@ func pickAddr(addrs []netip.Addr, private bool) (netip.Addr, bool) {
 	var v6 netip.Addr
 	for _, a := range addrs {
 		a = a.Unmap()
-		if !private && !publicAddr(a) {
+		if !private && !PublicAddr(a) {
 			continue
 		}
 		if a.Is4() {
@@ -543,10 +594,59 @@ func pickAddr(addrs []netip.Addr, private bool) (netip.Addr, bool) {
 	return v6, v6.IsValid()
 }
 
-var sharedAddressSpace = netip.MustParsePrefix("100.64.0.0/10")
+func prefixes(ps ...string) []netip.Prefix {
+	out := make([]netip.Prefix, len(ps))
+	for i, p := range ps {
+		out[i] = netip.MustParsePrefix(p)
+	}
+	return out
+}
 
-func publicAddr(a netip.Addr) bool {
-	return a.IsValid() && a.IsGlobalUnicast() && !a.IsPrivate() && !a.IsLoopback() && !a.IsLinkLocalUnicast() && !sharedAddressSpace.Contains(a)
+// Special-purpose blocks of the IANA registries that are not globally
+// reachable, or reserved for documentation, benchmarks and relays.
+var (
+	special4 = prefixes("0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
+		"192.0.0.0/24", "192.0.2.0/24", "192.88.99.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24",
+		"203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4")
+	global6   = netip.MustParsePrefix("2000::/3")
+	special6  = prefixes("2001::/23", "2001:db8::/32", "3fff::/20")
+	nat64     = netip.MustParsePrefix("64:ff9b::/96")
+	sixToFour = netip.MustParsePrefix("2002::/16")
+)
+
+// PublicAddr reports whether a is a globally reachable unicast address
+// outside the IANA special-purpose blocks. IPv4 addresses embedded in IPv6
+// (IPv4-mapped, NAT64 64:ff9b::/96, 6to4) are checked as IPv4; other IPv6
+// addresses must be in 2000::/3, which leaves out IPv4-compatible,
+// site-local, discard-only and local-use NAT64 prefixes.
+func PublicAddr(a netip.Addr) bool {
+	if !a.IsValid() {
+		return false
+	}
+	a = a.Unmap()
+	if a.Is4() {
+		for _, p := range special4 {
+			if p.Contains(a) {
+				return false
+			}
+		}
+		return true
+	}
+	b := a.As16()
+	switch {
+	case nat64.Contains(a):
+		return PublicAddr(netip.AddrFrom4([4]byte(b[12:16])))
+	case sixToFour.Contains(a):
+		return PublicAddr(netip.AddrFrom4([4]byte(b[2:6])))
+	case !global6.Contains(a):
+		return false
+	}
+	for _, p := range special6 {
+		if p.Contains(a) {
+			return false
+		}
+	}
+	return true
 }
 
 // exchange asks one server over UDP with EDNS0, and again over TCP when
@@ -588,6 +688,10 @@ func fill(a *Answer, name string, qtype uint16, r reply, authoritative bool) {
 		a.Status, a.Error = StatusError, strings.ToLower(a.Rcode)+ede(m)
 		return
 	}
+	if blocked(m) {
+		a.Status, a.Error = StatusError, "filtered by the resolver"+ede(m)
+		return
+	}
 	if authoritative && !m.Authoritative {
 		a.Status, a.Error = StatusError, "not authoritative for the zone (lame delegation)"
 		return
@@ -595,6 +699,10 @@ func fill(a *Answer, name string, qtype uint16, r reply, authoritative bool) {
 	vals, cnames, ttl := records(m, name, qtype)
 	a.Values, a.CNAMEs = vals, cnames
 	if len(vals) == 0 && len(cnames) == 0 {
+		if len(m.Answer) > 0 {
+			a.Status, a.Error = StatusError, "answer records for another name or type"
+			return
+		}
 		ttl = negativeTTL(m)
 	}
 	if ttl >= 0 {
@@ -622,7 +730,25 @@ func exchangeError(err error) string {
 	return "no answer"
 }
 
-// ede renders the extended DNS error of a refusal (RFC 8914).
+// blocked reports an answer the resolver marks as its own decision
+// (extended DNS errors Blocked, Censored, Filtered).
+func blocked(m *mdns.Msg) bool {
+	opt := m.IsEdns0()
+	if opt == nil {
+		return false
+	}
+	for _, o := range opt.Option {
+		if e, ok := o.(*mdns.EDNS0_EDE); ok {
+			switch e.InfoCode {
+			case mdns.ExtendedErrorCodeBlocked, mdns.ExtendedErrorCodeCensored, mdns.ExtendedErrorCodeFiltered:
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ede renders the extended DNS error of an answer (RFC 8914).
 func ede(m *mdns.Msg) string {
 	opt := m.IsEdns0()
 	if opt == nil {
@@ -689,7 +815,11 @@ func negativeTTL(m *mdns.Msg) int {
 	return -1
 }
 
-func valueStatus(a *Answer, exp Expected) string {
+// valueStatus compares an answer with the expected values. A TTL other
+// than the expected one at an authoritative server, or a cached answer with
+// more TTL left than the expected TTL, is the previous content (a TTL-only
+// change).
+func valueStatus(a *Answer, exp Expected, authoritative bool) string {
 	switch {
 	case !exp.Exists && len(a.Values) == 0 && len(a.CNAMEs) == 0:
 		return StatusMatch
@@ -697,50 +827,119 @@ func valueStatus(a *Answer, exp Expected) string {
 		return StatusStale
 	case len(a.Values) == 0 && len(a.CNAMEs) == 0:
 		return StatusMissing
-	case len(a.CNAMEs) == 0 && slices.Equal(a.Values, exp.Values):
-		return StatusMatch
+	case len(a.CNAMEs) > 0 || !slices.Equal(a.Values, exp.Values):
+		return StatusStale
+	case a.TTLLeft != nil && authoritative && *a.TTLLeft != exp.TTL:
+		return StatusStale
+	case a.TTLLeft != nil && !authoritative && *a.TTLLeft > exp.TTL:
+		return StatusStale
 	}
-	return StatusStale
+	return StatusMatch
 }
 
-// aliasStatus compares the addresses of an alias with those of its target:
-// the authoritative answers, and the target asked from the same resolver
-// (its addresses can depend on the location of the resolver, a CDN, or
-// rotate, a load balancer). Sharing an address is a match.
-func aliasStatus(a *Answer, authoritative bool, authAddrs []string, target reply, targetName string, qtype uint16) string {
+// aliasStatus checks the addresses of an alias against its target: an
+// authoritative answer against the target resolved by the gate, a resolver
+// against the target asked from that same resolver. Every address answered
+// must be one of the target's; anything else cannot be told apart from a
+// CDN answering per location and is indeterminate, never a match.
+func aliasStatus(a *Answer, authoritative bool, resolved []string, target reply, targetName string, qtype uint16) string {
 	switch {
 	case len(a.CNAMEs) > 0:
 		return StatusStale
 	case len(a.Values) == 0:
 		return StatusMissing
-	case authoritative:
-		return StatusMatch
 	}
-	ref := slices.Clone(authAddrs)
-	if target.err == nil && target.msg != nil && target.msg.Rcode == mdns.RcodeSuccess {
-		vals, _, _ := records(target.msg, targetName, qtype)
-		ref = append(ref, vals...)
+	ref := resolved
+	if !authoritative {
+		ref = nil
+		if target.err == nil && target.msg != nil && target.msg.Rcode == mdns.RcodeSuccess {
+			ref, _, _ = records(target.msg, targetName, qtype)
+		}
+	}
+	if len(ref) > 0 && subset(a.Values, ref) {
+		return StatusMatch
 	}
 	if len(ref) == 0 {
 		a.Error = "the alias target could not be resolved"
-		return StatusError
+	} else {
+		a.Error = "addresses outside those of the alias target"
 	}
-	if intersects(a.Values, ref) {
-		return StatusMatch
+	return StatusIndeterminate
+}
+
+func subset(vals, of []string) bool {
+	for _, v := range vals {
+		if !slices.Contains(of, v) {
+			return false
+		}
 	}
-	return StatusStale
+	return true
+}
+
+// resolveTarget resolves an alias target with the system resolver, as
+// canonical address values of qtype.
+func (c *Checker) resolveTarget(ctx context.Context, target string, qtype uint16) []string {
+	network := "ip4"
+	if qtype == mdns.TypeAAAA {
+		network = "ip6"
+	}
+	addrs, err := c.opt.Lookup.LookupNetIP(ctx, network, target)
+	if err != nil {
+		c.opt.Log.Debug("propagation: alias target lookup", "target", target, "err", err)
+		return nil
+	}
+	var out []string
+	for _, a := range addrs {
+		a = a.Unmap()
+		if a.Is4() == (qtype == mdns.TypeA) {
+			out = append(out, a.String())
+		}
+	}
+	return canonicalSet(out)
+}
+
+// maxResultBytes bounds the values of a whole result, far below the 6 MB
+// payload of AWS Lambda.
+const maxResultBytes = 1 << 20
+
+// capValues cuts the values of an answer to MaxValues of MaxValueBytes
+// within what is left of the result budget, and returns the budget left.
+func capValues(a *Answer, budget int) int {
+	if len(a.Values) > MaxValues {
+		a.Values, a.Truncated = a.Values[:MaxValues], true
+	}
+	out := make([]string, 0, len(a.Values))
+	for _, v := range a.Values {
+		if len(v) > MaxValueBytes {
+			v, a.Truncated = strings.ToValidUTF8(v[:MaxValueBytes], "")+"…", true
+		}
+		if len(v) > budget {
+			a.Truncated = true
+			break
+		}
+		budget -= len(v)
+		out = append(out, v)
+	}
+	a.Values = out
+	return budget
 }
 
 func summarize(answers []Answer) Summary {
 	s := Summary{Total: len(answers)}
+	auth := 0
 	for _, a := range answers {
 		switch a.Status {
 		case StatusMatch:
 			s.Match++
+			if a.Kind == KindAuthoritative {
+				auth++
+			}
 		case StatusStale:
 			s.Stale++
 		case StatusMissing:
 			s.Missing++
+		case StatusIndeterminate:
+			s.Indeterminate++
 		default:
 			s.Error++
 		}
@@ -748,6 +947,6 @@ func summarize(answers []Answer) Summary {
 			s.MaxTTLLeft = *a.TTLLeft
 		}
 	}
-	s.Converged = s.Match > 0 && s.Stale == 0 && s.Missing == 0
+	s.Converged = auth > 0 && s.Stale == 0 && s.Missing == 0 && s.Indeterminate == 0
 	return s
 }

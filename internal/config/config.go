@@ -19,6 +19,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/KamorionLabs/dns-gate/internal/glob"
+	"github.com/KamorionLabs/dns-gate/internal/propagation"
 )
 
 // Config is the root configuration document.
@@ -308,14 +309,22 @@ type ACME struct {
 
 // Propagation configures the DNS propagation check of an RRset: its
 // authoritative name servers and public resolvers are asked over UDP and
-// TCP port 53 (outbound).
+// TCP port 53 (outbound). Cache, rate limit and in-flight cap are per
+// process (per replica, per Lambda instance).
 type Propagation struct {
-	// Enabled serves the check (default true).
+	// Enabled serves the check (default true, false on AWS Lambda).
 	Enabled *bool `yaml:"enabled"`
 	// Resolvers replace the default list of public resolvers.
 	Resolvers []PropagationResolver `yaml:"resolvers"`
-	// QueryTimeout bounds one query (default 2s), Timeout a whole check
-	// (default 6s).
+	// AllowPrivateResolvers accepts resolvers at private, loopback,
+	// link-local or other special-purpose addresses: such a resolver may
+	// answer internal (split-horizon) names to whoever can check.
+	AllowPrivateResolvers bool `yaml:"allow_private_resolvers"`
+	// MaxInFlight bounds the checks running at once in one process
+	// (default 3, 503 beyond).
+	MaxInFlight int `yaml:"max_in_flight"`
+	// QueryTimeout bounds one query (default 1.5s), Timeout a whole check
+	// (default 4s, at most 5s).
 	QueryTimeout Duration `yaml:"query_timeout"`
 	Timeout      Duration `yaml:"timeout"`
 	// Concurrency is the number of servers one check asks at once
@@ -341,6 +350,9 @@ type PropagationResolver struct {
 	Location string `yaml:"location"`
 	Country  string `yaml:"country"`
 	Region   string `yaml:"region"`
+	// Filtering marks a resolver that blocks names by policy (malware,
+	// phishing): its negative answers are flagged.
+	Filtering bool `yaml:"filtering"`
 }
 
 // MCP configures the Model Context Protocol endpoint (/mcp).
@@ -624,6 +636,10 @@ func Parse(data []byte, getenv func(string) string) (*Config, error) {
 		return nil, err
 	}
 	c.defaults()
+	if getenv(EnvLambdaRuntime) != "" && c.Propagation.Enabled == nil {
+		off := false
+		c.Propagation.Enabled = &off
+	}
 	err := c.Validate()
 	if getenv(EnvLambdaRuntime) != "" && c.Store.Type != "dynamodb" {
 		err = errors.Join(err, fmt.Errorf("store.type: %q is not supported on AWS Lambda, dynamodb required", c.Store.Type))
@@ -809,10 +825,13 @@ func (c *Config) defaults() {
 		c.MCP.RequestsPerMinute = 120
 	}
 	if c.Propagation.QueryTimeout == 0 {
-		c.Propagation.QueryTimeout = Duration(2 * time.Second)
+		c.Propagation.QueryTimeout = Duration(1500 * time.Millisecond)
 	}
 	if c.Propagation.Timeout == 0 {
-		c.Propagation.Timeout = Duration(6 * time.Second)
+		c.Propagation.Timeout = Duration(4 * time.Second)
+	}
+	if c.Propagation.MaxInFlight == 0 {
+		c.Propagation.MaxInFlight = 3
 	}
 	if c.Propagation.Concurrency == 0 {
 		c.Propagation.Concurrency = 16
@@ -1996,8 +2015,11 @@ func (c *Config) validatePropagation(add func(string, ...any)) {
 	if p.QueryTimeout.D() < 100*time.Millisecond || p.QueryTimeout.D() > 10*time.Second {
 		add("propagation.query_timeout: must be between 100ms and 10s")
 	}
-	if p.Timeout.D() < p.QueryTimeout.D() || p.Timeout.D() > 30*time.Second {
-		add("propagation.timeout: must be between propagation.query_timeout and 30s")
+	if p.Timeout.D() < p.QueryTimeout.D() || p.Timeout.D() > 5*time.Second {
+		add("propagation.timeout: must be between propagation.query_timeout and 5s")
+	}
+	if p.MaxInFlight < 1 || p.MaxInFlight > 64 {
+		add("propagation.max_in_flight: must be between 1 and 64")
 	}
 	if p.Concurrency < 1 || p.Concurrency > 64 {
 		add("propagation.concurrency: must be between 1 and 64")
@@ -2020,10 +2042,17 @@ func (c *Config) validatePropagation(add func(string, ...any)) {
 			add("%s.name: %q is used twice", at, r.Name)
 		}
 		names[r.Name] = true
-		if _, err := netip.ParseAddr(r.Address); err != nil {
-			if ap, err := netip.ParseAddrPort(r.Address); err != nil || ap.Port() == 0 {
+		addr, err := netip.ParseAddr(r.Address)
+		if err != nil {
+			ap, err := netip.ParseAddrPort(r.Address)
+			if err != nil || ap.Port() == 0 {
 				add("%s.address: an IP address with an optional port is required, not a host name", at)
+				continue
 			}
+			addr = ap.Addr()
+		}
+		if !p.AllowPrivateResolvers && !propagation.PublicAddr(addr) {
+			add("%s.address: %s is not a public address (propagation.allow_private_resolvers)", at, addr)
 		}
 	}
 }

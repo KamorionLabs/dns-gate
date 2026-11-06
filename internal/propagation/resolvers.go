@@ -23,6 +23,8 @@ type Resolver struct {
 	Country string `json:"country,omitempty"`
 	// Region groups resolvers in the UI.
 	Region string `json:"region,omitempty"`
+	// Filtering marks a resolver that blocks some names by policy.
+	Filtering bool `json:"filtering,omitempty"`
 }
 
 // DefaultResolvers are documented open resolvers without a configuration
@@ -34,11 +36,11 @@ type Resolver struct {
 var DefaultResolvers = []Resolver{
 	{Name: "Cloudflare", Address: "1.1.1.1", Location: "Anycast", Country: "US", Region: RegionAnycast},
 	{Name: "Google Public DNS", Address: "8.8.8.8", Location: "Anycast", Country: "US", Region: RegionAnycast},
-	{Name: "Quad9", Address: "9.9.9.9", Location: "Anycast", Country: "CH", Region: RegionAnycast},
-	{Name: "OpenDNS (Cisco)", Address: "208.67.222.222", Location: "Anycast", Country: "US", Region: RegionAnycast},
+	{Name: "Quad9", Address: "9.9.9.9", Location: "Anycast", Country: "CH", Region: RegionAnycast, Filtering: true},
+	{Name: "OpenDNS (Cisco)", Address: "208.67.222.222", Location: "Anycast", Country: "US", Region: RegionAnycast, Filtering: true},
 	{Name: "AdGuard DNS (unfiltered)", Address: "94.140.14.140", Location: "Anycast", Country: "CY", Region: RegionAnycast},
 	{Name: "Control D (unfiltered)", Address: "76.76.2.0", Location: "Anycast", Country: "CA", Region: RegionAnycast},
-	{Name: "CleanBrowsing (security)", Address: "185.228.168.9", Location: "Anycast", Country: "US", Region: RegionAnycast},
+	{Name: "CleanBrowsing (security)", Address: "185.228.168.9", Location: "Anycast", Country: "US", Region: RegionAnycast, Filtering: true},
 	{Name: "UltraDNS Public", Address: "64.6.64.6", Location: "Anycast", Country: "US", Region: RegionAnycast},
 	{Name: "NextDNS", Address: "45.90.28.0", Location: "Anycast", Country: "US", Region: RegionAnycast},
 	{Name: "DNS.SB", Address: "185.222.222.222", Location: "Anycast", Country: "DE", Region: RegionAnycast},

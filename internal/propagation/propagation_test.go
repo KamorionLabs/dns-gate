@@ -298,11 +298,11 @@ func TestCheckSkipsPrivateNameServers(t *testing.T) {
 		t.Errorf("private name server asked: %+v (%d queries)", a, e.auth.queries.Load())
 	}
 	for _, a := range []string{"10.0.0.1", "127.0.0.1", "169.254.169.254", "100.64.0.1", "::1", "fe80::1", "fd00::1", "0.0.0.0", "224.0.0.1"} {
-		if publicAddr(netip.MustParseAddr(a)) {
+		if PublicAddr(netip.MustParseAddr(a)) {
 			t.Errorf("%s is public", a)
 		}
 	}
-	if !publicAddr(netip.MustParseAddr("205.251.192.1")) {
+	if !PublicAddr(netip.MustParseAddr("205.251.192.1")) {
 		t.Error("public address refused")
 	}
 }
@@ -389,27 +389,42 @@ func TestCheckCNAMEChain(t *testing.T) {
 }
 
 func TestCheckAlias(t *testing.T) {
-	e := newEnv(t, 3, nil)
+	e := newEnv(t, 4, func(o *Options) {
+		l := o.Lookup.(fakeLookup)
+		l.addrs["d111.cloudfront.net"] = []netip.Addr{netip.MustParseAddr("198.51.100.1"), netip.MustParseAddr("198.51.100.2"), netip.MustParseAddr("198.51.100.9"), netip.MustParseAddr("2001:db8::1")}
+		l.addrs["lb.example.net"] = []netip.Addr{netip.MustParseAddr("198.51.100.4")}
+	})
 	e.auth.handle("www.example.com.", mdns.TypeA, answer(t, true, "www.example.com. 60 IN A 198.51.100.1", "www.example.com. 60 IN A 198.51.100.2"))
 	e.resolvers[0].handle("www.example.com.", mdns.TypeA, answer(t, false, "www.example.com. 60 IN A 203.0.113.7"))
 	e.resolvers[0].handle("d111.cloudfront.net.", mdns.TypeA, answer(t, false, "d111.cloudfront.net. 60 IN A 203.0.113.7", "d111.cloudfront.net. 60 IN A 203.0.113.8"))
 	e.resolvers[1].handle("www.example.com.", mdns.TypeA, answer(t, false, "www.example.com. 60 IN A 192.0.2.50"))
 	e.resolvers[1].handle("d111.cloudfront.net.", mdns.TypeA, answer(t, false, "d111.cloudfront.net. 60 IN A 203.0.113.9"))
 	e.resolvers[2].handle("www.example.com.", mdns.TypeA, answer(t, false, "www.example.com. 60 IN A 198.51.100.2"))
+	e.resolvers[3].handle("www.example.com.", mdns.TypeA, answer(t, false, "www.example.com. 60 IN A 203.0.113.7", "www.example.com. 60 IN A 192.0.2.66"))
+	e.resolvers[3].handle("d111.cloudfront.net.", mdns.TypeA, answer(t, false, "d111.cloudfront.net. 60 IN A 203.0.113.7"))
 	s := &dns.RRset{Key: dns.Key{Host: "www", Type: "A"}, Alias: &dns.Alias{Target: "D111.cloudfront.net", HostedZoneID: "Z2FDTNDATAQYW2"}}
 	res := e.check(t, Request{Zone: "example.com", Host: "www", Type: "A", Expected: s, Hash: dns.ContentHash(*s)})
 	got := byName(res)
 	if res.Expected.AliasTarget != "d111.cloudfront.net." || got["ns1.dns.test"].Status != StatusMatch || got["r0"].Status != StatusMatch ||
-		got["r1"].Status != StatusStale || got["r2"].Status != StatusMatch {
+		got["r1"].Status != StatusIndeterminate || got["r2"].Status != StatusIndeterminate || got["r3"].Status != StatusIndeterminate {
 		t.Errorf("alias: %+v %+v", res.Expected, got)
+	}
+	if res.Summary.Indeterminate != 3 || res.Summary.Converged {
+		t.Errorf("alias summary: %+v", res.Summary)
 	}
 
 	apex := &dns.RRset{Key: dns.Key{Host: "@", Type: "APEX"}, TTL: 600, Values: []string{"lb.example.net."}}
 	e.auth.handle("example.com.", mdns.TypeA, answer(t, true, "example.com. 600 IN A 198.51.100.3"))
 	for _, r := range e.resolvers {
 		r.handle("example.com.", mdns.TypeA, answer(t, false, "example.com. 600 IN A 198.51.100.3"))
+		r.handle("lb.example.net.", mdns.TypeA, answer(t, false, "lb.example.net. 600 IN A 198.51.100.3"))
 	}
 	res = e.check(t, Request{Zone: "example.com", Host: "@", Type: "APEX", Expected: apex, Hash: "x"})
+	if a := byName(res)["ns1.dns.test"]; a.Status != StatusIndeterminate || res.Summary.Converged {
+		t.Errorf("authoritative answer outside the resolved target: %+v %+v", a, res.Summary)
+	}
+	e.checker.opt.Lookup.(fakeLookup).addrs["lb.example.net"] = []netip.Addr{netip.MustParseAddr("198.51.100.3")}
+	res = e.check(t, Request{Zone: "example.com", Host: "@", Type: "APEX", Expected: apex, Hash: "y"})
 	if res.QueryType != "A" || res.Expected.AliasTarget != "lb.example.net." || !res.Summary.Converged {
 		t.Errorf("apex: %+v", res)
 	}
@@ -504,5 +519,139 @@ func TestCanonicalValue(t *testing.T) {
 	}
 	if got := canonicalValue("example.com", mdns.TypeA, "not an address"); got != "not an address" {
 		t.Errorf("invalid value: %q", got)
+	}
+}
+
+func TestCheckTTL(t *testing.T) {
+	e := newEnv(t, 2, nil)
+	e.auth.handle("www.example.com.", mdns.TypeA, answer(t, true, "www.example.com. 3600 IN A 192.0.2.1"))
+	e.resolvers[0].handle("www.example.com.", mdns.TypeA, answer(t, false, "www.example.com. 3000 IN A 192.0.2.1"))
+	e.resolvers[1].handle("www.example.com.", mdns.TypeA, answer(t, false, "www.example.com. 200 IN A 192.0.2.1"))
+	s := &dns.RRset{Key: dns.Key{Host: "www", Type: "A"}, TTL: 300, Values: []string{"192.0.2.1"}}
+	res := e.check(t, Request{Zone: "example.com", Host: "www", Type: "A", Expected: s, Hash: dns.ContentHash(*s)})
+	got := byName(res)
+	if got["ns1.dns.test"].Status != StatusStale || got["r0"].Status != StatusStale || got["r1"].Status != StatusMatch || res.Summary.Converged {
+		t.Errorf("TTL-only change: %+v", got)
+	}
+}
+
+func TestCheckUnusableAnswers(t *testing.T) {
+	e := newEnv(t, 3, func(o *Options) { o.Resolvers[2].Filtering = true })
+	e.auth.handle("old.example.com.", mdns.TypeA, negative(t, mdns.RcodeNameError, true))
+	e.resolvers[0].handle("old.example.com.", mdns.TypeA, answer(t, false, "other.example.net. 60 IN A 192.0.2.1"))
+	e.resolvers[1].handle("old.example.com.", mdns.TypeA, func(req, resp *mdns.Msg, _ bool) {
+		resp.Answer = []mdns.RR{rr(t, "old.example.com. 60 IN A 0.0.0.0")}
+		resp.SetEdns0(1232, false)
+		resp.IsEdns0().Option = append(resp.IsEdns0().Option, &mdns.EDNS0_EDE{InfoCode: mdns.ExtendedErrorCodeBlocked})
+	})
+	e.resolvers[2].handle("old.example.com.", mdns.TypeA, negative(t, mdns.RcodeSuccess, false))
+	res := e.check(t, Request{Zone: "example.com", Host: "old", Type: "A"})
+	got := byName(res)
+	if a := got["r0"]; a.Status != StatusError || !strings.Contains(a.Error, "records") {
+		t.Errorf("records of another name: %+v", a)
+	}
+	if a := got["r1"]; a.Status != StatusError || !strings.Contains(a.Error, "blocked") {
+		t.Errorf("blocked answer: %+v", a)
+	}
+	if a := got["r2"]; a.Status != StatusMatch || !a.Filtering {
+		t.Errorf("negative answer of a filtering resolver: %+v", a)
+	}
+
+	e.auth.handle("old.example.com.", mdns.TypeA, func(req, resp *mdns.Msg, _ bool) { resp.Rcode = mdns.RcodeServerFailure })
+	e.resolvers[0].handle("old.example.com.", mdns.TypeA, negative(t, mdns.RcodeNameError, false))
+	e.now = e.now.Add(time.Minute)
+	res = e.check(t, Request{Zone: "example.com", Host: "old", Type: "A"})
+	if res.Summary.Converged || res.Summary.Match == 0 {
+		t.Errorf("converged without an authoritative answer: %+v", res.Summary)
+	}
+}
+
+func TestCheckCapsAnswers(t *testing.T) {
+	e := newEnv(t, 1, nil)
+	var rrs []string
+	for i := range 100 {
+		rrs = append(rrs, "big.example.com. 300 IN TXT \"v"+strconv.Itoa(i)+strings.Repeat("x", 250)+"\" \""+strings.Repeat("y", 250)+"\"")
+	}
+	big := func(aa bool) func(req, resp *mdns.Msg, tcp bool) {
+		return func(req, resp *mdns.Msg, tcp bool) {
+			resp.Authoritative = aa
+			if !tcp {
+				resp.Truncated = true
+				return
+			}
+			answer(t, aa, rrs...)(req, resp, tcp)
+		}
+	}
+	e.auth.handle("big.example.com.", mdns.TypeTXT, big(true))
+	e.resolvers[0].handle("big.example.com.", mdns.TypeTXT, big(false))
+	s := &dns.RRset{Key: dns.Key{Host: "big", Type: "TXT"}, TTL: 300, Values: []string{"v"}}
+	res := e.check(t, Request{Zone: "example.com", Host: "big", Type: "TXT", Expected: s, Hash: "h"})
+	for _, a := range res.Answers {
+		if len(a.Values) > MaxValues || !a.Truncated {
+			t.Errorf("%s: %d values, truncated %v", a.Name, len(a.Values), a.Truncated)
+		}
+		for _, v := range a.Values {
+			if len(v) > MaxValueBytes+len("…") {
+				t.Errorf("value of %d bytes", len(v))
+			}
+		}
+	}
+}
+
+func TestCheckInFlightCap(t *testing.T) {
+	release := make(chan struct{})
+	e := newEnv(t, 1, func(o *Options) { o.MaxInFlight = 1; o.Timeout = 3 * time.Second; o.QueryTimeout = 2 * time.Second })
+	e.auth.handle("www.example.com.", mdns.TypeA, func(req, resp *mdns.Msg, _ bool) {
+		<-release
+		resp.Authoritative = true
+	})
+	e.resolvers[0].handle("www.example.com.", mdns.TypeA, answer(t, false, "www.example.com. 300 IN A 192.0.2.1"))
+	done := make(chan error, 1)
+	go func() {
+		_, err := e.checker.Check(context.Background(), "a", aRequest("192.0.2.1"))
+		done <- err
+	}()
+	for e.auth.queries.Load() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	other := aRequest("192.0.2.1")
+	other.Hash = "other"
+	if _, err := e.checker.Check(context.Background(), "b", other); !errors.Is(err, ErrBusy) {
+		t.Errorf("second check while one runs: %v", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.checker.Check(context.Background(), "b", other); err != nil {
+		t.Errorf("after the first check: %v", err)
+	}
+}
+
+func TestSubjectBucketsBounded(t *testing.T) {
+	c := New(Options{MaxSubjects: 8, Resolvers: []Resolver{{Name: "x", Address: "192.0.2.53"}}})
+	for i := range 100 {
+		c.allow("s" + strconv.Itoa(i))
+	}
+	if n := c.subjects.Len(); n > 8 {
+		t.Fatalf("%d buckets kept", n)
+	}
+}
+
+func TestPublicAddr(t *testing.T) {
+	for _, a := range []string{
+		"0.1.2.3", "10.0.0.1", "100.64.0.1", "127.0.0.1", "169.254.169.254", "172.16.0.1", "192.0.0.8", "192.0.2.1", "192.88.99.1",
+		"192.168.1.1", "198.18.0.1", "198.51.100.1", "203.0.113.1", "224.0.0.1", "240.0.0.1", "255.255.255.255",
+		"::", "::1", "::127.0.0.1", "::ffff:10.0.0.1", "64:ff9b::a00:1", "64:ff9b::7f00:1", "64:ff9b:1::1", "2002:a00:1::1", "2002:7f00:1::",
+		"2001::1", "2001:0:4136:e378:8000:63bf:3fff:fdd2", "2001:db8::1", "3fff::1", "fec0::1", "fe80::1", "fc00::1", "fd00::1", "100::1", "ff02::1",
+	} {
+		if PublicAddr(netip.MustParseAddr(a)) {
+			t.Errorf("%s is public", a)
+		}
+	}
+	for _, a := range []string{"205.251.192.1", "1.1.1.1", "2600:9000:5300::1", "64:ff9b::808:808", "2002:808:808::1", "::ffff:8.8.8.8"} {
+		if !PublicAddr(netip.MustParseAddr(a)) {
+			t.Errorf("%s refused", a)
+		}
 	}
 }
