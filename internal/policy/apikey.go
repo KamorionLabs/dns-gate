@@ -118,7 +118,7 @@ func (s *Snapshot) KeyRoleProblem(holder []string, role string) string {
 			return fmt.Sprintf("role %s must be ephemeral with an ephemeral_ttl of at most %s, as the caller's write rights", role, ttl)
 		}
 	}
-	if max := s.MaxChanges(holder); max > 0 {
+	if max := s.MaxChanges(holder); max > 0 && s.writes(role) {
 		if k := s.MaxChanges([]string{role}); k <= 0 || k > max {
 			return fmt.Sprintf("role %s allows more changes per request than the caller (max_changes_per_request %d)", role, max)
 		}

@@ -79,6 +79,7 @@ func TestKeyRoleProblemEphemeralAndCap(t *testing.T) {
 			"eph-30m":   {EphemeralTTL: config.Duration(30 * time.Minute), MaxChangesPerRequest: 3, Rules: rule},
 			"default":   {EphemeralTTL: config.Duration(30 * time.Minute), Rules: rule},
 			"unlimited": {EphemeralTTL: config.Duration(30 * time.Minute), MaxChangesPerRequest: -1, Rules: rule},
+			"reader":    {Rules: []config.Rule{{Zones: []string{"example.com"}, Actions: []string{ActionDNSRead}}}},
 		},
 	}
 	s := FromConfig(c).Holder().Current()
@@ -90,6 +91,7 @@ func TestKeyRoleProblemEphemeralAndCap(t *testing.T) {
 		{"keys", "eph-2h", "ephemeral"},
 		{"keys", "default", "max_changes_per_request"},
 		{"keys", "unlimited", "max_changes_per_request"},
+		{"keys", "reader", ""},
 		{"keys-free", "permanent", ""},
 		{"keys-free", "unlimited", ""},
 	} {
