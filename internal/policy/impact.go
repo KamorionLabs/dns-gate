@@ -5,7 +5,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/KamorionLabs/dns-gate/internal/glob"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 )
 
@@ -35,7 +34,7 @@ func (s *Snapshot) grants() map[grantKey]bool {
 					continue
 				}
 				for z := range s.zones {
-					if glob.Any(r.Zones, z) {
+					if ok, _ := s.ruleSelects(r, z, s.folderOnce(z)); ok {
 						out[grantKey{who, roleName, z, a}] = true
 					}
 				}
@@ -96,7 +95,7 @@ func (s *Snapshot) teamWrites() map[string]map[string]bool {
 				continue
 			}
 			for z := range s.zones {
-				if glob.Any(r.Zones, z) {
+				if ok, _ := s.ruleSelects(r, z, s.folderOnce(z)); ok {
 					if out[team] == nil {
 						out[team] = map[string]bool{}
 					}
@@ -312,28 +311,29 @@ func unionKeys[T any](a, b map[string]T) []string {
 // on an RRset (or a zone when key is nil).
 func (s *Snapshot) WhoCan(action, zone, host, typ string) uiapi.WhoCanResponse {
 	zone = normZone(zone)
-	resp := uiapi.WhoCanResponse{Entries: []uiapi.WhoCanEntry{}}
+	resp := uiapi.WhoCanResponse{Folder: s.Folder(zone), Entries: []uiapi.WhoCanEntry{}}
 	var key *struct{ host, typ string }
 	if host != "" || typ != "" {
 		key = &struct{ host, typ string }{host, typ}
 	}
-	decide := func(role string) bool {
+	decide := func(role string) Decision {
 		if key == nil {
-			return s.Decide([]string{role}, action, zone, nil).Allowed
+			return s.Decide([]string{role}, action, zone, nil)
 		}
 		k := normKey(rrsetKey(key.host, key.typ))
-		return s.Decide([]string{role}, action, zone, &k).Allowed
+		return s.Decide([]string{role}, action, zone, &k)
 	}
 	if key != nil && !IsMeta(action) {
 		_, resp.Protected = s.protectedBy(zone, normKey(rrsetKey(key.host, key.typ)))
 	}
 	for _, b := range s.bindings {
-		if !decide(b.binding.Role) {
+		d := decide(b.binding.Role)
+		if !d.Allowed {
 			continue
 		}
 		e := uiapi.WhoCanEntry{
 			Role: b.binding.Role, Team: b.binding.Team, TeamFrom: b.binding.TeamFrom, Layer: b.layer,
-			Groups: b.binding.Groups, Subjects: b.binding.Subjects,
+			Groups: b.binding.Groups, Subjects: b.binding.Subjects, ByFolder: d.Folder != "",
 		}
 		if len(b.binding.Groups) == 0 && len(b.binding.Subjects) == 0 {
 			if m, ok := s.TeamMembers(b.binding.Team); ok {
@@ -344,12 +344,12 @@ func (s *Snapshot) WhoCan(action, zone, host, typ string) uiapi.WhoCanResponse {
 	}
 	for _, k := range s.keys {
 		for _, r := range k.key.Roles {
-			if decide(r) {
+			if d := decide(r); d.Allowed {
 				team := ""
 				if len(k.key.Teams) > 0 {
 					team = k.key.Teams[0]
 				}
-				resp.Entries = append(resp.Entries, uiapi.WhoCanEntry{Role: r, Team: team, Layer: k.layer, Keys: []string{k.key.ID}})
+				resp.Entries = append(resp.Entries, uiapi.WhoCanEntry{Role: r, Team: team, Layer: k.layer, Keys: []string{k.key.ID}, ByFolder: d.Folder != ""})
 				break
 			}
 		}

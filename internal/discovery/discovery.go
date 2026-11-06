@@ -35,7 +35,18 @@ type Source struct {
 	Provider provider.Provider
 	Include  []string // zone globs, empty means every zone
 	Exclude  []string // zone globs, win over Include
-	Refresh  time.Duration
+	// Folders, when set, keeps only the zones whose folder matches one of
+	// these folder globs (providers implementing provider.FolderLister).
+	Folders []string
+	Refresh time.Duration
+}
+
+// FolderChange is a zone that moved to another folder between two listings
+// of its provider.
+type FolderChange struct {
+	Provider string
+	Zone     string
+	Old, New string
 }
 
 // Config configures a Discoverer.
@@ -43,6 +54,10 @@ type Config struct {
 	Sources []Source
 	Now     func() time.Time
 	Logger  *slog.Logger
+	// OnFolderChange, when set, is called after a listing for every zone
+	// (selected by include and exclude) whose folder changed since the
+	// previous listing of its provider.
+	OnFolderChange func(context.Context, FolderChange)
 }
 
 // Status describes the last listings. LastRefreshAt is the oldest of the
@@ -61,6 +76,7 @@ type ProviderStatus struct {
 	Kind          string
 	Include       []string
 	Exclude       []string
+	Folders       []string
 	Refresh       time.Duration
 	Loaded        bool
 	Count         int
@@ -70,12 +86,16 @@ type ProviderStatus struct {
 
 type source struct {
 	Source
-	zones  map[string]bool
-	sorted []string
-	loaded bool
-	lastAt time.Time
-	tried  time.Time
-	err    error
+	zones map[string]bool
+	// folders are the folders of the zones selected by include and
+	// exclude (before the folder filter), nil for providers without
+	// folders.
+	folders map[string]string
+	sorted  []string
+	loaded  bool
+	lastAt  time.Time
+	tried   time.Time
+	err     error
 }
 
 // Discoverer caches the filtered zone lists of the providers and resolves the
@@ -143,16 +163,70 @@ func (d *Discoverer) Refresh(ctx context.Context) error {
 }
 
 func (d *Discoverer) refreshLocked(ctx context.Context, s *source) error {
+	changes, err := d.list(ctx, s)
+	if d.cfg.OnFolderChange != nil {
+		for _, c := range changes {
+			d.cfg.OnFolderChange(ctx, c)
+		}
+	}
+	return err
+}
+
+// listZones lists the zones of a provider, with their folders when it has
+// some (nil otherwise).
+func listZones(ctx context.Context, p provider.Provider) ([]string, map[string]string, error) {
+	fl, ok := p.(provider.FolderLister)
+	if !ok {
+		names, err := p.ListZones(ctx)
+		return names, nil, err
+	}
+	folders, err := fl.ListZoneFolders(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	names := make([]string, 0, len(folders))
+	for n := range folders {
+		names = append(names, n)
+	}
+	return names, folders, nil
+}
+
+func (d *Discoverer) list(ctx context.Context, s *source) ([]FolderChange, error) {
 	now := d.cfg.Now()
-	names, err := s.Provider.ListZones(ctx)
+	names, listed, err := listZones(ctx, s.Provider)
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	s.tried = now
 	if err != nil {
 		s.err = fmt.Errorf("provider %s: %w", s.Provider.ID(), err)
-		return s.err
+		return nil, s.err
 	}
 	zones := Filter(names, s.Include, s.Exclude)
+	var folders map[string]string
+	var changes []FolderChange
+	if listed != nil {
+		folders = make(map[string]string, len(zones))
+		for _, z := range zones {
+			f := listed[z]
+			if f == "" {
+				f = glob.RootFolder
+			}
+			folders[z] = f
+			if old, ok := s.folders[z]; ok && s.loaded && old != f {
+				changes = append(changes, FolderChange{Provider: s.Provider.ID(), Zone: z, Old: old, New: f})
+			}
+		}
+	}
+	s.folders = folders
+	if len(s.Folders) > 0 {
+		kept := []string{}
+		for _, z := range zones {
+			if glob.AnyFolder(s.Folders, folders[z]) {
+				kept = append(kept, z)
+			}
+		}
+		zones = kept
+	}
 	s.zones = make(map[string]bool, len(zones))
 	for _, z := range zones {
 		s.zones[z] = true
@@ -169,7 +243,7 @@ func (d *Discoverer) refreshLocked(ctx context.Context, s *source) error {
 			}
 		}
 	}
-	return nil
+	return changes, nil
 }
 
 // RefreshIfOlder lists again the providers whose last attempt is older than
@@ -275,6 +349,21 @@ func (d *Discoverer) Discovered(zone string) bool {
 	return false
 }
 
+// Folder returns the folder of a discovered zone at its last listing ("/"
+// for a zone in no folder), "" when the zone is not discovered or its
+// provider has no folders.
+func (d *Discoverer) Folder(zone string) string {
+	zone = dns.NormalizeZone(zone)
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	for _, s := range d.srcs {
+		if s.zones[zone] {
+			return s.folders[zone]
+		}
+	}
+	return ""
+}
+
 // DiscoveredZones returns the filtered zones of every provider, sorted.
 func (d *Discoverer) DiscoveredZones() []string {
 	d.mu.RLock()
@@ -317,7 +406,8 @@ func (d *Discoverer) Status() Status {
 	st := Status{Loaded: len(d.srcs) > 0, Count: len(d.zonesLocked())}
 	for _, s := range d.srcs {
 		st.Providers = append(st.Providers, ProviderStatus{ID: s.Provider.ID(), Kind: s.Provider.Kind(),
-			Include: append([]string{}, s.Include...), Exclude: append([]string{}, s.Exclude...), Refresh: s.Refresh,
+			Include: append([]string{}, s.Include...), Exclude: append([]string{}, s.Exclude...),
+			Folders: append([]string{}, s.Folders...), Refresh: s.Refresh,
 			Loaded: s.loaded, Count: len(s.sorted), LastRefreshAt: s.lastAt, Err: s.err})
 		st.Loaded = st.Loaded && s.loaded
 		if s.loaded && (st.LastRefreshAt.IsZero() || s.lastAt.Before(st.LastRefreshAt)) {
@@ -332,14 +422,15 @@ func (d *Discoverer) Status() Status {
 
 // Provider returns the provider serving zone: the only provider whose zone
 // filter selects it or, when several do, the only one of them whose account
-// lists it.
+// lists it. A provider with a folder filter selects only the zones its last
+// listing found in a selected folder.
 func (d *Discoverer) Provider(zone string) (provider.Provider, error) {
 	zone = dns.NormalizeZone(zone)
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	var matched, listed []*source
 	for _, s := range d.srcs {
-		if !selects(s.Include, s.Exclude, zone) {
+		if !selects(s.Include, s.Exclude, zone) || (len(s.Folders) > 0 && !s.zones[zone]) {
 			continue
 		}
 		matched = append(matched, s)

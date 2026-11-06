@@ -56,6 +56,16 @@ type Checker interface {
 	Check(ctx context.Context, zone string, cur *dns.Zone, changes []dns.Change) ([]Problem, error)
 }
 
+// FolderLister is implemented by providers that organise the zones of an
+// account in folders (EuroDNS). Discovery lists them with ListZoneFolders
+// instead of ListZones.
+type FolderLister interface {
+	// ListZoneFolders returns the normalized names of the zones of the
+	// account with the folder of each, normalized by glob.NormalizeFolder
+	// ("/" for the zones in no folder).
+	ListZoneFolders(ctx context.Context) (map[string]string, error)
+}
+
 // Snapshotter is implemented by providers that keep zone snapshots
 // (EuroDNS). The id is recorded in the audit event of each write.
 type Snapshotter interface {

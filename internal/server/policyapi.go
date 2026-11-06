@@ -191,7 +191,7 @@ func (s *Server) baseLayer() uiapi.BaseLayer {
 	c := s.cfg.Config
 	b := uiapi.BaseLayer{
 		ConfigHash: c.Hash, LoadedAt: c.LoadedAt, Zones: c.Zones,
-		Bounds:   uiapi.Bounds{Zones: nonNil(c.Policy.Bounds.Zones), Actions: nonNil(c.Policy.Bounds.Actions)},
+		Bounds:   uiapi.Bounds{Zones: nonNil(c.Policy.Bounds.Zones), Folders: c.Policy.Bounds.Folders, Actions: nonNil(c.Policy.Bounds.Actions)},
 		Document: s.cfg.Policy.Base(), Issuers: []uiapi.Issuer{}, Protected: []uiapi.Protected{},
 	}
 	if len(c.Policy.Delegations) > 0 {
@@ -825,7 +825,7 @@ func (s *Server) discoveryView(c *config.Config) *uiapi.ZonesDiscovery {
 			refresh = p.Zones.Refresh.D()
 		}
 		v := uiapi.ProviderDiscovery{ID: p.ID, Kind: p.Kind, Include: nonNil(p.Zones.Include), Exclude: nonNil(p.Zones.Exclude),
-			Refresh: p.Zones.Refresh.D().String()}
+			Folders: p.Zones.Folders, Refresh: p.Zones.Refresh.D().String()}
 		for _, ps := range st.Providers {
 			if ps.ID != p.ID {
 				continue

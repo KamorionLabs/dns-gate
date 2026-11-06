@@ -43,6 +43,7 @@ type Me struct {
 type Permission struct {
 	Role    string   `json:"role"`
 	Zones   []string `json:"zones"`
+	Folders []string `json:"folders,omitempty"`
 	Actions []string `json:"actions"`
 	Hosts   []string `json:"hosts"` // empty: the whole zone
 	Types   []string `json:"types"` // empty: any type
@@ -81,8 +82,11 @@ type ConnectIssuer struct {
 // and not managed (Unmanaged, read-only; counts stay zero until its content
 // has been read once).
 type ZoneSummary struct {
-	Zone         string     `json:"zone"`
-	Provider     string     `json:"provider"`
+	Zone     string `json:"zone"`
+	Provider string `json:"provider"`
+	// Folder is the provider folder of the zone (EuroDNS, "/" at the
+	// root), "" when the provider has no folders or the zone is not listed.
+	Folder       string     `json:"folder,omitempty"`
 	Unmanaged    bool       `json:"unmanaged,omitempty"`
 	RRsets       int        `json:"rrsets"`  // total upstream RRsets
 	Managed      int        `json:"managed"` // owned by the gate (active)
@@ -140,6 +144,8 @@ type ZoneInventory struct {
 	// Tombstones are the RRsets of a managed zone deleted recently through
 	// the gate and still reserved for their team.
 	Tombstones []Tombstone `json:"tombstones,omitempty"`
+	// Folder is the provider folder of the zone (EuroDNS, "/" at the root).
+	Folder string `json:"folder,omitempty"`
 }
 
 // Tombstone reserves a deleted RRset for its team until ExpiresAt: only

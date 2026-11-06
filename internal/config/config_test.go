@@ -590,3 +590,43 @@ func TestEuroDNSZoneProfilesOptIn(t *testing.T) {
 		t.Fatalf("zone_profiles: %v", err)
 	}
 }
+
+func TestFolders(t *testing.T) {
+	e := env(map[string]string{"EURODNS_API_KEY": "k"})
+	groups := "\ngroups:\n  admins:\n    members:\n      - issuer: ci\n        claims: {roles: [Gate.PolicyAdmin]}\n"
+	ok := strings.Replace(base, "      - zones: [example.com]\n", "      - folders: [\"/ES\", \"/ES/**\"]\n", 1)
+	ok = strings.Replace(ok, "    kind: eurodns\n", "    kind: eurodns\n    zones: {folders: [\"/ES/**\", \"/\"]}\n", 1) + groups + `policy:
+  editable: true
+  bounds: {folders: ["/ES/**"], actions: [dns.read, dns.record.write]}
+  delegations:
+    - name: es
+      subjects: [{issuer: ci, claims: {sub: "repo:acme/gate:*"}}]
+      allow: {folders: ["/ES/Madrid/**"], actions: [dns.record.write], binding_subjects: [{issuer: ci, claims: {sub: "repo:acme/*"}}], teams: {names: [web]}}
+`
+	c, err := Parse([]byte(ok), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(c.Roles["writer"].Rules[0].Folders, ","); got != "/ES,/ES/**" || strings.Join(c.Providers[0].Zones.Folders, ",") != "/ES/**,/" {
+		t.Fatalf("folders: %q %+v", got, c.Providers[0].Zones)
+	}
+	route53 := `  - id: r53
+    kind: route53
+    zones: {include: ["*.fr"], folders: ["/ES"]}
+    route53: {region: eu-west-3}
+`
+	for name, doc := range map[string]string{
+		"rule without zones nor folders": strings.Replace(ok, "      - folders: [\"/ES\", \"/ES/**\"]\n        actions", "      - actions", 1),
+		"relative folder":                strings.Replace(ok, "folders: [\"/ES\", \"/ES/**\"]", "folders: [\"ES\"]", 1),
+		"partial double star":            strings.Replace(ok, "folders: [\"/ES\", \"/ES/**\"]", "folders: [\"/ES/a**\"]", 1),
+		"bad provider folder":            strings.Replace(ok, "zones: {folders: [\"/ES/**\", \"/\"]}", "zones: {folders: [\"/ES/\"]}", 1),
+		"route53 folders":                strings.Replace(ok, "providers:\n", "providers:\n"+route53, 1),
+		"bad bounds folder":              strings.Replace(ok, "bounds: {folders: [\"/ES/**\"]", "bounds: {folders: [\"/ES?\"]", 1),
+		"allow outside bounds":           strings.Replace(ok, "allow: {folders: [\"/ES/Madrid/**\"]", "allow: {folders: [\"/FR\"]", 1),
+		"no bounds zones nor folders":    strings.Replace(ok, "bounds: {folders: [\"/ES/**\"], ", "bounds: {", 1),
+	} {
+		if _, err := Parse([]byte(doc), e); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+}

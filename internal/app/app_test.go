@@ -131,7 +131,7 @@ roles:
 		a.Handler().ServeHTTP(rec, req)
 		return rec
 	}
-	if rec := get("/api/v1/zones"); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"zone":"other.org","provider":"eurodns","unmanaged":true`) ||
+	if rec := get("/api/v1/zones"); rec.Code != 200 || !strings.Contains(rec.Body.String(), `"zone":"other.org","provider":"eurodns","folder":"/","unmanaged":true`) ||
 		!strings.Contains(rec.Body.String(), `"zone":"example.com","provider":"eurodns"`) {
 		t.Fatalf("zones: %d %s", rec.Code, rec.Body.String())
 	}

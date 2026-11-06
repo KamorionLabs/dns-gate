@@ -81,18 +81,23 @@ func keyTeamProblem(snap *policy.Snapshot, team string) string {
 }
 
 // canManageKey: a team of the subject (any team for gate-wide managers,
-// holding gate.apikey.manage on "*") and gate.apikey.manage on every zone of
-// the key role.
+// holding gate.apikey.manage on "*") and gate.apikey.manage on every zone
+// and folder pattern of the key role.
 func canManageKey(snap *policy.Snapshot, subj *identity.Subject, team, role string) bool {
 	if !slices.Contains(subj.Teams, team) && !snap.GrantsPattern(subj.Roles, policy.ActionAPIKeyManage, "*") {
 		return false
 	}
-	zones := snap.RoleZones(role)
-	if len(zones) == 0 {
+	zones, folders := snap.RoleZones(role), snap.RoleFolders(role)
+	if len(zones) == 0 && len(folders) == 0 {
 		return snap.GrantsAnywhere(subj.Roles, policy.ActionAPIKeyManage)
 	}
 	for _, z := range zones {
 		if !snap.GrantsPattern(subj.Roles, policy.ActionAPIKeyManage, z) {
+			return false
+		}
+	}
+	for _, f := range folders {
+		if !snap.GrantsFolderPattern(subj.Roles, policy.ActionAPIKeyManage, f) {
 			return false
 		}
 	}

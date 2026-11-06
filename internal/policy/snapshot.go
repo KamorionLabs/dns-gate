@@ -58,6 +58,14 @@ type Discovery interface {
 	DiscoveredZones() []string
 }
 
+// FolderDiscovery is implemented by a Discovery that knows the provider
+// folder of each zone (EuroDNS folders).
+type FolderDiscovery interface {
+	// Folder returns the folder of a discovered zone at its last listing
+	// ("/" for a zone in no folder), "" when unknown or without folders.
+	Folder(zone string) string
+}
+
 type compiledKey struct {
 	layer string
 	key   uiapi.VirtualKey
@@ -113,7 +121,10 @@ func BaseDocument(c *config.Config) uiapi.PolicyDocument {
 			ur.EphemeralTTL = r.EphemeralTTL.D().String()
 		}
 		for _, rule := range r.Rules {
-			nr := uiapi.Rule{Zones: rule.Zones, Actions: rule.Actions}
+			nr := uiapi.Rule{Zones: rule.Zones, Folders: rule.Folders, Actions: rule.Actions}
+			if nr.Zones == nil {
+				nr.Zones = []string{}
+			}
 			if rule.Records != nil {
 				nr.Records = &uiapi.RecordScope{Hosts: rule.Records.Hosts, Types: rule.Records.Types}
 			}
@@ -262,6 +273,45 @@ func (s *Snapshot) UnmanagedZones() []string {
 		}
 	}
 	return out
+}
+
+// Folder returns the provider folder of a zone as last listed by discovery
+// ("/" for a zone in no folder), "" when the zone is not listed or its
+// provider has no folders: folder selectors never match it.
+func (s *Snapshot) Folder(zone string) string {
+	fd, ok := s.discovery.(FolderDiscovery)
+	if !ok {
+		return ""
+	}
+	return fd.Folder(normZone(zone))
+}
+
+// ruleSelects reports whether a rule applies to a zone: the zone matches
+// its zones, or the folder of the zone (folder, computed on demand) matches
+// its folders. via is the folder when the rule applies through it only.
+func (s *Snapshot) ruleSelects(r uiapi.Rule, zone string, folder func() string) (ok bool, via string) {
+	if glob.Any(r.Zones, zone) {
+		return true, ""
+	}
+	if len(r.Folders) == 0 {
+		return false, ""
+	}
+	if f := folder(); glob.AnyFolder(r.Folders, f) {
+		return true, f
+	}
+	return false, ""
+}
+
+// folderOnce returns a function computing the folder of zone at most once.
+func (s *Snapshot) folderOnce(zone string) func() string {
+	var f string
+	done := false
+	return func() string {
+		if !done {
+			f, done = s.Folder(zone), true
+		}
+		return f
+	}
 }
 
 // Resolution is the outcome of binding a subject.
@@ -444,6 +494,9 @@ type Decision struct {
 	Matched string // e.g. "roles.web.rules[0]"
 	Denied  string
 	Layer   string
+	// Folder is the folder of the zone when the matched rule applied
+	// through its folders.
+	Folder string
 }
 
 // IsMeta reports whether an action is a policy.* action (base only, not
@@ -474,6 +527,7 @@ func (s *Snapshot) Decide(roles []string, action, zone string, key *dns.Key) Dec
 	}
 	sorted := append([]string(nil), roles...)
 	sort.Strings(sorted)
+	folder := s.folderOnce(zone)
 	for _, name := range sorted {
 		cr := s.roles[name]
 		if cr == nil || (meta && cr.layer != LayerBase) {
@@ -483,8 +537,12 @@ func (s *Snapshot) Decide(roles []string, action, zone string, key *dns.Key) Dec
 			if !contains(r.Actions, action) {
 				continue
 			}
-			if !meta && !glob.Any(r.Zones, zone) {
-				continue
+			via := ""
+			if !meta {
+				var ok bool
+				if ok, via = s.ruleSelects(r, zone, folder); !ok {
+					continue
+				}
 			}
 			if !s.ruleEffective(cr, r, action) {
 				continue
@@ -492,7 +550,7 @@ func (s *Snapshot) Decide(roles []string, action, zone string, key *dns.Key) Dec
 			if key != nil && !meta && r.Records != nil && !scopeMatches(*r.Records, *key) {
 				continue
 			}
-			return Decision{Allowed: true, Matched: fmt.Sprintf("roles.%s.rules[%d]", name, i), Layer: cr.layer}
+			return Decision{Allowed: true, Matched: fmt.Sprintf("roles.%s.rules[%d]", name, i), Layer: cr.layer, Folder: via}
 		}
 	}
 	return Decision{Denied: "no rule grants " + action}
@@ -519,7 +577,7 @@ func (s *Snapshot) Permissions(roles []string) []uiapi.Permission {
 			if len(actions) == 0 {
 				continue
 			}
-			p := uiapi.Permission{Role: name, Zones: append([]string{}, r.Zones...), Actions: actions, Hosts: []string{}, Types: []string{}}
+			p := uiapi.Permission{Role: name, Zones: append([]string{}, r.Zones...), Folders: r.Folders, Actions: actions, Hosts: []string{}, Types: []string{}}
 			if r.Records != nil {
 				p.Hosts = append(p.Hosts, r.Records.Hosts...)
 				p.Types = append(p.Types, r.Records.Types...)
@@ -551,6 +609,11 @@ func (s *Snapshot) withinBounds(r uiapi.Rule, action string) bool {
 	}
 	for _, z := range r.Zones {
 		if !ZoneCovered(s.bounds.Zones, z) {
+			return false
+		}
+	}
+	for _, f := range r.Folders {
+		if !glob.FolderCovered(s.bounds.Folders, f) {
 			return false
 		}
 	}
@@ -614,7 +677,7 @@ func (s *Snapshot) Explain(issuer string, claims map[string]any, action, zone, h
 		key = &k
 	}
 	d := s.Decide(res.Roles, action, zone, key)
-	resp.Allowed, resp.Matched, resp.Denied, resp.Layer = d.Allowed, d.Matched, d.Denied, d.Layer
+	resp.Allowed, resp.Matched, resp.Denied, resp.Layer, resp.Folder = d.Allowed, d.Matched, d.Denied, d.Layer, d.Folder
 	if len(res.Roles) == 0 && !d.Allowed {
 		resp.Denied = "no binding applies to this subject"
 	}

@@ -3,6 +3,7 @@ package discovery
 import (
 	"context"
 	"errors"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -161,5 +162,87 @@ func TestProviderResolution(t *testing.T) {
 	st := d.Status()
 	if !st.Loaded || st.Err == nil || len(st.Providers) != 3 || st.Providers[1].Err == nil || st.Count != 4 {
 		t.Fatalf("status %+v", st)
+	}
+}
+
+// folderLister is a provider with folders (provider.FolderLister).
+type folderLister struct {
+	fakeLister
+	folders map[string]string
+}
+
+func (f *folderLister) ListZoneFolders(context.Context) (map[string]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	out := make(map[string]string, len(f.folders))
+	for z, fo := range f.folders {
+		out[z] = fo
+	}
+	return out, f.err
+}
+
+func (f *folderLister) move(zone, folder string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.folders[zone] = folder
+}
+
+func TestFolders(t *testing.T) {
+	l := &folderLister{fakeLister: fakeLister{id: "eu"}, folders: map[string]string{
+		"example.es": "/ES", "madrid.example.es": "/ES/Madrid", "example.fr": "/FR", "example.com": "/", "excluded.net": "/ES",
+	}}
+	plain := &fakeLister{id: "r53", names: []string{"example.org"}}
+	var changes []FolderChange
+	d := New(Config{
+		Sources: []Source{
+			{Provider: l, Exclude: []string{"*.net"}, Folders: []string{"/ES", "/ES/**", "/"}},
+			{Provider: plain, Include: []string{"*.org"}},
+		},
+		OnFolderChange: func(_ context.Context, c FolderChange) { changes = append(changes, c) },
+	})
+	if err := d.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(d.DiscoveredZones(), ","); got != "example.com,example.es,example.org,madrid.example.es" {
+		t.Fatalf("zones = %s", got)
+	}
+	for zone, want := range map[string]string{"example.es": "/ES", "Madrid.Example.ES.": "/ES/Madrid", "example.com": "/", "example.fr": "", "example.org": "", "absent.com": ""} {
+		if got := d.Folder(zone); got != want {
+			t.Errorf("Folder(%s) = %q, want %q", zone, got, want)
+		}
+	}
+	if p, err := d.Provider("example.es"); err != nil || p.ID() != "eu" {
+		t.Fatalf("provider of a zone in a selected folder: %v %v", p, err)
+	}
+	if _, err := d.Provider("example.fr"); err == nil {
+		t.Fatal("a zone outside the selected folders must not be served")
+	}
+	if st := d.Status(); strings.Join(st.Providers[0].Folders, ",") != "/ES,/ES/**,/" {
+		t.Fatalf("status = %+v", st.Providers[0])
+	}
+	if len(changes) != 0 {
+		t.Fatalf("no change at the first listing: %+v", changes)
+	}
+
+	l.move("example.es", "/FR")
+	l.move("example.fr", "/ES/Barcelona")
+	l.move("excluded.net", "/FR")
+	if err := d.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sort.Slice(changes, func(i, j int) bool { return changes[i].Zone < changes[j].Zone })
+	want := []FolderChange{{Provider: "eu", Zone: "example.es", Old: "/ES", New: "/FR"}, {Provider: "eu", Zone: "example.fr", Old: "/FR", New: "/ES/Barcelona"}}
+	if len(changes) != 2 || changes[0] != want[0] || changes[1] != want[1] {
+		t.Fatalf("changes = %+v", changes)
+	}
+	if d.Discovered("example.es") || !d.Discovered("example.fr") || d.Folder("example.fr") != "/ES/Barcelona" {
+		t.Fatalf("zones after the move = %v", d.DiscoveredZones())
+	}
+
+	// A failed listing keeps the folders of the previous one.
+	l.err = errors.New("upstream down")
+	if err := d.Refresh(context.Background()); err == nil || d.Folder("example.fr") != "/ES/Barcelona" {
+		t.Fatalf("folders after a failed listing: %v %q", err, d.Folder("example.fr"))
 	}
 }

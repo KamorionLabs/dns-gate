@@ -11,7 +11,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/KamorionLabs/dns-gate/internal/dns"
+	"github.com/KamorionLabs/dns-gate/internal/glob"
+	"github.com/KamorionLabs/dns-gate/internal/provider"
 )
+
+var _ provider.FolderLister = (*Provider)(nil)
 
 const (
 	// PageSize is the number of domains requested per page.
@@ -38,11 +44,39 @@ type lister struct {
 }
 
 type domainResult struct {
-	DomainName string `json:"domainName"`
+	DomainName     string `json:"domainName"`
+	FolderFullPath string `json:"folderFullPath"`
+}
+
+// ListZoneFolders returns the zones of the account with their EuroDNS
+// folder (folderFullPath of POST /domains/search, "/" for a domain in no
+// folder).
+func (p *Provider) ListZoneFolders(ctx context.Context) (map[string]string, error) {
+	items, err := (&lister{BaseURL: p.baseURL, Transport: p.transport}).search(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(items))
+	for _, it := range items {
+		out[dns.NormalizeZone(it.DomainName)] = glob.NormalizeFolder(it.FolderFullPath)
+	}
+	return out, nil
 }
 
 // ListDomains returns every domain name of the account.
 func (l *lister) ListDomains(ctx context.Context) ([]string, error) {
+	items, err := l.search(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		out = append(out, it.DomainName)
+	}
+	return out, nil
+}
+
+func (l *lister) search(ctx context.Context) ([]domainResult, error) {
 	size := l.PageSize
 	if size <= 0 {
 		size = PageSize
@@ -54,7 +88,7 @@ func (l *lister) ListDomains(ctx context.Context) ([]string, error) {
 	u := *base
 	u.Path = strings.TrimRight(base.Path, "/") + "/domains/search"
 	hc := &http.Client{Transport: l.Transport, Timeout: 60 * time.Second}
-	var out []string
+	var out []domainResult
 	seen := map[string]bool{}
 	for page := firstPage; page < firstPage+maxPages; page++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader([]byte(`{}`)))
@@ -87,7 +121,7 @@ func (l *lister) ListDomains(ctx context.Context) ([]string, error) {
 		for _, it := range items {
 			if it.DomainName != "" && !seen[it.DomainName] {
 				seen[it.DomainName] = true
-				out = append(out, it.DomainName)
+				out = append(out, it)
 				added++
 			}
 		}

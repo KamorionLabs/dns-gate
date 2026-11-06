@@ -204,6 +204,10 @@ type zoneArg struct {
 	Zone string `json:"zone" jsonschema:"managed zone name, e.g. example.com"`
 }
 
+type listZonesIn struct {
+	Folder string `json:"folder,omitempty" jsonschema:"optional EuroDNS folder glob: /ES is the folder ES only, /ES/** every folder below it, / the zones in no folder"`
+}
+
 type listZonesOut struct {
 	Zones []uiapi.ZoneSummary `json:"zones"`
 }
@@ -296,24 +300,23 @@ type adoptApplyIn struct {
 func (m *mcpServer) addReadTools(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_zones",
-		Description: "List the DNS zones you can read, with counts of managed, foreign, tainted and pending RRsets. Zones flagged unmanaged exist in a provider account but are not managed by the gate: their RRsets are readable (list_rrsets, get_rrset) but cannot be changed or adopted until a policy administrator brings them under management.",
+		Description: "List the DNS zones you can read, with their provider folder (EuroDNS folders, \"/\" for a zone in no folder) and counts of managed, foreign, tainted and pending RRsets. Zones flagged unmanaged exist in a provider account but are not managed by the gate: their RRsets are readable (list_rrsets, get_rrset) but cannot be changed or adopted until a policy administrator brings them under management. Optional filter on a folder glob.",
 		Annotations: readOnly("List zones"),
-	}, func(ctx context.Context, req *mcp.CallToolRequest, _ struct{}) (*mcp.CallToolResult, listZonesOut, error) {
+	}, func(ctx context.Context, req *mcp.CallToolRequest, in listZonesIn) (*mcp.CallToolResult, listZonesOut, error) {
 		subj, err := m.subject(ctx, req)
 		if err != nil {
 			return nil, listZonesOut{}, err
+		}
+		if in.Folder != "" {
+			if err := glob.ValidFolderPattern(in.Folder); err != nil {
+				return nil, listZonesOut{}, fmt.Errorf("folder: %w", err)
+			}
 		}
 		zs, err := m.s.cfg.Engine.Zones(ctx, subj)
 		if err != nil {
 			return nil, listZonesOut{}, errors.New("inventory unavailable")
 		}
-		readable := m.readable(subj)
-		out := listZonesOut{Zones: []uiapi.ZoneSummary{}}
-		for _, z := range zs {
-			if readable[z.Zone] {
-				out.Zones = append(out.Zones, z)
-			}
-		}
+		out := listZonesOut{Zones: readableZones(m.s.cfg.Policy.Current(), zs, m.readable(subj), in.Folder)}
 		m.audit(ctx, req, subj, "list_zones", "", "allow", "", nil)
 		return nil, out, nil
 	})

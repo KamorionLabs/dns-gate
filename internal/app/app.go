@@ -18,6 +18,7 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/config"
 	"github.com/KamorionLabs/dns-gate/internal/discovery"
 	"github.com/KamorionLabs/dns-gate/internal/eurodnsapi"
+	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
 	"github.com/KamorionLabs/dns-gate/internal/provider"
 	eurodnsprov "github.com/KamorionLabs/dns-gate/internal/provider/eurodns"
@@ -80,9 +81,9 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		if pc.EuroDNS != nil && pc.EuroDNS.ZoneProfiles {
 			profiles[pc.ID] = true
 		}
-		sources = append(sources, discovery.Source{Provider: p, Include: pc.Zones.Include, Exclude: pc.Zones.Exclude, Refresh: pc.Zones.Refresh.D()})
+		sources = append(sources, discovery.Source{Provider: p, Include: pc.Zones.Include, Exclude: pc.Zones.Exclude,
+			Folders: pc.Zones.Folders, Refresh: pc.Zones.Refresh.D()})
 	}
-	disc := discovery.New(discovery.Config{Sources: sources, Logger: log})
 
 	if cfg.SingleReplicaStore() {
 		if n, err := strconv.Atoi(os.Getenv("DNS_GATE_REPLICAS")); err == nil && n > 1 {
@@ -100,6 +101,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		out = os.Stdout
 	}
 	auditLog := &audit.Tee{Primary: audit.NewJSON(out), Store: st, ErrorLog: log}
+	disc := discovery.New(discovery.Config{Sources: sources, Logger: log, OnFolderChange: folderChangeAudit(auditLog, time.Now)})
 	holder, err := policy.NewHolder(cfg)
 	if err != nil {
 		return nil, err
@@ -186,6 +188,22 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 	a := &App{Config: cfg, Store: st, Engine: eng, Policy: holder, Discovery: disc, authz: authz, handler: srv.Handler(), opts: opts, log: log, now: time.Now}
 	a.PlanGC = a.GCPlans
 	return a, nil
+}
+
+// ActionZoneFolderChanged is the audit action of a zone found in another
+// provider folder than at the previous listing: the rules selecting zones by
+// folder apply from then on.
+const ActionZoneFolderChanged = "gate.zone.folder_changed"
+
+// folderChangeAudit records the folder changes found by discovery.
+func folderChangeAudit(l audit.Logger, now func() time.Time) func(context.Context, discovery.FolderChange) {
+	return func(ctx context.Context, c discovery.FolderChange) {
+		l.Log(ctx, audit.Event{
+			Time: now().UTC(), Subject: "gate:discovery", SubjectName: "gate:discovery", SubjectCategory: identity.CategorySystem,
+			Action: ActionZoneFolderChanged, Zone: c.Zone, Provider: c.Provider, Decision: "allow",
+			Extra: map[string]any{"old": c.Old, "new": c.New},
+		})
+	}
 }
 
 // untrustedEmail lists the issuers whose email claim must not identify a
