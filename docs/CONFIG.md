@@ -38,6 +38,10 @@ Generate a session key with `openssl rand -hex 32`, a token signing key with `op
 | `reconcile_interval` | `15m` | Drift detection period per zone (minimum `1m`). |
 | `limits.max_body_bytes` | `1048576` | Request body limit. |
 | `limits.max_changes_per_request` | `20` | Default blast-radius limit (RRset changes per request). |
+| `limits.ephemeral_lifetime_factor` | `4` | An ephemeral RRset lives at most its creation plus this many `ephemeral_ttl`, however often values are added. |
+| `acme.max_registrations` | `100` | acme-dns registrations and httpreq value ledgers per API key or token subject. |
+| `acme.registration_idle` | `720h` | Registrations of token subjects and httpreq ledgers unused this long are purged (maintenance, DynamoDB TTL). |
+| `acme.max_values` | `10` | Values of one challenge TXT RRset. |
 | `lock.ttl`, `lock.wait` | `60s`, `30s` | Per-zone write lease and how long a request waits for it (then `503 zone_locked`). |
 
 ## Providers
@@ -107,7 +111,7 @@ Trusted OIDC token issuers, for bearer tokens (`Authorization: Bearer <JWT>`) an
 
 | Field | Default | Description |
 |---|---|---|
-| `name` | (required) | Identifier used by bindings and in subjects (`<name>:<sub>`). |
+| `name` | (required) | Identifier used by bindings and in subjects (`<name>:<sub>`). `api-key`, `virtual-key` and `gate` are reserved for subjects of the gate itself (the gate issuer may be named `gate`). |
 | `issuer` | (required) | Expected `iss`, HTTPS. |
 | `jwks_url` | discovery | JWKS URL; empty means `<issuer>/.well-known/openid-configuration`. |
 | `audiences` | (required) | Accepted `aud` values. Use a gate-specific audience so tokens minted for other services are refused. |
@@ -123,6 +127,7 @@ Trusted OIDC token issuers, for bearer tokens (`Authorization: Bearer <JWT>`) an
 | `self` | `false` | This issuer is the gate itself, see [Gate-issued tokens](#gate-issued-tokens). |
 | `token_ttl` | `1h` | Lifetime of gate-issued tokens (`self: true` only, 1m to 24h). |
 | `token_exchange` | `false` | Tokens of this issuer can be exchanged for gate tokens, see [Token exchange](#token-exchange). Needs a gate issuer; refused on it. |
+| `max_exchanged_ttl` | `15m` | Longest lifetime of a gate token exchanged for a token of this issuer (`token_exchange` only, 1m to 24h). |
 
 Tokens must carry `exp` and the subject claim(s). Keys are cached and refetched on an unknown `kid` (at most every 30 s).
 
@@ -181,7 +186,8 @@ curl -fsS https://dns.example.com/api/v1/token-exchange \
 
 - The subject token is validated exactly as a bearer token of its issuer: signature, audiences, `bound_claims`, and the identity must be bound (`no_binding` otherwise). `subject_token_type` is `…:jwt`, `…:id_token` or `…:access_token`; `actor_token` (delegation) is refused.
 - The gate token carries the claims of the subject token, `gate_iss` (its issuer), `gate_cat` and `gate_xchg` (the `jti` of the exchanged token). It is bound as that issuer, like every gate token: same subject, bindings, teams and category.
-- Lifetime: 15 minutes, or `expires_in` (seconds, at least 60), capped by `token_ttl`. It does not depend on the expiry of the subject token.
+- Lifetime: 15 minutes, or `expires_in` (seconds, at least 60), capped by the issuer's `max_exchanged_ttl`, the gate issuer's `token_ttl`, and the expiry of the subject token plus 5 minutes.
+- An exchanged token is refused once its issuer no longer has `token_exchange` (after a configuration change).
 - Gate tokens and API keys are never exchanged: no chaining. Errors follow RFC 6749 (`400 invalid_grant` with a description); without a gate issuer or an opted-in issuer the endpoint answers `404 token_exchange_disabled`.
 - Every exchange is audited (`gate.token.exchange`, with the new `jti` and the exchanged one); refusals too.
 
@@ -330,7 +336,7 @@ A map of named roles. Deny by default: an action is allowed only if a rule of on
 | `rules[].records.hosts` | Host patterns relative to the zone, `@` is the apex. `*` matches one label, `**` one or more labels (a bare `**` matches every host, apex included). |
 | `rules[].records.types` | Record types, `*` for any. Omit `records` to cover the whole zone. |
 | `rebase_on_save` | On a full-zone PUT, ignore differences outside the role's scope instead of refusing them (stale zones sent by ACME clients). Granted if any role of the subject enables it. |
-| `ephemeral_ttl` | RRsets created by the role expire and are garbage-collected after this duration (ACME challenges); each write of the subject pushes the expiry back. Applies only if every write role of the subject is ephemeral. Required by the [ACME endpoints](ACME.md). |
+| `ephemeral_ttl` | RRsets created by the role expire and are garbage-collected after this duration (ACME challenges); a write adding a value pushes the expiry back, never beyond the creation plus `limits.ephemeral_lifetime_factor` TTLs. Applies only if every write role of the subject is ephemeral. Required by the [ACME endpoints](ACME.md). |
 | `max_changes_per_request` | `0` = global default, `-1` = unlimited, otherwise a limit. The most permissive role of the subject wins. |
 
 `dns.record.write` and `dns.record.adopt` are further limited by ownership: the gate only modifies or deletes RRsets it created or adopted, owned by one of the subject's teams.

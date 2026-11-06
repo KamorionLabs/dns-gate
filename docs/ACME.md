@@ -15,7 +15,9 @@ The gate speaks two protocols that existing clients already support:
 Every write goes through the zone engine as the caller: the record scope of its
 role, ownership by its team, the zone lock, protected records and the audit log
 apply. A name and its wildcard are validated together: their values coexist in one
-TXT RRset. The endpoints work the same way on AWS Lambda.
+TXT RRset (at most `acme.max_values`, 10 by default), and each value belongs to the
+caller that wrote it: only that caller removes it. The endpoints work the same way
+on AWS Lambda.
 
 Contents:
 
@@ -46,9 +48,11 @@ parties that have no identity provider.
 The token exchange, `POST /api/v1/token-exchange` (RFC 8693), takes a token of an
 issuer with `token_exchange: true`, validates it exactly as a bearer token
 (signature, audience, `bound_claims`, bindings) and answers a token signed by the
-gate with the same identity, valid 15 minutes (`expires_in` asks for another
-lifetime, capped by the gate issuer's `token_ttl`). Gate tokens and API keys are
-never exchanged.
+gate with the same identity, valid 15 minutes. `expires_in` asks for another
+lifetime, within the issuer's `max_exchanged_ttl` (15 minutes by default), the gate
+issuer's `token_ttl`, and 5 minutes past the expiry of the exchanged token. Gate
+tokens and API keys are never exchanged, and an exchanged token stops working if its
+issuer is no longer opted in.
 
 ```sh
 GATE=https://dns-gate.example.com
@@ -74,10 +78,10 @@ roles:
 
 - `ephemeral_ttl` is required by the ACME endpoints (`403 ephemeral_required`
   otherwise): acme-dns has no cleanup call, and a client may die before its cleanup.
-  Every write to the RRset pushes the expiry back; the reconciler deletes expired
-  RRsets (`reconcile_interval`, or the Lambda maintenance schedule). A caller that
-  also holds a permanent write role is refused: bind the ACME identity to this role
-  only.
+  Adding a value pushes the expiry back, never beyond the creation of the RRset plus
+  `limits.ephemeral_lifetime_factor` (4) TTLs; the reconciler deletes expired RRsets
+  (`reconcile_interval`, or the Lambda maintenance schedule). A caller that also
+  holds a permanent write role is refused: bind the ACME identity to this role only.
 - The record scope keeps the caller on challenge records: a leaked credential cannot
   touch anything else.
 
@@ -563,16 +567,18 @@ example.com {
 | `subdomain` is a registration UUID | A registration of an API key, or the domain name itself (the only form with a token). |
 | `X-Api-User` / `X-Api-Key` | Key id / key, or any value / a token. They win over basic authentication when both are sent (python requests sends basic authentication taken from the URL). `Authorization: Bearer` also works. |
 | `/register` creates an anonymous account | `401 registration_requires_api_key`. With an API key (basic authentication, e.g. `https://<id>:<key>@dns-gate.example.com/acme/acme-dns`, or `X-Api-User`/`X-Api-Key`), `{"domain": "<name>", "allowfrom": [...]}` (`domain` is a gate extension) answers `201` with an account whose password is the key. Tokens cannot register (`403`). |
-| Two most recent TXT values per subdomain | Same, per registration (per subject and domain with a token). Values written by other means (httpreq) are left alone. |
+| Two most recent TXT values per subdomain | Same, per registration (per subject and domain with a token). Values written by other means (httpreq) are left alone. Registrations and their values are saved only once the record is written. |
 | No cleanup | Same; the RRset expires with the role's `ephemeral_ttl`. |
-| `allowfrom` per registration | Same, on top of the key's `allowed_cidrs`. |
+| `allowfrom` per registration | Stricter: for a key and a domain, the address must be allowed by every registration of that key for that domain that has an `allowfrom`, whatever the subdomain used (a registration UUID or the domain name). On top of the key's `allowed_cidrs`. |
+| Unlimited registrations | At most `acme.max_registrations` (100) per key or token subject (`409 too_many_registrations`); those of token subjects are purged after `acme.registration_idle` (30 days) without use. |
 | Errors `{"error": "..."}` | Same, with a `message`: `bad_subdomain`, `bad_txt`, `forbidden`, `ephemeral_required`… |
 
 ## 6. Security
 
 - Prefer tokens: nothing to store or rotate, and the audit log names the
-  repository, service account or role. An exchanged token lasts 15 minutes by
-  default, and only the issuers you opt in can be exchanged.
+  repository, service account or role. An exchanged token lasts 15 minutes at most
+  by default, never much longer than the token it replaces, and only the issuers you
+  opt in can be exchanged.
 - An API key is a bearer secret: store it like a password (mode 600 files,
   Kubernetes secrets, the Windows key files above). The gate keeps only its
   SHA-256, compares it in constant time and never logs it. Give each server its own
@@ -580,8 +586,11 @@ example.com {
   `DELETE /api/v1/api-keys/{id}`.
 - Whatever the credential, the role limits it to `_acme-challenge` TXT records of
   the zones you list: enough to obtain certificates for those names, nothing else.
-- Exchanges (`gate.token.exchange`), refused API keys (`apikey.authenticate`) and
-  every write are in the audit log, with the subject, team and record.
+  A key never outgrows its issuer (rights, ephemeral TTL, change limit), and stops
+  working if its role later grants more than at issuance (`403 role_widened`).
+- Exchanges (`gate.token.exchange`), refused API keys (`apikey.authenticate`; unknown
+  or malformed keys are counted per address and minute) and every write are in the
+  audit log, with the subject, team and record.
 
 ## 7. Other certificate setups
 

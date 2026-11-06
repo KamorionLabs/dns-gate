@@ -164,9 +164,11 @@ paths:
         answer is a token signed by the gate issuer (`self: true`) with the
         same identity (issuer, subject, name, category, teams and claims),
         plus the claim `gate_xchg` (the `jti` of the exchanged token).
-        Gate tokens and API keys are never exchanged. The lifetime is 15
+        Gate tokens and API keys are never exchanged, and an exchanged token
+        is refused once its issuer no longer opts in. The lifetime is 15
         minutes, or `expires_in` (a gate extension, seconds), capped by the
-        `token_ttl` of the gate issuer. Every exchange is audited
+        issuer's `max_exchanged_ttl` (15m by default), the `token_ttl` of the
+        gate issuer and the subject token expiry plus 5 minutes. Every exchange is audited
         (`gate.token.exchange`). `404 token_exchange_disabled` without a gate
         issuer or an opted-in issuer. Errors follow RFC 6749
         (`{"error", "error_description"}`).
@@ -887,8 +889,10 @@ paths:
         Binds a new key to one team of the caller and one role. The role
         must not grant `policy.*` nor `gate.*` actions, and the caller must
         hold `gate.apikey.manage` on every zone of the role and every action
-        of the role on the same zones and records (`403 forbidden`
-        otherwise). `acme_domains` creates one acme-dns registration per
+        of the role on the same zones and records, with an ephemeral TTL and
+        a change limit no looser than its own (`403 forbidden` otherwise).
+        The grant of the role is recorded: if the role later grants more,
+        the key is refused (`403 role_widened`). `acme_domains` creates one acme-dns registration per
         domain (the role must allow `_acme-challenge.<domain>` TXT and have
         an `ephemeral_ttl`); `acme_dns_accounts` in the answer is the storage
         file of acme-dns clients. Humans need a recent login.
@@ -927,10 +931,12 @@ paths:
       operationId: replaceAPIKey
       summary: Replace the mutable fields of an API key
       description: |
-        Replaces name, description, expires_at, allowed_cidrs and
-        acme_domains (omitted fields are cleared). Team and role cannot
-        change (`409 immutable`); a revoked key cannot change (`409 revoked`).
-        Existing acme-dns registrations of kept domains keep their subdomain.
+        Replaces name, description, expires_at and allowed_cidrs (omitted
+        fields are cleared). `acme_domains`, when present, syncs the
+        registrations created through the API (kept domains keep their
+        subdomain); when absent, registrations stay as they are; those of
+        clients are never touched. Team and role cannot change
+        (`409 immutable`); a revoked key cannot change (`409 revoked`).
       requestBody:
         required: true
         content:
@@ -950,7 +956,7 @@ paths:
       tags: [api-keys]
       operationId: revokeAPIKey
       summary: Revoke an API key
-      description: The key stops working at once; it stays listed with `include_revoked=true`. Idempotent.
+      description: The key stops working at once; it stays listed with `include_revoked=true`. Idempotent. Besides its managers, its creator and the members of its team holding `gate.apikey.manage` anywhere may revoke it.
       responses:
         "204": { description: Revoked. }
         "404": { $ref: "#/components/responses/Error" }
@@ -995,7 +1001,9 @@ paths:
         gate; with an API key, basic authentication with the key id as user
         name (`HTTPREQ_USERNAME`) and the key as password
         (`HTTPREQ_PASSWORD`). The caller's role must have an `ephemeral_ttl`
-        (`403 ephemeral_required`).
+        (`403 ephemeral_required`). Each value belongs to its author: cleanup
+        removes only the caller's own values. An RRset holds at most
+        `acme.max_values` values (`409 too_many_values`).
       security:
         - apiKeyBasic: []
         - apiKey: []
@@ -1258,7 +1266,7 @@ components:
                 type: string
                 description: |
                   forbidden, registration_requires_api_key, domain_required,
-                  bad_domain, bad_subdomain, bad_txt, invalid_allowfrom_cidr,
+                  bad_domain, bad_subdomain, bad_txt, invalid_allowfrom_cidr, too_many_values, too_many_registrations,
                   malformed_json_payload, ephemeral_required, source_ip,
                   no_binding, unavailable, or a zone engine reason.
               message: { type: string }
@@ -1295,8 +1303,9 @@ components:
             410 plan_expired; 412 precondition; 413 too_large; 415 bad_request;
             423 zone_locked; 429 rate_limited; 500 internal;
             501 not_implemented; 502 upstream; 503 store_unavailable,
-            unavailable; 504 timeout. API keys add 403 ephemeral_required and
-            409 immutable, revoked.
+            unavailable; 504 timeout. API keys and ACME add 403
+            ephemeral_required, role_widened and 409 immutable, revoked,
+            too_many_values, too_many_registrations.
           enum:
             - invalid
             - relative_target
@@ -1344,6 +1353,9 @@ components:
             - ephemeral_required
             - immutable
             - revoked
+            - role_widened
+            - too_many_values
+            - too_many_registrations
         message: { type: string }
         details: {}
         errors:
@@ -1780,6 +1792,7 @@ components:
             properties:
               subdomain: { type: string }
               domain: { type: string }
+              origin: { type: string, enum: [api, client], description: "api: from acme_domains, synced by PUT; client: /register or the domain name used as subdomain." }
               allowfrom: { type: array, items: { type: string } }
         created_at: { type: string, format: date-time }
         created_by: { type: string }
