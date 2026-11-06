@@ -421,8 +421,12 @@ func (s *Server) handleACMEDNSUpdate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_txt", "message": "txt: 43 base64url characters required"})
 		return
 	}
-	if !cidrsAllow(reg.AllowFrom, s.cfg.Authn.ClientIP(r)) {
-		s.apiAudit(r, subj, op, "", "deny", "source_ip", map[string]any{"subdomain": reg.Subdomain})
+	if ok, err := s.acmeAllowed(r, reg); err != nil || !ok {
+		if err != nil {
+			s.acmeFailure(w, r, err, true)
+			return
+		}
+		s.apiAudit(r, subj, op, "", "deny", "source_ip", map[string]any{"subdomain": reg.Subdomain, "domain": reg.Domain})
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "forbidden", "message": "registration not allowed from this address"})
 		return
 	}
@@ -499,6 +503,26 @@ func (s *Server) acmeRegistration(ctx context.Context, subj *identity.Subject, s
 	}
 	now := s.now().UTC()
 	return &store.ACMERegistration{KeyID: owner, Subdomain: sub, Domain: sub, CreatedAt: now, UpdatedAt: now}, nil
+}
+
+// acmeAllowed applies allowfrom: the client address must be allowed by
+// every registration of the owner for the domain of reg that restricts
+// addresses, whatever the subdomain used.
+func (s *Server) acmeAllowed(r *http.Request, reg *store.ACMERegistration) (bool, error) {
+	ip := s.cfg.Authn.ClientIP(r)
+	if !cidrsAllow(reg.AllowFrom, ip) {
+		return false, nil
+	}
+	regs, err := s.cfg.APIKeys.ListACMERegistrations(r.Context(), reg.KeyID)
+	if err != nil {
+		return false, err
+	}
+	for _, o := range regs {
+		if o.Domain == reg.Domain && !cidrsAllow(o.AllowFrom, ip) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func cidrsAllow(cidrs []string, ip netip.Addr) bool {

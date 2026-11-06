@@ -817,3 +817,32 @@ func TestAPIKeyRefusalAuditedOnce(t *testing.T) {
 		}
 	}
 }
+
+// The allowfrom of a registration holds for every registration of the same
+// key and domain: neither the domain name as subdomain nor a second
+// registration without allowfrom bypasses it.
+func TestACMEDNSAllowFromPerDomain(t *testing.T) {
+	e := newACMEEnv(t)
+	k := e.createKey(`{"name": "k", "team": "web", "role": "acme"}`)
+	reg := basic(k.ID, k.Key)
+	status, b := e.do("POST", "/acme/acme-dns/register", reg, `{"allowfrom": ["192.0.2.0/24"], "domain": "api.example.com"}`)
+	if status != 201 {
+		t.Fatalf("register: %d %s", status, b)
+	}
+	hdr := map[string]string{"X-Api-User": k.ID, "X-Api-Key": k.Key}
+	if status, b := e.do("POST", "/acme/acme-dns/update", hdr, `{"subdomain":"api.example.com", "txt": "`+challenge("a")+`"}`); status != 401 {
+		t.Errorf("domain as subdomain bypassed allowfrom: %d %s", status, b)
+	}
+	_, b = e.do("POST", "/acme/acme-dns/register", reg, `{"domain": "api.example.com"}`)
+	var open uiapi.ACMEDNSAccount
+	_ = json.Unmarshal(b, &open)
+	if status, b := e.do("POST", "/acme/acme-dns/update", hdr, `{"subdomain":"`+open.SubDomain+`", "txt": "`+challenge("a")+`"}`); status != 401 {
+		t.Errorf("second registration bypassed allowfrom: %d %s", status, b)
+	}
+	if got := e.txt("_acme-challenge.api"); len(got) != 0 {
+		t.Errorf("written: %v", got)
+	}
+	if status, b := e.do("POST", "/acme/acme-dns/update", hdr, `{"subdomain":"www.example.com", "txt": "`+challenge("a")+`"}`); status != 200 {
+		t.Errorf("other domain: %d %s", status, b)
+	}
+}
