@@ -10,6 +10,8 @@ package discovery
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -22,6 +24,7 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/glob"
 	"github.com/KamorionLabs/dns-gate/internal/provider"
+	"github.com/KamorionLabs/dns-gate/internal/requestid"
 )
 
 // MinOnDemand is the minimum age of a list before an on-demand refresh.
@@ -35,7 +38,57 @@ type Source struct {
 	Provider provider.Provider
 	Include  []string // zone globs, empty means every zone
 	Exclude  []string // zone globs, win over Include
-	Refresh  time.Duration
+	// Folders, when set, keeps only the zones whose folder matches one of
+	// these folder globs (providers implementing provider.FolderLister).
+	Folders []string
+	Refresh time.Duration
+	// FolderMaxAge is how long the folders of the last successful listing
+	// are trusted while the following listings fail (default 3 Refresh):
+	// past it, Folder returns "" and folder rules no longer apply.
+	FolderMaxAge time.Duration
+}
+
+// DefaultFolderPeriods is the default FolderMaxAge, in refresh periods.
+const DefaultFolderPeriods = 3
+
+// Kinds of folder changes.
+const (
+	// FolderListed: first listing of a provider by this process, one
+	// summary for every zone (Count and Digest, no Zone).
+	FolderListed = "listed"
+	// FolderSeen: a zone that a later listing finds (Old is "").
+	FolderSeen = "seen"
+	// FolderChanged: the zone is in another folder than at the previous
+	// listing.
+	FolderChanged = "changed"
+	// FolderGone: the zone is no longer listed (New is "").
+	FolderGone = "gone"
+)
+
+// FolderChange is what a listing tells about folders: the summary of the
+// first listing by this process (FolderListed), or a zone found, moved or no
+// longer listed since the previous listing. Only zones selected by include
+// and exclude are reported.
+type FolderChange struct {
+	Kind     string
+	Provider string
+	Zone     string
+	Old, New string
+	// Count and Digest summarize a first listing: the number of zones and
+	// FolderDigest of their folders.
+	Count  int
+	Digest string
+}
+
+// FolderDigest is the SHA-256, in hex, of the "zone<TAB>folder" lines of
+// folders sorted by zone: two listings with the same digest saw the same
+// folders.
+func FolderDigest(folders map[string]string) string {
+	h := sha256.New()
+	for _, z := range sortedKeys(folders) {
+		fmt.Fprintf(h, "%s\t%s\n", z, folders[z])
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // Config configures a Discoverer.
@@ -43,6 +96,11 @@ type Config struct {
 	Sources []Source
 	Now     func() time.Time
 	Logger  *slog.Logger
+	// OnFolderChange, when set, is called after each successful listing of
+	// a provider with folders, for every FolderChange, with a context that
+	// is not cancelled with the listing and carries one request id per
+	// listing.
+	OnFolderChange func(context.Context, FolderChange)
 }
 
 // Status describes the last listings. LastRefreshAt is the oldest of the
@@ -57,11 +115,16 @@ type Status struct {
 
 // ProviderStatus describes the last listing of one provider.
 type ProviderStatus struct {
-	ID            string
-	Kind          string
-	Include       []string
-	Exclude       []string
-	Refresh       time.Duration
+	ID           string
+	Kind         string
+	Include      []string
+	Exclude      []string
+	Folders      []string
+	Refresh      time.Duration
+	FolderMaxAge time.Duration
+	// FoldersStale: the folders are older than FolderMaxAge (failed
+	// listings), folder rules match none of the zones of the provider.
+	FoldersStale  bool
 	Loaded        bool
 	Count         int
 	LastRefreshAt time.Time
@@ -70,12 +133,18 @@ type ProviderStatus struct {
 
 type source struct {
 	Source
-	zones  map[string]bool
-	sorted []string
-	loaded bool
-	lastAt time.Time
-	tried  time.Time
-	err    error
+	zones map[string]bool
+	// folders are the folders of the zones selected by include and
+	// exclude (before the folder filter), nil for providers without
+	// folders.
+	folders map[string]string
+	// foldersAt is the end of the listing that read folders.
+	foldersAt time.Time
+	sorted    []string
+	loaded    bool
+	lastAt    time.Time
+	tried     time.Time
+	err       error
 }
 
 // Discoverer caches the filtered zone lists of the providers and resolves the
@@ -103,6 +172,9 @@ func New(cfg Config) *Discoverer {
 	for _, s := range cfg.Sources {
 		if s.Refresh <= 0 {
 			s.Refresh = time.Hour
+		}
+		if s.FolderMaxAge <= 0 {
+			s.FolderMaxAge = DefaultFolderPeriods * s.Refresh
 		}
 		d.srcs = append(d.srcs, &source{Source: s, zones: map[string]bool{}})
 	}
@@ -143,16 +215,87 @@ func (d *Discoverer) Refresh(ctx context.Context) error {
 }
 
 func (d *Discoverer) refreshLocked(ctx context.Context, s *source) error {
+	changes, err := d.list(ctx, s)
+	if d.cfg.OnFolderChange != nil && len(changes) > 0 {
+		ctx = context.WithoutCancel(ctx)
+		if requestid.From(ctx) == "" {
+			ctx = requestid.With(ctx, requestid.New())
+		}
+		for _, c := range changes {
+			d.cfg.OnFolderChange(ctx, c)
+		}
+	}
+	return err
+}
+
+// listZones lists the zones of a provider, with their folders when it has
+// some (nil otherwise).
+func listZones(ctx context.Context, p provider.Provider) ([]string, map[string]string, error) {
+	fl, ok := p.(provider.FolderLister)
+	if !ok {
+		names, err := p.ListZones(ctx)
+		return names, nil, err
+	}
+	folders, err := fl.ListZoneFolders(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	names := make([]string, 0, len(folders))
+	for n := range folders {
+		names = append(names, n)
+	}
+	return names, folders, nil
+}
+
+func (d *Discoverer) list(ctx context.Context, s *source) ([]FolderChange, error) {
 	now := d.cfg.Now()
-	names, err := s.Provider.ListZones(ctx)
+	names, listed, err := listZones(ctx, s.Provider)
+	done := d.cfg.Now()
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	s.tried = now
 	if err != nil {
 		s.err = fmt.Errorf("provider %s: %w", s.Provider.ID(), err)
-		return s.err
+		return nil, s.err
 	}
 	zones := Filter(names, s.Include, s.Exclude)
+	var folders map[string]string
+	var changes []FolderChange
+	if listed != nil {
+		folders = make(map[string]string, len(zones))
+		first := s.folders == nil
+		for _, z := range zones {
+			f := listed[z]
+			folders[z] = f
+			if first {
+				continue
+			}
+			switch old, ok := s.folders[z]; {
+			case !ok && f != "":
+				changes = append(changes, FolderChange{Kind: FolderSeen, Provider: s.Provider.ID(), Zone: z, New: f})
+			case ok && old != f:
+				changes = append(changes, FolderChange{Kind: FolderChanged, Provider: s.Provider.ID(), Zone: z, Old: old, New: f})
+			}
+		}
+		for _, z := range sortedKeys(s.folders) {
+			if _, ok := folders[z]; !ok && s.folders[z] != "" {
+				changes = append(changes, FolderChange{Kind: FolderGone, Provider: s.Provider.ID(), Zone: z, Old: s.folders[z]})
+			}
+		}
+		if first {
+			changes = []FolderChange{{Kind: FolderListed, Provider: s.Provider.ID(), Count: len(folders), Digest: FolderDigest(folders)}}
+		}
+	}
+	s.folders, s.foldersAt = folders, done
+	if len(s.Folders) > 0 {
+		kept := []string{}
+		for _, z := range zones {
+			if glob.AnyFolder(s.Folders, folders[z]) {
+				kept = append(kept, z)
+			}
+		}
+		zones = kept
+	}
 	s.zones = make(map[string]bool, len(zones))
 	for _, z := range zones {
 		s.zones[z] = true
@@ -169,7 +312,7 @@ func (d *Discoverer) refreshLocked(ctx context.Context, s *source) error {
 			}
 		}
 	}
-	return nil
+	return changes, nil
 }
 
 // RefreshIfOlder lists again the providers whose last attempt is older than
@@ -275,6 +418,36 @@ func (d *Discoverer) Discovered(zone string) bool {
 	return false
 }
 
+// Folder returns the folder of a discovered zone at its last listing ("/"
+// for a zone in no folder), "" when the zone is not discovered, its provider
+// has no folders, its folders are stale (FolderMaxAge) or several providers
+// list it (it is then served by none).
+func (d *Discoverer) Folder(zone string) string {
+	zone = dns.NormalizeZone(zone)
+	now := d.cfg.Now()
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	folder, n := "", 0
+	for _, s := range d.srcs {
+		if s.zones[zone] {
+			n++
+			if !s.foldersStale(now) {
+				folder = s.folders[zone]
+			}
+		}
+	}
+	if n != 1 {
+		return ""
+	}
+	return folder
+}
+
+// foldersStale reports whether the folders of the source are older than
+// FolderMaxAge, counted from the end of the listing that read them.
+func (s *source) foldersStale(now time.Time) bool {
+	return s.folders != nil && now.Sub(s.foldersAt) > s.FolderMaxAge
+}
+
 // DiscoveredZones returns the filtered zones of every provider, sorted.
 func (d *Discoverer) DiscoveredZones() []string {
 	d.mu.RLock()
@@ -312,12 +485,14 @@ func (d *Discoverer) Loaded() bool {
 
 // Status returns the state of the last listings.
 func (d *Discoverer) Status() Status {
+	now := d.cfg.Now()
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	st := Status{Loaded: len(d.srcs) > 0, Count: len(d.zonesLocked())}
 	for _, s := range d.srcs {
 		st.Providers = append(st.Providers, ProviderStatus{ID: s.Provider.ID(), Kind: s.Provider.Kind(),
-			Include: append([]string{}, s.Include...), Exclude: append([]string{}, s.Exclude...), Refresh: s.Refresh,
+			Include: append([]string{}, s.Include...), Exclude: append([]string{}, s.Exclude...),
+			Folders: append([]string{}, s.Folders...), Refresh: s.Refresh, FolderMaxAge: s.FolderMaxAge, FoldersStale: s.foldersStale(now),
 			Loaded: s.loaded, Count: len(s.sorted), LastRefreshAt: s.lastAt, Err: s.err})
 		st.Loaded = st.Loaded && s.loaded
 		if s.loaded && (st.LastRefreshAt.IsZero() || s.lastAt.Before(st.LastRefreshAt)) {
@@ -332,14 +507,15 @@ func (d *Discoverer) Status() Status {
 
 // Provider returns the provider serving zone: the only provider whose zone
 // filter selects it or, when several do, the only one of them whose account
-// lists it.
+// lists it. A provider with a folder filter selects only the zones its last
+// listing found in a selected folder.
 func (d *Discoverer) Provider(zone string) (provider.Provider, error) {
 	zone = dns.NormalizeZone(zone)
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	var matched, listed []*source
 	for _, s := range d.srcs {
-		if !selects(s.Include, s.Exclude, zone) {
+		if !selects(s.Include, s.Exclude, zone) || (len(s.Folders) > 0 && !s.zones[zone]) {
 			continue
 		}
 		matched = append(matched, s)
@@ -358,6 +534,15 @@ func (d *Discoverer) Provider(zone string) (provider.Provider, error) {
 		return nil, fmt.Errorf("zone %s is listed by several providers (%s): exclude it from all but one", zone, ids(listed))
 	}
 	return nil, fmt.Errorf("zone %s is selected by several providers (%s) and listed by none of them", zone, ids(matched))
+}
+
+func sortedKeys(m map[string]string) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func ids(srcs []*source) string {

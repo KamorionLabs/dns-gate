@@ -590,7 +590,7 @@ func (e *engine) Write(ctx context.Context, s *identity.Subject, zoneIn, ifMatch
 	if len(plan.Ignored) > 0 {
 		extra = map[string]any{"ignored_out_of_scope": plan.Ignored}
 	}
-	e.emit(ctx, s, action, zone, "allow", "", uiChanges(plan.Changes), snapshot, extra)
+	e.emit(ctx, s, action, zone, "allow", "", uiChanges(plan.Changes), snapshot, plan.grants.extra(extra))
 	e.committed(ctx, zone, plan)
 	return result, newVersion, nil
 }
@@ -660,7 +660,7 @@ func (e *engine) validate(ctx context.Context, s *identity.Subject, p provider.P
 	var tombs map[dns.Key]store.Tombstone
 	for i := range plan.Changes {
 		c := &plan.Changes[i]
-		if !e.cfg.Authz.AllowRRset(s, policy.ActionRecordWrite, zone, c.Key) {
+		if !e.allowRRset(&plan.grants, s, policy.ActionRecordWrite, zone, c.Key) {
 			return nil, fail(ReasonForbidden, "not allowed to write %s in %s", keyString(c.Key), zone)
 		}
 		if e.cfg.Guard != nil {
@@ -891,17 +891,18 @@ func (e *engine) Adopt(ctx context.Context, s *identity.Subject, zoneIn string, 
 	rid := RequestID(ctx)
 	var writes []store.Ownership
 	var changes []uiapi.Change
+	var g grants
 	for _, r := range refs {
 		want := refKey(zone, r)
 		set, key, ok := findSet(sets, want)
 		o, owned := owns[key]
 		if ok && owned && o.State == store.StateActive && o.ContentHash == dns.ContentHash(set) && slices.Contains(s.Teams, o.Owner) {
-			if !e.cfg.Authz.AllowRRset(s, policy.ActionRecordWrite, zone, key) && !e.cfg.Authz.AllowRRset(s, policy.ActionRecordAdopt, zone, key) {
+			if !e.allowRRset(&g, s, policy.ActionRecordWrite, zone, key) && !e.allowRRset(&g, s, policy.ActionRecordAdopt, zone, key) {
 				return e.deny(ctx, s, action, zone, fail(ReasonForbidden, "not allowed to manage %s in %s", keyString(key), zone))
 			}
 			continue
 		}
-		if !e.cfg.Authz.AllowRRset(s, policy.ActionRecordAdopt, zone, key) {
+		if !e.allowRRset(&g, s, policy.ActionRecordAdopt, zone, key) {
 			return e.deny(ctx, s, action, zone, fail(ReasonForbidden, "not allowed to adopt %s in %s", keyString(key), zone))
 		}
 		if !ok {
@@ -947,7 +948,7 @@ func (e *engine) Adopt(ctx context.Context, s *identity.Subject, zoneIn string, 
 		}
 	}
 	if len(writes) > 0 {
-		e.emit(ctx, s, action, zone, "allow", "", changes, "", nil)
+		e.emit(ctx, s, action, zone, "allow", "", changes, "", g.extra(nil))
 	}
 	return nil
 }

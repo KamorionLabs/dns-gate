@@ -2,7 +2,7 @@
   type Name =
     | 'search' | 'sun' | 'moon' | 'logout' | 'copy' | 'check' | 'lock' | 'clock' | 'x' | 'chevron'
     | 'arrow' | 'human' | 'pipeline' | 'key' | 'gate' | 'alert' | 'history' | 'filter'
-    | 'plus' | 'trash' | 'shield' | 'flask' | 'doc' | 'undo' | 'download' | 'team' | 'transfer';
+    | 'plus' | 'trash' | 'shield' | 'flask' | 'doc' | 'undo' | 'download' | 'team' | 'transfer' | 'folder';
   let { name, size = 16 }: { name: Name; size?: number } = $props();
 </script>
 
@@ -70,6 +70,8 @@
     <path d="M8 2.5v8M4.75 7.5 8 10.75l3.25-3.25M3 13.5h10" />
   {:else if name === 'team'}
     <circle cx="6" cy="5.5" r="2.25" /><path d="M1.75 13.5c.5-2.4 2.2-3.7 4.25-3.7s3.75 1.3 4.25 3.7" /><path d="M10.5 3.6a2.25 2.25 0 0 1 0 4.1M12 9.9c1.2.5 2 1.7 2.25 3.6" />
+  {:else if name === 'folder'}
+    <path d="M2 4.5a1 1 0 0 1 1-1h3l1.5 1.5H13a1 1 0 0 1 1 1V12a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1Z" />
   {:else if name === 'transfer'}
     <path d="M2.5 5.5h10M9.5 2.5l3 3-3 3" /><path d="M13.5 10.5h-10M6.5 7.5l-3 3 3 3" />
   {/if}

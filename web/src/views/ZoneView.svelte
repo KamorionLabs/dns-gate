@@ -13,7 +13,7 @@
   import { shortHashes, ttl as fmtTTL } from '../lib/format';
   import { identityLabel } from '../lib/identity';
   import { managedSplit } from '../lib/zones';
-  import { zoneMatch } from '../lib/glob';
+  import { ruleCovers } from '../lib/folders';
   import { whoCanDoWhat } from '../lib/access';
   import { forbidden, policyState } from '../lib/policy.svelte';
   import Seal from '../components/Seal.svelte';
@@ -98,7 +98,7 @@
   // permissions in /me, the button stays and the gate answers.
   const adoptAllowed = $derived(
     !adoptForbidden &&
-      (!me?.permissions || me.permissions.some((p) => p.actions.includes('dns.record.adopt') && p.zones.some((z) => zoneMatch(z, zone)))),
+      (!me?.permissions || me.permissions.some((p) => p.actions.includes('dns.record.adopt') && ruleCovers(p, zone))),
   );
   const adoptWhyNot = 'Adopting needs the dns.record.adopt permission on this zone. Ask a policy administrator.';
 

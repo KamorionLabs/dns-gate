@@ -269,7 +269,13 @@ paths:
       tags: [zones]
       operationId: listZones
       summary: Zones the caller can read
-      description: Managed zones, and zones discovered in the provider accounts but not managed (`unmanaged`, read-only). Requires ui.read.
+      description: Managed zones, and zones discovered in the provider accounts but not managed (`unmanaged`, read-only), with the provider folder of each (EuroDNS). Requires ui.read.
+      parameters:
+        - name: folder
+          in: query
+          required: false
+          description: Keep the zones whose folder matches this folder glob (`/ES` the folder ES, `/ES/**` every folder below it, `/` the zones in no folder).
+          schema: { type: string, examples: ["/ES/**"] }
       responses:
         "200":
           description: Zones.
@@ -1814,6 +1820,8 @@ components:
       properties:
         role: { type: string }
         zones: { type: array, items: { type: string } }
+        folders: { type: array, items: { type: string }, description: "Folder globs: the rule also applies to the zones whose provider folder matches one." }
+        folder_zones: { type: array, items: { type: string }, description: "Zone globs a zone selected through folders must also match: policy.bounds.zones of a managed rule, allow.zones of a delegated one. Absent: no narrowing." }
         actions: { type: array, items: { type: string } }
         hosts: { type: array, items: { type: string } }
         types: { type: array, items: { type: string } }
@@ -1867,6 +1875,7 @@ components:
       properties:
         zone: { type: string }
         provider: { type: string, description: "Provider instance id, e.g. eurodns or route53-prod." }
+        folder: { type: string, description: 'Provider folder of the zone (EuroDNS), "/" for a zone in no folder; absent for providers without folders (Route53) or a zone not listed.', examples: ["/ES/Madrid"] }
         unmanaged: { type: boolean, description: "Discovered, not managed by the gate (read-only)." }
         rrsets: { type: integer }
         managed: { type: integer }
@@ -1913,6 +1922,7 @@ components:
       properties:
         zone: { type: string }
         provider: { type: string, description: "Provider instance id serving the zone." }
+        folder: { type: string, description: 'Provider folder of the zone (EuroDNS), "/" for a zone in no folder.' }
         unmanaged: { type: boolean }
         last_synced_at: { type: string, format: date-time }
         rrsets: { type: array, items: { $ref: "#/components/schemas/RRset" } }
@@ -2100,9 +2110,11 @@ components:
 
     Rule:
       type: object
+      description: A rule applies to the zones matching `zones` and to the zones whose provider folder matches `folders`; at least one of them is required.
       required: [zones, actions]
       properties:
         zones: { type: array, items: { type: string } }
+        folders: { type: array, items: { type: string, examples: ["/ES", "/ES/**"] } }
         actions: { type: array, items: { type: string, examples: ["dns.read", "dns.record.write", "ui.read"] } }
         records:
           type: object
@@ -2200,7 +2212,7 @@ components:
               subjects: { type: array, items: { $ref: "#/components/schemas/SubjectMatcher" } }
               allow:
                 type: object
-                description: Limits of the delegation (zones, actions, records, binding subjects, teams, roles, groups, max_objects).
+                description: Limits of the delegation (zones, folders, actions, records, binding subjects, teams, roles, groups, max_objects).
         objects: { type: array, items: { $ref: "#/components/schemas/DelegatedObject" } }
         revision_id: { type: string }
 

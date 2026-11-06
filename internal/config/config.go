@@ -76,7 +76,24 @@ type Provider struct {
 type ProviderZones struct {
 	Include []string `yaml:"include"` // zone globs, default ["*"]
 	Exclude []string `yaml:"exclude"` // zone globs, win over include
-	Refresh Duration `yaml:"refresh"` // listing period, default 1h, minimum 5m
+	// Folders, when set, keeps only the zones of the account whose folder
+	// matches one of these folder globs (EuroDNS providers only). A zone of
+	// such a provider is served only once the listing has seen it in a
+	// selected folder.
+	Folders []string `yaml:"folders"`
+	// FolderExpiry is the number of refresh periods the folders of the last
+	// successful listing are trusted while listings fail (EuroDNS, default
+	// 3): past it, folder rules match no zone of the provider.
+	FolderExpiry int      `yaml:"folder_expiry"`
+	Refresh      Duration `yaml:"refresh"` // listing period, default 1h, minimum 5m
+}
+
+// DefaultFolderExpiry is the default providers[].zones.folder_expiry.
+const DefaultFolderExpiry = 3
+
+// FolderMaxAge is how long the folders of a listing are trusted.
+func (z ProviderZones) FolderMaxAge() time.Duration {
+	return time.Duration(z.FolderExpiry) * z.Refresh.D()
 }
 
 // Matches reports whether the zone filter of the provider selects zone.
@@ -240,6 +257,8 @@ type Delegation struct {
 type DelegationAllow struct {
 	// Zones are the zone globs delegated role rules may target.
 	Zones []string `yaml:"zones"`
+	// Folders are the folder globs delegated role rules may target.
+	Folders []string `yaml:"folders"`
 	// Actions delegated role rules may grant.
 	Actions []string `yaml:"actions"`
 	// Records, when set, forces delegated role rules to name hosts and/or
@@ -298,7 +317,9 @@ type MCP struct {
 
 // Bounds limit what the managed layer may grant.
 type Bounds struct {
-	Zones   []string `yaml:"zones"`
+	Zones []string `yaml:"zones"`
+	// Folders are the folder globs managed rules may target.
+	Folders []string `yaml:"folders"`
 	Actions []string `yaml:"actions"`
 }
 
@@ -463,9 +484,12 @@ type Role struct {
 	MaxChangesPerRequest int      `yaml:"max_changes_per_request"` // 0: global default, -1: unlimited
 }
 
-// Rule grants actions on zones, optionally restricted to some records.
+// Rule grants actions on zones, optionally restricted to some records. It
+// applies to the zones matching Zones and to the zones whose provider folder
+// matches Folders (EuroDNS folders, "/ES" or "/ES/**").
 type Rule struct {
 	Zones   []string     `yaml:"zones"`
+	Folders []string     `yaml:"folders"`
 	Actions []string     `yaml:"actions"`
 	Records *RecordScope `yaml:"records"`
 }
@@ -669,6 +693,9 @@ func (c *Config) defaults() {
 		}
 		if p.Zones.Refresh == 0 {
 			p.Zones.Refresh = Duration(time.Hour)
+		}
+		if p.Zones.FolderExpiry == 0 {
+			p.Zones.FolderExpiry = DefaultFolderExpiry
 		}
 		if e := p.EuroDNS; e != nil {
 			if e.BaseURL == "" {
@@ -976,8 +1003,13 @@ func (c *Config) Validate() error {
 		}
 		for j, rule := range r.Rules {
 			rat := fmt.Sprintf("%s.rules[%d]", at, j)
-			if len(rule.Zones) == 0 {
-				add("%s.zones: required", rat)
+			if len(rule.Zones) == 0 && len(rule.Folders) == 0 {
+				add("%s.zones: zones or folders required", rat)
+			}
+			for _, f := range rule.Folders {
+				if err := glob.ValidFolderPattern(f); err != nil {
+					add("%s.folders: %q: %v", rat, f, err)
+				}
 			}
 			if len(rule.Actions) == 0 {
 				add("%s.actions: required", rat)
@@ -1089,6 +1121,11 @@ func (c *Config) Validate() error {
 			add("policy.bounds: zones and actions are required when policy.editable is true")
 		}
 	}
+	for _, f := range c.Policy.Bounds.Folders {
+		if err := glob.ValidFolderPattern(f); err != nil {
+			add("policy.bounds.folders: %q: %v", f, err)
+		}
+	}
 	for _, z := range c.Policy.Bounds.Zones {
 		if strings.Contains(z, "?") {
 			add("policy.bounds.zones: %q: only * wildcards are supported", z)
@@ -1134,6 +1171,7 @@ func (c *Config) Validate() error {
 			add("ownership.person_issuers: required with require_second_approver when several issuers yield human subjects (%s): the same person could approve their own request through another issuer; name the issuer(s) people sign in with", strings.Join(humans, ", "))
 		}
 	}
+	c.Warnings = append(c.Warnings, c.folderWarnings()...)
 	if len(c.Ownership.PersonIssuers) > 0 && !c.Ownership.RequireSecondApprover {
 		add("ownership.person_issuers: only used with require_second_approver: true")
 	}
@@ -1612,7 +1650,14 @@ func validateDelegations(c *Config, issuers map[string]bool) []error {
 		}
 		al := d.Allow
 		if len(al.Zones) == 0 {
-			add("%s.allow.zones: at least one zone glob is required", at)
+			add("%s.allow.zones: at least one zone glob is required (folder rules stay within it)", at)
+		}
+		for _, f := range al.Folders {
+			if err := glob.ValidFolderPattern(f); err != nil {
+				add("%s.allow.folders: %q: %v", at, f, err)
+			} else if !glob.FolderCovered(c.Policy.Bounds.Folders, f) {
+				add("%s.allow.folders: %q is outside policy.bounds.folders", at, f)
+			}
 		}
 		for _, z := range al.Zones {
 			if !glob.Covered(c.Policy.Bounds.Zones, strings.ToLower(z)) {
@@ -1828,6 +1873,63 @@ func envName(id string) string {
 	return strings.Trim(envNameRe.ReplaceAllString(strings.ToUpper(id), "_"), "_")
 }
 
+// folderWarnings reports the folder selectors that cannot match: without a
+// EuroDNS provider, or outside the zones.folders filters of every EuroDNS
+// provider when they all have one.
+func (c *Config) folderWarnings() []string {
+	type sel struct{ at, pattern string }
+	var sels []sel
+	for _, name := range sortedNames(c.Roles) {
+		for i, r := range c.Roles[name].Rules {
+			for _, f := range r.Folders {
+				sels = append(sels, sel{fmt.Sprintf("roles.%s.rules[%d].folders", name, i), f})
+			}
+		}
+	}
+	for _, f := range c.Policy.Bounds.Folders {
+		sels = append(sels, sel{"policy.bounds.folders", f})
+	}
+	for i, d := range c.Policy.Delegations {
+		for _, f := range d.Allow.Folders {
+			sels = append(sels, sel{fmt.Sprintf("policy.delegations[%d].allow.folders", i), f})
+		}
+	}
+	if len(sels) == 0 {
+		return nil
+	}
+	var filters [][]string
+	for _, p := range c.Providers {
+		if p.Kind == KindEuroDNS {
+			filters = append(filters, p.Zones.Folders)
+		}
+	}
+	var out []string
+	if len(filters) == 0 {
+		return append(out, fmt.Sprintf("%s: no EuroDNS provider, folder selectors never match a zone", sels[0].at))
+	}
+	for _, s := range sels {
+		reachable := false
+		for _, f := range filters {
+			reachable = reachable || len(f) == 0 || foldersMayIntersect(f, s.pattern)
+		}
+		if !reachable {
+			out = append(out, fmt.Sprintf("%s: %q is outside the zones.folders of every EuroDNS provider, it may never match a zone", s.at, s.pattern))
+		}
+	}
+	return out
+}
+
+// foldersMayIntersect reports whether a folder pattern may match a folder
+// one of the filter patterns matches.
+func foldersMayIntersect(filters []string, p string) bool {
+	for _, f := range filters {
+		if glob.FolderCovered([]string{f}, p) || glob.FolderCovered([]string{p}, f) || glob.MatchFolder(f, p) || glob.MatchFolder(p, f) {
+			return true
+		}
+	}
+	return false
+}
+
 // ProvidersFor returns the ids of the providers whose zone filter selects
 // zone.
 func (c *Config) ProvidersFor(zone string) []string {
@@ -1864,6 +1966,17 @@ func (c *Config) validateProviders(add func(string, ...any)) {
 					add("%s.zones.%s: %q: zone glob with * wildcards expected", at, l.name, g)
 				}
 			}
+		}
+		for _, f := range p.Zones.Folders {
+			if err := glob.ValidFolderPattern(f); err != nil {
+				add("%s.zones.folders: %q: %v", at, f, err)
+			}
+		}
+		if len(p.Zones.Folders) > 0 && p.Kind != KindEuroDNS {
+			add("%s.zones.folders: only EuroDNS accounts have folders", at)
+		}
+		if p.Zones.FolderExpiry < 2 || p.Zones.FolderExpiry > 100 {
+			add("%s.zones.folder_expiry: must be between 2 and 100 refresh periods (with 1, folder rules would close at every listing)", at)
 		}
 		if p.Zones.Refresh.D() < 5*time.Minute {
 			add("%s.zones.refresh: must be >= 5m (provider rate limits)", at)

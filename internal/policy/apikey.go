@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/KamorionLabs/dns-gate/internal/glob"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 )
 
@@ -34,10 +35,66 @@ func (s *Snapshot) RoleZones(name string) []string {
 	return out
 }
 
+// RoleFolders returns the folder patterns of the rules of a role.
+func (s *Snapshot) RoleFolders(name string) []string {
+	cr := s.roles[name]
+	if cr == nil {
+		return nil
+	}
+	var out []string
+	for _, r := range cr.role.Rules {
+		out = append(out, r.Folders...)
+	}
+	return out
+}
+
 // GrantsPattern reports whether one of roles grants action on every zone
 // the zone pattern matches.
 func (s *Snapshot) GrantsPattern(roles []string, action, pattern string) bool {
-	return s.grantsRule(roles, action, strings.ToLower(pattern), nil)
+	return s.grantsRule(roles, action, zoneSelector(pattern), nil)
+}
+
+// GrantsFolderPattern reports whether one of roles grants action on every
+// zone whose folder the folder pattern matches.
+func (s *Snapshot) GrantsFolderPattern(roles []string, action, pattern string) bool {
+	return s.grantsRule(roles, action, selector{pattern: pattern, folder: true}, nil)
+}
+
+// selector is a zone pattern of a rule or, with folder, a folder pattern.
+type selector struct {
+	pattern string
+	folder  bool
+}
+
+func zoneSelector(pattern string) selector { return selector{pattern: strings.ToLower(pattern)} }
+
+func (sel selector) String() string {
+	if sel.folder {
+		return fmt.Sprintf("folders %q", sel.pattern)
+	}
+	return fmt.Sprintf("zones %q", sel.pattern)
+}
+
+// selectors lists the zone and folder patterns of a rule.
+func selectors(r uiapi.Rule) []selector {
+	out := make([]selector, 0, len(r.Zones)+len(r.Folders))
+	for _, z := range r.Zones {
+		out = append(out, zoneSelector(z))
+	}
+	for _, f := range r.Folders {
+		out = append(out, selector{pattern: f, folder: true})
+	}
+	return out
+}
+
+// ruleCovers reports whether a rule applies to every zone the selector
+// does: a zone pattern covered by its zones, a folder pattern covered by
+// its folders or a rule on every zone ("*").
+func ruleCovers(r uiapi.Rule, sel selector) bool {
+	if sel.folder {
+		return glob.FolderCovered(r.Folders, sel.pattern) || ZoneCovered(r.Zones, "*")
+	}
+	return ZoneCovered(r.Zones, sel.pattern)
 }
 
 // GrantsAnywhere reports whether one of roles grants action on some zone.
@@ -56,7 +113,7 @@ func (s *Snapshot) GrantsAnywhere(roles []string, action string) bool {
 	return false
 }
 
-func (s *Snapshot) grantsRule(roles []string, action, pattern string, records *uiapi.RecordScope) bool {
+func (s *Snapshot) grantsRule(roles []string, action string, sel selector, records *uiapi.RecordScope) bool {
 	if IsMeta(action) {
 		return false
 	}
@@ -66,12 +123,33 @@ func (s *Snapshot) grantsRule(roles []string, action, pattern string, records *u
 			continue
 		}
 		for _, r := range cr.role.Rules {
-			if contains(r.Actions, action) && s.ruleEffective(cr, r, action) && ZoneCovered(r.Zones, pattern) && scopeCovered(r.Records, records) {
+			if contains(r.Actions, action) && s.ruleEffective(cr, r, action) && s.roleRuleCovers(cr, r, sel) && scopeCovered(r.Records, records) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// roleRuleCovers is ruleCovers for a rule of the role cr. A managed rule
+// reaches through its folders only the zones of policy.bounds.zones, and a
+// delegated one only those of its allow.zones (Snapshot.ruleApplies): it
+// covers a folder pattern only when those bounds cover every zone.
+func (s *Snapshot) roleRuleCovers(cr *compiledRole, r uiapi.Rule, sel selector) bool {
+	if !ruleCovers(r, sel) {
+		return false
+	}
+	if !sel.folder || cr.layer != LayerManaged {
+		return true
+	}
+	if !ZoneCovered(s.bounds.Zones, "*") {
+		return false
+	}
+	if cr.delegation != "" {
+		d := s.delegations[cr.delegation]
+		return d != nil && ZoneCovered(d.Allow.Zones, "*")
+	}
+	return true
 }
 
 // scopeCovered reports whether the record scope k (nil: every record) is
@@ -105,9 +183,10 @@ func scopeCovered(h, k *uiapi.RecordScope) bool {
 
 // KeyRoleProblem explains why a holder of roles may not give role to an API
 // key, "" when it may. The role must exist and grant neither policy.* nor
-// gate.* actions; the holder must hold gate.apikey.manage on every zone
-// pattern of the role, and every action of the role on the same zones and
-// records: a key never has more rights than the subject that issued it.
+// gate.* actions; the holder must hold gate.apikey.manage on every zone and
+// folder pattern of the role, and every action of the role on the same zones,
+// folders and records: a key never has more rights than the subject that
+// issued it.
 func (s *Snapshot) KeyRoleProblem(holder []string, role string) string {
 	cr := s.roles[role]
 	if cr == nil {
@@ -124,18 +203,19 @@ func (s *Snapshot) KeyRoleProblem(holder []string, role string) string {
 		}
 	}
 	for i, r := range cr.role.Rules {
-		for _, z := range r.Zones {
-			if !s.GrantsPattern(holder, ActionAPIKeyManage, z) {
-				return fmt.Sprintf("%s not granted on zones %q of role %s", ActionAPIKeyManage, z, role)
+		sels := selectors(r)
+		for _, sel := range sels {
+			if !s.grantsRule(holder, ActionAPIKeyManage, sel, nil) {
+				return fmt.Sprintf("%s not granted on %s of role %s", ActionAPIKeyManage, sel, role)
 			}
 		}
 		for _, a := range r.Actions {
 			if IsMeta(a) || IsGate(a) {
 				return fmt.Sprintf("role %s grants %s, which API keys cannot hold", role, a)
 			}
-			for _, z := range r.Zones {
-				if !s.grantsRule(holder, a, strings.ToLower(z), r.Records) {
-					return fmt.Sprintf("role %s rules[%d] grants %s on %q beyond the caller's own rights", role, i, a, z)
+			for _, sel := range sels {
+				if !s.grantsRule(holder, a, sel, r.Records) {
+					return fmt.Sprintf("role %s rules[%d] grants %s on %s beyond the caller's own rights", role, i, a, sel)
 				}
 			}
 		}
@@ -194,13 +274,13 @@ func (s *Snapshot) RoleGrant(name string) (RoleGrant, bool) {
 	}
 	g := RoleGrant{Rules: []uiapi.Rule{}, EphemeralTTL: cr.ephemeral, MaxChanges: cr.role.MaxChangesPerRequest}
 	for _, r := range cr.role.Rules {
-		g.Rules = append(g.Rules, uiapi.Rule{Zones: r.Zones, Actions: r.Actions, Records: r.Records})
+		g.Rules = append(g.Rules, uiapi.Rule{Zones: r.Zones, Folders: r.Folders, Actions: r.Actions, Records: r.Records})
 	}
 	return g, true
 }
 
 // Within reports whether g declares nothing beyond limit: every action of
-// every rule on the same zones and records, an ephemeral TTL no longer (when
+// every rule on the same zones, folders and records, an ephemeral TTL no longer (when
 // limit is ephemeral and g writes), and a change limit no looser: an
 // unlimited limit accepts any, an inherited one only inherited, an explicit
 // one an explicit value no higher.
@@ -209,8 +289,8 @@ func (g RoleGrant) Within(limit RoleGrant) bool {
 	for _, r := range g.Rules {
 		for _, a := range r.Actions {
 			writes = writes || a == ActionRecordWrite
-			for _, z := range r.Zones {
-				if !rulesCover(limit.Rules, a, strings.ToLower(z), r.Records) {
+			for _, sel := range selectors(r) {
+				if !rulesCover(limit.Rules, a, sel, r.Records) {
 					return false
 				}
 			}
@@ -229,9 +309,9 @@ func (g RoleGrant) Within(limit RoleGrant) bool {
 	}
 }
 
-func rulesCover(rules []uiapi.Rule, action, pattern string, records *uiapi.RecordScope) bool {
+func rulesCover(rules []uiapi.Rule, action string, sel selector, records *uiapi.RecordScope) bool {
 	for _, r := range rules {
-		if contains(r.Actions, action) && ZoneCovered(r.Zones, pattern) && scopeCovered(r.Records, records) {
+		if contains(r.Actions, action) && ruleCovers(r, sel) && scopeCovered(r.Records, records) {
 			return true
 		}
 	}

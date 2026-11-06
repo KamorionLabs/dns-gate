@@ -21,6 +21,10 @@ export interface Me {
 export interface Permission {
   role: string;
   zones: string[];
+  /** Folder globs (EuroDNS folders): the rule also applies to the zones in these folders. */
+  folders?: string[];
+  /** Zones a zone selected through folders must also match (bounds of a managed or delegated rule). */
+  folder_zones?: string[];
   actions: string[];
   hosts: string[]; // empty: the whole zone
   types: string[]; // empty: any type
@@ -70,6 +74,8 @@ export interface ZoneSummary {
   last_write_at?: string;
   /** Zone found at the DNS provider but not managed by the gate: read-only, counts are 0 until it was read once. */
   unmanaged?: boolean;
+  /** Folder of the zone at the provider (EuroDNS), "/" for a zone in no folder; absent without folders. */
+  folder?: string;
 }
 
 export interface Actor {
@@ -118,6 +124,8 @@ export interface ZoneInventory {
   unmanaged?: boolean;
   /** Record sets deleted recently through the gate, still reserved for their team. */
   tombstones?: Tombstone[];
+  /** Folder of the zone at the provider (EuroDNS), "/" for a zone in no folder. */
+  folder?: string;
 }
 
 /** Until expires_at, only this team may create or adopt the record set again; others ask for a transfer. */
@@ -254,6 +262,8 @@ export interface RecordScope {
 
 export interface Rule {
   zones: string[];
+  /** Folder globs: "/ES" the folder ES, "/ES/**" every folder below it. */
+  folders?: string[];
   actions: string[];
   records?: RecordScope;
 }
@@ -338,6 +348,7 @@ export interface Delegation {
   subjects: SubjectMatcher[];
   allow: {
     zones: string[];
+    folders?: string[];
     actions: string[];
     records?: RecordScope;
     binding_subjects: SubjectMatcher[];
@@ -366,6 +377,7 @@ export interface Protected {
 
 export interface Bounds {
   zones: string[];
+  folders?: string[];
   actions: string[];
 }
 
@@ -483,6 +495,8 @@ export interface ExplainResponse {
   matched?: string;
   denied?: string;
   layer?: string;
+  /** Folder of the zone, when the matched rule applied through its folders. */
+  folder?: string;
 }
 
 export interface WhoCanEntry {
@@ -493,9 +507,13 @@ export interface WhoCanEntry {
   groups?: string[];
   subjects?: SubjectMatcher[];
   virtual_keys?: string[];
+  /** Granted through a folder selector of the role. */
+  by_folder?: boolean;
 }
 
 export interface WhoCanResponse {
+  /** Folder of the zone (EuroDNS). */
+  folder?: string;
   protected: boolean;
   entries: WhoCanEntry[];
 }

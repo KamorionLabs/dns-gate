@@ -84,6 +84,11 @@ func ruleWithinDelegation(d *config.Delegation, r uiapi.Rule, action string) boo
 			return false
 		}
 	}
+	for _, f := range r.Folders {
+		if !glob.FolderCovered(d.Allow.Folders, f) {
+			return false
+		}
+	}
 	return recordsWithinDelegation(d, r.Records)
 }
 
@@ -248,7 +253,7 @@ func DelegationViews(c *config.Config) []uiapi.Delegation {
 	out := []uiapi.Delegation{}
 	for _, d := range c.Policy.Delegations {
 		v := uiapi.Delegation{Name: d.Name, Description: d.Description, Subjects: matchers(d.Subjects), Allow: uiapi.DelegationAllow{
-			Zones: append([]string{}, d.Allow.Zones...), Actions: append([]string{}, d.Allow.Actions...),
+			Zones: append([]string{}, d.Allow.Zones...), Folders: d.Allow.Folders, Actions: append([]string{}, d.Allow.Actions...),
 			BindingSubjects: matchers(d.Allow.BindingSubjects),
 			Teams:           uiapi.DelegationTeams{FromSubject: uiTeamFrom(d.Allow.Teams.FromSubject), Names: d.Allow.Teams.Names},
 			Roles:           d.Allow.Roles, Groups: d.Allow.Groups, MaxObjects: d.Allow.MaxObjects,
@@ -356,6 +361,11 @@ func validateRuleInDelegation(v *verrs, dl *config.Delegation, rat string, rule 
 	for j, z := range rule.Zones {
 		if !ZoneCovered(dl.Allow.Zones, strings.ToLower(z)) {
 			v.add(fmt.Sprintf("%s.zones[%d]", rat, j), "zone %q is outside the allow.zones of delegation %q", z, dl.Name)
+		}
+	}
+	for j, f := range rule.Folders {
+		if !glob.FolderCovered(dl.Allow.Folders, f) {
+			v.add(fmt.Sprintf("%s.folders[%d]", rat, j), "folder %q is outside the allow.folders of delegation %q", f, dl.Name)
 		}
 	}
 	for j, a := range rule.Actions {

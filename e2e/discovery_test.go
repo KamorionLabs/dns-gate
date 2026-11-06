@@ -23,10 +23,21 @@ import (
 const discoveredZone = "example.net"
 
 // accountDomains answers POST /domains/search (the fake has no domain
-// listing) and forwards everything else to the EuroDNS fake.
+// listing), with the EuroDNS folder of each domain (folderFullPath, null in
+// no folder), and forwards everything else to the EuroDNS fake.
 type accountDomains struct {
-	mu    sync.Mutex
-	names []string
+	mu      sync.Mutex
+	names   []string
+	folders map[string]string
+}
+
+func (a *accountDomains) setFolder(name, folder string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.folders == nil {
+		a.folders = map[string]string{}
+	}
+	a.folders[name] = folder
 }
 
 func (a *accountDomains) add(name string) {
@@ -57,9 +68,13 @@ func (a *accountDomains) server(t *testing.T, fakeURL string, profiles *profilet
 		size, _ := strconv.Atoi(r.Header.Get("pagination-size"))
 		start := min(max(page-1, 0)*size, len(a.names))
 		end := min(start+size, len(a.names))
-		out := []map[string]string{}
+		out := []map[string]any{}
 		for _, n := range a.names[start:end] {
-			out = append(out, map[string]string{"domainName": n})
+			var folder any
+			if f := a.folders[n]; f != "" {
+				folder = f
+			}
+			out = append(out, map[string]any{"domainName": n, "folderFullPath": folder})
 		}
 		w.Header().Set("pagination-count", strconv.Itoa(len(a.names)))
 		w.Header().Set("Content-Type", "application/json")

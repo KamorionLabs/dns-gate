@@ -4,7 +4,8 @@
 </script>
 
 <div class="rule">
-  <span class="part"><span class="lbl">zones</span>{#each rule.zones as z (z)}<span class="v mono">{z}</span>{/each}</span>
+  {#if rule.zones?.length || !rule.folders?.length}<span class="part"><span class="lbl">zones</span>{#each rule.zones ?? [] as z (z)}<span class="v mono">{z}</span>{/each}</span>{/if}
+  {#if rule.folders?.length}<span class="part"><span class="lbl">folders</span>{#each rule.folders as f (f)}<span class="v mono">{f}</span>{/each}</span>{/if}
   <span class="part"><span class="lbl">may</span>{#each rule.actions as a (a)}<span class="v act mono" class:write={a.endsWith('write')} class:meta={a.startsWith('policy.')}>{a}</span>{/each}</span>
   {#if rule.records?.hosts?.length || rule.records?.types?.length}
     <span class="part">
