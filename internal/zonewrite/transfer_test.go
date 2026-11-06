@@ -186,3 +186,32 @@ func TestTeamRename(t *testing.T) {
 		t.Fatalf("rename audit %+v", ap)
 	}
 }
+
+func TestTransferStaysProposedWhenZoneLocked(t *testing.T) {
+	e := newTeamsEnv(t)
+	ctx := context.Background()
+	if _, err := e.eng.ApplyRRsets(ctx, alice, zoneName, put("l1", "192.0.2.1"), 0); err != nil {
+		t.Fatal(err)
+	}
+	tr := e.eng.(Transfers)
+	v, err := tr.ProposeTransfer(ctx, alice, zoneName, uiapi.TransferProposal{RRsets: adoptRefs("l1 A"), ToTeam: "team-b", Comment: "move"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.Lock(ctx, zoneName, "another-replica", time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	lockedCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	res, err := tr.DecideTransfer(lockedCtx, teamMate, v.ID, true, "")
+	e.wantReason(err, ReasonLocked)
+	if res == nil || res.Status != uiapi.TransferProposed || res.DecidedBy != nil {
+		t.Fatalf("a locked zone must leave the transfer proposed: %+v", res)
+	}
+	if err := e.st.Unlock(ctx, zoneName, "another-replica"); err != nil {
+		t.Fatal(err)
+	}
+	if done, err := tr.DecideTransfer(ctx, teamMate, v.ID, true, ""); err != nil || done.Status != uiapi.TransferApplied {
+		t.Fatalf("retry: %+v %v", done, err)
+	}
+}

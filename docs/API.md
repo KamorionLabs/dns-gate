@@ -280,7 +280,7 @@ curl -sS "${auth[@]}" -X POST "$GATE/api/v1/zones/example.com/transfers" \
   "rrsets": [{"host": "www", "type": "CNAME"}, {"host": "@", "type": "TXT"}],
   "to_team": "corporate", "comment": "the corporate site moves to its own pipeline"}'
 
-# a member of the owner team, or a dns.ownership.approve holder, approves it
+# a member of the owner team with write access to the zone, or a dns.ownership.approve holder, approves it
 curl -sS "${auth[@]}" -X POST "$GATE/api/v1/transfers/tr-1780000000000-0a1b2c3d4e/approve" \
   -H "Content-Type: application/json" -d '{"comment": "ok"}'
 ```

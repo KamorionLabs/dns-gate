@@ -17,10 +17,11 @@ import "time"
 //	POST /api/v1/transfers/{id}/reject        DecisionRequest -> Transfer
 //
 // A transfer request moves RRsets of one team to another once a second
-// person approves it: a member of the owner team, or a holder of
-// dns.ownership.approve on the zone, never the requester. A rename moves
-// every RRset of a team in every zone (store only); it is proposed by a
-// policy.propose holder and approved by another policy.approve holder.
+// person approves it: a member of the owner team allowed to write in the
+// zone, or a holder of dns.ownership.approve on it, never the requester.
+// A rename moves every RRset of a team in every zone (store only); it is
+// proposed by a policy.propose holder and approved by another
+// policy.approve holder.
 
 // Team kinds (TeamInfo.Kind).
 const (

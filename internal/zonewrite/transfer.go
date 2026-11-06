@@ -270,6 +270,10 @@ func (e *engine) DecideTransfer(ctx context.Context, s *identity.Subject, id str
 		if ze, ok := AsError(applyErr); ok {
 			t.Error = ze.Message
 		}
+		if retryable(applyErr) && moved == 0 {
+			t.Status, t.Error = uiapi.TransferProposed, ""
+			t.DecidedBy, t.DecidedByName, t.DecidedByCategory, t.DecidedAt, t.DecisionComment = "", "", "", nil, ""
+		}
 	}
 	if err := e.updateTransfer(ctx, t); err != nil {
 		e.log.Error("transfer status update failed", "transfer", t.ID, "status", t.Status, "error", err)
@@ -284,6 +288,14 @@ func (e *engine) DecideTransfer(ctx context.Context, s *identity.Subject, id str
 		e.emit(ctx, s, actionTransferApply, t.Zone, "allow", "", transferChanges(*t), "", transferExtra(*t))
 	}
 	return e.transferView(s, *t), nil
+}
+
+// retryable tells whether an apply failed before changing anything for a
+// transient reason (zone locked, store or provider unavailable): the
+// request then stays proposed.
+func retryable(err error) bool {
+	ze, ok := AsError(err)
+	return ok && (ze.Reason == ReasonLocked || ze.Reason == ReasonUpstream)
 }
 
 // updateTransfer writes t and bumps its version; a concurrent decision is a
@@ -451,19 +463,24 @@ func (e *engine) canSeeTransfer(s *identity.Subject, t store.Transfer) bool {
 	return e.cfg.Authz.Allow(s, policy.ActionUIRead, t.Zone) || e.cfg.Authz.Allow(s, policy.ActionDNSRead, t.Zone)
 }
 
-// mayDecide tells whether s may approve t (anyone but the requester).
+// mayDecide tells whether s may approve t (anyone but the requester): a
+// member of the owner team allowed to write in the zone, or a holder of
+// dns.ownership.approve on it; another policy.approve holder for a rename.
 func (e *engine) mayDecide(s *identity.Subject, t store.Transfer) bool {
 	if t.Kind == uiapi.TransferKindRename {
 		return e.cfg.Authz.Allow(s, uiapi.ActionPolicyApprove, "")
 	}
-	return slices.Contains(s.Teams, t.FromTeam) || e.cfg.Authz.Allow(s, policy.ActionOwnershipApprove, t.Zone)
+	if slices.Contains(s.Teams, t.FromTeam) && e.cfg.Authz.Allow(s, policy.ActionRecordWrite, t.Zone) {
+		return true
+	}
+	return e.cfg.Authz.Allow(s, policy.ActionOwnershipApprove, t.Zone)
 }
 
 func (e *engine) decideRule(t store.Transfer) string {
 	if t.Kind == uiapi.TransferKindRename {
 		return "a team rename is approved by another " + uiapi.ActionPolicyApprove + " holder"
 	}
-	return fmt.Sprintf("a member of team %s or a %s holder on %s must approve this transfer", t.FromTeam, policy.ActionOwnershipApprove, t.Zone)
+	return fmt.Sprintf("a member of team %s allowed to write in %s, or a %s holder on it, must approve this transfer", t.FromTeam, t.Zone, policy.ActionOwnershipApprove)
 }
 
 func (e *engine) transferView(s *identity.Subject, t store.Transfer) *uiapi.Transfer {

@@ -620,15 +620,17 @@ paths:
       operationId: approveTransfer
       summary: Approve a transfer request, which applies it
       description: |
-        By a member of the owner team or a holder of dns.ownership.approve on
-        the zone (another policy.approve holder for a team rename), never by
+        By a member of the owner team allowed to write in the zone, or a
+        holder of dns.ownership.approve on it (another policy.approve holder
+        for a team rename), never by
         the requester (`403 forbidden`). The ownership entries change team
         in one store transaction, after checking under the zone lock that
         they still belong to the team with the content hash of the request,
         in the store and upstream; otherwise the transfer is `failed` and the
         answer is `412 precondition` with the transfer in `transfer`.
         `410 expired` when the request expired, `412 precondition` when it
-        was already decided.
+        was already decided. When the zone is locked (`423`) or the store or
+        the provider is unavailable, the request stays proposed.
       requestBody:
         content:
           application/json:

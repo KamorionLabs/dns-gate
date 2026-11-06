@@ -314,14 +314,14 @@ expires, only that team may create or adopt the RRset again; ephemeral RRsets le
 no tombstone.
 
 A transfer request lists RRsets of one team (owned or tombstoned) and a target team,
-with their content hash. The approval, by a member of the owner team or a holder of
-`dns.ownership.approve` on the zone and never by the requester, takes the zone lock,
-reads the zone, checks that every entry still has the team, the state and the
-content hash of the request (store and upstream), then changes them all in one store
-transaction (`Store.Reassign`: SQL transaction, DynamoDB `TransactWriteItems` with a
-version or team condition per item, at most 100 items). A team rename does the same
-for every RRset and tombstone of a team, zone by zone, approved by a second policy
-approver.
+with their content hash. The approval, by a member of the owner team allowed to
+write in the zone or a holder of `dns.ownership.approve` on it, and never by the
+requester, takes the zone lock, reads the zone, checks that every entry still has
+the team, the state and the content hash of the request (store and upstream), then
+changes them all in one store transaction (`Store.Reassign`: SQL transaction,
+DynamoDB `TransactWriteItems` with a version or team condition per item, at most 100
+items). A team rename does the same for every RRset and tombstone of a team, zone by
+zone, approved by a second policy approver.
 
 ### 6.4 Rebase on full-zone PUT
 
