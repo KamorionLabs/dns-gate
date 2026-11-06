@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/KamorionLabs/dns-gate/internal/apikey"
@@ -52,17 +53,17 @@ func (a *Authenticator) AuthenticateAPIKey(r *http.Request, user, key string) (*
 func (a *Authenticator) authenticateAPIKey(ctx context.Context, user, token string, ip netip.Addr) (*identity.Subject, error) {
 	id, ok := apikey.Parse(token)
 	if !ok {
-		return nil, a.keyFailure(ctx, "", ip, unauthorized("malformed API key"))
+		return nil, a.keyNoise(ctx, ip, unauthorized("malformed API key"))
 	}
 	if user != "" && user != id {
-		return nil, a.keyFailure(ctx, id, ip, unauthorized("user name is not the id of the API key"))
+		return nil, a.keyNoise(ctx, ip, unauthorized("user name is not the id of the API key"))
 	}
 	if a.keys == nil {
 		return nil, unauthorized("API keys are not enabled")
 	}
 	k, err := a.keys.GetAPIKey(ctx, id)
 	if errors.Is(err, store.ErrNotFound) {
-		return nil, a.keyFailure(ctx, id, ip, unauthorized("invalid API key"))
+		return nil, a.keyNoise(ctx, ip, unauthorized("invalid API key"))
 	}
 	if err != nil {
 		return nil, &Error{Status: http.StatusServiceUnavailable, Reason: "unavailable", Message: "API key lookup failed"}
@@ -105,7 +106,71 @@ func (a *Authenticator) authenticateAPIKey(ctx context.Context, user, token stri
 	}, nil
 }
 
-// keyFailure audits a refused API key and returns e.
+// noiseWindow is the period over which refusals of unknown or malformed
+// keys from one address are counted into one audit event.
+const noiseWindow = time.Minute
+
+// noiseCounter aggregates refusals of unknown or malformed API keys per
+// source address: anyone can send them, one audit event each would let a
+// client flood the audit log.
+type noiseCounter struct {
+	mu   sync.Mutex
+	seen map[string]*noiseEntry
+}
+
+type noiseEntry struct {
+	start      time.Time
+	suppressed int
+}
+
+// note records a refusal and returns how many refusals to report now (the
+// suppressed ones of the previous window plus this one), 0 to stay quiet.
+func (n *noiseCounter) note(addr string, now time.Time) int {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.seen == nil {
+		n.seen = map[string]*noiseEntry{}
+	}
+	e := n.seen[addr]
+	if e != nil && now.Sub(e.start) < noiseWindow {
+		e.suppressed++
+		return 0
+	}
+	count := 1
+	if e != nil {
+		count += e.suppressed
+	}
+	if len(n.seen) >= 4096 {
+		for k, v := range n.seen {
+			if now.Sub(v.start) >= noiseWindow {
+				delete(n.seen, k)
+			}
+		}
+	}
+	n.seen[addr] = &noiseEntry{start: now}
+	return count
+}
+
+// keyNoise audits refusals of unknown or malformed keys, at most once per
+// source address and minute with a count, and returns e.
+func (a *Authenticator) keyNoise(ctx context.Context, ip netip.Addr, e *Error) *Error {
+	if a.audit == nil {
+		return e
+	}
+	addr := addrString(ip)
+	count := a.noise.note(addr, a.now())
+	if count == 0 {
+		return e
+	}
+	a.audit.Log(ctx, audit.Event{
+		Time: a.now().UTC(), RequestID: requestid.From(ctx), SubjectCategory: identity.CategoryKey,
+		Action: "apikey.authenticate", Decision: "deny", Reason: e.Reason,
+		Extra: map[string]any{"message": "unknown or malformed API keys", "count": count, "remote_addr": addr},
+	})
+	return e
+}
+
+// keyFailure audits a refused use of an existing API key and returns e.
 func (a *Authenticator) keyFailure(ctx context.Context, id string, ip netip.Addr, e *Error) *Error {
 	if a.audit == nil {
 		return e

@@ -125,7 +125,7 @@ func (s *Server) handleHTTPReq(w http.ResponseWriter, r *http.Request, present b
 	subj, err := s.cfg.Authn.Authenticate(r)
 	if err != nil {
 		ae := authFailure(err)
-		s.audit(r, nil, op, "", "deny", ae.reason)
+		s.auditAuthFailure(r, op, ae.reason)
 		writeError(w, ae.status, ae.reason, ae.message)
 		return
 	}
@@ -341,7 +341,7 @@ func (s *Server) handleACMEDNSRegister(w http.ResponseWriter, r *http.Request) {
 				"this gate has no anonymous acme-dns registration: create a gate API key with acme_domains (POST /api/v1/api-keys) " +
 					"and use its acme_dns_accounts, or call /register with the key (basic auth) and {\"domain\": \"<name>\"}"}
 		}
-		s.audit(r, nil, op, "", "deny", ae.reason)
+		s.auditAuthFailure(r, op, ae.reason)
 		writeJSON(w, ae.status, map[string]string{"error": ae.reason, "message": ae.message})
 		return
 	}
@@ -402,7 +402,7 @@ func (s *Server) handleACMEDNSUpdate(w http.ResponseWriter, r *http.Request) {
 	const op = "acme.update"
 	subj, _, ae := s.acmeDNSSubject(r)
 	if ae != nil {
-		s.audit(r, nil, op, "", "deny", ae.reason)
+		s.auditAuthFailure(r, op, ae.reason)
 		writeJSON(w, ae.status, map[string]string{"error": ae.reason, "message": ae.message})
 		return
 	}
@@ -511,4 +511,33 @@ func cidrsAllow(cidrs []string, ip netip.Addr) bool {
 		}
 	}
 	return false
+}
+
+// presentsAPIKey reports whether r carries a gate API key: authn audits
+// the refusals of those itself.
+func presentsAPIKey(r *http.Request) bool {
+	if apikey.Looks(r.Header.Get("X-Api-Key")) {
+		return true
+	}
+	scheme, v, _ := strings.Cut(r.Header.Get("Authorization"), " ")
+	switch {
+	case strings.EqualFold(scheme, "Bearer"):
+		return apikey.Looks(strings.TrimSpace(v))
+	case strings.EqualFold(scheme, "Basic"):
+		b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(v))
+		if err != nil {
+			return false
+		}
+		_, pass, _ := strings.Cut(string(b), ":")
+		return apikey.Looks(pass)
+	}
+	return false
+}
+
+// auditAuthFailure audits a refused authentication, unless authn already
+// did (API keys).
+func (s *Server) auditAuthFailure(r *http.Request, op, reason string) {
+	if !presentsAPIKey(r) {
+		s.audit(r, nil, op, "", "deny", reason)
+	}
 }

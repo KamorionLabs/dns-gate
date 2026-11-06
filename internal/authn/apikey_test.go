@@ -91,7 +91,7 @@ func TestAPIKeys(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
-	if len(log.events) < 5 || log.events[0].Action != "apikey.authenticate" || log.events[0].Decision != "deny" {
+	if len(log.events) < 2 || log.events[0].Action != "apikey.authenticate" || log.events[0].Decision != "deny" {
 		t.Fatalf("failures not audited: %+v", log.events)
 	}
 	for _, e := range log.events {
@@ -158,4 +158,47 @@ func tampered(key string) string {
 		c = 'B'
 	}
 	return key[:i] + string(c) + key[i+1:]
+}
+
+// Refusals of unknown or malformed keys are aggregated per source address
+// and minute; refusals of existing keys are audited one by one.
+func TestAPIKeyFailureAuditAggregated(t *testing.T) {
+	a, _ := setup(t)
+	now := time.Now()
+	a.SetClock(func() time.Time { return now })
+	st := store.NewMemory().(store.APIKeyStore)
+	log := &auditLog{}
+	a.SetAPIKeys(st, log)
+	id := apikey.NewID()
+	key := apikey.NewSecret(id)
+	if err := st.CreateAPIKey(context.Background(), store.APIKey{ID: id, Team: "edge", Role: "acme-solver", SecretHash: apikey.Hash(key), CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	try := func(remote, tok string) {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.RemoteAddr = remote
+		r.Header.Set("Authorization", "Bearer "+tok)
+		if _, err := a.Authenticate(r); err == nil {
+			t.Fatal("accepted")
+		}
+	}
+	for i := 0; i < 5; i++ {
+		try("192.0.2.1:1", apikey.NewSecret(apikey.NewID()))
+		try("192.0.2.1:1", "dgk_garbage")
+	}
+	try("192.0.2.2:1", "dgk_garbage")
+	if len(log.events) != 2 {
+		t.Fatalf("noise not aggregated: %d events", len(log.events))
+	}
+	now = now.Add(time.Minute)
+	try("192.0.2.1:1", "dgk_garbage")
+	if len(log.events) != 3 || log.events[2].Extra["count"] != 10 {
+		t.Fatalf("aggregate: %+v", log.events)
+	}
+	for i := 0; i < 3; i++ {
+		try("192.0.2.1:1", tampered(key))
+	}
+	if len(log.events) != 6 || log.events[5].Subject != "api-key:"+id {
+		t.Fatalf("refusals of an existing key: %+v", log.events)
+	}
 }

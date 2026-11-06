@@ -276,7 +276,9 @@ func (s *Server) handleEuroDNS(w http.ResponseWriter, r *http.Request) {
 		if !errors.As(aerr, &ae) {
 			ae = &authn.Error{Status: http.StatusUnauthorized, Reason: "unauthenticated", Message: "authentication failed"}
 		}
-		s.audit(r, nil, m.Operation.ID, m.Zone, "deny", ae.Reason)
+		if !presentsAPIKey(r) {
+			s.audit(r, nil, m.Operation.ID, m.Zone, "deny", ae.Reason)
+		}
 		writeError(w, ae.Status, ae.Reason, ae.Message)
 		return
 	}
@@ -446,7 +448,9 @@ func (s *Server) handleExtension(w http.ResponseWriter, r *http.Request) {
 		if !errors.As(aerr, &ae) {
 			ae = &authn.Error{Status: http.StatusUnauthorized, Reason: "unauthenticated", Message: "authentication failed"}
 		}
-		s.audit(r, nil, "adopt", zone, "deny", ae.Reason)
+		if !presentsAPIKey(r) {
+			s.audit(r, nil, "adopt", zone, "deny", ae.Reason)
+		}
 		writeError(w, ae.Status, ae.Reason, ae.Message)
 		return
 	}

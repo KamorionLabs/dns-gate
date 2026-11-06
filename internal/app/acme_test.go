@@ -788,3 +788,32 @@ func TestTokenExchangeLifetimeBounds(t *testing.T) {
 		t.Fatalf("not capped by the subject token expiry: %d %v", status, out)
 	}
 }
+
+func (e *acmeEnv) denials() int {
+	b, _ := os.ReadFile(e.audit)
+	return strings.Count(string(b), `"decision":"deny"`)
+}
+
+// A refused API key is audited once, by the authentication, not again by
+// the endpoint.
+func TestAPIKeyRefusalAuditedOnce(t *testing.T) {
+	e := newACMEEnv(t)
+	k := e.createKey(`{"name": "k", "team": "web", "role": "acme"}`)
+	for _, tc := range []struct {
+		path string
+		hdr  map[string]string
+		body string
+	}{
+		{"/acme/httpreq/present", basic(k.ID, tamper(k.Key)), `{"fqdn": "_acme-challenge.example.com.", "value": "v"}`},
+		{"/acme/acme-dns/update", map[string]string{"X-Api-User": k.ID, "X-Api-Key": tamper(k.Key)}, `{"subdomain":"example.com", "txt": "` + challenge("x") + `"}`},
+		{"/acme/acme-dns/register", basic(k.ID, tamper(k.Key)), `{"domain": "example.com"}`},
+	} {
+		before := e.denials()
+		if status, _ := e.do("POST", tc.path, tc.hdr, tc.body); status != 401 {
+			t.Fatalf("%s: %d", tc.path, status)
+		}
+		if n := e.denials() - before; n != 1 {
+			t.Errorf("%s: %d audit events for one refusal", tc.path, n)
+		}
+	}
+}

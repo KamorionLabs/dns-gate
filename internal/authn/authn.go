@@ -61,6 +61,7 @@ type Authenticator struct {
 	self    *TokenIssuer
 	keys    APIKeys
 	audit   audit.Logger
+	noise   noiseCounter
 	now     func() time.Time
 }
 
