@@ -36,9 +36,11 @@
 //	AUDIT#_all              <time>#<request id>      copy of every event (cross-zone queries)
 //	POLICY                  REV#<id>                 one policy revision (document as binary)
 //	POLICY                  ACTIVE                   revision_id of the active revision
-//	PLAN#<id>               PLAN                     one RRset plan (subject, zone, changes as JSON, zone_version, expires_at)
+//	PLAN#<id>               PLAN                     one RRset plan (subject, zone, team, changes as JSON, zone_version, expires_at)
 //	APIKEY                  KEY#<id>                 one API key (hashes, team, role, expiries, last use)
 //	APIKEY#<key id>         ACMEDNS#<subdomain>      one acme-dns registration of a key (domain, txt_values)
+//	ZONE#<zone>             TOMB#<host>#<type>       tombstone of a deleted RRset (team, deleted_by, expires_at)
+//	TRANSFERS               TR#<id>                  one transfer request (document as JSON, status, version)
 //
 // Ownership attributes: owner, created_by, created_at, updated_at,
 // request_id, content_hash, pending_hash, state, adopted, expires_at
@@ -47,7 +49,9 @@
 // Enable DynamoDB TTL on the attribute "ttl" (N, unix seconds). LOCK items
 // carry it as a cleanup of abandoned leases, audit items for retention
 // (DynamoDBConfig.AuditRetention, default 400 days), plan items for expiry
-// (TakePlan also checks expires_at, the TTL deletion being lazy). Ephemeral ownership
+// (TakePlan also checks expires_at, the TTL deletion being lazy), tombstones
+// after their expiry (callers compare ExpiresAt), transfer requests
+// TransferRetention after theirs. Ephemeral ownership
 // entries never carry it: the gate must delete the upstream records before
 // the entry disappears.
 //
@@ -59,6 +63,12 @@
 // API keys keep only the SHA-256 of the key; TouchAPIKey writes the last
 // use without version check, so that authentication never conflicts with a
 // rotation or a revocation (UpdateAPIKey leaves the last use alone).
+//
+// Tombstones reserve a deleted RRset for the team that owned it. Transfers
+// are ownership transfer requests; Reassign applies one atomically (SQL
+// transaction, DynamoDB TransactWriteItems with a condition per item, at most
+// MaxReassign items). GCTombstones and GCTransfers purge them on the SQL
+// backends.
 //
 // Put semantics: Version 0 creates (fails with ErrConflict if the entry
 // exists); any other Version must match the stored one. On success the

@@ -41,12 +41,14 @@ export const opLabel: Record<ChangeOp, string> = {
   adopt: 'Adopted',
   taint: 'Drift detected',
   expire: 'Expired',
+  transfer: 'Transferred',
 };
 
 const reasons: Record<string, string> = {
   forbidden: 'Not allowed by policy (role scope or protected record)',
   foreign_rrset: 'Record is not managed by the gate',
   not_owner: 'Record is owned by another team',
+  not_team_member: 'Not a member of the selected team',
   tainted: 'Record changed outside the gate',
   precondition: 'Zone changed since it was read (If-Match)',
   too_many_changes: 'Too many changes in one request',
