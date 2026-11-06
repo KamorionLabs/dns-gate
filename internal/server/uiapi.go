@@ -99,7 +99,7 @@ func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
 		s.handleIssueToken(w, r, subj, sess)
 		return
 	case strings.HasPrefix(pattern, routeProfiles):
-		s.handleZoneProfilesAPI(w, r, subj, pattern, params)
+		s.handleZoneProfilesAPI(w, r, subj, sess, pattern, params)
 		return
 	case pattern == routeAPIKeys || strings.HasPrefix(pattern, routeAPIKeys+"/"):
 		s.handleAPIKeys(w, r, subj, sess, pattern, params["id"])

@@ -54,7 +54,7 @@ var PaginationHeaders = []string{"pagination-page", "pagination-size", "paginati
 
 const (
 	profilePageSize = 100
-	profileMaxPages = 50
+	profileMaxPages = 20
 	maxProfileBytes = 8 << 20
 )
 
@@ -113,7 +113,10 @@ func (p *Provider) ListZoneProfilesPage(ctx context.Context, pg ProfilePage) ([]
 	return out, ph, nil
 }
 
-// ListZoneProfiles returns every zone profile of the account, sorted by id.
+// ListZoneProfiles returns every zone profile of the account, sorted by id,
+// in at most profileMaxPages requests. EuroDNS may serve smaller pages than
+// asked: the listing ends when pagination-count profiles are read or, when
+// the header is absent, on an empty page.
 func (p *Provider) ListZoneProfiles(ctx context.Context) ([]ZoneProfileSummary, error) {
 	out := []ZoneProfileSummary{}
 	seen := map[int64]bool{}
@@ -121,6 +124,9 @@ func (p *Provider) ListZoneProfiles(ctx context.Context) ([]ZoneProfileSummary, 
 		items, h, err := p.ListZoneProfilesPage(ctx, ProfilePage{Page: page, Size: profilePageSize, SortField: "id", SortOrder: "asc"})
 		if err != nil {
 			return nil, err
+		}
+		if len(items) == 0 {
+			return out, nil
 		}
 		added := 0
 		for _, it := range items {
@@ -130,15 +136,14 @@ func (p *Provider) ListZoneProfiles(ctx context.Context) ([]ZoneProfileSummary, 
 				added++
 			}
 		}
-		if len(items) > 0 && added == 0 {
+		if added == 0 {
 			return nil, fmt.Errorf("eurodns: list zone profiles: page %d repeats earlier results", page)
 		}
-		total, terr := strconv.Atoi(h.Get("pagination-count"))
-		if len(items) < profilePageSize || (terr == nil && len(out) >= total) {
+		if total, err := strconv.Atoi(h.Get("pagination-count")); err == nil && len(out) >= total {
 			return out, nil
 		}
 	}
-	return nil, fmt.Errorf("eurodns: more than %d zone profiles, listing truncated", profilePageSize*profileMaxPages)
+	return nil, fmt.Errorf("eurodns: more than %d pages of zone profiles, listing truncated", profileMaxPages)
 }
 
 // GetZoneProfile returns a zone profile.

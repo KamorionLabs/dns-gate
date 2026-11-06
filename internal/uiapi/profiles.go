@@ -32,4 +32,8 @@ type ZoneProfileRecord struct {
 	Host  string `json:"host" jsonschema:"host relative to the domain, @ for the apex"`
 	TTL   int    `json:"ttl" jsonschema:"EuroDNS TTL: 600, 900, 1800, 3600, 7200, 14400, 21600, 43200, 86400, 172800, 432000 or 604800"`
 	RData string `json:"rdata" jsonschema:"record data; targets fully qualified with a trailing dot"`
+	// IsDynDNS and Proxy are the EuroDNS options of A (dynamic DNS) and of
+	// A, AAAA, CNAME and APEX records (proxy ON or OFF).
+	IsDynDNS *bool  `json:"isDynDns,omitempty" jsonschema:"A records only: dynamic DNS"`
+	Proxy    string `json:"proxy,omitempty" jsonschema:"A, AAAA, CNAME, APEX records: EuroDNS proxy ON or OFF"`
 }

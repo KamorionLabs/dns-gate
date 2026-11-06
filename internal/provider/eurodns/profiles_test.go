@@ -86,3 +86,22 @@ func TestListZoneProfilesPages(t *testing.T) {
 		t.Fatalf("page: %+v %v %v", page, h, err)
 	}
 }
+
+func TestListZoneProfilesSmallPages(t *testing.T) {
+	ctx := context.Background()
+	p, fake := profileProvider(t)
+	fake.MaxPageSize = 20
+	for i := range 45 {
+		if _, err := p.CreateZoneProfile(ctx, &eurodnsprov.ZoneProfile{Name: fmt.Sprintf("p%03d", i)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	all, err := p.ListZoneProfiles(ctx)
+	if err != nil || len(all) != 45 {
+		t.Fatalf("list with pages capped at 20: %d %v", len(all), err)
+	}
+	fake.HideCount = true
+	if all, err = p.ListZoneProfiles(ctx); err != nil || len(all) != 45 {
+		t.Fatalf("list without pagination-count: %d %v", len(all), err)
+	}
+}

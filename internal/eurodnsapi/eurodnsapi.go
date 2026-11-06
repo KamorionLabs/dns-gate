@@ -42,7 +42,10 @@ type Config struct {
 	// Accounts are the configured providers, for the account-wide
 	// operations (zone profiles) that name no zone.
 	Accounts []provider.Provider
-	Log      *slog.Logger
+	// ZoneProfiles are the ids of the EuroDNS providers whose zone profiles
+	// the gate serves (providers[].eurodns.zone_profiles).
+	ZoneProfiles map[string]bool
+	Log          *slog.Logger
 }
 
 // Facade serves the EuroDNS-compatible API. Safe for concurrent use.

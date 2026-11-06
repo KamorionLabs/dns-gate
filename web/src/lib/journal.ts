@@ -58,6 +58,11 @@ const READ_ACTIONS = new Set([
   'mcp.adopt_preview',
   'mcp.transfer_list',
   'checkDnsZone',
+  'checkZoneProfile',
+  'zone_profile.get',
+  'zone_profile.list',
+  'zone_profile.check',
+  'mcp.check_zone_profile',
 ]);
 
 /** Whether an entry is a successful read or dry run (hidden by default in the journal). */

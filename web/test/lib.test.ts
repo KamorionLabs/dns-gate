@@ -54,6 +54,12 @@ test('reads and dry runs are told apart from writes', () => {
   assert.equal(isRead({ ...base, action: 'mcp.list_rrsets', decision: 'deny' }), false);
   assert.equal(isRead({ ...base, action: 'saveDnsZone', decision: 'allow' }), false);
   assert.equal(isRead({ ...base, action: 'mcp.apply_rrset_change', decision: 'allow' }), false);
+  for (const a of ['checkZoneProfile', 'getProfile', 'listZoneProfiles', 'zone_profile.get', 'zone_profile.list', 'zone_profile.check', 'mcp.check_zone_profile', 'mcp.get_zone_profile']) {
+    assert.equal(isRead({ ...base, action: a, decision: 'allow' }), true, a);
+  }
+  for (const a of ['createZoneProfile', 'zone_profile.create', 'zone_profile.delete', 'mcp.update_zone_profile']) {
+    assert.equal(isRead({ ...base, action: a, decision: 'allow' }), false, a);
+  }
 });
 
 test('zone profile grants count on every zone only', async () => {
@@ -61,4 +67,6 @@ test('zone profile grants count on every zone only', async () => {
   const grant = (zones: string[]) => ({ role: 'r', zones, actions: ['dns.zone.profile'], hosts: [], types: [] });
   assert.deepEqual(describePermissions([grant(['*'])]), ['Manage the zone profiles of the EuroDNS accounts']);
   assert.match(describePermissions([grant(['example.com'])])[0], /no effect/);
+  assert.deepEqual(describePermissions([grant(['**'])]), ['Manage the zone profiles of the EuroDNS accounts']);
+  assert.match(describePermissions([grant(['*.com'])])[0], /no effect/);
 });

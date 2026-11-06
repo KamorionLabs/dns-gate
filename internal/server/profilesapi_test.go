@@ -38,6 +38,11 @@ func profileEnv(t *testing.T, writes bool, others ...provider.Provider) (*env, *
 	t.Helper()
 	e := newEnvWith(t, func(c *config.Config) {
 		c.MCP = config.MCP{Enabled: true, AllowWrites: writes, PlanTTL: config.Duration(10 * time.Minute), RequestsPerMinute: 600}
+		c.Issuers[0].CategoryClaim = "kind"
+		c.Issuers[0].CategoryMap = map[string]string{"user": "human"}
+		c.Policy.EditMaxAge = config.Duration(15 * time.Minute)
+		c.Protected = []config.Protected{{Zones: []string{"*"}, Hosts: []string{"@"}, Types: []string{"NS", "CAA"}},
+			{Zones: []string{"example.com"}, Hosts: []string{"_dmarc"}, Types: []string{"TXT"}}}
 		c.Roles["profiles"] = config.Role{Rules: []config.Rule{{Zones: []string{"*"}, Actions: []string{policy.ActionZoneProfile}}}}
 		c.Roles["narrow"] = config.Role{Rules: []config.Rule{{Zones: []string{"example.com"}, Actions: []string{policy.ActionZoneProfile, policy.ActionUIRead}}}}
 		c.Bindings = append(c.Bindings,
@@ -54,7 +59,14 @@ func profileEnv(t *testing.T, writes bool, others ...provider.Provider) (*env, *
 		t.Fatal(err)
 	}
 	ep := eurodnsprov.NewWithClient("eurodns", up.URL, client)
-	e.facade.Facade = eurodnsapi.New(eurodnsapi.Config{Providers: provider.Single(ep), Accounts: append([]provider.Provider{ep}, others...)})
+	enabled := map[string]bool{"eurodns": true}
+	for _, o := range others {
+		if o.ID() != "eurodns-off" {
+			enabled[o.ID()] = true
+		}
+	}
+	e.facade.Facade = eurodnsapi.New(eurodnsapi.Config{Providers: provider.Single(ep), Accounts: append([]provider.Provider{ep}, others...), ZoneProfiles: enabled})
+	e.server.profileLimiter = newSubjectLimiter(6000, e.clock)
 	return e, fake
 }
 
@@ -317,5 +329,184 @@ func TestMCPZoneProfiles(t *testing.T) {
 	cs = connect(t, e, e.token("writer"))
 	if res = call(t, cs, "list_zone_profiles", map[string]any{}, nil); !res.IsError || !strings.Contains(errText(res), "forbidden") {
 		t.Fatalf("writer list: %s", errText(res))
+	}
+}
+
+// humanToken is a token of a human subject who logged in age ago.
+func (e *env) humanToken(sub string, age time.Duration) string {
+	return e.idp.Sign(map[string]any{"sub": sub, "aud": "dns-gate", "kind": "user", "auth_time": time.Now().Add(-age).Unix()})
+}
+
+func TestZoneProfilesStepUp(t *testing.T) {
+	e, fake := profileEnv(t, true)
+	old := e.humanToken("profiler", time.Hour)
+	base := "/api/v1/providers/eurodns/zone-profiles"
+	if r := e.do(t, "POST", base, old, testProfile, nil); r.StatusCode != 403 || reason(t, r) != "reauth_required" {
+		t.Fatalf("REST create with an old login: %d", r.StatusCode)
+	}
+	if r := e.do(t, "POST", "/zone-profiles", old, testProfile, nil); r.StatusCode != 403 || reason(t, r) != "reauth_required" {
+		t.Fatalf("EuroDNS create with an old login: %d", r.StatusCode)
+	}
+	cs := connect(t, e, old)
+	if res := call(t, cs, "create_zone_profile", map[string]any{"name": "x", "records": []map[string]any{}}, nil); !res.IsError || !strings.Contains(errText(res), "reauth_required") {
+		t.Fatalf("MCP create with an old login: %s", errText(res))
+	}
+	if fake.Len() != 0 {
+		t.Fatal("a profile was created without a recent login")
+	}
+	if ev := e.events("zone_profile.create"); len(ev) != 1 || ev[0].Decision != "deny" || ev[0].Reason != "reauth_required" {
+		t.Fatalf("step-up audit: %+v", ev)
+	}
+	if r := e.do(t, "GET", base, old, "", nil); r.StatusCode != 200 {
+		t.Fatalf("read with an old login: %d", r.StatusCode)
+	}
+	if r := e.do(t, "POST", base+"/check", old, testProfile, nil); r.StatusCode != 200 {
+		t.Fatalf("check with an old login: %d", r.StatusCode)
+	}
+	if r := e.do(t, "POST", base, e.humanToken("profiler", time.Minute), testProfile, nil); r.StatusCode != 201 {
+		t.Fatalf("create with a recent login: %d", r.StatusCode)
+	}
+}
+
+func TestZoneProfilesProtectedRecords(t *testing.T) {
+	e, fake := profileEnv(t, false)
+	tok := e.token("profiler")
+	base := "/api/v1/providers/eurodns/zone-profiles"
+	r := e.do(t, "POST", base, tok, testProfile, nil)
+	var created eurodnsprov.ZoneProfile
+	decodeJSON(t, r, &created)
+	id := itoa(*created.ID)
+	for _, rec := range []string{
+		`{"type":"NS","host":"@","ttl":3600,"rdata":"ns1.attacker.example."}`,
+		`{"type":"caa","host":"","ttl":3600,"rdata":"0 issue \"ca.example\""}`,
+		`{"type":"TXT","host":"_dmarc","ttl":3600,"rdata":"v=DMARC1; p=none"}`,
+	} {
+		body := `{"name":"p","records":[` + rec + `]}`
+		for _, c := range []struct{ method, path string }{{"POST", base}, {"POST", base + "/check"}, {"PUT", base + "/" + id}, {"POST", "/zone-profiles"}} {
+			if r := e.do(t, c.method, c.path, tok, body, nil); r.StatusCode != 403 || reason(t, r) != "protected" {
+				t.Fatalf("%s %s %s: %d", c.method, c.path, rec, r.StatusCode)
+			}
+		}
+	}
+	if fake.Len() != 1 || fake.Profile(*created.ID).Name != "transfer-example" {
+		t.Fatal("a protected record reached EuroDNS")
+	}
+	if ev := e.events("zone_profile.check"); len(ev) == 0 || ev[0].Decision != "deny" || ev[0].Reason != "protected" {
+		t.Fatalf("protected audit: %+v", ev)
+	}
+}
+
+func TestZoneProfileUpdateAuditsPrevious(t *testing.T) {
+	e, _ := profileEnv(t, false)
+	tok := e.token("profiler")
+	base := "/api/v1/providers/eurodns/zone-profiles"
+	r := e.do(t, "POST", base, tok, testProfile, nil)
+	var created eurodnsprov.ZoneProfile
+	decodeJSON(t, r, &created)
+	upd := `{"name":"transfer-example","records":[{"type":"A","host":"@","ttl":600,"rdata":"192.0.2.20"},{"type":"TXT","host":"@","ttl":600,"rdata":"v=spf1 -all"}]}`
+	if r = e.do(t, "PUT", base+"/"+itoa(*created.ID), tok, upd, nil); r.StatusCode != 200 {
+		t.Fatalf("update: %d", r.StatusCode)
+	}
+	ev := e.events("zone_profile.update")
+	if len(ev) != 1 {
+		t.Fatalf("update audit: %+v", ev)
+	}
+	prev, _ := json.Marshal(ev[0].Extra["previous"])
+	if !strings.Contains(string(prev), "192.0.2.10") || !strings.Contains(string(prev), "ops@example.net") {
+		t.Fatalf("previous content: %s", prev)
+	}
+	ops := map[string]string{}
+	for _, c := range ev[0].Changes {
+		ops[c.Host+" "+c.Type] = c.Op
+	}
+	if ops["@ A"] != "update" || ops["@ MX"] != "delete" || ops["@ TXT"] != "create" || len(ops) != 3 {
+		t.Fatalf("changes: %+v", ev[0].Changes)
+	}
+	if ev := e.events("zone_profile.create"); len(ev[0].Changes) != 2 {
+		t.Fatalf("create changes: %+v", ev[0].Changes)
+	}
+}
+
+func TestZoneProfilesProviderOptIn(t *testing.T) {
+	c, err := eurodns.New(eurodns.WithBaseURL("http://127.0.0.1:1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	off := eurodnsprov.NewWithClient("eurodns-off", "http://127.0.0.1:1", c)
+	e, _ := profileEnv(t, false, off)
+	tok := e.token("profiler")
+	if r := e.do(t, "GET", "/api/v1/providers/eurodns-off/zone-profiles", tok, "", nil); r.StatusCode != 403 || reason(t, r) != "zone_profiles_disabled" {
+		t.Fatalf("disabled provider: %d", r.StatusCode)
+	}
+	if r := e.do(t, "GET", "/zone-profiles", tok, "", nil); r.StatusCode != 200 {
+		t.Fatalf("the only enabled provider is the default: %d", r.StatusCode)
+	}
+	if r := e.do(t, "GET", "/zone-profiles", tok, "", map[string]string{eurodnsapi.ProviderHeader: "eurodns-off"}); r.StatusCode != 403 {
+		t.Fatalf("disabled provider by header: %d", r.StatusCode)
+	}
+}
+
+func TestZoneProfilesRateLimit(t *testing.T) {
+	e, _ := profileEnv(t, false)
+	e.server.profileLimiter = newSubjectLimiter(4, e.clock)
+	tok := e.token("profiler")
+	var last int
+	for range 8 {
+		last = e.do(t, "GET", "/api/v1/providers/eurodns/zone-profiles", tok, "", nil).StatusCode
+	}
+	if last != 429 {
+		t.Fatalf("no per-subject limit: %d", last)
+	}
+	if r := e.do(t, "GET", "/zone-profiles", e.token("profiler"), "", nil); r.StatusCode != 429 || reason(t, r) != "rate_limited" {
+		t.Fatalf("limit shared by the EuroDNS routes: %d", r.StatusCode)
+	}
+	e.server.profileLimiter = newSubjectLimiter(6000, e.clock)
+	if r := e.do(t, "GET", "/zone-profiles", tok, "", map[string]string{"pagination-size": "500"}); r.StatusCode != 400 {
+		t.Fatalf("oversized page: %d", r.StatusCode)
+	}
+}
+
+func TestZoneProfilesBadRequestsAudited(t *testing.T) {
+	e, _ := profileEnv(t, false)
+	tok := e.token("profiler")
+	cases := []struct{ method, path, body, action string }{
+		{"GET", "/api/v1/providers/eurodns/zone-profiles/abc", "", "zone_profile.get"},
+		{"POST", "/api/v1/providers/eurodns/zone-profiles", "{bad", "zone_profile.create"},
+		{"GET", "/api/v1/providers/Bad!/zone-profiles", "", "zone_profile.list"},
+		{"POST", "/zone-profiles", "{bad", "createZoneProfile"},
+		{"GET", "/zone-profiles/0", "", "getProfile"},
+	}
+	for _, c := range cases {
+		if r := e.do(t, c.method, c.path, tok, c.body, nil); r.StatusCode != 400 {
+			t.Fatalf("%s %s: %d", c.method, c.path, r.StatusCode)
+		}
+		if ev := e.events(c.action); len(ev) != 1 || ev[0].Decision != "deny" || ev[0].Reason != "bad_request" || ev[0].Subject == "" {
+			t.Fatalf("%s %s audit: %+v", c.method, c.path, ev)
+		}
+	}
+	e.do(t, "GET", "/zone-profiles", tok, "", map[string]string{"pagination-page": "x"})
+	if ev := e.events("listZoneProfiles"); len(ev) != 1 || ev[0].Reason != "bad_request" {
+		t.Fatalf("pagination audit: %+v", ev)
+	}
+}
+
+func TestMCPZoneProfileUpdateKeepsForwards(t *testing.T) {
+	e, fake := profileEnv(t, true)
+	r := e.do(t, "POST", "/api/v1/providers/eurodns/zone-profiles", e.token("profiler"), testProfile, nil)
+	var created eurodnsprov.ZoneProfile
+	decodeJSON(t, r, &created)
+	id := *created.ID
+	cs := connect(t, e, e.token("profiler"))
+	res := call(t, cs, "update_zone_profile", map[string]any{"id": id, "name": "renamed",
+		"records": []map[string]any{{"type": "A", "host": "@", "ttl": 600, "rdata": "192.0.2.30", "isDynDns": true}}}, nil)
+	if res.IsError {
+		t.Fatalf("update: %s", errText(res))
+	}
+	p := fake.Profile(id)
+	if len(p.MailForwards) != 1 || p.Records[0].IsDynDNS == nil || !*p.Records[0].IsDynDNS {
+		t.Fatalf("forwards or record fields dropped: %+v", p)
+	}
+	if res = call(t, cs, "update_zone_profile", map[string]any{"id": id, "name": "renamed", "records": []map[string]any{}, "mail_forwards": []any{}}, nil); res.IsError || len(fake.Profile(id).MailForwards) != 0 {
+		t.Fatalf("explicit removal of the forwards: %s", errText(res))
 	}
 }

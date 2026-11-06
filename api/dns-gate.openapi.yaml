@@ -1245,8 +1245,13 @@ paths:
         mail forwards) that EuroDNS applies to a domain when it arrives on its
         nameservers (a transfer, a Premium DNS subscription); they name no
         domain. Every zone profile operation needs `dns.zone.profile` granted
-        on `*` (`403 forbidden` otherwise) and is audited; a provider of
-        another kind answers `400 invalid`.
+        on `*` (`403 forbidden` otherwise), a provider with
+        `eurodns.zone_profiles: true` (`403 zone_profiles_disabled`), and is
+        audited; a provider of another kind answers `400 invalid_provider`.
+        Writes need a recent login from humans (`403 reauth_required`);
+        records of the protected list are refused on create, update and check
+        (`403 protected`); 60 operations per subject and minute
+        (`429 rate_limited`).
       responses:
         "200":
           description: Profiles, by id.
@@ -1323,7 +1328,7 @@ paths:
       summary: Replace a zone profile
       description: |
         The full profile; domains it was already applied to do not change.
-        The audit event holds the new content.
+        The audit event holds the previous and the new content.
       requestBody:
         required: true
         content:
@@ -1701,7 +1706,9 @@ components:
             501 not_implemented; 502 upstream; 503 store_unavailable,
             unavailable; 504 timeout. API keys and ACME add 403
             ephemeral_required, role_widened and 409 immutable, revoked,
-            too_many_values, too_many_registrations, value_taken.
+            too_many_values, too_many_registrations, value_taken. Zone
+            profiles add 400 rejected, invalid_provider and 403 protected,
+            zone_profiles_disabled.
           enum:
             - invalid
             - relative_target
@@ -1756,6 +1763,10 @@ components:
             - too_many_values
             - value_taken
             - too_many_registrations
+            - rejected
+            - invalid_provider
+            - protected
+            - zone_profiles_disabled
         message: { type: string }
         details: {}
         transfer:

@@ -147,6 +147,7 @@ providers:
       base_url: %[1]s
       app_id: %[2]s
       rate: {every: 5ms, burst: 50}
+      zone_profiles: true
 zones: [%[3]s]
 check_on_write: true
 reconcile_interval: 1h

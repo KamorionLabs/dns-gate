@@ -132,6 +132,8 @@ type Server struct {
 	now     func() time.Time
 	delegMu sync.Mutex // serializes delegated policy writes in this replica
 	owners  ownerCounts
+	// profileLimiter bounds the zone profile operations per subject.
+	profileLimiter *subjectLimiter
 }
 
 // New builds the server.
@@ -158,7 +160,7 @@ func New(c Config) (*Server, error) {
 		}
 		c.Policy = h
 	}
-	s := &Server{cfg: c, log: c.Log, now: c.Now, pol: policy.New(c.Policy)}
+	s := &Server{cfg: c, log: c.Log, now: c.Now, pol: policy.New(c.Policy), profileLimiter: newSubjectLimiter(profileRequestsPerMinute, c.Now)}
 	s.table = routes.NewDynamic(s.pol.Managed)
 	if c.Config.MCP.Enabled {
 		s.mcp = s.newMCP()

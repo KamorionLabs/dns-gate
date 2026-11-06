@@ -6,10 +6,13 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/KamorionLabs/dns-gate/internal/audit"
+	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/eurodnsapi"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
@@ -43,8 +46,18 @@ const maxProfileName = 255
 // providerIDRe is the format of provider ids (providers[].id).
 var providerIDRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?$`)
 
-// reasonInvalidProfile refuses a profile the gate will not send to EuroDNS.
-const reasonInvalidProfile zonewrite.Reason = "invalid"
+// Refusals of zone profile operations, besides the zonewrite reasons.
+const (
+	reasonInvalidProfile   zonewrite.Reason = "invalid"
+	reasonProtectedProfile zonewrite.Reason = "protected"
+	reasonReauth           zonewrite.Reason = "reauth_required"
+	reasonProfileRate      zonewrite.Reason = "rate_limited"
+)
+
+// profileRequestsPerMinute is the zone profile operations allowed per
+// subject and minute, all channels together: they share the EuroDNS rate
+// limit of the account with every zone write.
+const profileRequestsPerMinute = 60
 
 // profileCall is one zone profile operation, whatever the channel (EuroDNS
 // API, REST API, MCP).
@@ -56,6 +69,11 @@ type profileCall struct {
 	Page     eurodnsprov.ProfilePage
 	// AllPages lists every page instead of Page.
 	AllPages bool
+	// Session is the UI session of the request, nil for bearer tokens.
+	Session *session
+	// KeepForwards keeps, on update, the URL and mail forwards of the
+	// current profile when the new one leaves them out (null).
+	KeepForwards bool
 }
 
 type profileResult struct {
@@ -66,7 +84,7 @@ type profileResult struct {
 }
 
 // profileAuditor records one zone profile decision of a channel.
-type profileAuditor func(ctx context.Context, provider, decision, reason string, extra map[string]any)
+type profileAuditor func(ctx context.Context, provider, decision, reason string, extra map[string]any, changes []uiapi.Change)
 
 // canManageProfiles reports whether subj holds dns.zone.profile on every
 // zone: profiles are account-wide objects that name no domain and are
@@ -87,30 +105,46 @@ func (s *Server) runProfile(ctx context.Context, subj *identity.Subject, c profi
 	if c.ID != 0 {
 		extra["profile_id"] = c.ID
 	}
+	deny := func(provider string, err *zonewrite.Error) (*profileResult, error) {
+		rec(ctx, provider, "deny", string(err.Reason), extra, nil)
+		return nil, err
+	}
 	if !s.canManageProfiles(subj) {
-		rec(ctx, c.Provider, "deny", "forbidden", extra)
-		return nil, profileForbidden()
+		return deny(c.Provider, profileForbidden())
+	}
+	if !s.profileLimiter.allow(subj.String()) {
+		return deny(c.Provider, &zonewrite.Error{Reason: reasonProfileRate, Message: "too many zone profile requests, retry in a minute"})
 	}
 	if s.cfg.EuroDNS == nil {
-		rec(ctx, c.Provider, "deny", "not_eurodns", extra)
-		return nil, &zonewrite.Error{Reason: zonewrite.ReasonNotFound, Message: "no EuroDNS provider: zone profiles exist only on EuroDNS providers"}
+		return deny(c.Provider, &zonewrite.Error{Reason: eurodnsapi.ReasonProfilesDisabled, Message: "no EuroDNS provider: zone profiles exist only on EuroDNS providers"})
 	}
 	ep, err := s.cfg.EuroDNS.ProfileAccount(c.Provider)
 	if err != nil {
-		rec(ctx, c.Provider, "deny", profileErrorReason(err), extra)
+		rec(ctx, c.Provider, "deny", profileErrorReason(err), extra, nil)
 		return nil, err
 	}
 	pid := ep.ID()
-	if c.Op == profileCreate || c.Op == profileUpdate {
-		if msg := checkProfile(c.Profile); msg != "" {
-			rec(ctx, pid, "deny", string(reasonInvalidProfile), extra)
-			return nil, &zonewrite.Error{Reason: reasonInvalidProfile, Message: msg}
+	write := c.Op == profileCreate || c.Op == profileUpdate || c.Op == profileDelete
+	if write {
+		if e := s.stepUp(subj, c.Session); e != nil {
+			return deny(pid, &zonewrite.Error{Reason: reasonReauth, Message: e.msg})
 		}
 	}
-	if c.Profile != nil && c.Op != profileCheck {
-		extra["profile"] = c.Profile.Clean()
+	if c.Op == profileCreate || c.Op == profileUpdate {
+		if msg := checkProfile(c.Profile); msg != "" {
+			return deny(pid, &zonewrite.Error{Reason: reasonInvalidProfile, Message: msg})
+		}
+	}
+	if c.Op == profileCreate || c.Op == profileUpdate || c.Op == profileCheck {
+		if c.Profile == nil {
+			return deny(pid, &zonewrite.Error{Reason: reasonInvalidProfile, Message: "a zone profile is required"})
+		}
+		if msg := s.protectedInProfile(c.Profile); msg != "" {
+			return deny(pid, &zonewrite.Error{Reason: reasonProtectedProfile, Message: msg})
+		}
 	}
 	out := &profileResult{Provider: pid}
+	var before, after *eurodnsprov.ZoneProfile
 	switch c.Op {
 	case profileList:
 		if c.AllPages {
@@ -126,28 +160,128 @@ func (s *Server) runProfile(ctx context.Context, subj *identity.Subject, c profi
 			extra["valid"] = *out.Profile.Report.IsValid
 		}
 	case profileCreate:
+		after = c.Profile.Clean()
+		extra["profile"] = after
 		out.Profile, err = ep.CreateZoneProfile(ctx, c.Profile)
 		if err == nil && out.Profile.ID != nil {
 			extra["profile_id"] = *out.Profile.ID
 		}
 	case profileUpdate:
-		out.Profile, err = ep.UpdateZoneProfile(ctx, c.ID, c.Profile)
+		before, err = ep.GetZoneProfile(ctx, c.ID)
+		if err != nil {
+			break
+		}
+		before = before.Clean()
+		extra["previous"] = before
+		next := *c.Profile
+		if c.KeepForwards && next.URLForwards == nil {
+			next.URLForwards = before.URLForwards
+		}
+		if c.KeepForwards && next.MailForwards == nil {
+			next.MailForwards = before.MailForwards
+		}
+		after = next.Clean()
+		extra["profile"] = after
+		out.Profile, err = ep.UpdateZoneProfile(ctx, c.ID, &next)
 	case profileDelete:
-		var cur *eurodnsprov.ZoneProfile
-		cur, err = ep.GetZoneProfile(ctx, c.ID)
+		before, err = ep.GetZoneProfile(ctx, c.ID)
 		if err == nil {
-			extra["profile"] = cur.Clean()
+			before = before.Clean()
+			extra["profile"] = before
 			err = ep.DeleteZoneProfile(ctx, c.ID)
 		}
 	default:
 		err = &zonewrite.Error{Reason: reasonInvalidProfile, Message: "unknown zone profile operation " + c.Op}
 	}
+	var changes []uiapi.Change
+	if write {
+		changes = profileChanges(before, after)
+	}
 	if err != nil {
-		rec(ctx, pid, "error", profileErrorReason(err), extra)
+		rec(ctx, pid, "error", profileErrorReason(err), extra, changes)
 		return nil, err
 	}
-	rec(ctx, pid, "allow", "", extra)
+	rec(ctx, pid, "allow", "", extra, changes)
 	return out, nil
+}
+
+// protectedInProfile returns why a profile holds a record of the protected
+// list, "" when it holds none. The zones of the protected entries are
+// ignored: the profile is applied to domains the gate does not know yet.
+func (s *Server) protectedInProfile(p *eurodnsprov.ZoneProfile) string {
+	snap := s.cfg.Policy.Current()
+	for _, r := range p.Records {
+		if pe, ok := snap.ProtectedRecord(r.Host, r.Type); ok {
+			host := r.Host
+			if host == "" {
+				host = "@"
+			}
+			return fmt.Sprintf("record %s %s is protected (hosts %s, types %s): zone profiles may not hold protected records, whatever the zones of the protected entry",
+				host, strings.ToUpper(r.Type), strings.Join(pe.Hosts, ","), strings.Join(pe.Types, ","))
+		}
+	}
+	return ""
+}
+
+// profileChanges summarizes, per host and type, the records a profile
+// write changes, for the audit journal.
+func profileChanges(before, after *eurodnsprov.ZoneProfile) []uiapi.Change {
+	type set struct {
+		ttl    int
+		values []string
+	}
+	group := func(p *eurodnsprov.ZoneProfile) map[dns.Key]*set {
+		out := map[dns.Key]*set{}
+		if p == nil {
+			return out
+		}
+		for _, r := range p.Records {
+			h := strings.TrimSuffix(strings.ToLower(r.Host), ".")
+			if h == "" {
+				h = "@"
+			}
+			k := dns.Key{Host: h, Type: strings.ToUpper(r.Type)}
+			if out[k] == nil {
+				out[k] = &set{ttl: r.TTL}
+			}
+			out[k].values = append(out[k].values, r.RData)
+		}
+		for _, st := range out {
+			sort.Strings(st.values)
+		}
+		return out
+	}
+	old, cur := group(before), group(after)
+	keys := map[dns.Key]bool{}
+	for k := range old {
+		keys[k] = true
+	}
+	for k := range cur {
+		keys[k] = true
+	}
+	var out []uiapi.Change
+	for k := range keys {
+		o, n := old[k], cur[k]
+		c := uiapi.Change{Host: k.Host, Type: k.Type}
+		switch {
+		case o == nil:
+			c.Op, c.NewTTL, c.NewValues = "create", n.ttl, n.values
+		case n == nil:
+			c.Op, c.OldTTL, c.OldValues = "delete", o.ttl, o.values
+		case o.ttl != n.ttl || !slices.Equal(o.values, n.values):
+			c.Op, c.OldTTL, c.OldValues, c.NewTTL, c.NewValues = "update", o.ttl, o.values, n.ttl, n.values
+		default:
+			continue
+		}
+		out = append(out, c)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Host != out[j].Host {
+			return out[i].Host < out[j].Host
+		}
+		return out[i].Type < out[j].Type
+	})
+	return out
 }
 
 // checkProfile validates what the gate requires of a profile to save; the
@@ -190,8 +324,13 @@ func profileErrorReason(err error) string {
 func (s *Server) profileErrorBody(ctx context.Context, err error) (int, errorBody) {
 	if ze, ok := zonewrite.AsError(err); ok {
 		status := reasonStatus(ze.Reason)
-		if ze.Reason == reasonInvalidProfile || ze.Reason == eurodnsapi.ReasonInvalidProvider {
+		switch ze.Reason {
+		case reasonInvalidProfile, eurodnsapi.ReasonInvalidProvider:
 			status = http.StatusBadRequest
+		case reasonProtectedProfile, reasonReauth, eurodnsapi.ReasonProfilesDisabled:
+			status = http.StatusForbidden
+		case reasonProfileRate:
+			status = http.StatusTooManyRequests
 		}
 		return status, errorBody{Reason: string(ze.Reason), Message: ze.Message, Details: ze.Details}
 	}
@@ -224,10 +363,10 @@ func (s *Server) profileErrorBody(ctx context.Context, err error) (int, errorBod
 }
 
 // profileEvent builds the audit event of a zone profile decision.
-func (s *Server) profileEvent(ctx context.Context, subj *identity.Subject, action, provider, decision, reason string, extra map[string]any) audit.Event {
+func (s *Server) profileEvent(ctx context.Context, subj *identity.Subject, action, provider, decision, reason string, extra map[string]any, changes []uiapi.Change) audit.Event {
 	e := audit.Event{
 		Time: s.now().UTC(), RequestID: requestid.From(ctx), Action: action, Provider: provider,
-		Decision: decision, Reason: reason, Extra: map[string]any{},
+		Decision: decision, Reason: reason, Extra: map[string]any{}, Changes: changes,
 	}
 	if e.RequestID == "" {
 		e.RequestID = requestid.New()
@@ -245,15 +384,23 @@ func (s *Server) profileEvent(ctx context.Context, subj *identity.Subject, actio
 // EuroDNS-compatible API (routes.Account). The provider is the only
 // EuroDNS provider, or the one named by the X-DNS-Gate-Provider header.
 func (s *Server) serveEuroDNSProfile(w http.ResponseWriter, r *http.Request, subj *identity.Subject, m *routes.Match) {
+	rec := func(ctx context.Context, provider, decision, reason string, extra map[string]any, changes []uiapi.Change) {
+		s.cfg.Audit.Log(ctx, s.profileEvent(ctx, subj, m.Operation.ID, provider, decision, reason, extra, changes))
+	}
 	c := profileCall{Provider: strings.TrimSpace(r.Header.Get(eurodnsapi.ProviderHeader))}
+	bad := func(msg string) {
+		rec(r.Context(), c.Provider, "deny", "bad_request", map[string]any{"message": msg}, nil)
+		writeError(w, http.StatusBadRequest, "bad_request", msg)
+	}
 	if c.Provider != "" && !providerIDRe.MatchString(c.Provider) {
-		writeError(w, http.StatusBadRequest, "bad_request", "invalid "+eurodnsapi.ProviderHeader+" header")
+		c.Provider = ""
+		bad("invalid " + eurodnsapi.ProviderHeader + " header")
 		return
 	}
 	if id := m.Params["id"]; id != "" {
 		n, err := strconv.ParseInt(id, 10, 32)
 		if err != nil || n <= 0 {
-			writeError(w, http.StatusBadRequest, "bad_request", "invalid zone profile id")
+			bad("invalid zone profile id")
 			return
 		}
 		c.ID = n
@@ -263,7 +410,7 @@ func (s *Server) serveEuroDNSProfile(w http.ResponseWriter, r *http.Request, sub
 		c.Op = profileList
 		pg, msg := paginationOf(r.Header)
 		if msg != "" {
-			writeError(w, http.StatusBadRequest, "bad_request", msg)
+			bad(msg)
 			return
 		}
 		c.Page = pg
@@ -273,6 +420,7 @@ func (s *Server) serveEuroDNSProfile(w http.ResponseWriter, r *http.Request, sub
 		c.Op = map[string]string{"checkZoneProfile": profileCheck, "createZoneProfile": profileCreate, "updateUserAPiZoneProfile": profileUpdate}[m.Operation.ID]
 		var p eurodnsprov.ZoneProfile
 		if !decodeBody(w, r, &p) {
+			rec(r.Context(), c.Provider, "deny", "bad_request", map[string]any{"message": "invalid body"}, nil)
 			return
 		}
 		c.Profile = &p
@@ -281,9 +429,6 @@ func (s *Server) serveEuroDNSProfile(w http.ResponseWriter, r *http.Request, sub
 	default:
 		writeError(w, http.StatusForbidden, "operation_denied", "operation not allowed by the gate")
 		return
-	}
-	rec := func(ctx context.Context, provider, decision, reason string, extra map[string]any) {
-		s.cfg.Audit.Log(ctx, s.profileEvent(ctx, subj, m.Operation.ID, provider, decision, reason, extra))
 	}
 	out, err := s.runProfile(r.Context(), subj, c, rec)
 	if err != nil {
@@ -294,8 +439,7 @@ func (s *Server) serveEuroDNSProfile(w http.ResponseWriter, r *http.Request, sub
 			_, _ = w.Write(ae.Body)
 			return
 		}
-		status, body := s.profileErrorBody(r.Context(), err)
-		writeJSON(w, status, body)
+		s.writeProfileError(w, r, err)
 		return
 	}
 	switch c.Op {
@@ -313,6 +457,15 @@ func (s *Server) serveEuroDNSProfile(w http.ResponseWriter, r *http.Request, sub
 	}
 }
 
+// writeProfileError writes an error of runProfile in the gate format.
+func (s *Server) writeProfileError(w http.ResponseWriter, r *http.Request, err error) {
+	status, body := s.profileErrorBody(r.Context(), err)
+	if status == http.StatusTooManyRequests {
+		w.Header().Set("Retry-After", "60")
+	}
+	writeJSON(w, status, body)
+}
+
 // passUpstreamStatus tells the EuroDNS refusals returned as is to EuroDNS
 // clients; the others (credentials of the gate, server errors) become 502.
 func passUpstreamStatus(code int) bool {
@@ -323,6 +476,9 @@ func passUpstreamStatus(code int) bool {
 	return false
 }
 
+// maxProfilePageSize caps the page size a client may ask for.
+const maxProfilePageSize = 100
+
 // paginationOf reads the pagination-* request headers of a listing.
 func paginationOf(h http.Header) (eurodnsprov.ProfilePage, string) {
 	var pg eurodnsprov.ProfilePage
@@ -330,7 +486,7 @@ func paginationOf(h http.Header) (eurodnsprov.ProfilePage, string) {
 		name string
 		dst  *int
 		max  int
-	}{{"pagination-page", &pg.Page, 1 << 20}, {"pagination-size", &pg.Size, 1000}} {
+	}{{"pagination-page", &pg.Page, 1 << 20}, {"pagination-size", &pg.Size, maxProfilePageSize}} {
 		v := h.Get(f.name)
 		if v == "" {
 			continue
@@ -355,13 +511,8 @@ func paginationOf(h http.Header) (eurodnsprov.ProfilePage, string) {
 }
 
 // handleZoneProfilesAPI serves /api/v1/providers/{provider}/zone-profiles.
-func (s *Server) handleZoneProfilesAPI(w http.ResponseWriter, r *http.Request, subj *identity.Subject, pattern string, params map[string]string) {
-	c := profileCall{Provider: params["provider"]}
-	if !providerIDRe.MatchString(c.Provider) {
-		writeError(w, http.StatusBadRequest, "bad_request", "invalid provider")
-		return
-	}
-	var action string
+func (s *Server) handleZoneProfilesAPI(w http.ResponseWriter, r *http.Request, subj *identity.Subject, sess *session, pattern string, params map[string]string) {
+	c := profileCall{Provider: params["provider"], Session: sess}
 	switch {
 	case pattern == routeProfiles && r.Method == http.MethodGet:
 		c.Op, c.AllPages = profileList, true
@@ -376,11 +527,25 @@ func (s *Server) handleZoneProfilesAPI(w http.ResponseWriter, r *http.Request, s
 	default:
 		c.Op = profileDelete
 	}
-	action = "zone_profile." + c.Op
+	action := "zone_profile." + c.Op
+	rec := func(ctx context.Context, provider, decision, reason string, extra map[string]any, changes []uiapi.Change) {
+		e := s.profileEvent(ctx, subj, action, provider, decision, reason, extra, changes)
+		e.Extra["via"] = "api"
+		s.cfg.Audit.Log(ctx, e)
+	}
+	bad := func(msg string) {
+		rec(r.Context(), c.Provider, "deny", "bad_request", map[string]any{"message": msg}, nil)
+		writeError(w, http.StatusBadRequest, "bad_request", msg)
+	}
+	if !providerIDRe.MatchString(c.Provider) {
+		c.Provider = ""
+		bad("invalid provider")
+		return
+	}
 	if pattern == routeProfile {
 		n, err := strconv.ParseInt(params["id"], 10, 32)
 		if err != nil || n <= 0 {
-			writeError(w, http.StatusBadRequest, "bad_request", "invalid zone profile id")
+			bad("invalid zone profile id")
 			return
 		}
 		c.ID = n
@@ -388,19 +553,14 @@ func (s *Server) handleZoneProfilesAPI(w http.ResponseWriter, r *http.Request, s
 	if c.Op == profileCreate || c.Op == profileUpdate || c.Op == profileCheck {
 		var p eurodnsprov.ZoneProfile
 		if !decodeBody(w, r, &p) {
+			rec(r.Context(), c.Provider, "deny", "bad_request", map[string]any{"message": "invalid body"}, nil)
 			return
 		}
 		c.Profile = &p
 	}
-	rec := func(ctx context.Context, provider, decision, reason string, extra map[string]any) {
-		e := s.profileEvent(ctx, subj, action, provider, decision, reason, extra)
-		e.Extra["via"] = "api"
-		s.cfg.Audit.Log(ctx, e)
-	}
 	out, err := s.runProfile(r.Context(), subj, c, rec)
 	if err != nil {
-		status, body := s.profileErrorBody(r.Context(), err)
-		writeJSON(w, status, body)
+		s.writeProfileError(w, r, err)
 		return
 	}
 	switch c.Op {

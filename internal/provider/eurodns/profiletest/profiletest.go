@@ -23,6 +23,10 @@ var validTypes = map[string]bool{"A": true, "AAAA": true, "APEX": true, "CAA": t
 type Fake struct {
 	// APIKey, when set, is the X-API-KEY every request must carry.
 	APIKey string
+	// MaxPageSize, when set, caps the page size of the listing.
+	MaxPageSize int
+	// HideCount omits the pagination-count header of the listing.
+	HideCount bool
 
 	mu       sync.Mutex
 	profiles map[int64]*eurodnsprov.ZoneProfile
@@ -129,6 +133,10 @@ func (f *Fake) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f.mu.Lock()
+	if f.MaxPageSize > 0 && size > f.MaxPageSize {
+		size = f.MaxPageSize
+	}
+	hide := f.HideCount
 	all := make([]eurodnsprov.ZoneProfileSummary, 0, len(f.profiles))
 	for id, p := range f.profiles {
 		all = append(all, eurodnsprov.ZoneProfileSummary{ID: id, Name: p.Name})
@@ -149,7 +157,9 @@ func (f *Fake) list(w http.ResponseWriter, r *http.Request) {
 	end := min(start+size, len(all))
 	w.Header().Set("pagination-page", strconv.Itoa(page))
 	w.Header().Set("pagination-size", strconv.Itoa(size))
-	w.Header().Set("pagination-count", strconv.Itoa(len(all)))
+	if !hide {
+		w.Header().Set("pagination-count", strconv.Itoa(len(all)))
+	}
 	if field != "" {
 		w.Header().Set("pagination-sortfield", field)
 	}

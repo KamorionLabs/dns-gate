@@ -109,12 +109,19 @@ func (e *env) scenarioZoneProfiles(t *testing.T) {
 		}
 		content, _ := json.Marshal(ev.Extra["profile"])
 		seen[ev.Action+"/"+ev.Decision] = string(content)
+		if ev.Action == "zone_profile.update" {
+			prev, _ := json.Marshal(ev.Extra["previous"])
+			seen["previous"] = string(prev)
+		}
 	}
 	for _, k := range []string{"createZoneProfile/deny", "zone_profile.list/deny", "zone_profile.check/allow", "createZoneProfile/allow",
 		"zone_profile.list/allow", "zone_profile.update/allow", "deleteZoneProfile/allow"} {
 		if _, ok := seen[k]; !ok {
 			t.Errorf("audit event %s missing", k)
 		}
+	}
+	if !strings.Contains(seen["previous"], "192.0.2.80") {
+		t.Errorf("update audited without the previous content: %s", seen["previous"])
 	}
 	if !strings.Contains(seen["createZoneProfile/allow"], "web.example.net.") || !strings.Contains(seen["deleteZoneProfile/allow"], "192.0.2.81") {
 		t.Errorf("audited content: %v", seen)

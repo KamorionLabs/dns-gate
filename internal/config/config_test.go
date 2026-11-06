@@ -535,7 +535,8 @@ func TestZoneProfileGrantWarning(t *testing.T) {
       - zones: [example.com]
         actions: [dns.zone.profile]
 `
-	c, err := Parse([]byte(strings.Replace(base, "roles:\n", roles, 1)), e)
+	doc := strings.Replace(base, "eurodns: {app_id: app}", "eurodns: {app_id: app, zone_profiles: true}", 1)
+	c, err := Parse([]byte(strings.Replace(doc, "roles:\n", roles, 1)), e)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -550,5 +551,42 @@ func TestZoneProfileGrantWarning(t *testing.T) {
 	}
 	if n != 1 {
 		t.Fatalf("warnings: %q", c.Warnings)
+	}
+}
+
+func TestZoneProfileGrantWarningGlobs(t *testing.T) {
+	e := env(map[string]string{"EURODNS_API_KEY": "k"})
+	roles := `roles:
+  stars:
+    rules:
+      - zones: ["**"]
+        actions: [dns.zone.profile]
+  com:
+    rules:
+      - zones: ["*.com"]
+        actions: [dns.zone.profile]
+`
+	c, err := Parse([]byte(strings.Replace(base, "roles:\n", roles, 1)), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := strings.Join(c.Warnings, "\n")
+	if strings.Contains(w, "roles.stars") || !strings.Contains(w, "roles.com") || !strings.Contains(w, "no eurodns provider sets zone_profiles") {
+		t.Fatalf("warnings: %q", c.Warnings)
+	}
+}
+
+func TestEuroDNSZoneProfilesOptIn(t *testing.T) {
+	e := env(map[string]string{"EURODNS_API_KEY": "k"})
+	c, err := Parse([]byte(base), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Providers[0].EuroDNS.ZoneProfiles {
+		t.Fatal("zone profiles enabled by default")
+	}
+	c, err = Parse([]byte(strings.Replace(base, "eurodns: {app_id: app}", "eurodns: {app_id: app, zone_profiles: true}", 1)), e)
+	if err != nil || !c.Providers[0].EuroDNS.ZoneProfiles {
+		t.Fatalf("zone_profiles: %v", err)
 	}
 }

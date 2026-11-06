@@ -28,8 +28,8 @@ type profileWriteIn struct {
 	ID           int64                     `json:"id,omitempty" jsonschema:"zone profile id; update_zone_profile only"`
 	Name         string                    `json:"name" jsonschema:"profile name"`
 	Records      []uiapi.ZoneProfileRecord `json:"records" jsonschema:"records of the profile, hosts relative to the domain"`
-	URLForwards  []map[string]any          `json:"url_forwards,omitempty" jsonschema:"EuroDNS URL forwards: forwardType (FRAME, HTTP301, HTTP302), host, url, and title, keywords, description for FRAME"`
-	MailForwards []map[string]any          `json:"mail_forwards,omitempty" jsonschema:"EuroDNS mail forwards: source (left part of the address, * for catch-all), destination"`
+	URLForwards  []map[string]any          `json:"url_forwards,omitempty" jsonschema:"EuroDNS URL forwards: forwardType (FRAME, HTTP301, HTTP302), host, url, and title, keywords, description for FRAME; on update, omit to keep the current ones, [] removes them"`
+	MailForwards []map[string]any          `json:"mail_forwards,omitempty" jsonschema:"EuroDNS mail forwards: source (left part of the address, * for catch-all), destination; on update, omit to keep the current ones, [] removes them"`
 }
 
 type profileListOut struct {
@@ -46,15 +46,15 @@ type profileOut struct {
 }
 
 func (in profileWriteIn) profile() (*eurodnsprov.ZoneProfile, error) {
-	doc := map[string]any{"name": in.Name, "records": in.Records, "urlForwards": in.URLForwards, "mailForwards": in.MailForwards}
+	doc := map[string]any{"name": in.Name, "records": in.Records}
 	if in.Records == nil {
 		doc["records"] = []uiapi.ZoneProfileRecord{}
 	}
-	if in.URLForwards == nil {
-		doc["urlForwards"] = []any{}
+	if in.URLForwards != nil {
+		doc["urlForwards"] = in.URLForwards
 	}
-	if in.MailForwards == nil {
-		doc["mailForwards"] = []any{}
+	if in.MailForwards != nil {
+		doc["mailForwards"] = in.MailForwards
 	}
 	b, err := json.Marshal(doc)
 	if err != nil {
@@ -84,8 +84,8 @@ func (m *mcpServer) runProfileTool(ctx context.Context, req *mcp.CallToolRequest
 	if err != nil {
 		return nil, err
 	}
-	rec := func(ctx context.Context, provider, decision, reason string, extra map[string]any) {
-		e := m.s.profileEvent(ctx, subj, "mcp."+tool, provider, decision, reason, extra)
+	rec := func(ctx context.Context, provider, decision, reason string, extra map[string]any, changes []uiapi.Change) {
+		e := m.s.profileEvent(ctx, subj, "mcp."+tool, provider, decision, reason, extra, changes)
 		e.Extra["via"], e.Extra["mcp_client"] = "mcp", clientName(req)
 		m.s.cfg.Audit.Log(ctx, e)
 	}
@@ -178,7 +178,7 @@ func (m *mcpServer) addProfileWriteTools(srv *mcp.Server) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "update_zone_profile",
-		Description: "Replace a zone profile of a EuroDNS account (name, records, forwards): give its full content, check it first and confirm with the user. Domains it was already applied to do not change." + profileToolNote,
+		Description: "Replace a zone profile of a EuroDNS account: give its name and all its records (with their isDynDns and proxy options); URL and mail forwards left out are kept, [] removes them. Check it first and confirm with the user. Domains it was already applied to do not change. Needs a recent login for humans." + profileToolNote,
 		Annotations: write("Update a zone profile", true),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in profileWriteIn) (*mcp.CallToolResult, profileOut, error) {
 		if in.ID <= 0 {
@@ -188,7 +188,7 @@ func (m *mcpServer) addProfileWriteTools(srv *mcp.Server) {
 		if err != nil {
 			return nil, profileOut{}, err
 		}
-		out, err := m.runProfileTool(ctx, req, "update_zone_profile", profileCall{Op: profileUpdate, Provider: in.Provider, ID: in.ID, Profile: p})
+		out, err := m.runProfileTool(ctx, req, "update_zone_profile", profileCall{Op: profileUpdate, Provider: in.Provider, ID: in.ID, Profile: p, KeepForwards: true})
 		if err != nil {
 			return nil, profileOut{}, err
 		}
