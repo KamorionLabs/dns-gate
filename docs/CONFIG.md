@@ -287,6 +287,8 @@ Gate-issued credentials for clients that only speak the EuroDNS `X-APP-ID` / `X-
 
 Virtual keys are the weakest credential: restrict them to narrow roles such as `acme-solver`, with an expiry and source CIDRs.
 
+Virtual keys are static: changing one means a configuration change. Keys issued at runtime, rotated with an overlap and revoked through the API are [API keys](API.md#api-keys) (`gate.apikey.manage`), stored hashed in the store and accepted everywhere virtual keys are, plus the neutral API and the [ACME endpoints](ACME.md). The `dgk_` prefix is reserved to API keys.
+
 ## Roles
 
 A map of named roles. Deny by default: an action is allowed only if a rule of one of the subject's roles matches.
@@ -294,7 +296,7 @@ A map of named roles. Deny by default: an action is allowed only if a rule of on
 | Field | Description |
 |---|---|
 | `rules[].zones` | Zone globs (`*` matches any sequence, `*` alone any managed zone, and for `dns.read` and `ui.read` any [discovered](#zone-discovery) zone). |
-| `rules[].actions` | `dns.read`, `dns.record.write`, `dns.record.adopt`, `dns.zone.admin`, `domain.read`, `ui.read`. |
+| `rules[].actions` | `dns.read`, `dns.record.write`, `dns.record.adopt`, `dns.zone.admin`, `domain.read`, `ui.read`, `gate.apikey.manage` (manage the [API keys](API.md#api-keys) of the subject's teams whose role zones it covers). |
 | `rules[].records.hosts` | Host patterns relative to the zone, `@` is the apex. `*` matches one label, `**` one or more labels (a bare `**` matches every host, apex included). |
 | `rules[].records.types` | Record types, `*` for any. Omit `records` to cover the whole zone. |
 | `rebase_on_save` | On a full-zone PUT, ignore differences outside the role's scope instead of refusing them (stale zones sent by ACME clients). Granted if any role of the subject enables it. |
@@ -712,6 +714,9 @@ Validation of the response posted to `/auth/saml/acs`: XML signature of the resp
 | `POST /api/v1/tokens` | Gate token for the UI session, see [Gate-issued tokens](#gate-issued-tokens). |
 | `GET /.well-known/jwks.json` | Public key of the gate issuer. |
 | `GET /.well-known/openid-configuration`, `/.well-known/oauth-authorization-server`, `/oauth/authorize`, `POST /oauth/token` | Gate authorization server for native clients (Claude Desktop extension), with a gate issuer and the UI login. |
+| `/api/v1/api-keys[/{id}[/rotate]]` | [API keys](API.md#api-keys) (`gate.apikey.manage`). |
+| `POST /acme/httpreq/present`, `/acme/httpreq/cleanup` | lego `httpreq` DNS-01 provider, see [ACME.md](ACME.md). |
+| `POST /acme/acme-dns/update`, `/acme/acme-dns/register` | acme-dns API for acme.sh, certbot, cert-manager and Caddy, see [ACME.md](ACME.md). |
 | `/healthz`, `/readyz` | Probes. |
 
 `GET` on a zone returns an `ETag`; send it back in `If-Match` on writes to get `412 precondition` instead of overwriting a concurrent change. Errors are JSON `{"reason": "...", "message": "..."}`: `forbidden`, `not_owner`, `too_many_changes` (403), `not_found`, `zone_not_eurodns` (404), `foreign_rrset`, `tainted` (409), `precondition` (412), `invalid_zone` (400), `zone_locked` (503, `Retry-After`), `upstream` (502).

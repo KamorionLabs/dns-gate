@@ -152,8 +152,12 @@ signed-in user gets a short-lived gate token for curl or Terraform from the Conn
 page, and Claude Desktop signs in through the gate's OAuth endpoints — see
 [docs/IDENTITY-CENTER.md](docs/IDENTITY-CENTER.md).
 
-Existing EuroDNS clients (ACME) can use scoped virtual keys instead. Details in
-[docs/DESIGN.md](docs/DESIGN.md#9-authentication).
+Third parties without OIDC (ACME clients, appliances) get gate-issued API keys,
+bound to a team and a role, rotated and revoked through the API. certbot, acme.sh,
+lego, win-acme, cert-manager and Caddy solve DNS-01 challenges through the gate's
+lego httpreq and acme-dns endpoints, on any provider and without CNAME: see
+[docs/ACME.md](docs/ACME.md). Existing EuroDNS clients can also use scoped virtual
+keys. Details in [docs/DESIGN.md](docs/DESIGN.md#9-authentication).
 
 ## Quickstart (local)
 

@@ -15,7 +15,9 @@ info:
     [docs/API.md](https://github.com/KamorionLabs/dns-gate/blob/main/docs/API.md).
 
     **Authentication.** A bearer token (JWT from an issuer declared in the gate
-    configuration), a virtual key (`X-App-Id` + `X-Api-Key`), or the web UI
+    configuration), a gate API key (`dgk_...`, as a bearer token, as the
+    password of basic authentication with the key id as user name, or in
+    `X-Api-Key`), a virtual key (`X-App-Id` + `X-Api-Key`), or the web UI
     session cookie. With the session cookie, every request other than GET must
     carry the `X-Gate-CSRF` header (equal to the `gate_csrf` cookie) and a
     same-origin `Origin` header; humans need a recent login for writes
@@ -37,6 +39,13 @@ info:
     for the Claude Desktop extension (`/.well-known/oauth-authorization-server`,
     `/.well-known/openid-configuration`, `/oauth/authorize`, `/oauth/token`),
     standard OAuth 2.0 with PKCE not described here.
+
+    **ACME DNS-01.** `/acme/httpreq/present` and `/cleanup` serve the lego
+    `httpreq` DNS provider, `/acme/acme-dns/update` and `/register` the
+    acme-dns API (acme.sh `dns_acmedns`, the certbot acme-dns hook,
+    cert-manager, Caddy). They write `_acme-challenge` TXT RRsets through the
+    engine, as the caller, whose role must have an `ephemeral_ttl`. Guide:
+    [docs/ACME.md](https://github.com/KamorionLabs/dns-gate/blob/main/docs/ACME.md).
   license:
     name: MIT
     url: https://github.com/KamorionLabs/dns-gate/blob/main/LICENSE
@@ -51,6 +60,7 @@ servers:
         description: Host name of the gate.
 security:
   - bearer: []
+  - apiKey: []
   - virtualKey: []
     virtualKeyApp: []
   - session: []
@@ -73,6 +83,10 @@ tags:
     description: Policy delegation API, used by the Terraform provider to manage roles and bindings.
   - name: policy
     description: Policy editor of the web UI (managed layer, revisions, approvals).
+  - name: api-keys
+    description: Gate-issued API keys for third parties without OIDC (ACME clients, appliances).
+  - name: acme
+    description: ACME DNS-01 endpoints compatible with lego httpreq and acme-dns.
 
 paths:
   /.well-known/dns-gate:
@@ -785,6 +799,268 @@ paths:
                   key_sha256: { type: string }
         default: { $ref: "#/components/responses/Error" }
 
+  /api/v1/api-keys:
+    get:
+      tags: [api-keys]
+      operationId: listAPIKeys
+      summary: API keys the caller manages
+      description: |
+        Keys of the caller's teams (of every team for a holder of
+        `gate.apikey.manage` on `*`) whose role zones it manages. Never the
+        key itself. Needs `gate.apikey.manage`; keys cannot manage keys.
+      parameters:
+        - { name: team, in: query, schema: { type: string } }
+        - { name: include_revoked, in: query, schema: { type: boolean } }
+      responses:
+        "200":
+          description: Keys, oldest first.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/APIKey" } }
+        "403": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+    post:
+      tags: [api-keys]
+      operationId: createAPIKey
+      summary: Create an API key (the key is returned once)
+      description: |
+        Binds a new key to one team of the caller and one role. The role
+        must not grant `policy.*` nor `gate.*` actions, and the caller must
+        hold `gate.apikey.manage` on every zone of the role and every action
+        of the role on the same zones and records (`403 forbidden`
+        otherwise). `acme_domains` creates one acme-dns registration per
+        domain (the role must allow `_acme-challenge.<domain>` TXT and have
+        an `ephemeral_ttl`); `acme_dns_accounts` in the answer is the storage
+        file of acme-dns clients. Humans need a recent login.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/APIKeyRequest" }
+      responses:
+        "201":
+          description: Key, with the secret (shown once).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IssuedAPIKey" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/api-keys/{id}:
+    parameters:
+      - $ref: "#/components/parameters/APIKeyID"
+    get:
+      tags: [api-keys]
+      operationId: getAPIKey
+      summary: One API key (404 when the caller does not manage it)
+      responses:
+        "200":
+          description: Key.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/APIKey" }
+        "404": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+    put:
+      tags: [api-keys]
+      operationId: replaceAPIKey
+      summary: Replace the mutable fields of an API key
+      description: |
+        Replaces name, description, expires_at, allowed_cidrs and
+        acme_domains (omitted fields are cleared). Team and role cannot
+        change (`409 immutable`); a revoked key cannot change (`409 revoked`).
+        Existing acme-dns registrations of kept domains keep their subdomain.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/APIKeyRequest" }
+      responses:
+        "200":
+          description: Key.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/APIKey" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [api-keys]
+      operationId: revokeAPIKey
+      summary: Revoke an API key
+      description: The key stops working at once; it stays listed with `include_revoked=true`. Idempotent.
+      responses:
+        "204": { description: Revoked. }
+        "404": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/api-keys/{id}/rotate:
+    parameters:
+      - $ref: "#/components/parameters/APIKeyID"
+    post:
+      tags: [api-keys]
+      operationId: rotateAPIKey
+      summary: Rotate an API key (the new key is returned once)
+      description: |
+        Issues a new key for the same id; the previous key stays valid during
+        `overlap` (default 24h, `0s` to stop it at once). Only one previous
+        key is kept: rotating again ends the previous overlap.
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/APIKeyRotate" }
+      responses:
+        "200":
+          description: Key, with the new secret.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IssuedAPIKey" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /acme/httpreq/present:
+    post:
+      tags: [acme]
+      operationId: httpreqPresent
+      summary: Add a DNS-01 challenge value (lego httpreq)
+      description: |
+        lego `httpreq` provider with `HTTPREQ_ENDPOINT=https://<gate>/acme/httpreq`.
+        Default mode: `fqdn` and `value`; RAW mode (`HTTPREQ_MODE=RAW`):
+        `domain` and `keyAuth`, the value being base64url(SHA-256(keyAuth)).
+        The value is added to the `_acme-challenge` TXT RRset (several
+        challenges, a wildcard and its apex, coexist). Any credential of the
+        gate; with an API key, basic authentication with the key id as user
+        name (`HTTPREQ_USERNAME`) and the key as password
+        (`HTTPREQ_PASSWORD`). The caller's role must have an `ephemeral_ttl`
+        (`403 ephemeral_required`).
+      security:
+        - apiKeyBasic: []
+        - apiKey: []
+        - bearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HTTPReqRequest" }
+      responses:
+        "200":
+          description: Present.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HTTPReqResult" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /acme/httpreq/cleanup:
+    post:
+      tags: [acme]
+      operationId: httpreqCleanup
+      summary: Remove a DNS-01 challenge value (lego httpreq)
+      description: Removes the value; the RRset is deleted with its last value. Same body and credentials as present.
+      security:
+        - apiKeyBasic: []
+        - apiKey: []
+        - bearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HTTPReqRequest" }
+      responses:
+        "200":
+          description: Cleaned up (also when the value was absent).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HTTPReqResult" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /acme/acme-dns/update:
+    post:
+      tags: [acme]
+      operationId: acmeDNSUpdate
+      summary: Set a DNS-01 challenge value (acme-dns)
+      description: |
+        acme-dns `/update` with base URL `https://<gate>/acme/acme-dns`.
+        `X-Api-User` is the key id, `X-Api-Key` the key (they win over basic
+        authentication taken from the URL). `subdomain` is a registration of
+        the key (from `acme_dns_accounts` or `/register`) or a domain name
+        (`www.example.com`): the value is written to
+        `_acme-challenge.<domain>` in its managed zone, no CNAME needed. As
+        acme-dns, the two most recent values of a registration are kept;
+        there is no cleanup call, the ephemeral TTL of the role removes the
+        RRset. Errors are `{"error", "message"}`.
+      security:
+        - acmeDNSUser: []
+          acmeDNSKey: []
+        - apiKeyBasic: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subdomain, txt]
+              properties:
+                subdomain: { type: string, examples: ["8e5700ea-a4bf-41c7-8a77-e990661dcc6a", "www.example.com"] }
+                txt: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
+      responses:
+        "200":
+          description: Written.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  txt: { type: string }
+        "400": { $ref: "#/components/responses/ACMEDNSError" }
+        "401": { $ref: "#/components/responses/ACMEDNSError" }
+        "403": { $ref: "#/components/responses/ACMEDNSError" }
+        default: { $ref: "#/components/responses/ACMEDNSError" }
+
+  /acme/acme-dns/register:
+    post:
+      tags: [acme]
+      operationId: acmeDNSRegister
+      summary: Create an acme-dns registration of an API key
+      description: |
+        Unlike acme-dns, registration is not anonymous: without credentials
+        the answer is `401 registration_requires_api_key`. With a key (basic
+        authentication, e.g. from the user info of the base URL, or
+        `X-Api-User` / `X-Api-Key`), the body names the domain (`domain`, a
+        gate extension; `400 domain_required` otherwise) and the answer is an
+        acme-dns account whose password is the presented key.
+      security:
+        - apiKeyBasic: []
+        - acmeDNSUser: []
+          acmeDNSKey: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                domain: { type: string, examples: ["www.example.com"] }
+                allowfrom: { type: array, items: { type: string }, description: "CIDR prefixes allowed to call /update for this registration." }
+      responses:
+        "201":
+          description: Account.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ACMEDNSAccount" }
+        "400": { $ref: "#/components/responses/ACMEDNSError" }
+        "401": { $ref: "#/components/responses/ACMEDNSError" }
+        "403": { $ref: "#/components/responses/ACMEDNSError" }
+        default: { $ref: "#/components/responses/ACMEDNSError" }
+
 components:
   securitySchemes:
     bearer:
@@ -801,6 +1077,25 @@ components:
       type: apiKey
       in: header
       name: X-App-Id
+    apiKey:
+      type: http
+      scheme: bearer
+      bearerFormat: dgk
+      description: Gate API key (`dgk_<id>_<secret>`) as a bearer token.
+    apiKeyBasic:
+      type: http
+      scheme: basic
+      description: Gate API key as the password, its id as the user name.
+    acmeDNSUser:
+      type: apiKey
+      in: header
+      name: X-Api-User
+      description: Id of the gate API key (acme-dns user name).
+    acmeDNSKey:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: Gate API key (acme-dns password).
     session:
       type: apiKey
       in: cookie
@@ -851,6 +1146,11 @@ components:
       in: query
       description: Delegation acting, when the caller matches several.
       schema: { type: string }
+    APIKeyID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, pattern: "^[0-9a-f]{16}$" }
     RevisionID:
       name: id
       in: path
@@ -871,6 +1171,22 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    ACMEDNSError:
+      description: acme-dns error.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error:
+                type: string
+                description: |
+                  forbidden, registration_requires_api_key, domain_required,
+                  bad_domain, bad_subdomain, bad_txt, invalid_allowfrom_cidr,
+                  malformed_json_payload, ephemeral_required, source_ip,
+                  no_binding, unavailable, or a zone engine reason.
+              message: { type: string }
     Locked:
       description: The zone is locked by another write; retry after Retry-After seconds.
       headers:
@@ -903,7 +1219,9 @@ components:
             stale_revision, approval_required, invalid_status, already_decided;
             410 plan_expired; 412 precondition; 413 too_large; 415 bad_request;
             423 zone_locked; 429 rate_limited; 500 internal;
-            501 not_implemented; 502 upstream; 503 store_unavailable; 504 timeout.
+            501 not_implemented; 502 upstream; 503 store_unavailable,
+            unavailable; 504 timeout. API keys add 403 ephemeral_required and
+            409 immutable, revoked.
           enum:
             - invalid
             - relative_target
@@ -946,7 +1264,11 @@ components:
             - not_implemented
             - upstream
             - store_unavailable
+            - unavailable
             - timeout
+            - ephemeral_required
+            - immutable
+            - revoked
         message: { type: string }
         details: {}
         errors:
@@ -969,7 +1291,9 @@ components:
             if-match, ownership, adopt (EuroDNS-compatible API extensions),
             policy-delegation (/api/v1/policy/delegated), plans
             (/api/v1/zones/{zone}/plan and apply), rrset-api
-            (/api/v1/zones/{zone}/rrsets/{host}/{type}).
+            (/api/v1/zones/{zone}/rrsets/{host}/{type}), api-keys
+            (/api/v1/api-keys), acme-httpreq (/acme/httpreq), acme-dns
+            (/acme/acme-dns).
           items: { type: string }
 
     Actor:
@@ -1360,3 +1684,94 @@ components:
         (EffectivePolicy, RevisionPage, RevisionDetail, ProposeRequest,
         ExplainRequest, ExplainResponse, WhoCanResponse) are documented in
         internal/uiapi/policy.go and may change before 1.0.
+
+    APIKey:
+      type: object
+      required: [id, name, team, role, status, allowed_cidrs, acme_domains, acme_dns, created_at, created_by]
+      properties:
+        id: { type: string, pattern: "^[0-9a-f]{16}$", description: "Key id: user name of basic authentication and acme-dns, X-App-Id." }
+        name: { type: string }
+        description: { type: string }
+        team: { type: string, description: Team owning the RRsets the key creates. }
+        role: { type: string }
+        status: { type: string, enum: [active, expired, revoked] }
+        expires_at: { type: string, format: date-time }
+        allowed_cidrs: { type: array, items: { type: string } }
+        acme_domains: { type: array, items: { type: string } }
+        acme_dns:
+          type: array
+          items:
+            type: object
+            properties:
+              subdomain: { type: string }
+              domain: { type: string }
+              allowfrom: { type: array, items: { type: string } }
+        created_at: { type: string, format: date-time }
+        created_by: { type: string }
+        created_by_name: { type: string }
+        rotated_at: { type: string, format: date-time }
+        previous_key_expires_at: { type: string, format: date-time, description: End of the overlap of the last rotation. }
+        revoked_at: { type: string, format: date-time }
+        revoked_by: { type: string }
+        last_used_at: { type: string, format: date-time, description: "Last successful authentication (updated at most once a minute)." }
+        last_used_ip: { type: string }
+
+    IssuedAPIKey:
+      allOf:
+        - $ref: "#/components/schemas/APIKey"
+        - type: object
+          required: [key, acme_dns_accounts]
+          properties:
+            key: { type: string, description: "dgk_<id>_<secret>, shown once." }
+            acme_dns_accounts:
+              type: object
+              description: |
+                acme-dns accounts by domain: the storage file of the certbot
+                acme-dns hook (acmedns.json), the registration file of
+                certbot-dns-acmedns and the cert-manager acmeDNS secret.
+              additionalProperties: { $ref: "#/components/schemas/ACMEDNSAccount" }
+
+    ACMEDNSAccount:
+      type: object
+      required: [username, password, fulldomain, subdomain, allowfrom]
+      properties:
+        username: { type: string, description: Key id. }
+        password: { type: string, description: The key. }
+        fulldomain: { type: string, description: "_acme-challenge.<domain>, the RRset written (no CNAME needed)." }
+        subdomain: { type: string }
+        allowfrom: { type: array, items: { type: string } }
+
+    APIKeyRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, pattern: "^[A-Za-z0-9][A-Za-z0-9 ._@-]{0,63}$" }
+        description: { type: string, maxLength: 512 }
+        team: { type: string, description: Required on creation; on PUT empty or unchanged. }
+        role: { type: string, description: Required on creation; on PUT empty or unchanged. }
+        expires_at: { type: string, format: date-time }
+        allowed_cidrs: { type: array, items: { type: string }, maxItems: 64 }
+        acme_domains:
+          type: array
+          maxItems: 100
+          items: { type: string, examples: ["www.example.com", "*.example.com"] }
+
+    APIKeyRotate:
+      type: object
+      properties:
+        overlap: { type: string, description: "Go duration, default 24h, at most 720h.", examples: ["24h", "0s"] }
+
+    HTTPReqRequest:
+      type: object
+      properties:
+        fqdn: { type: string, examples: ["_acme-challenge.www.example.com."] }
+        value: { type: string }
+        domain: { type: string, description: RAW mode. }
+        token: { type: string, description: RAW mode. }
+        keyAuth: { type: string, description: RAW mode. }
+
+    HTTPReqResult:
+      type: object
+      properties:
+        fqdn: { type: string }
+        value: { type: string }

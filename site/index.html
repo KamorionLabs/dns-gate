@@ -358,7 +358,7 @@ resource "dnsgate_record_set" "apex" {
       </div>
       <div class="caller">
         <h3>Existing EuroDNS clients</h3>
-        <p>Tools that only send the EuroDNS headers, such as ACME clients, use scoped virtual keys: hashed, expiring, bound to a network, limited by their role.</p>
+        <p>Third parties without OIDC, such as ACME clients, use gate-issued API keys: hashed, expiring, bound to a network, a team and a role, rotated and revoked through the API. certbot, acme.sh, lego and cert-manager solve DNS-01 challenges through the gate's httpreq and acme-dns endpoints, with no CNAME.</p>
         <p class="ids">lego · Caddy · scripts</p>
       </div>
     </div>
