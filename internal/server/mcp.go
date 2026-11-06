@@ -53,6 +53,12 @@ func (s *Server) newMCP() *mcpServer {
 	})
 	m.addReadTools(srv)
 	m.addTeamTools(srv)
+	if s.cfg.EuroDNS != nil {
+		m.addProfileReadTools(srv)
+		if s.cfg.Config.MCP.AllowWrites {
+			m.addProfileWriteTools(srv)
+		}
+	}
 	if s.cfg.Config.MCP.AllowWrites && s.cfg.Ops != nil {
 		m.addWriteTools(srv)
 	}
@@ -435,7 +441,7 @@ func (m *mcpServer) addReadTools(srv *mcp.Server) {
 		all := m.s.readsEveryManagedZone(readable)
 		page := uiapi.AuditPage{Entries: []uiapi.AuditEntry{}, NextCursor: next}
 		for _, e := range events {
-			if (e.Zone == "" && all) || readable[e.Zone] {
+			if ((e.Zone == "" && all) || readable[e.Zone]) && m.s.auditVisible(subj, e) {
 				page.Entries = append(page.Entries, toAuditEntry(e))
 			}
 		}

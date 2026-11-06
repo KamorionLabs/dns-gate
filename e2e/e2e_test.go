@@ -30,6 +30,7 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/app"
 	"github.com/KamorionLabs/dns-gate/internal/config"
 	"github.com/KamorionLabs/dns-gate/internal/oidctest"
+	"github.com/KamorionLabs/dns-gate/internal/provider/eurodns/profiletest"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 	eurodns "github.com/KamorionLabs/eurodns-go"
 	"github.com/KamorionLabs/eurodns-go/eurodnstest"
@@ -48,6 +49,7 @@ type env struct {
 	fake     *eurodnstest.Server
 	upstream *httptest.Server // fake plus the account domain listing
 	account  *accountDomains
+	profiles *profiletest.Fake
 	idp      *oidctest.Provider
 	gate     *httptest.Server
 	app      *app.App
@@ -77,7 +79,8 @@ func TestEndToEnd(t *testing.T) {
 	t.Run("12_zone_discovery_and_team_from", e.scenarioDiscoveryTeamFrom)
 	t.Run("13_policy_delegation", e.scenarioDelegation)
 	t.Run("14_dnsgate_provider", e.scenarioDNSGateProvider)
-	t.Run("15_audit_hash_chain", e.scenarioAuditChain)
+	t.Run("15_zone_profiles", e.scenarioZoneProfiles)
+	t.Run("16_audit_hash_chain", e.scenarioAuditChain)
 }
 
 func setup(t *testing.T) *env {
@@ -102,7 +105,9 @@ func setup(t *testing.T) *env {
 	}})
 
 	e.account = &accountDomains{names: []string{zone}}
-	e.upstream = e.account.server(t, e.fake.URL)
+	e.profiles = profiletest.New()
+	e.profiles.APIKey = upstreamKey
+	e.upstream = e.account.server(t, e.fake.URL, e.profiles)
 
 	e.idp = oidctest.New()
 	t.Cleanup(e.idp.Close)
@@ -143,6 +148,7 @@ providers:
       base_url: %[1]s
       app_id: %[2]s
       rate: {every: 5ms, burst: 50}
+      zone_profiles: true
 zones: [%[3]s]
 check_on_write: true
 reconcile_interval: 1h
@@ -184,12 +190,19 @@ roles:
     rules:
       - zones: ["*"]
         actions: [policy.read, policy.propose, policy.approve, ui.read]
+  profile-admin:
+    rules:
+      - zones: ["*"]
+        actions: [dns.zone.profile]
   pipeline-writer:
     rules:
       - zones: [%[9]s]
         actions: [dns.read, dns.record.write, ui.read]
         records: {hosts: ["*.apps"], types: [CNAME]}
 bindings:
+  - role: profile-admin
+    team: platform
+    subjects: [{issuer: ci, claims: {sub: [ci-profiles]}}]
   - role: pipeline-writer
     team_from: {claim: sub, regex: "^pipeline:([a-z0-9-]+)$", prefix: p-}
     subjects: [{issuer: ci, claims: {sub: ["pipeline:*"]}}]

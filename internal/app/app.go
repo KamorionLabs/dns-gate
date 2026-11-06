@@ -67,6 +67,8 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		log.Warn("configuration accepted with a warning", "warning", w)
 	}
 	var sources []discovery.Source
+	var accounts []provider.Provider
+	profiles := map[string]bool{}
 	hasEuroDNS := false
 	for _, pc := range cfg.Providers {
 		p, err := newProvider(ctx, pc)
@@ -74,6 +76,10 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 			return nil, err
 		}
 		hasEuroDNS = hasEuroDNS || pc.Kind == config.KindEuroDNS
+		accounts = append(accounts, p)
+		if pc.EuroDNS != nil && pc.EuroDNS.ZoneProfiles {
+			profiles[pc.ID] = true
+		}
 		sources = append(sources, discovery.Source{Provider: p, Include: pc.Zones.Include, Exclude: pc.Zones.Exclude, Refresh: pc.Zones.Refresh.D()})
 	}
 	disc := discovery.New(discovery.Config{Sources: sources, Logger: log})
@@ -182,7 +188,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		scfg.Transfers = tr
 	}
 	if hasEuroDNS {
-		scfg.EuroDNS = eurodnsapi.New(eurodnsapi.Config{Engine: eng, Authz: authz, Providers: disc, Log: log})
+		scfg.EuroDNS = eurodnsapi.New(eurodnsapi.Config{Engine: eng, Authz: authz, Providers: disc, Accounts: accounts, ZoneProfiles: profiles, Log: log})
 	}
 	srv, err := server.New(scfg)
 	if err != nil {

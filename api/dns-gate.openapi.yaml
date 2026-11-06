@@ -36,9 +36,11 @@ info:
 
     **EuroDNS-compatible API.** Every other path of the gate is the EuroDNS
     API, served under RBAC and ownership for the zones of EuroDNS providers
-    (`404 zone_not_eurodns` for a zone of another provider); it is
-    documented by EuroDNS at <https://docapi.eurodns.com/> and not repeated
-    here.
+    (`404 zone_not_eurodns` for a zone of another provider), plus the zone
+    profiles of the EuroDNS account (`/zone-profiles`, under
+    `dns.zone.profile` on `*`, the provider named by `X-DNS-Gate-Provider`
+    when there are several); it is documented by EuroDNS at
+    <https://docapi.eurodns.com/> and not repeated here.
 
     **Gate tokens and OAuth.** With an issuer marked `self: true`, the gate
     signs its own tokens: `POST /api/v1/tokens` issues one to a web UI
@@ -102,6 +104,8 @@ tags:
     description: Gate-issued API keys for third parties without OIDC (ACME clients, appliances).
   - name: acme
     description: ACME DNS-01 endpoints compatible with lego httpreq and acme-dns.
+  - name: zone-profiles
+    description: Zone profiles of EuroDNS accounts, prepared before a domain transfer.
 
 paths:
   /.well-known/dns-gate:
@@ -1233,6 +1237,129 @@ paths:
         "409": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
 
+  /api/v1/providers/{provider}/zone-profiles:
+    parameters:
+      - $ref: "#/components/parameters/ProviderID"
+    get:
+      tags: [zone-profiles]
+      operationId: listZoneProfiles
+      summary: Zone profiles of a EuroDNS provider
+      description: |
+        Every zone profile (id and name) of the EuroDNS account of the
+        provider. Zone profiles are account-wide templates (records, URL and
+        mail forwards) that EuroDNS applies to a domain when it arrives on its
+        nameservers (a transfer, a Premium DNS subscription); they name no
+        domain. Every zone profile operation needs `dns.zone.profile` granted
+        on `*` (`403 forbidden` otherwise), a provider with
+        `eurodns.zone_profiles: true` (`403 zone_profiles_disabled`), and is
+        audited; a provider of another kind answers `400 invalid_provider`.
+        Writes need a recent login from humans (`403 reauth_required`);
+        records of the protected list are refused on create, update and check
+        (`403 protected`); 60 operations per subject and minute
+        (`429 rate_limited`).
+      responses:
+        "200":
+          description: Profiles, by id.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ZoneProfileList" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+    post:
+      tags: [zone-profiles]
+      operationId: createZoneProfile
+      summary: Create a zone profile
+      description: |
+        `name` is required; EuroDNS validates the content (`400 rejected`
+        with its report or errors in `details`). The audit event holds the
+        profile.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ZoneProfile" }
+      responses:
+        "201":
+          description: Profile, with its id.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ZoneProfile" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/providers/{provider}/zone-profiles/check:
+    parameters:
+      - $ref: "#/components/parameters/ProviderID"
+    post:
+      tags: [zone-profiles]
+      operationId: checkZoneProfile
+      summary: Validate a zone profile without saving it
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ZoneProfile" }
+      responses:
+        "200":
+          description: Profile as EuroDNS reads it, with its validation `report`.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ZoneProfile" }
+        "403": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/providers/{provider}/zone-profiles/{id}:
+    parameters:
+      - $ref: "#/components/parameters/ProviderID"
+      - $ref: "#/components/parameters/ZoneProfileID"
+    get:
+      tags: [zone-profiles]
+      operationId: getZoneProfile
+      summary: A zone profile
+      responses:
+        "200":
+          description: Profile.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ZoneProfile" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+    put:
+      tags: [zone-profiles]
+      operationId: updateZoneProfile
+      summary: Replace a zone profile
+      description: |
+        The full profile; domains it was already applied to do not change.
+        The audit event holds the previous and the new content.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ZoneProfile" }
+      responses:
+        "200":
+          description: Profile.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ZoneProfile" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [zone-profiles]
+      operationId: deleteZoneProfile
+      summary: Delete a zone profile
+      description: The profile is read first; the audit event holds its content.
+      responses:
+        "204": { description: Deleted. }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+
   /acme/httpreq/present:
     post:
       tags: [acme]
@@ -1472,6 +1599,18 @@ components:
       in: path
       required: true
       schema: { type: string, pattern: "^[0-9a-f]{16}$" }
+    ProviderID:
+      name: provider
+      in: path
+      required: true
+      description: Id of a provider of the gate configuration (`providers[].id`).
+      schema: { type: string, examples: ["eurodns"] }
+    ZoneProfileID:
+      name: id
+      in: path
+      required: true
+      description: EuroDNS zone profile id.
+      schema: { type: integer, format: int32, minimum: 1 }
     RevisionID:
       name: id
       in: path
@@ -1572,7 +1711,9 @@ components:
             501 not_implemented; 502 upstream; 503 store_unavailable,
             unavailable; 504 timeout. API keys and ACME add 403
             ephemeral_required, role_widened and 409 immutable, revoked,
-            too_many_values, too_many_registrations, value_taken.
+            too_many_values, too_many_registrations, value_taken. Zone
+            profiles add 400 rejected, invalid_provider and 403 protected,
+            zone_profiles_disabled.
           enum:
             - invalid
             - relative_target
@@ -1627,6 +1768,10 @@ components:
             - too_many_values
             - value_taken
             - too_many_registrations
+            - rejected
+            - invalid_provider
+            - protected
+            - zone_profiles_disabled
         message: { type: string }
         details: {}
         transfer:
@@ -2272,3 +2417,62 @@ components:
       properties:
         fqdn: { type: string }
         value: { type: string }
+
+    ZoneProfileList:
+      type: object
+      required: [provider, profiles]
+      properties:
+        provider: { type: string }
+        profiles:
+          type: array
+          items:
+            type: object
+            required: [id, name]
+            properties:
+              id: { type: integer }
+              name: { type: string }
+
+    ZoneProfile:
+      type: object
+      description: |
+        EuroDNS `ZoneProfilePage`: hosts are relative to the domain the
+        profile is applied to (`@` for the apex), targets are fully qualified
+        with a trailing dot. `id`, `domainConnect` and `report` are read-only.
+      required: [name]
+      properties:
+        id: { type: [integer, "null"], readOnly: true }
+        name: { type: string, maxLength: 255 }
+        domainConnect: { type: [boolean, "null"], readOnly: true }
+        records:
+          type: array
+          items:
+            type: object
+            required: [type, host, ttl, rdata]
+            properties:
+              id: { type: [integer, "null"], readOnly: true }
+              type: { type: string, examples: ["A", "CNAME", "MX", "TXT"] }
+              host: { type: string, examples: ["@", "www"] }
+              ttl: { type: integer, enum: [600, 900, 1800, 3600, 7200, 14400, 21600, 43200, 86400, 172800, 432000, 604800] }
+              rdata: { type: string }
+        urlForwards:
+          type: array
+          items:
+            type: object
+            properties:
+              forwardType: { type: string, enum: [FRAME, HTTP301, HTTP302] }
+              host: { type: string }
+              url: { type: string }
+              title: { type: string }
+              keywords: { type: string }
+              description: { type: string }
+        mailForwards:
+          type: array
+          items:
+            type: object
+            properties:
+              source: { type: string, description: "Left part of the address, `*` for a catch-all." }
+              destination: { type: string }
+        report:
+          type: object
+          readOnly: true
+          description: EuroDNS validation report (check), as returned by EuroDNS.

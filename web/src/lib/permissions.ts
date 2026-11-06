@@ -45,6 +45,10 @@ export function describePermissions(perms: Permission[]): string[] {
     else if (verbs.length) zone.push(`${capital(list(verbs))} ${what(p)} in ${at}`);
     else if (p.actions.includes('ui.read')) zone.push(`Browse ${at} in this console`);
     if (p.actions.includes('dns.zone.admin')) zone.push(`Manage DNSSEC and zone settings of ${at}`);
+    if (p.actions.includes('dns.zone.profile')) {
+      const everywhere = p.zones.some((z) => /^\*+$/.test(z)) && p.hosts.length === 0 && p.types.length === 0;
+      zone.push(everywhere ? 'Manage the zone profiles of the EuroDNS accounts' : `Manage zone profiles: no effect, granted on ${at} or on some records instead of every zone`);
+    }
     if (p.actions.includes('domain.read')) zone.push(`Read domain details of ${at}`);
     if (p.actions.includes('gate.apikey.manage')) zone.push(`Manage the API keys of your teams for ${at}`);
     for (const a of p.actions) if (meta[a]) policy.push(meta[a]);

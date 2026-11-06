@@ -30,6 +30,7 @@ const (
 	Deny        Kind = iota // refused (default)
 	Engine                  // handled by the zone write engine
 	Passthrough             // proxied upstream after authorization
+	Account                 // account-wide operation naming no zone (zone profiles), served by the gate
 )
 
 // Rule is the gate mapping of an operation.
@@ -49,6 +50,13 @@ var mapping = map[string]Rule{
 	"getSnapShot":          {policy.ActionDNSRead, Passthrough},
 	"getDnssecStatus":      {policy.ActionDNSRead, Passthrough},
 	"getDomain":            {policy.ActionDomainRead, Passthrough},
+
+	"listZoneProfiles":         {policy.ActionZoneProfile, Account},
+	"createZoneProfile":        {policy.ActionZoneProfile, Account},
+	"checkZoneProfile":         {policy.ActionZoneProfile, Account},
+	"getProfile":               {policy.ActionZoneProfile, Account},
+	"updateUserAPiZoneProfile": {policy.ActionZoneProfile, Account},
+	"deleteZoneProfile":        {policy.ActionZoneProfile, Account},
 }
 
 // Match is a resolved request.
@@ -170,6 +178,9 @@ func (t *Table) Resolve(r *http.Request) (*Match, error) {
 	m.Path = path
 	if m.Rule.Kind == Deny {
 		return m, ErrDenied
+	}
+	if m.Rule.Kind == Account {
+		return m, nil
 	}
 	if m.Zone == "" || !t.managed(m.Zone) {
 		return m, ErrZoneUnknown
