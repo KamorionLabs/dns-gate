@@ -518,6 +518,9 @@ func (e *engine) Write(ctx context.Context, s *identity.Subject, zoneIn, ifMatch
 		e.log.Info("rebase ignored out-of-scope differences", "zone", zone, "subject", s.String(), "ignored", plan.Ignored)
 	}
 	if len(plan.Changes) == 0 && !plan.Settings {
+		if len(plan.Ignored) > 0 {
+			e.emit(ctx, s, action, zone, "allow", "", nil, "", map[string]any{"ignored_out_of_scope": plan.Ignored})
+		}
 		return cur, version, nil
 	}
 	claims, err := e.validate(ctx, s, p, zone, sets, owns, plan, false)
@@ -591,9 +594,15 @@ func (e *engine) Write(ctx context.Context, s *identity.Subject, zoneIn, ifMatch
 		e.log.Warn("zone version bump failed", "zone", zone, "error", err)
 		newVersion = version
 	}
-	var extra map[string]any
+	extra := map[string]any{}
 	if len(plan.Ignored) > 0 {
-		extra = map[string]any{"ignored_out_of_scope": plan.Ignored}
+		extra["ignored_out_of_scope"] = plan.Ignored
+	}
+	if len(plan.zoneAdminForwards) > 0 {
+		extra["zone_admin_forwards"] = plan.zoneAdminForwards
+	}
+	if len(extra) == 0 {
+		extra = nil
 	}
 	e.emit(ctx, s, action, zone, "allow", "", uiChanges(plan.Changes), snapshot, plan.grants.extra(extra))
 	e.committed(ctx, zone, plan)
@@ -665,8 +674,9 @@ func (e *engine) validate(ctx context.Context, s *identity.Subject, p provider.P
 	var tombs map[dns.Key]store.Tombstone
 	for i := range plan.Changes {
 		c := &plan.Changes[i]
+		writes := e.allowRRset(&plan.grants, s, policy.WriteAction(c.Key), zone, c.Key)
 		zoneAdmin := c.Key.IsForward() && plan.ForeignForwards && e.allowRRset(&plan.grants, s, policy.ActionZoneAdmin, zone, c.Key)
-		if !e.allowRRset(&plan.grants, s, policy.WriteAction(c.Key), zone, c.Key) && !zoneAdmin {
+		if !writes && !zoneAdmin {
 			return nil, fail(ReasonForbidden, "not allowed to write %s in %s", keyString(c.Key), zone)
 		}
 		if c.Key.IsForward() && !caps.Forwards {
@@ -700,7 +710,14 @@ func (e *engine) validate(ctx context.Context, s *identity.Subject, p provider.P
 			c.New = &n
 		}
 		o, owned := owns[c.Key]
+		if (c.Old == nil || owned) && !writes {
+			return nil, fail(ReasonForbidden, "%s requires %s: %s only changes or deletes the forwards the gate does not own",
+				keyString(c.Key), policy.ActionForwardWrite, policy.ActionZoneAdmin)
+		}
 		if c.Old == nil {
+			if err := e.interference(s, c.Key, sets, owns); err != nil {
+				return nil, err
+			}
 			cl := claim{change: *c}
 			if owned {
 				if !slices.Contains(s.Teams, o.Owner) {
@@ -743,6 +760,7 @@ func (e *engine) validate(ctx context.Context, s *identity.Subject, p provider.P
 			continue
 		}
 		if !owned && zoneAdmin {
+			plan.zoneAdminForwards = append(plan.zoneAdminForwards, keyString(c.Key))
 			continue
 		}
 		if !owned {
@@ -777,6 +795,36 @@ func (e *engine) validate(ctx context.Context, s *identity.Subject, p provider.P
 		claims = append(claims, cl)
 	}
 	return claims, nil
+}
+
+// interference refuses the creation of an RRset that would take a host from
+// another team: a URL forward replaces the A, AAAA, CNAME and APEX records
+// of its host (policy.ForwardShadowTypes), so a forward is created only
+// where those records are absent or owned by one of s's teams, and such a
+// record only where the forward of the host is absent or owned by one of
+// s's teams.
+func (e *engine) interference(s *identity.Subject, k dns.Key, sets map[dns.Key]dns.RRset, owns map[dns.Key]store.Ownership) error {
+	var others []dns.Key
+	switch {
+	case k.IsForward():
+		for _, t := range policy.ForwardShadowTypes {
+			others = append(others, dns.Key{Host: k.Host, Type: t})
+		}
+	case slices.ContainsFunc(policy.ForwardShadowTypes, func(t string) bool { return strings.EqualFold(t, k.Type) }):
+		others = []dns.Key{dns.ForwardKey(k.Host)}
+	}
+	for _, other := range others {
+		if _, key, present := findSet(sets, other); present {
+			o, owned := owns[key]
+			switch {
+			case !owned:
+				return fail(ReasonForeignRRset, "%s exists and is not managed by the gate: %s would replace it; adopt it first", keyString(key), keyString(k))
+			case !slices.Contains(s.Teams, o.Owner):
+				return fail(ReasonNotOwner, "%s is owned by team %s: %s would replace it", keyString(key), o.Owner, keyString(k))
+			}
+		}
+	}
+	return nil
 }
 
 // DefaultEphemeralLifetimeFactor is the default of

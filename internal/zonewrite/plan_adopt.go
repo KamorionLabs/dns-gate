@@ -180,6 +180,11 @@ func (e *engine) ApplyRRsets(ctx context.Context, s *identity.Subject, zoneIn st
 		ifMatch = etag(expectedZoneVersion)
 	}
 	zone := normZone(zoneIn)
+	if p, err := e.provider(zone); err == nil && e.zones.Managed(zone) {
+		if err := e.requireHTTPS(ctx, p, zone, changes); err != nil {
+			return nil, e.deny(WithRequestID(ctx, requestID(ctx)), s, "applyRRsets", zone, err)
+		}
+	}
 	_, version, err := e.Write(ctx, s, zone, ifMatch, "applyRRsets", func(cur *dns.Zone) (*Plan, error) {
 		p, err := e.provider(zone)
 		if err != nil {
@@ -187,9 +192,6 @@ func (e *engine) ApplyRRsets(ctx context.Context, s *identity.Subject, zoneIn st
 		}
 		owns, err := e.ownerships(ctx, zone)
 		if err != nil {
-			return nil, err
-		}
-		if err := e.requireHTTPS(ctx, p, zone, changes); err != nil {
 			return nil, err
 		}
 		plan, err = rrsetPlan(zone, p, index(cur), owns, changes)
@@ -221,8 +223,11 @@ func httpsStatus(ctx context.Context, p provider.Provider, zone string) provider
 	return st
 }
 
-// requireHTTPS refuses forward changes asking for HTTPS when the forwards
-// of the zone answer plain HTTP only, or when that cannot be told.
+// requireHTTPS refuses forward changes asking for HTTPS unless the forwards
+// of the zone answer HTTPS: an active subscription, or one waiting for the
+// first forward of the zone to issue its certificate (no_forward). A
+// certificate being issued (pending), no subscription, or a status that
+// cannot be read refuse it.
 func (e *engine) requireHTTPS(ctx context.Context, p provider.Provider, zone string, changes []uiapi.RRsetChange) error {
 	var host string
 	for _, c := range changes {
@@ -235,7 +240,7 @@ func (e *engine) requireHTTPS(ctx context.Context, p provider.Provider, zone str
 		return nil
 	}
 	switch st := httpsStatus(ctx, p, zone); st.Status {
-	case provider.HTTPSActive, provider.HTTPSPending, provider.HTTPSNoForward:
+	case provider.HTTPSActive, provider.HTTPSNoForward:
 		return nil
 	default:
 		msg := "the forwards of " + zone + " do not answer HTTPS (" + st.Status + ")"

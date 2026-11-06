@@ -65,6 +65,9 @@ type Plan struct {
 	// the EuroDNS full-zone PUT from before forwards were owned. Forwards
 	// owned by a team keep the ownership rules.
 	ForeignForwards bool
+	// zoneAdminForwards lists the unowned forwards changed through
+	// ForeignForwards, recorded in the audit.
+	zoneAdminForwards []string
 	// Base, when set, replaces the current zone as the zone the changes are
 	// applied onto (checked and written): it carries the new settings.
 	Base *dns.Zone
@@ -135,7 +138,8 @@ type Engine interface {
 	// precondition (412).
 	//
 	// A forward change with RequireHTTPS is refused (https_unavailable)
-	// unless HTTPSRedirect is active, pending or no_forward.
+	// unless HTTPSRedirect is active or no_forward, checked before the zone
+	// lock is taken.
 	PlanRRsets(ctx context.Context, s *identity.Subject, zone string, changes []uiapi.RRsetChange) (*uiapi.PlanResult, error)
 	ApplyRRsets(ctx context.Context, s *identity.Subject, zone string, changes []uiapi.RRsetChange, expectedZoneVersion int64) (*uiapi.PlanResult, error)
 

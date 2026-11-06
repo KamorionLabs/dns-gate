@@ -37,3 +37,39 @@ func TestForwardWriteScope(t *testing.T) {
 		t.Fatal("WriteAction")
 	}
 }
+
+func TestProtectedEntryCoversForwards(t *testing.T) {
+	e := FromConfig(&config.Config{
+		Zones: []string{"example.com"},
+		Roles: map[string]config.Role{"redirects": {Rules: []config.Rule{{Zones: []string{"example.com"}, Actions: []string{ActionForwardWrite}}}}},
+		Protected: []config.Protected{{Zones: []string{"*"}, Hosts: []string{"www"}, Types: []string{"CNAME"}},
+			{Zones: []string{"*"}, Hosts: []string{"mail"}, Types: []string{"MX"}}},
+	})
+	r := subj("redirects")
+	if e.AllowRRset(r, ActionForwardWrite, "example.com", dns.ForwardKey("www")) || !e.IsProtected("example.com", dns.ForwardKey("www")) {
+		t.Fatal("a protected CNAME must protect the forward of its host")
+	}
+	if !e.AllowRRset(r, ActionForwardWrite, "example.com", dns.ForwardKey("mail")) {
+		t.Fatal("a protected MX does not concern forwards")
+	}
+	if _, ok := e.Holder().Current().ProtectedRecord("www", dns.TypeURLForward); !ok {
+		t.Fatal("zone profile check must see the forward as protected")
+	}
+}
+
+func TestForwardWritersCountInImpact(t *testing.T) {
+	e := FromConfig(&config.Config{
+		Zones: []string{"example.com"},
+		Roles: map[string]config.Role{
+			"redirects": {Rules: []config.Rule{{Zones: []string{"example.com"}, Actions: []string{ActionForwardWrite}, Records: &config.RecordScope{Types: []string{"CNAME"}}}}},
+		},
+		Bindings: []config.Binding{{Role: "redirects", Team: "marketing", Subjects: []config.Subject{{Issuer: "idp", Claims: map[string]config.StringList{"sub": {"x"}}}}}},
+	})
+	sn := e.Holder().Current()
+	if !sn.teamWrites()["marketing"]["example.com"] {
+		t.Fatal("a team writing only forwards writes in the zone")
+	}
+	if got := sn.ForwardWithoutHosts(""); len(got) != 1 || got[0] != "redirects.rules[0]" {
+		t.Fatalf("forward grant without hosts not flagged: %v", got)
+	}
+}

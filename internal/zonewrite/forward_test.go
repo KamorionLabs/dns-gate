@@ -148,9 +148,18 @@ func (f forwardless) Capabilities() provider.Capabilities {
 type httpsProvider struct {
 	*eurodnsprov.Provider
 	status string
+	st     store.Store
+	locked *bool
 }
 
-func (h httpsProvider) HTTPSRedirect(context.Context, string) (provider.HTTPSRedirect, error) {
+func (h httpsProvider) HTTPSRedirect(ctx context.Context, zone string) (provider.HTTPSRedirect, error) {
+	if h.st != nil {
+		if err := h.st.Lock(ctx, zone, "probe", time.Second); err != nil {
+			*h.locked = true
+		} else {
+			_ = h.st.Unlock(ctx, zone, "probe")
+		}
+	}
 	return provider.HTTPSRedirect{Status: h.status, Message: "test"}, nil
 }
 
@@ -164,10 +173,11 @@ func TestForwardCapabilityAndHTTPS(t *testing.T) {
 		t.Fatalf("https %+v %v", st, err)
 	}
 
-	for status, ok := range map[string]bool{provider.HTTPSActive: true, provider.HTTPSPending: true, provider.HTTPSNoForward: true,
+	for status, ok := range map[string]bool{provider.HTTPSActive: true, provider.HTTPSPending: false, provider.HTTPSNoForward: true,
 		provider.HTTPSInactive: false, provider.HTTPSUnknown: false} {
 		e := newEnv(t, eurodnstest.Options{})
-		e.eng, _ = New(Config{Providers: provider.Single(httpsProvider{e.prov, status}), Store: e.st, Authz: e.authz, Zones: []string{zoneName}, Holder: "test"})
+		locked := false
+		e.eng, _ = New(Config{Providers: provider.Single(httpsProvider{e.prov, status, e.st, &locked}), Store: e.st, Authz: e.authz, Zones: []string{zoneName}, Holder: "test"})
 		c := fwd("www", "301", "https://example.net/")
 		c.RequireHTTPS = true
 		res, err := e.eng.PlanRRsets(ctx, fwdA, zoneName, []uiapi.RRsetChange{c})
@@ -175,6 +185,9 @@ func TestForwardCapabilityAndHTTPS(t *testing.T) {
 			t.Fatalf("%s: plan %+v %v", status, res, err)
 		}
 		_, err = e.eng.ApplyRRsets(ctx, fwdA, zoneName, []uiapi.RRsetChange{c}, 0)
+		if locked {
+			t.Fatalf("%s: HTTPS status read under the zone lock", status)
+		}
 		if ok {
 			if err != nil {
 				t.Fatalf("%s: %v", status, err)
@@ -185,5 +198,28 @@ func TestForwardCapabilityAndHTTPS(t *testing.T) {
 		if !strings.Contains(err.Error(), "subscription") {
 			t.Fatalf("%s: message %v", status, err)
 		}
+	}
+}
+
+func TestForwardInterference(t *testing.T) {
+	e := newEnv(t, eurodnstest.Options{})
+	ctx := context.Background()
+	both := bound(&identity.Subject{Issuer: "idp", ID: "wa", Name: "wa@example.com", Category: identity.CategoryHuman, Roles: []string{"writer", "forwarder"}, Teams: []string{"team-a"}})
+	_, err := e.eng.ApplyRRsets(ctx, fwdA, zoneName, []uiapi.RRsetChange{fwd("legacy", "301", "https://example.net/")}, 0)
+	e.wantReason(err, ReasonForeignRRset)
+	e.mustAdd(bob, rec("A", "www", "192.0.2.1"))
+	_, err = e.eng.ApplyRRsets(ctx, fwdA, zoneName, []uiapi.RRsetChange{fwd("www", "301", "https://example.net/")}, 0)
+	e.wantReason(err, ReasonNotOwner)
+	e.mustAdd(alice, rec("AAAA", "api", "2001:db8::1"))
+	if _, err := e.eng.ApplyRRsets(ctx, both, zoneName, []uiapi.RRsetChange{fwd("api", "301", "https://example.net/")}, 0); err != nil {
+		t.Fatalf("a forward over records of the same team: %v", err)
+	}
+	if _, err := e.eng.ApplyRRsets(ctx, fwdA, zoneName, []uiapi.RRsetChange{fwd("promo", "301", "https://example.net/")}, 0); err != nil {
+		t.Fatal(err)
+	}
+	e.wantReason(e.add(bob, zoneName, rec("CNAME", "promo", "shop.example.net.")), ReasonNotOwner)
+	e.wantReason(e.add(bob, zoneName, rec("A", "go", "192.0.2.9")), ReasonForeignRRset)
+	if err := e.add(bob, zoneName, rec("TXT", "promo", "verification")); err != nil {
+		t.Fatalf("a TXT next to a forward: %v", err)
 	}
 }
