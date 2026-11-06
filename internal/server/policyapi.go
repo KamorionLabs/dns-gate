@@ -329,7 +329,8 @@ func (s *Server) impact(ctx context.Context, prev, next *policy.Snapshot) []uiap
 	for _, z := range s.pol.ManagedZones() {
 		all[z] = true
 	}
-	return append(policy.FamilyTakeovers(prev, next, s.storeOwners(ctx, all)), policy.Impact(prev, next, s.ownedCounter(ctx))...)
+	owners, _ := s.storeOwners(ctx, all)
+	return append(policy.FamilyTakeovers(prev, next, owners), policy.Impact(prev, next, s.ownedCounter(ctx))...)
 }
 
 func (s *Server) ownedCounter(ctx context.Context) policy.OwnedCounter {

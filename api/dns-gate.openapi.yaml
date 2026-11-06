@@ -1766,6 +1766,22 @@ components:
         unmanaged: { type: boolean }
         last_synced_at: { type: string, format: date-time }
         rrsets: { type: array, items: { $ref: "#/components/schemas/RRset" } }
+        tombstones:
+          type: array
+          description: RRsets of a managed zone deleted recently through the gate, still reserved for their team.
+          items: { $ref: "#/components/schemas/Tombstone" }
+
+    Tombstone:
+      type: object
+      required: [host, type, team, deleted_at, expires_at]
+      description: Until expires_at, only this team may create or adopt the RRset again; others ask for a transfer.
+      properties:
+        host: { type: string }
+        type: { type: string }
+        team: { type: string }
+        deleted_by: { $ref: "#/components/schemas/Actor" }
+        deleted_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
 
     RRsetPut:
       type: object
@@ -2057,6 +2073,7 @@ components:
         family: { $ref: "#/components/schemas/TeamFrom" }
         issuer: { type: string, description: "Issuer of a claim kind." }
         warning: { type: string }
+        rrsets: { type: integer, description: "RRsets the team owns in the zones the caller can read." }
 
     TeamList:
       type: object
@@ -2081,6 +2098,10 @@ components:
                   rrsets: { type: integer }
                   tombstones: { type: integer }
             transfers: { type: array, items: { $ref: "#/components/schemas/Transfer" }, description: "Pending transfers from or to the team." }
+            permissions:
+              type: array
+              description: Rules of the team's roles, per zone; for policy.read holders and the members of the team.
+              items: { $ref: "#/components/schemas/Permission" }
 
     TransferProposal:
       type: object

@@ -100,16 +100,18 @@ func (s *Server) zoneOwners(ctx context.Context, zone string) zoneOwners {
 }
 
 // storeOwners returns the teams owning RRsets or tombstones in the readable
-// managed zones.
-func (s *Server) storeOwners(ctx context.Context, readable map[string]bool) []string {
+// managed zones, and the number of RRsets of each team there.
+func (s *Server) storeOwners(ctx context.Context, readable map[string]bool) ([]string, map[string]int) {
 	set := map[string]bool{}
+	counts := map[string]int{}
 	for _, z := range s.pol.ManagedZones() {
 		if !readable[z] {
 			continue
 		}
 		zo := s.zoneOwners(ctx, z)
-		for t := range zo.rrsets {
+		for t, n := range zo.rrsets {
 			set[t] = true
+			counts[t] += n
 		}
 		for t := range zo.tombstones {
 			set[t] = true
@@ -119,35 +121,61 @@ func (s *Server) storeOwners(ctx context.Context, readable map[string]bool) []st
 	for t := range set {
 		out = append(out, t)
 	}
-	return out
+	return out, counts
 }
 
 // handleTeams serves GET /api/v1/teams and GET /api/v1/teams/{team}.
 func (s *Server) handleTeams(w http.ResponseWriter, r *http.Request, subj *identity.Subject, readable map[string]bool, team string) {
-	snap := s.cfg.Policy.Current()
-	withMembers := s.pol.AllowMeta(subj, "policy.read")
-	owners := s.storeOwners(r.Context(), readable)
 	if team == "" {
-		writeJSON(w, http.StatusOK, uiapi.TeamList{Strict: snap.StrictTeams(), Teams: snap.TeamInfos(owners, withMembers)})
+		writeJSON(w, http.StatusOK, s.teamList(r.Context(), subj, readable))
 		return
 	}
-	ti, ok := snap.TeamInfo(team, owners, withMembers)
+	d, ok := s.teamDetail(r.Context(), subj, readable, team)
 	if !ok {
 		writeError(w, http.StatusNotFound, "not_found", "unknown team "+team)
 		return
 	}
-	d := uiapi.TeamDetail{TeamInfo: ti, Owned: []uiapi.TeamZone{}, Transfers: []uiapi.Transfer{}}
+	writeJSON(w, http.StatusOK, d)
+}
+
+// teamList lists the teams with the RRsets they own in the readable zones.
+func (s *Server) teamList(ctx context.Context, subj *identity.Subject, readable map[string]bool) uiapi.TeamList {
+	snap := s.cfg.Policy.Current()
+	owners, counts := s.storeOwners(ctx, readable)
+	list := uiapi.TeamList{Strict: snap.StrictTeams(), Teams: snap.TeamInfos(owners, s.pol.AllowMeta(subj, uiapi.ActionPolicyRead))}
+	for i := range list.Teams {
+		list.Teams[i].RRsets = counts[list.Teams[i].Name]
+	}
+	return list
+}
+
+// teamDetail describes a team: what it owns in the readable zones, its
+// pending transfers and, for policy.read holders and its members, the rules
+// of its roles. False when the team is unknown.
+func (s *Server) teamDetail(ctx context.Context, subj *identity.Subject, readable map[string]bool, team string) (*uiapi.TeamDetail, bool) {
+	snap := s.cfg.Policy.Current()
+	withMembers := s.pol.AllowMeta(subj, uiapi.ActionPolicyRead)
+	owners, counts := s.storeOwners(ctx, readable)
+	ti, ok := snap.TeamInfo(team, owners, withMembers)
+	if !ok {
+		return nil, false
+	}
+	ti.RRsets = counts[team]
+	d := &uiapi.TeamDetail{TeamInfo: ti, Owned: []uiapi.TeamZone{}, Transfers: []uiapi.Transfer{}}
+	if withMembers || slices.Contains(subj.Teams, team) {
+		d.Permissions = snap.Permissions(ti.Roles)
+	}
 	for _, z := range s.pol.ManagedZones() {
 		if !readable[z] {
 			continue
 		}
-		zo := s.zoneOwners(r.Context(), z)
+		zo := s.zoneOwners(ctx, z)
 		if n, nt := zo.rrsets[team], zo.tombstones[team]; n+nt > 0 {
 			d.Owned = append(d.Owned, uiapi.TeamZone{Zone: z, RRsets: n, Tombstones: nt})
 		}
 	}
 	if s.cfg.Transfers != nil {
-		page, err := s.cfg.Transfers.ListTransfers(r.Context(), subj, store.TransferQuery{Status: uiapi.TransferProposed, Limit: 500})
+		page, err := s.cfg.Transfers.ListTransfers(ctx, subj, store.TransferQuery{Status: uiapi.TransferProposed, Limit: 500})
 		if err == nil {
 			for _, t := range page.Transfers {
 				if t.FromTeam == team || t.ToTeam == team {
@@ -156,7 +184,7 @@ func (s *Server) handleTeams(w http.ResponseWriter, r *http.Request, subj *ident
 			}
 		}
 	}
-	writeJSON(w, http.StatusOK, d)
+	return d, true
 }
 
 // handleTransfers serves the transfer routes.

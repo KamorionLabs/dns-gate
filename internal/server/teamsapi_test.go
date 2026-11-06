@@ -106,17 +106,25 @@ func TestTeamsEndpoints(t *testing.T) {
 	var list uiapi.TeamList
 	_ = json.NewDecoder(r.Body).Decode(&list)
 	kinds := map[string]string{}
+	counts := map[string]int{}
 	for _, ti := range list.Teams {
-		kinds[ti.Name] = ti.Kind
+		kinds[ti.Name], counts[ti.Name] = ti.Kind, ti.RRsets
 	}
-	if r.StatusCode != 200 || list.Strict || kinds["web"] != uiapi.TeamKindAuto || kinds["legacy"] != uiapi.TeamKindStore {
+	if r.StatusCode != 200 || list.Strict || kinds["web"] != uiapi.TeamKindAuto || kinds["legacy"] != uiapi.TeamKindStore || counts["web"] != 1 || counts["ops"] != 0 {
 		t.Fatalf("teams: %d %+v", r.StatusCode, list)
 	}
 	r = e.do(t, "GET", "/api/v1/teams/web", tok, "", nil)
 	var d uiapi.TeamDetail
 	_ = json.NewDecoder(r.Body).Decode(&d)
-	if r.StatusCode != 200 || len(d.Owned) != 1 || d.Owned[0].RRsets != 1 || d.Owned[0].Tombstones != 1 || d.Roles[0] != "writer" {
+	if r.StatusCode != 200 || len(d.Owned) != 1 || d.Owned[0].RRsets != 1 || d.Owned[0].Tombstones != 1 || d.Roles[0] != "writer" || d.RRsets != 1 ||
+		len(d.Permissions) != 1 || d.Permissions[0].Zones[0] != "example.com" {
 		t.Fatalf("team detail: %d %+v", r.StatusCode, d)
+	}
+	d = uiapi.TeamDetail{}
+	r = e.do(t, "GET", "/api/v1/teams/legacy", tok, "", nil)
+	_ = json.NewDecoder(r.Body).Decode(&d)
+	if r.StatusCode != 200 || d.Permissions != nil {
+		t.Fatalf("rules of a team the caller is not a member of: %d %+v", r.StatusCode, d)
 	}
 	if r := e.do(t, "GET", "/api/v1/teams/nobody", tok, "", nil); r.StatusCode != 404 {
 		t.Fatalf("unknown team: %d", r.StatusCode)

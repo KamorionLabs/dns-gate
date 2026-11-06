@@ -137,6 +137,20 @@ type ZoneInventory struct {
 	Unmanaged    bool       `json:"unmanaged,omitempty"` // discovered, not managed: read-only, no adoption
 	LastSyncedAt *time.Time `json:"last_synced_at,omitempty"`
 	RRsets       []RRset    `json:"rrsets"`
+	// Tombstones are the RRsets of a managed zone deleted recently through
+	// the gate and still reserved for their team.
+	Tombstones []Tombstone `json:"tombstones,omitempty"`
+}
+
+// Tombstone reserves a deleted RRset for its team until ExpiresAt: only
+// that team may create or adopt it again; others ask for a transfer.
+type Tombstone struct {
+	Host      string    `json:"host"`
+	Type      string    `json:"type"`
+	Team      string    `json:"team"`
+	DeletedBy *Actor    `json:"deleted_by,omitempty"`
+	DeletedAt time.Time `json:"deleted_at"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 // AuditEntry is one audit event as shown in the UI.
