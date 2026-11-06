@@ -1,0 +1,79 @@
+# dns-gate quickstart: a gate on http://127.0.0.1:8080 in front of the
+# sandbox of examples/quickstart (in-memory EuroDNS API, local OpenID
+# issuer). Memory store: everything is lost when the gate stops.
+# Guide: docs/quickstart.md, configuration reference: docs/CONFIG.md.
+
+listen:
+  address: "127.0.0.1:8080"
+
+providers:
+  - id: eurodns
+    kind: eurodns
+    zones: {include: [example.com]}
+    eurodns:
+      base_url: http://127.0.0.1:8053   # the sandbox; https://rest-api.eurodns.com in real life
+      app_id: quickstart                # the API key comes from EURODNS_API_KEY
+
+zones: [example.com]
+
+store:
+  type: memory
+
+issuers:
+  - name: local                         # tokens from http://127.0.0.1:8090/mint?sub=<name>
+    issuer: http://127.0.0.1:8090
+    audiences: [dns-gate]
+    category: human
+    token_exchange: true
+  - name: gate                          # the gate's own tokens (token exchange, UI tokens)
+    self: true
+    issuer: http://127.0.0.1:8080
+
+teams:
+  web: {description: Web site}
+  shop: {description: Online shop}
+  platform: {description: DNS administrators}
+
+roles:
+  zone-writer:
+    rules:
+      - zones: [example.com]
+        actions: [dns.read, dns.record.write, dns.forward.write, ui.read]
+  acme-solver:
+    ephemeral_ttl: 24h
+    rules:
+      - zones: [example.com]
+        actions: [dns.read, dns.record.write]
+        records: {hosts: [_acme-challenge, _acme-challenge.**], types: [TXT]}
+  dns-admin:
+    rules:
+      - zones: ["*"]
+        actions: [dns.read, dns.record.write, dns.record.adopt, dns.ownership.approve,
+                  gate.apikey.manage, ui.read, policy.read]
+
+bindings:
+  - role: zone-writer
+    team: web
+    subjects: [{issuer: local, claims: {sub: [alice]}}]
+  - role: zone-writer
+    team: shop
+    subjects: [{issuer: local, claims: {sub: [bob]}}]
+  - role: dns-admin
+    team: platform
+    subjects: [{issuer: local, claims: {sub: [admin]}}]
+
+protected:
+  - zones: ["*"]
+    hosts: ["@"]
+    types: [NS, SOA, MX, CAA]
+
+mcp:
+  enabled: true
+  allow_writes: true
+  public_url: http://127.0.0.1:8080
+
+ui:
+  enabled: true
+  issuer: local
+  client_id: gate-ui
+  redirect_url: http://127.0.0.1:8080/auth/callback
