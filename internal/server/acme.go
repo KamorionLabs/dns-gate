@@ -180,23 +180,31 @@ func (s *Server) handleHTTPReq(w http.ResponseWriter, r *http.Request, present b
 		case err != nil:
 			return nil, nil, err
 		}
+		before, live := len(led.Values), slices.Clone(vals)
+		led.Values = slices.DeleteFunc(led.Values, func(v string) bool { return !slices.Contains(live, v) })
+		pruned := len(led.Values) != before
 		own := slices.Contains(led.Values, value)
 		if present && !own && slices.Contains(vals, value) {
 			return nil, nil, errValueTaken
 		}
 		switch {
-		case present && !own:
+		case present && !slices.Contains(vals, value):
 			led.Values = append(led.Values, value)
-			if !slices.Contains(vals, value) {
-				vals = append(vals, value)
-			}
+			vals = append(vals, value)
 			if err := s.authorRoom(r.Context(), owner, t.domain, sub, led.Values, vals); err != nil {
 				return nil, nil, err
 			}
 		case !present && own:
 			led.Values = slices.DeleteFunc(led.Values, func(v string) bool { return v == value })
 			vals = slices.DeleteFunc(vals, func(v string) bool { return v == value })
-		case !present:
+		}
+		if max := s.cfg.Config.ACME.MaxValuesPerAuthor; len(led.Values) > max {
+			led.Values = led.Values[len(led.Values)-max:]
+		}
+		if sameValues(live, vals) {
+			if pruned && led.Version > 0 {
+				s.pruneHistory(r.Context(), *led, now)
+			}
 			return vals, nil, nil
 		}
 		values, exp := led.Values, s.acmeIdle(now)
@@ -577,6 +585,35 @@ func (s *Server) acmeRoom(ctx context.Context, owner string) *acmeError {
 	return nil
 }
 
+// mayRecreate reports whether a registration deleted while it was being
+// saved may be created again: never one of the API (a key update removed
+// it) nor one of an API key that is revoked or gone.
+func (s *Server) mayRecreate(ctx context.Context, reg store.ACMERegistration) bool {
+	if reg.Origin == store.ACMEOriginAPI {
+		return false
+	}
+	if !apikey.ValidID(reg.KeyID) {
+		return true
+	}
+	k, err := s.cfg.APIKeys.GetAPIKey(ctx, reg.KeyID)
+	return err == nil && k.RevokedAt == nil
+}
+
+// pruneHistory stores an httpreq history that lost values no longer in the
+// RRset, when no write follows: removing dead values grants nothing.
+func (s *Server) pruneHistory(ctx context.Context, led store.ACMERegistration, now time.Time) {
+	var err error
+	if len(led.Values) == 0 {
+		err = s.cfg.APIKeys.DeleteACMERegistration(ctx, led.KeyID, led.Subdomain)
+	} else {
+		led.UpdatedAt = now
+		err = s.cfg.APIKeys.PutACMERegistration(ctx, led)
+	}
+	if err != nil {
+		s.log.Warn("acme history prune failed", "owner", led.KeyID, "subdomain", led.Subdomain, "err", err)
+	}
+}
+
 // saveRegistration applies set to reg and stores it; on a version conflict
 // it reads the stored registration again and applies set to it, a few
 // times, then logs at error level and returns the error.
@@ -589,6 +626,9 @@ func (s *Server) saveRegistration(ctx context.Context, reg store.ACMERegistratio
 		}
 		fresh, gerr := s.cfg.APIKeys.GetACMERegistration(ctx, reg.KeyID, reg.Subdomain)
 		switch {
+		case errors.Is(gerr, store.ErrNotFound) && !s.mayRecreate(ctx, reg):
+			s.log.Warn("acme registration removed meanwhile, not recreated", "owner", reg.KeyID, "subdomain", reg.Subdomain)
+			return nil
 		case errors.Is(gerr, store.ErrNotFound):
 			reg.Version = 0
 		case gerr != nil:

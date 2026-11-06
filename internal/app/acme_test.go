@@ -1095,3 +1095,49 @@ func TestACMERegistrationCapConcurrent(t *testing.T) {
 		t.Fatalf("%d registrations beyond the cap of 3", len(regs))
 	}
 }
+
+// A value removed from the RRset by someone else (a teammate through the
+// RRset API, the garbage collector) is published again by its author's
+// next present or update.
+func TestACMERepublish(t *testing.T) {
+	e := newACMEEnv(t)
+	k := e.createKey(`{"name": "k", "team": "web", "role": "acme"}`)
+	body := `{"fqdn": "_acme-challenge.example.com.", "value": "v1"}`
+	e.do("POST", "/acme/httpreq/present", basic(k.ID, k.Key), body)
+	e.overwrite(t, "_acme-challenge")
+	if status, b := e.do("POST", "/acme/httpreq/present", basic(k.ID, k.Key), body); status != 200 || !slices.Contains(e.txt("_acme-challenge"), "v1") {
+		t.Fatalf("value not published again: %d %s %v", status, b, e.txt("_acme-challenge"))
+	}
+	hdr := map[string]string{"X-Api-User": k.ID, "X-Api-Key": k.Key}
+	v := challenge("dns")
+	e.do("POST", "/acme/acme-dns/update", hdr, `{"subdomain":"www.example.com", "txt": "`+v+`"}`)
+	e.overwrite(t, "_acme-challenge.www")
+	if status, _ := e.do("POST", "/acme/acme-dns/update", hdr, `{"subdomain":"www.example.com", "txt": "`+v+`"}`); status != 200 || !slices.Contains(e.txt("_acme-challenge.www"), v) {
+		t.Fatalf("acme-dns value not published again: %v", e.txt("_acme-challenge.www"))
+	}
+}
+
+// The httpreq history of an author keeps only values still in the RRset,
+// even when a cleanup has nothing to write.
+func TestHTTPReqHistoryPruned(t *testing.T) {
+	e := newACMEEnv(t)
+	k := e.createKey(`{"name": "k", "team": "web", "role": "acme"}`)
+	body := `{"fqdn": "_acme-challenge.example.com.", "value": "v1"}`
+	e.do("POST", "/acme/httpreq/present", basic(k.ID, k.Key), body)
+	e.overwrite(t, "_acme-challenge")
+	e.do("POST", "/acme/httpreq/cleanup", basic(k.ID, k.Key), body)
+	regs, _ := e.app.Store.(store.APIKeyStore).ListACMERegistrations(context.Background(), k.ID)
+	for _, r := range regs {
+		if slices.Contains(r.Values, "v1") {
+			t.Fatalf("dead value kept in the history: %+v", r)
+		}
+	}
+}
+
+// overwrite replaces a challenge RRset as a teammate with the RRset API.
+func (e *acmeEnv) overwrite(t *testing.T, host string) {
+	t.Helper()
+	if status, b := e.do("PUT", "/api/v1/zones/example.com/rrsets/"+host+"/TXT", e.bearer("writer"), `{"ttl": 600, "values": ["x"]}`); status != 200 {
+		t.Fatalf("overwrite %s: %d %s", host, status, b)
+	}
+}
