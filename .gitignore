@@ -9,3 +9,5 @@ web/dist/*
 .env
 *.local.yaml
 api/eurodns.openapi.json
+__pycache__/
+/_site/

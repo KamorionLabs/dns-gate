@@ -6,7 +6,9 @@ several accounts of each in one gate, other providers on the
 [roadmap](https://github.com/KamorionLabs/dns-gate/issues). Clients see one
 provider-neutral API whatever the provider of a zone.
 
-**How it works, with diagrams: <https://kamorionlabs.github.io/dns-gate/>**
+**Documentation: <https://kamorionlabs.github.io/dns-gate/docs/>** (quickstart, Helm and
+Lambda deployment, concepts, API by example). How it works, with diagrams:
+<https://kamorionlabs.github.io/dns-gate/>.
 
 Provider credentials are coarse: a EuroDNS API key reaches every domain, contact,
 nameserver profile and subscription of the account, and cloud DNS credentials are
@@ -53,10 +55,10 @@ Also included:
   plan must be empty — see [docs/ONBOARDING.md](docs/ONBOARDING.md);
 - **zone discovery**: the zones of the provider accounts outside the configured ones
   are listed read-only and brought under management from the UI by a reviewed
-  policy revision, without a redeploy — see [docs/CONFIG.md](docs/CONFIG.md#zone-discovery);
+  policy revision, without a redeploy — see [docs/config/providers.md](docs/config/providers.md#zone-discovery);
 - **EuroDNS folders**: role rules select zones by EuroDNS folder (`folders: ["/ES/**"]`)
   as well as by name, with the folder shown in the UI, the API and MCP and every move
-  audited — see [docs/CONFIG.md](docs/CONFIG.md#eurodns-folders);
+  audited — see [docs/config/providers.md](docs/config/providers.md#eurodns-folders);
 - a **DNS propagation check**: after a change, the answers of the zone's name servers
   and of public resolvers around the world compared with the expected content (up to
   date, old answer still cached, no record), with the TTL left, from the UI right
@@ -64,7 +66,7 @@ Also included:
   [docs/CONFIG.md](docs/CONFIG.md#propagation-check);
 - **one binding for many pipelines**: the owner team derived from a claim
   (`team_from`), so each pipeline matched by a glob owns its own records — see
-  [docs/CONFIG.md](docs/CONFIG.md#team-derived-from-a-claim);
+  [docs/config/policy.md](docs/config/policy.md#team-derived-from-a-claim);
 - **URL forwards** (EuroDNS HTTP redirects) as owned objects like RRsets: a team
   creates, changes and deletes its own redirects with `dns.forward.write`, from the
   API, the UI, the MCP server or the `dnsgate_url_forward` Terraform resource —
@@ -73,7 +75,7 @@ Also included:
   ownership: read tools by default, writes only if enabled and always through a plan
   then an apply bound to that plan. Claude Desktop users install it from the Connect
   page as a one-click extension that signs them in through the browser, without a
-  terminal or any runtime to install — see [docs/CONFIG.md](docs/CONFIG.md#claude-desktop-extension).
+  terminal or any runtime to install — see [docs/config/ui-mcp.md](docs/config/ui-mcp.md#claude-desktop-extension).
 
 ## Related repositories
 
@@ -159,7 +161,7 @@ Azure DevOps pipelines can also present the OIDC token Azure DevOps issues for a
 service connection, without any cloud login. Its audience (`api://AzureADTokenExchange`)
 is shared by every service connection of the organization, so the gate only trusts it
 bound to the exact subjects of service connections dedicated to the gate — see
-[docs/CONFIG.md](docs/CONFIG.md#azure-devops-oidc).
+[docs/config/authentication.md](docs/config/authentication.md#azure-devops-oidc).
 
 People sign in to the UI with OIDC (Entra ID or any OIDC provider) or SAML 2.0, for
 example AWS IAM Identity Center with its groups. When the gate is its own issuer, a
@@ -170,7 +172,7 @@ page, and Claude Desktop signs in through the gate's OAuth endpoints — see
 Clients that keep a credential longer than their CI or workload token lasts
 (certbot and acme.sh hooks, scripts) exchange that token for a short-lived gate token
 (`POST /api/v1/token-exchange`, RFC 8693, opt-in per issuer with
-`token_exchange: true`, see [docs/CONFIG.md](docs/CONFIG.md#token-exchange)). Third
+`token_exchange: true`, see [docs/config/authentication.md](docs/config/authentication.md#token-exchange)). Third
 parties without any OIDC identity (a hosting provider, an appliance) get gate-issued
 API keys (`dgk_…`): bound to a team and a role, stored hashed, rotated with an
 overlap and revoked through `/api/v1/api-keys` by holders of `gate.apikey.manage`,
@@ -178,7 +180,7 @@ see [docs/API.md](docs/API.md). certbot, acme.sh, lego, Traefik, win-acme,
 cert-manager and Caddy solve DNS-01 challenges through the gate's lego httpreq and
 acme-dns endpoints, unmodified, on any provider and without CNAME: see
 [docs/ACME.md](docs/ACME.md). Static virtual keys from the configuration remain for
-existing EuroDNS clients. Details in [docs/DESIGN.md](docs/DESIGN.md#9-authentication).
+existing EuroDNS clients. Details in [docs/design/authentication.md](docs/design/authentication.md#9-authentication).
 
 ## Quickstart (local)
 
@@ -197,24 +199,25 @@ A Route 53 account is one more entry in `providers` (`kind: route53`, AWS creden
 from the default chain, optionally an assumed role): see
 [docs/providers/route53.md](docs/providers/route53.md).
 
-Deployment: a container (Helm chart in `charts/dns-gate`) with a memory, SQLite,
+Without any account, `go run ./examples/quickstart` starts a sandbox (in-memory
+EuroDNS API and OpenID issuer) for a local gate: see the [Quickstart](docs/quickstart.md).
+
+Deployment: a container ([Helm chart](docs/deploy/helm.md) in `charts/dns-gate`) with a memory, SQLite,
 Postgres or DynamoDB store, or an AWS Lambda function behind API Gateway (low volume,
 Route 53, DynamoDB store, configuration from S3 or SSM):
 [docs/DEPLOY-LAMBDA.md](docs/DEPLOY-LAMBDA.md).
 
 ## Documentation
 
-- [API guide](docs/API.md) and [API reference](https://kamorionlabs.github.io/dns-gate/api.html) ([OpenAPI](api/dns-gate.openapi.yaml)), including API keys
-- [ACME / certificates](docs/ACME.md)
-- [Onboarding existing zones](docs/ONBOARDING.md)
-- [Configuration reference](docs/CONFIG.md)
-- [Audit events: schema, ECS/OCSF, hash chain, SIEM export](docs/AUDIT.md)
-- [Route 53 provider](docs/providers/route53.md)
-- [SAML login with AWS IAM Identity Center, gate tokens](docs/IDENTITY-CENTER.md)
-- [Deploying on AWS Lambda](docs/DEPLOY-LAMBDA.md)
-- [Migrating a 0.x configuration to providers](docs/MIGRATION-0.x.md)
-- [Design](docs/DESIGN.md)
-- [Threat model](docs/THREAT-MODEL.md)
+On the site: <https://kamorionlabs.github.io/dns-gate/docs/>. The same pages, in this
+repository:
+
+- [Quickstart](docs/quickstart.md): a local gate with a sandbox provider and identity provider
+- Deploy: [Kubernetes with Helm](docs/deploy/helm.md), [AWS Lambda](docs/deploy/lambda.md)
+- Concepts: [identities](docs/concepts/identities.md), [roles and rules](docs/concepts/policy.md), [teams and ownership](docs/concepts/ownership.md), [onboarding existing zones](docs/ONBOARDING.md)
+- API: [by example](docs/api/index.md), [guide](docs/API.md), [reference](https://kamorionlabs.github.io/dns-gate/api.html) ([OpenAPI](api/dns-gate.openapi.yaml))
+- Integrations: [Terraform](docs/integrations/terraform.md), [CI pipelines](docs/integrations/ci.md), [MCP and Claude](docs/integrations/mcp.md), [certificates (ACME)](docs/ACME.md), [SIEM and audit export](docs/integrations/siem.md)
+- Reference: [configuration](docs/CONFIG.md), [audit events](docs/AUDIT.md), [design](docs/DESIGN.md), [threat model](docs/THREAT-MODEL.md), [migrating from 0.x](docs/MIGRATION-0.x.md)
 - [Roadmap and points to validate: GitHub issues](https://github.com/KamorionLabs/dns-gate/issues)
 
 ## License

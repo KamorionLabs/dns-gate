@@ -93,7 +93,7 @@ roles:
 
 Declare the issuer, opt it in to the exchange, bind the identity to the role. The
 exchange needs a gate issuer (`self: true`) and its signing key
-(`DNS_GATE_TOKEN_SIGNING_KEY`, see [CONFIG.md](CONFIG.md#gate-issued-tokens)).
+(`DNS_GATE_TOKEN_SIGNING_KEY`, see [configuration](config/authentication.md#gate-issued-tokens)).
 
 ```yaml
 issuers:
@@ -307,7 +307,7 @@ static secret, so it uses an [API key](#cert-manager).
 ### Azure (managed identity, AKS workload identity)
 
 Issuer `https://login.microsoftonline.com/<tenant-id>/v2.0`, configured as in
-[CONFIG.md](CONFIG.md#entra-id); bind on the `oid` of the managed identity. The
+[configuration](config/authentication.md#entra-id); bind on the `oid` of the managed identity. The
 token audience is the gate app registration (`api://dns-gate`).
 
 ```sh

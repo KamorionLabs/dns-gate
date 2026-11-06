@@ -86,7 +86,7 @@ names from the time the project was called eurodns-gate (`EURODNS_GATE_*`) when 
 
 Teams used to be plain strings in `bindings[].team`, `virtual_keys[].teams`,
 issuer `team_claim` and delegations. They are now declared in a
-[`teams` block](CONFIG.md#teams), with their members. The migration takes one minor
+[`teams` block](config/policy.md#teams), with their members. The migration takes one minor
 version:
 
 - **A file without `teams` keeps working unchanged.** Every team it names is
@@ -163,7 +163,7 @@ Other changes of the same version:
 ## URL forwards (0.9)
 
 URL forwards (EuroDNS HTTP redirects) become owned objects, written with the new
-action `dns.forward.write` ([CONFIG.md](CONFIG.md#roles), [API.md](API.md#url-forwards)).
+action `dns.forward.write` ([configuration](config/policy.md#roles), [API.md](API.md#url-forwards)).
 
 - Inventories, plans, adoption previews, the audit and the MCP tools list forwards
   as RRsets of type `URLFWD` (no TTL nor values, a `forward` object). Clients that

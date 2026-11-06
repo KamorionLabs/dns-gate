@@ -33,6 +33,7 @@
       <a href="#ownership">Ownership</a>
       <a href="#policy">Policy</a>
       <a href="#run">Run it</a>
+      <a href="docs/">Docs</a>
       <a href="api.html">API</a>
       <a class="gh" href="https://github.com/KamorionLabs/dns-gate">GitHub</a>
     </nav>
@@ -48,7 +49,7 @@
       <p class="lead">A DNS provider key or role usually opens a whole account or zone. dns-gate holds those credentials alone and lets teams, pipelines, third parties and ACME clients change exactly the records they own, with their own identity, through one API in front of every provider.</p>
       <div class="actions">
         <a class="btn primary" href="#how">See how it works</a>
-        <a class="btn secondary" href="api.html">API reference</a>
+        <a class="btn secondary" href="docs/quickstart/">Quickstart</a>
       </div>
       <p class="meta"><span>OIDC and SAML</span><span>REST API</span><span>Web UI</span><span>MCP server</span><span>Terraform provider</span><span>ACME DNS-01</span><span>Container or Lambda</span><span>MIT</span></p>
     </div>
@@ -408,7 +409,7 @@ go run ./cmd/dns-gate -config config.yaml</code></pre>
           <svg class="seal s-managed" width="20" height="20" aria-hidden="true"><use href="#seal-managed"/></svg>
           <p><b>Beta, in production since November 2026</b> for one organization: 14 zones, OpenTofu pipelines writing certificate validation and site records, the web UI and the MCP server. Versions are still 0.x.</p>
         </div>
-        <p style="margin-top:20px;color:var(--ink-2);font-size:15px">Read more: <a href="api.html">API reference</a> · <a href="https://github.com/KamorionLabs/dns-gate/blob/main/docs/API.md">API guide</a> · <a href="https://github.com/KamorionLabs/dns-gate/blob/main/docs/DESIGN.md">design</a> · <a href="https://github.com/KamorionLabs/dns-gate/blob/main/docs/CONFIG.md">configuration</a> · <a href="https://github.com/KamorionLabs/dns-gate/blob/main/docs/THREAT-MODEL.md">threat model</a> · <a href="https://github.com/KamorionLabs/dns-gate/blob/main/docs/ONBOARDING.md">onboarding existing zones</a> · <a href="https://github.com/KamorionLabs/dns-gate/blob/main/docs/ACME.md">certificates (ACME)</a> · <a href="https://github.com/KamorionLabs/dns-gate/blob/main/docs/DEPLOY-LAMBDA.md">AWS Lambda</a></p>
+        <p style="margin-top:20px;color:var(--ink-2);font-size:15px">Read more: <a href="docs/">documentation</a> · <a href="docs/quickstart/">quickstart</a> · <a href="docs/deploy/helm/">Helm</a> · <a href="docs/deploy/lambda/">AWS Lambda</a> · <a href="docs/api/">API by example</a> · <a href="api.html">API reference</a> · <a href="docs/CONFIG/">configuration</a> · <a href="docs/THREAT-MODEL/">threat model</a> · <a href="docs/integrations/certificates/">certificates (ACME)</a></p>
       </div>
     </div>
   </div>

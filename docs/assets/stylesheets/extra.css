@@ -1,0 +1,118 @@
+/* The landing page palette (site/style.css) on Material for MkDocs: paper,
+   one registry ink, the seal blue for links and accents. */
+
+:root {
+  --gate-paper: #f6f5f1;
+  --gate-sheet: #fdfcf9;
+  --gate-well: #efede7;
+  --gate-ink: #1b2230;
+  --gate-ink-2: #444d5e;
+  --gate-rule: rgba(27, 34, 48, 0.1);
+  --gate-seal: #24406b;
+  --gate-seal-wash: rgba(36, 64, 107, 0.08);
+  --gate-wax: #b4372f;
+
+  --md-text-font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
+  --md-code-font-family: ui-monospace, 'SF Mono', 'Cascadia Code', 'JetBrains Mono', Menlo, Consolas, monospace;
+}
+
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: var(--gate-seal);
+  --md-primary-fg-color--light: #3a5a8c;
+  --md-primary-fg-color--dark: #1b3254;
+  --md-primary-bg-color: var(--gate-ink);
+  --md-primary-bg-color--light: var(--gate-ink-2);
+  --md-accent-fg-color: var(--gate-wax);
+  --md-accent-fg-color--transparent: rgba(180, 55, 47, 0.1);
+  --md-default-bg-color: var(--gate-paper);
+  --md-default-fg-color: var(--gate-ink);
+  --md-default-fg-color--light: var(--gate-ink-2);
+  --md-typeset-a-color: var(--gate-seal);
+  --md-code-bg-color: var(--gate-well);
+  --md-footer-bg-color: var(--gate-sheet);
+  --md-footer-bg-color--dark: var(--gate-well);
+  --md-footer-fg-color: var(--gate-ink);
+  --md-footer-fg-color--light: var(--gate-ink-2);
+  --md-footer-fg-color--lighter: #6b7383;
+}
+
+[data-md-color-scheme="slate"] {
+  --gate-paper: #111419;
+  --gate-sheet: #161a21;
+  --gate-well: #0d1014;
+  --gate-ink: #e6e8ec;
+  --gate-ink-2: #b3b9c4;
+  --gate-rule: rgba(255, 255, 255, 0.08);
+  --gate-seal: #8fb0e6;
+  --gate-seal-wash: rgba(143, 176, 230, 0.1);
+  --gate-wax: #e0786e;
+
+  --md-hue: 218;
+  --md-primary-fg-color: var(--gate-seal);
+  --md-primary-fg-color--light: #a9c3ee;
+  --md-primary-fg-color--dark: #6f92cc;
+  --md-primary-bg-color: var(--gate-ink);
+  --md-primary-bg-color--light: var(--gate-ink-2);
+  --md-accent-fg-color: var(--gate-wax);
+  --md-accent-fg-color--transparent: rgba(224, 120, 110, 0.1);
+  --md-default-bg-color: var(--gate-paper);
+  --md-typeset-a-color: var(--gate-seal);
+  --md-code-bg-color: var(--gate-sheet);
+  --md-footer-bg-color: var(--gate-sheet);
+  --md-footer-bg-color--dark: var(--gate-well);
+}
+
+/* Header and tabs on paper, as on the landing page, instead of a colored bar. */
+.md-header,
+.md-tabs {
+  background-color: var(--gate-sheet);
+  color: var(--gate-ink);
+}
+.md-header {
+  box-shadow: 0 1px 0 var(--gate-rule);
+}
+.md-header--shadow {
+  box-shadow: 0 1px 0 var(--gate-rule), 0 2px 8px rgba(0, 0, 0, 0.04);
+}
+.md-header__button.md-logo img {
+  height: 1.4rem;
+}
+.md-search__form {
+  background-color: var(--gate-seal-wash);
+}
+.md-search__input::placeholder,
+.md-search__icon {
+  color: var(--gate-ink-2);
+}
+
+.md-typeset h1 {
+  color: var(--gate-ink);
+  font-weight: 600;
+}
+.md-typeset h2,
+.md-typeset h3 {
+  font-weight: 600;
+}
+
+.md-typeset table:not([class]) {
+  font-size: 0.72rem;
+  border-color: var(--gate-rule);
+}
+.md-typeset table:not([class]) th {
+  background-color: var(--gate-seal-wash);
+}
+
+.md-typeset code {
+  border-radius: 4px;
+}
+
+/* Cards for the overview page ("grid cards" of Material, styled with borders only). */
+.md-typeset .grid.cards > ul > li,
+.md-typeset .grid > .card {
+  border-color: var(--gate-rule);
+  background-color: var(--gate-sheet);
+}
+.md-typeset .grid.cards > ul > li:hover {
+  border-color: var(--gate-seal);
+  box-shadow: none;
+}

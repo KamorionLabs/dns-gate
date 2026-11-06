@@ -109,7 +109,7 @@ Configuration notes for Lambda:
   filter `{ $.type = "audit" }` (`audit_export` in the Terraform module); each execution
   environment writes its own hash chain with `audit.hash_chain: true` (put
   `DNS_GATE_AUDIT_CHAIN_KEY` in the secret for a keyed chain). See
-  [AUDIT.md](AUDIT.md#aws-lambda--cloudwatch-logs).
+  [SIEM and audit export](integrations/siem.md#aws-lambda-cloudwatch-logs).
 - Gate-issued tokens and the token exchange (`issuers[].self`) need
   `DNS_GATE_TOKEN_SIGNING_KEY`, and the UI `DNS_GATE_SESSION_KEY`: put them in the
   secret, so that every execution environment shares them.

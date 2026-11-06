@@ -3,7 +3,13 @@ name: pages
 on:
   push:
     branches: [main]
-    paths: ["site/**", "api/dns-gate.openapi.yaml", ".github/workflows/pages.yml"]
+    paths:
+      - "site/**"
+      - "docs/**"
+      - "mkdocs.yml"
+      - "examples/**"
+      - "api/dns-gate.openapi.yaml"
+      - ".github/workflows/pages.yml"
   workflow_dispatch:
 
 permissions:
@@ -24,11 +30,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
-      - name: Publish the OpenAPI spec next to the site
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: docs/requirements.txt
+      - name: Landing page, API reference and OpenAPI document
         run: |
           mkdir -p _site
           cp -R site/. _site/
           cp api/dns-gate.openapi.yaml _site/dns-gate.openapi.yaml
+      - name: Documentation under /docs/
+        env:
+          NO_MKDOCS_2_WARNING: "1"
+        run: |
+          pip install -r docs/requirements.txt
+          mkdocs build --strict --site-dir _site/docs
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site

@@ -1,251 +1,136 @@
-# dns-gate API
+# API guide
 
-The gate's own API, under `/api/v1`, is the same whatever the DNS provider behind
-a zone (EuroDNS, Route53). The reference is the OpenAPI 3.1 document
-[`api/dns-gate.openapi.yaml`](../api/dns-gate.openapi.yaml), rendered on the
-[project site](https://kamorionlabs.github.io/dns-gate/api.html). Every other path
-of the gate is the EuroDNS-compatible API, documented by
-[EuroDNS](https://docapi.eurodns.com/).
+The rules behind the gate's API. The operations and schemas are in the
+[API reference](https://kamorionlabs.github.io/dns-gate/api.html) (OpenAPI 3.1,
+[`api/dns-gate.openapi.yaml`](../api/dns-gate.openapi.yaml)); runnable examples in
+several languages are in [API by example](api/index.md).
+
+The gate's own API lives under `/api/v1` and is the same whatever the provider of a
+zone (Route 53, EuroDNS). For EuroDNS zones the gate also serves the
+EuroDNS-compatible API, documented by [EuroDNS](https://docapi.eurodns.com/): an
+existing EuroDNS client changes its base URL and credentials only.
 
 ## Detecting a gate
 
 `GET /.well-known/dns-gate` (no authentication) is the only detection path:
 
 ```json
-{"version": "<gate version>", "features": ["if-match", "ownership", "adopt", "policy-delegation", "plans", "rrset-api", "forwards"]}
+{"version": "0.9.0", "features": ["if-match", "ownership", "adopt", "policy-delegation", "plans", "rrset-api", "forwards", "token-exchange", "api-keys", "acme-httpreq", "acme-dns"]}
 ```
 
-`rrset-api` means the single RRset endpoints below are served, `forwards` the
-[URL forward](#url-forwards) endpoints, `plans` the REST
-plan/apply, `policy-delegation` the delegated policy API, `api-keys` the API key
-endpoints, `acme-httpreq` and `acme-dns` the [ACME endpoints](ACME.md),
-`token-exchange` the token exchange.
+| Feature | Meaning |
+|---|---|
+| `rrset-api` | the single-RRset endpoints |
+| `forwards` | the [URL forward](#url-forwards) endpoints |
+| `plans` | REST plan and apply |
+| `policy-delegation` | the [delegation API](config/managed-policy.md#delegation-api) |
+| `api-keys`, `token-exchange` | [API keys](#api-keys), the [token exchange](#token-exchange), when enabled |
+| `acme-httpreq`, `acme-dns` | the [ACME endpoints](ACME.md) |
 
 ## Authentication
 
 | Client | Credentials |
 |---|---|
-| Pipelines, CLIs, Terraform | `Authorization: Bearer <JWT>` from an issuer of the gate configuration (GitHub Actions, GitLab, Azure DevOps, Entra ID, any OIDC issuer), audience the gate |
-| Tools that keep one credential for a run (acme.sh) | a gate token from the [token exchange](#token-exchange) of such a JWT, as a bearer token |
-| Third parties without OIDC (ACME clients, appliances) | [API key](#api-keys) `dgk_<id>_<secret>`: `Authorization: Bearer dgk_…`, or basic authentication with the key id as user name and the key as password, or `X-Api-Key: dgk_…` (with `X-App-Id` or `X-Api-User` set to the key id, if sent) |
-| Tools without OIDC, static | virtual key from the configuration: `X-App-Id` + `X-Api-Key` |
-| Web UI | session cookie; every request other than GET also sends `X-Gate-CSRF` (the `gate_csrf` cookie) and a same-origin `Origin`, and humans need a recent login for writes (`403 reauth_required`) |
+| Pipelines, CLIs, Terraform | `Authorization: Bearer <JWT>` from an issuer of the configuration, audience the gate |
+| Tools that keep one credential for a run (acme.sh) | a gate token from the [token exchange](#token-exchange), as a bearer token |
+| Third parties without OIDC | an [API key](#api-keys) `dgk_<id>_<secret>`: `Authorization: Bearer dgk_…`, or basic authentication (key id as user name, key as password), or `X-Api-Key: dgk_…` (with `X-App-Id` or `X-Api-User` set to the key id, if sent) |
+| Static tools without OIDC | a virtual key of the configuration: `X-App-Id` + `X-Api-Key` |
+| Web UI | the session cookie; every request other than `GET` also sends `X-Gate-CSRF` (the `gate_csrf` cookie) and a same-origin `Origin`; people need a recent login for writes (`403 reauth_required`) |
 
-Permissions are the policy actions: `ui.read` or `dns.read` to read,
-`dns.record.write` on the zone, host and type to write records, and
-`dns.forward.write` on the zone and host to write URL forwards. Writes also require
-ownership: a team only changes RRsets it created through the gate or adopted, and
-creates new ones in its scope.
+Permissions are the [policy actions](concepts/policy.md#rules): `ui.read` or
+`dns.read` to read, `dns.record.write` on the zone, host and type to write records,
+`dns.forward.write` on the zone and host for URL forwards. Writes also require
+ownership: a team only changes RRsets it created through the gate or adopted.
 
-```sh
-GATE=https://dns-gate.example.com
-TOKEN=$(cat /var/run/secrets/tokens/dns-gate)
-auth=(-H "Authorization: Bearer $TOKEN")
-```
-
-## Reading
-
-```sh
-curl -sS "${auth[@]}" "$GATE/api/v1/zones"
-curl -sS "${auth[@]}" "$GATE/api/v1/zones?folder=/ES/**"
-curl -sS "${auth[@]}" "$GATE/api/v1/zones/example.com/rrsets"
-curl -sS -i "${auth[@]}" "$GATE/api/v1/zones/example.com/rrsets/www/CNAME"
-```
-
-A zone summary carries the provider `folder` of the zone for EuroDNS accounts
-(`"/ES/Madrid"`, `"/"` for a domain in no folder; absent for Route53), and
-`?folder=` keeps the zones whose folder matches a folder glob (`/ES` the folder
-ES only, `/ES/**` every folder below it, not ES itself; the Zones view filters
-the same way), see
-[EuroDNS folders](CONFIG.md#eurodns-folders).
+## RRsets
 
 Hosts are relative to the zone, `@` is the apex, `*` is allowed as the first label
-(`*.app`); the type is case-insensitive. An RRset:
+(`*.app`); types are case-insensitive. An RRset:
 
 ```json
-{
-  "host": "www", "type": "CNAME", "ttl": 3600, "values": ["site.example.net."],
-  "hash": "9f2c…", "status": "managed", "owner": "web", "protected": false, "adopted": false
-}
+{"host": "www", "type": "CNAME", "ttl": 3600, "values": ["site.example.net."],
+ "hash": "9f2c…", "status": "managed", "owner": "web", "protected": false, "adopted": false}
 ```
 
-Alias RRsets (Route53) have `"alias": {"target", "hosted_zone_id",
-"evaluate_target_health"}` and no values. `read_only` explains why the gate never
-writes an RRset (`server_managed`, `routing_policy`, `relative_target`…).
+- **Status**: `managed`, `foreign`, `tainted`, `missing` or `pending`, see
+  [record states](concepts/ownership.md#record-states). `read_only` explains why the
+  gate never writes an RRset (`server_managed`, `routing_policy`, `relative_target`…).
+- **Alias** RRsets (Route 53) have `"alias": {"target", "hosted_zone_id",
+  "evaluate_target_health"}` and no values.
+- **Values** are in zone file presentation format. TXT values are the text itself,
+  unquoted, at any length: the gate or the provider splits them in 255-byte strings
+  and they read back as sent. Targets without a trailing dot are absolute; a
+  single-label target is refused (`400 relative_target`).
+- **Reads** of single RRsets come from the gate's inventory cache, refreshed by every
+  write and every reconcile: a Terraform plan reading hundreds of RRsets costs no
+  provider request. Writes never rely on it.
+- A `PUT` body is the full desired state: `ttl` and `values`, or `alias`. The answer
+  is the RRset as written, with its new `ETag`. `DELETE` answers `204`, also when the
+  RRset does not exist.
 
-The single-RRset read is served from the gate's inventory cache (refreshed by
-every write and every reconcile), not from the provider: a Terraform plan reading
-hundreds of RRsets costs no provider request. Writes never rely on it.
+## Preconditions
 
-## ETags and preconditions
+| Request | Effect |
+|---|---|
+| `GET …/rrsets/{host}/{type}` | `ETag: "<hash>"`, the content hash (TTL and values, or alias), also the `hash` field |
+| `GET …/rrsets` | `ETag: "v<n>"`, the gate version of the zone, bumped by every write through the gate |
+| `PUT` with `If-None-Match: *` | creates only: `409 foreign_rrset` if an RRset exists outside the gate, `412 precondition` if the gate owns one |
+| `PUT` or `DELETE` with `If-Match: "<hash>"` | acts only if the RRset still has that content, `412 precondition` otherwise (one hash, no `*`) |
 
-- `GET …/rrsets/{host}/{type}` returns `ETag: "<hash>"`, the content hash of the RRset
-  (TTL and values, or alias). It is also the `hash` field of every RRset.
-- `GET …/rrsets` returns `ETag: "v<n>"`, the gate version of the zone, bumped by every
-  write through the gate.
-- `PUT` with `If-None-Match: *` creates only: `409 foreign_rrset` if an RRset
-  created outside the gate exists, `412 precondition` if the gate owns one.
-- `PUT` or `DELETE` with `If-Match: "<hash>"` acts only if the RRset still has that
-  content: `412 precondition` otherwise. Only one hash, no `*`.
+The engine checks preconditions under the zone lock, against the zone read from the
+provider. A single-RRset write carries no zone version: a write to another RRset of
+the zone in between does not refuse it.
 
-The engine checks the preconditions under the zone lock, against the zone read
-from the provider, so two writers never overwrite each other silently. A single
-RRset write carries no zone version: a write to another RRset of the zone in
-between does not refuse it.
+## Plan and apply
 
-## Writing one RRset
+`POST /api/v1/zones/{zone}/plan` checks RBAC, ownership, preconditions and the
+provider validation for up to 100 changes, without writing. A change is the desired
+state of an RRset (`ttl`, `values` or `alias`), or `"delete": true`, guarded by
+`"expected_hash"` or `"must_not_exist"`; a forward change has `"type": "URLFWD"` and
+a `forward` object.
 
-```sh
-# create, refused if it already exists
-curl -sS -i "${auth[@]}" -X PUT "$GATE/api/v1/zones/example.com/rrsets/app/CNAME" \
-  -H "Content-Type: application/json" -H "If-None-Match: *" \
-  -d '{"ttl": 3600, "values": ["site.example.net."]}'
-
-# replace, only if unchanged since it was read
-curl -sS -i "${auth[@]}" -X PUT "$GATE/api/v1/zones/example.com/rrsets/app/CNAME" \
-  -H "Content-Type: application/json" -H 'If-Match: "9f2c…"' \
-  -d '{"ttl": 600, "values": ["other.example.net."]}'
-
-# alias (Route53)
-curl -sS "${auth[@]}" -X PUT "$GATE/api/v1/zones/example.com/rrsets/@/A" \
-  -H "Content-Type: application/json" \
-  -d '{"alias": {"target": "d111111abcdef8.cloudfront.net.", "hosted_zone_id": "Z2FDTNDATAQYW2"}}'
-
-# delete (204, also when the RRset does not exist)
-curl -sS -i "${auth[@]}" -X DELETE "$GATE/api/v1/zones/example.com/rrsets/app/CNAME" -H 'If-Match: "5d1e…"'
-```
-
-The body is the full desired state: `ttl` and `values`, or `alias`. The answer is
-the RRset as written, with its new `ETag`.
-
-Values are in zone file presentation format. TXT values are the text itself,
-unquoted, at any length (`"v=spf1 include:_spf.example.net -all"` in JSON): the gate
-or the provider splits them in 255-byte strings, and they read back as sent.
-Targets without a trailing dot are absolute (`site.example.net` is
-`site.example.net.`); a single-label target is refused with `400 relative_target`.
+- A refusal is `200` with `"allowed": false`, a `reason` and a `message`. An allowed
+  plan has a `plan_id`.
+- The plan is stored by the gate (shared by every instance), bound to its author, the
+  zone, the zone version and its team, valid once for `mcp.plan_ttl` (10 minutes).
+- `POST …/apply` with the `plan_id` writes exactly what was planned, or fails:
+  `412 precondition` (the zone changed), `410 plan_expired`, `404 plan_not_found`
+  (unknown, applied, or for another zone). The result carries `new_hash` for every
+  created or updated RRset.
+- The MCP tools `plan_rrset_change` and `apply_rrset_change` use the same plans.
 
 ## URL forwards
 
-A URL forward (HTTP redirect) makes the DNS provider answer HTTP requests for a
-host with a 301 or 302 redirect to a URL, or with a page framing it. Only zones
-whose provider has forwards (EuroDNS) have them; elsewhere a write is
-`400 invalid`. A forward is an owned object like an RRset, with the same
-ownership, tombstones, transfers, adoption, audit and preconditions: in the
-inventory, plans, adoption and transfers it is the RRset of type `URLFWD` of its
-host, with no TTL nor values and a `forward` object. Writing one requires
-`dns.forward.write` on the zone and host (`records.hosts` of the rule;
-`records.types` does not apply), adopting one `dns.record.adopt` on the host and
-type `URLFWD`.
+A forward is the RRset of type `URLFWD` of its host: owned, adopted, transferred and
+audited like any RRset, with no TTL nor values and a `forward` object. Endpoints:
+`GET /api/v1/zones/{zone}/forwards`, `GET|PUT|DELETE …/forwards/{host}`, with the same
+preconditions. Only providers with forwards (EuroDNS) have them; elsewhere a write is
+`400 invalid`.
 
-```sh
-curl -sS "${auth[@]}" "$GATE/api/v1/zones/example.com/forwards"
-curl -sS -i "${auth[@]}" "$GATE/api/v1/zones/example.com/forwards/go"
+| Field | Rules |
+|---|---|
+| `type` | `301`, `302` or `frame` |
+| `url` | absolute `http://` or `https://`, at most 2048 bytes, no user information, spaces, control characters nor unencoded ``< > " ' ` \ { } | ^``, host in punycode, canonical form (as Go's `net/url` prints it) |
+| `title`, `keywords`, `description` | frames only, plain text of at most 200, 500 and 1000 characters, without control or format characters nor ``< > " ' ` ``: EuroDNS shows them in the page it serves on the host |
+| `require_https` | refuses the write (`409 https_unavailable`) unless the forwards of the zone answer HTTPS; checked after authorization, before the zone lock, nothing stored |
 
-# create a permanent redirect, refused if a forward exists on the host
-curl -sS -i "${auth[@]}" -X PUT "$GATE/api/v1/zones/example.com/forwards/go" \
-  -H "Content-Type: application/json" -H "If-None-Match: *" \
-  -d '{"type": "301", "url": "https://www.example.com/landing"}'
+A forward cannot be created over `A`, `AAAA`, `CNAME` or `APEX` records of its host
+owned by another team or by nobody, nor those records over another team's forward.
 
-# a frame, only if unchanged since it was read
-curl -sS -i "${auth[@]}" -X PUT "$GATE/api/v1/zones/example.com/forwards/shop" \
-  -H "Content-Type: application/json" -H 'If-Match: "a5df…"' \
-  -d '{"type": "frame", "url": "https://shop.example.net/", "title": "Shop"}'
-
-# delete (204, also when there is no forward)
-curl -sS -i "${auth[@]}" -X DELETE "$GATE/api/v1/zones/example.com/forwards/go"
-```
-
-```json
-{
-  "host": "go", "type": "URLFWD", "ttl": 0, "values": [],
-  "forward": {"type": "301", "url": "https://www.example.com/landing"},
-  "hash": "a5df…", "status": "managed", "owner": "web", "protected": false, "adopted": false,
-  "https": {"status": "inactive", "message": "no HTTPS redirect subscription on example.com: forwards answer plain HTTP only"}
-}
-```
-
-`type` is `301`, `302` or `frame`; `url` an absolute `http://` or `https://` URL of
-at most 2048 bytes, without user information, spaces, control characters nor
-unencoded `< > " ' \` \ { } | ^`, with a host in punycode (`xn--…`), written in
-canonical form (as Go's `net/url` prints it back); `title` (200 characters),
-`keywords` (500) and `description` (1000) apply to frames only and are plain text,
-without control or format characters (bidirectional overrides) nor
-`< > " ' \``: EuroDNS serves them in the page it shows on the forward host. A
-forward cannot be created over `A`, `AAAA`, `CNAME` or `APEX` records of its host
-owned by another team or by nobody, nor those records over the forward of another
-team (see [CONFIG.md](CONFIG.md#url-forwards)). The `ETag` is the
-content hash of the forward (see the `Forward` schema of the OpenAPI document).
-In a plan, a forward change is `{"host": "go", "type": "URLFWD", "forward":
-{"type": "302", "url": "https://…"}}` (or `"delete": true`), and the planned and
-audited changes carry `old_forward` and `new_forward`.
-
-**HTTPS.** A forward entry has no HTTPS setting: the URL target may be `https://`
-in any case, but the forward host answers HTTPS requests (`https://go.example.com`)
-only when the domain has an EuroDNS *HTTPS redirect* subscription, a paid product
-holding a certificate for the forward hosts. The gate reads its state
-(`GET /subscriptions` and `GET /https-redirect-subscriptions/{id}` at EuroDNS,
-cached 10 minutes; an API key without access to subscriptions gives `unknown`) and
-reports it as `https.status`: `active`, `pending` (certificate being issued),
-`no_forward` (active, issued once the zone has a forward), `inactive` (plain HTTP
-only, or a subscription past its expiration date), `unknown` (read failed, kept 30
-seconds), or `unsupported` (provider without forwards). The gate never
-orders, renews nor cancels a subscription. `"require_https": true` in the body
-(or in a plan change) refuses the write with `409 https_unavailable` unless the
-status is `active` or `no_forward` (`pending` is refused: the certificate is not
-issued yet); it is checked after the authorization (a forbidden write is
-`403`) and before the zone lock, and is a check only, nothing is
-stored.
-
-## Plan, then apply
-
-For several RRsets at once, or to review a change before it happens:
-
-```sh
-curl -sS "${auth[@]}" -X POST "$GATE/api/v1/zones/example.com/plan" \
-  -H "Content-Type: application/json" -d '{
-  "changes": [
-    {"host": "app", "type": "CNAME", "ttl": 3600, "values": ["site.example.net."], "must_not_exist": true},
-    {"host": "old", "type": "A", "delete": true, "expected_hash": "5d1e…"}
-  ]}'
-```
-
-The plan checks RBAC, ownership, preconditions and the provider validation
-without writing. A refusal is `200` with `"allowed": false` and a `reason`; an
-allowed plan has a `plan_id`:
-
-```json
-{"zone": "example.com", "allowed": true, "zone_version": 42, "plan_id": "plan-3f9a…",
- "changes": [{"op": "create", "host": "app", "type": "CNAME", "new_ttl": 3600, "new_values": ["site.example.net."]}]}
-```
-
-```sh
-curl -sS "${auth[@]}" -X POST "$GATE/api/v1/zones/example.com/apply" \
-  -H "Content-Type: application/json" -d '{"plan_id": "plan-3f9a…"}'
-```
-
-A plan is stored by the gate (shared by every instance), bound to its author, the
-zone and the zone version, and valid once for `mcp.plan_ttl` (10 minutes by
-default). The apply writes exactly what was planned, or fails with
-`412 precondition` if the zone changed since the plan, `410 plan_expired`, or
-`404 plan_not_found` (unknown, already applied, or planned for another zone): plan
-again. The MCP tools
-`plan_rrset_change` and `apply_rrset_change` use the same plans.
+**HTTPS.** The forward host answers HTTPS only when the domain has an EuroDNS *HTTPS
+redirect* subscription, a paid product ordered outside the gate. The gate reads it
+(cached 10 minutes) and reports `https.status`: `active`, `pending` (certificate being
+issued), `no_forward` (active, issued once the zone has a forward), `inactive` (plain
+HTTP only, or past its expiry), `unknown` (read failed, or a key without access to
+subscriptions; kept 30 seconds) or `unsupported`. `require_https` accepts `active`
+and `no_forward` only. The gate never orders, renews nor cancels a subscription.
 
 ## DNS propagation
 
-After a change, `GET …/rrsets/{host}/{type}/propagation` tells whether the DNS
-already answers it: the gate asks the authoritative name servers of the zone (no
-recursion) and a list of public resolvers around the world, and compares each
-answer with the RRset as read from the provider.
-
-```sh
-curl -sS "${auth[@]}" "$GATE/api/v1/zones/example.com/rrsets/app/CNAME/propagation"
-# right after a PUT (its ETag) or an apply (new_hash of each change), refused (412 precondition)
-# if the RRset is no longer the one written
-curl -sS "${auth[@]}" "$GATE/api/v1/zones/example.com/rrsets/app/CNAME/propagation?expect=9f2c…"
-# after a DELETE
-curl -sS "${auth[@]}" "$GATE/api/v1/zones/example.com/rrsets/old/A/propagation?expect=absent"
-```
+`GET /api/v1/zones/{zone}/rrsets/{host}/{type}/propagation` asks the authoritative
+name servers of the zone and public resolvers for one RRset and compares their
+answers with the RRset as read from the provider. Guide:
+[Propagation check](features/propagation.md).
 
 ```json
 {
@@ -262,250 +147,135 @@ curl -sS "${auth[@]}" "$GATE/api/v1/zones/example.com/rrsets/old/A/propagation?e
 }
 ```
 
-Each answer is `match`, `stale` (other values: the previous content, cached until
-`ttl_left` runs out), `missing` (NXDOMAIN or no record of the type, possibly a cached
-negative answer) or `error` (timeout, `SERVFAIL`, `REFUSED`, a name server
-answering without authority, records of another name, an answer filtered by the
-resolver) or, for alias RRsets, `indeterminate` (addresses that are not all the
-target's: a CDN answers per location). `summary.converged` is true when every server
-that answered matches, with at least one authoritative server, and none is
-indeterminate; `max_ttl_left` bounds when the stale caches expire. A TTL change
-counts too: authoritative answers must carry the new TTL. An RRset that does not
-exist matches empty answers, so a deletion can be followed too.
+| Answer status | Meaning |
+|---|---|
+| `match` | the expected content (and, for authoritative answers, the expected TTL) |
+| `stale` | other values: the previous content, cached until `ttl_left` runs out |
+| `missing` | NXDOMAIN or no record of the type, possibly a cached negative answer |
+| `error` | timeout, `SERVFAIL`, `REFUSED`, no authority, records of another name, an answer filtered by the resolver |
+| `indeterminate` | alias RRsets: addresses that are not all the target's (a CDN answers per location) |
 
-The inventory a check compares with is the cache of the gate instance answering.
-Pass `expect` after a write: the apply result carries `new_hash` for every created
-or updated RRset (use `absent` for a deletion). An instance whose inventory differs
-reads the zone from the provider again before answering.
+`summary.converged` is true when every server that answered matches, with at least
+one authoritative server, and none is indeterminate; `max_ttl_left` bounds when stale
+caches expire.
 
-The check requires `dns.read` on the RRset, in a zone managed by the gate: names
-outside the managed zones are never asked. Results are cached for a few seconds per
-RRset content, checks are rate limited per caller (`429`, `Retry-After`) and a few
-at a time per instance (`503 busy`, `Retry-After`): poll
-every few seconds, resolvers only update when the TTL of their cached answer runs
-out. Resolver list, timeouts and network requirements:
-[CONFIG.md](CONFIG.md#propagation-check). The MCP tool `check_propagation` does the
-same.
+- `?expect=<hash>` after a write (the `ETag` of a `PUT`, the `new_hash` of an apply)
+  or `?expect=absent` after a delete: an instance whose inventory differs reads the
+  zone again first, and answers `412 precondition` if it still differs.
+- Requires `dns.read` on the RRset, in a managed zone. Results are cached a few
+  seconds per RRset content; `429` per caller and `503 busy` per instance, both with
+  `Retry-After`; `501 not_implemented` when `propagation.enabled` is false.
+- Not audited (a read). The MCP tool `check_propagation` does the same.
 
 ## Token exchange
 
 `POST /api/v1/token-exchange` (RFC 8693, form-encoded, no other authentication)
 trades a token of an issuer with `token_exchange: true` for a gate token with the
-same identity, valid 15 minutes (`expires_in` for another lifetime, within the
-issuer's `max_exchanged_ttl`, the gate issuer's `token_ttl` and 5 minutes past the
-expiry of the exchanged token). Gate tokens and API keys are never exchanged.
+same identity.
 
-```sh
-GATE_TOKEN=$(curl -fsS "$GATE/api/v1/token-exchange" \
-  -d grant_type=urn:ietf:params:oauth:grant-type:token-exchange \
-  -d subject_token_type=urn:ietf:params:oauth:token-type:jwt \
-  --data-urlencode "subject_token=$TOKEN" | jq -r .access_token)
-```
+- `grant_type=urn:ietf:params:oauth:grant-type:token-exchange`, `subject_token`, and
+  `subject_token_type` `…:jwt`, `…:id_token` or `…:access_token`; `actor_token` is
+  refused.
+- The subject token is validated as a bearer token of its issuer (signature,
+  audiences, `bound_claims`) and its identity must be bound (`no_binding`).
+- Lifetime 15 minutes, or `expires_in` (at least 60 seconds), capped by the issuer's
+  `max_exchanged_ttl`, the gate issuer's `token_ttl` and the subject token's expiry
+  plus 5 minutes.
+- Gate tokens and API keys are never exchanged. Errors follow RFC 6749
+  (`400 invalid_grant`); without an opted-in issuer the endpoint answers
+  `404 token_exchange_disabled`.
 
-Configuration and details: [CONFIG.md](CONFIG.md#token-exchange).
+Configuration: [token exchange](config/authentication.md#token-exchange).
 
 ## API keys
 
-API keys are issued by the gate at runtime, for third parties that have no OIDC
-identity: a hosting provider renewing certificates, an appliance. A key is bound
-to one team (the owner of the RRsets it creates; a declared team once a
-[`teams`](CONFIG.md#teams) block exists, otherwise the key is refused at creation and
-in use) and one role, with an optional
-expiry and source CIDRs. Only its SHA-256 is stored; the key is shown once, at
-creation and at each rotation. The same key works on this API, on the
-[ACME endpoints](ACME.md) and on the EuroDNS-compatible API (`X-App-Id: <id>`,
+Keys are issued at runtime for third parties without an OIDC identity, one team and
+one role each, with an optional expiry and source CIDRs. Only their SHA-256 is
+stored; the key is shown once, at creation and at each rotation. A key works on this
+API, the [ACME endpoints](ACME.md) and the EuroDNS-compatible API (`X-App-Id: <id>`,
 `X-Api-Key: dgk_…`).
 
-Managing keys needs the `gate.apikey.manage` action, from an OIDC identity (a key
-never manages keys):
+| Route | Effect |
+|---|---|
+| `POST /api/v1/api-keys` | create (`201`): `name`, `team`, `role`, `expires_at`, `allowed_cidrs`, `acme_domains`; the answer adds `key` and `acme_dns_accounts` |
+| `GET /api/v1/api-keys[/{id}]` | list (with last use, `?include_revoked=true`), one key |
+| `POST /api/v1/api-keys/{id}/rotate` | new key; the previous one stays valid for `overlap` (default `24h`, `"0s"` for none) |
+| `PUT /api/v1/api-keys/{id}` | replace name, description, expiry, CIDRs, ACME domains; team and role never change (`409 immutable`) |
+| `DELETE /api/v1/api-keys/{id}` | revoke (`204`) at once |
+
+Managing keys needs `gate.apikey.manage`, from an OIDC identity (a key never manages
+keys):
 
 - the key's team must be one of the caller's teams, unless the caller holds
-  `gate.apikey.manage` on `*` (gate-wide managers);
-- the caller must hold `gate.apikey.manage` on every zone and folder pattern of
-  the key's role, and every action of the role on the same zones, folders and
-  records (a folder pattern is covered by a rule whose `folders` cover it, or by
-  a rule on every zone, `*`; a managed or delegated rule of the caller covers it
-  only when `policy.bounds.zones`, and the `allow.zones` of its delegation, cover
-  every zone, since they narrow its folders): a key never has more rights than
-  its issuer;
-- the role may not grant `policy.*` or `gate.*` actions, nor be less ephemeral
-  (longer `ephemeral_ttl`, or permanent) or less capped (`max_changes_per_request`)
-  than the caller's own write rights.
+  `gate.apikey.manage` on `*`;
+- the caller must hold `gate.apikey.manage` on every zone and folder pattern of the
+  key's role, and every action of the role on the same zones, folders and records: a
+  key never has more rights than its issuer (a managed or delegated rule of the
+  caller covers a folder pattern only when `policy.bounds.zones`, and the
+  `allow.zones` of its delegation, cover every zone);
+- the role may not grant `policy.*` or `gate.*`, nor be less ephemeral or less
+  capped (`max_changes_per_request`) than the caller's own write rights;
+- with a `teams` block, the team must be declared.
 
-The key records what its role declared at issuance (rules, `ephemeral_ttl`,
-`max_changes_per_request`, 0 meaning "inherit the global default"); if the role later
-declares more, the key is refused (`403 role_widened`) until a new key is issued; a
-role that shrinks is fine, and changing the global limits or `policy.bounds` never
-invalidates keys. A key without a recorded grant is refused. The creator of a key and the
-members of its team holding `gate.apikey.manage` anywhere can always see and revoke
-it, even when they no longer manage the zones of its role.
+The key records its role as issued; if the role later grants more, the key is refused
+(`403 role_widened`) until a new key is issued. The creator and the members of its
+team holding `gate.apikey.manage` can always see and revoke it. People need a recent
+login to create, change or rotate keys. Every refused use and every change is
+audited (`apikey.*`, with the key id, never the key).
 
-```sh
-# create (201); the answer carries "key", shown once
-curl -sS "${auth[@]}" -X POST "$GATE/api/v1/api-keys" -H "Content-Type: application/json" -d '{
-  "name": "web certificates", "team": "web", "role": "acme-solver",
-  "expires_at": "2027-06-30T00:00:00Z", "allowed_cidrs": ["192.0.2.0/24"],
-  "acme_domains": ["www.example.com", "example.com"]}'
+## Teams and transfers
 
-curl -sS "${auth[@]}" "$GATE/api/v1/api-keys"                    # list, with last use
-curl -sS "${auth[@]}" "$GATE/api/v1/api-keys/3f9a0c1b2d4e5f60"   # one key
+A caller bound to several teams writes for its **default team** (`default_team` of
+`GET /api/v1/me`). `X-DNS-Gate-Team: <team>` on a write, or `team` in a plan, acts for
+another of its teams (`403 not_team_member` otherwise; an apply naming another team
+than its plan is `400 team_mismatch`). The EuroDNS-compatible API always uses the
+default team.
 
-# rotate: the previous key stays valid during the overlap (default 24h, "0s" for none)
-curl -sS "${auth[@]}" -X POST "$GATE/api/v1/api-keys/3f9a0c1b2d4e5f60/rotate" \
-  -H "Content-Type: application/json" -d '{"overlap": "1h"}'
+- `GET /api/v1/teams` lists the teams (declared, referenced, derived from claims, and
+  owners found in the store), with RRset counts in the zones the caller can read;
+  `GET /api/v1/teams/{team}` adds what the team owns per zone, its pending transfers
+  and, for `policy.read` holders and members, the rules of its roles.
+- A deleted RRset stays reserved for its team for `ownership.tombstone_ttl` (7 days):
+  another team gets `403 not_owner`. Live tombstones are in the `tombstones` of
+  `GET /api/v1/zones/{zone}/rrsets`.
 
-# replace the mutable fields (name, description, expiry, CIDRs, ACME domains);
-# without acme_domains the acme-dns registrations stay as they are, with it only
-# those created through the API are synced (never those of clients, "origin": "client")
-curl -sS "${auth[@]}" -X PUT "$GATE/api/v1/api-keys/3f9a0c1b2d4e5f60" \
-  -H "Content-Type: application/json" -d '{"name": "web certificates", "acme_domains": ["www.example.com"]}'
+**Transfers.** `POST /api/v1/zones/{zone}/transfers` with `rrsets` (of one team),
+`to_team`, `comment`, optionally `"apply": true`; then
+`POST /api/v1/transfers/{id}/approve` or `/reject`.
 
-# revoke (204): the key stops working at once, it stays listed with ?include_revoked=true
-curl -sS "${auth[@]}" -X DELETE "$GATE/api/v1/api-keys/3f9a0c1b2d4e5f60"
-```
-
-A listed key:
-
-```json
-{"id": "3f9a0c1b2d4e5f60", "name": "web certificates", "team": "web", "role": "acme-solver",
- "status": "active", "expires_at": "2027-06-30T00:00:00Z", "allowed_cidrs": ["192.0.2.0/24"],
- "acme_domains": ["example.com", "www.example.com"],
- "acme_dns": [{"subdomain": "8e5700ea-a4bf-41c7-8a77-e990661dcc6a", "domain": "www.example.com", "allowfrom": []}],
- "created_at": "…", "created_by": "github:repo:example/dns:ref:refs/heads/main",
- "last_used_at": "…", "last_used_ip": "192.0.2.10"}
-```
-
-The creation and rotation answers add `key` and `acme_dns_accounts` (the acme-dns
-accounts of the key by domain, see [ACME.md](ACME.md)). Team and role never change
-(`409 immutable` on `PUT`): create another key. Humans need a recent login to
-create, change or rotate keys. Refused key uses are audited
-(`apikey.authenticate`, with the key id, never the key), as are creations,
-changes, rotations and revocations (`apikey.*`).
-
-## Teams
-
-Every RRset written or adopted through the gate is owned by a team, and only the
-team's members may change or delete it. A caller bound to several teams writes
-for its **default team** (the first one, `default_team` in `GET /api/v1/me`) and may
-change the RRsets of all its teams. To act for one of them only, send the
-`X-DNS-Gate-Team` header on any `/api/v1` write, or the `team` field of a plan:
-
-```sh
-curl -sS "${auth[@]}" -X PUT "$GATE/api/v1/zones/example.com/rrsets/app/CNAME" \
-  -H "X-DNS-Gate-Team: corporate" -H "Content-Type: application/json" \
-  -d '{"ttl": 3600, "values": ["site.example.net."]}'
-
-curl -sS "${auth[@]}" -X POST "$GATE/api/v1/zones/example.com/plan" \
-  -H "Content-Type: application/json" -d '{"team": "corporate", "changes": [...]}'
-```
-
-A team the caller is not a member of is `403 not_team_member`. A plan keeps its
-team: the apply writes for it (`400 team_mismatch` if the apply names another one).
-The EuroDNS-compatible API always writes for the default team.
-
-`GET /api/v1/teams` lists the teams: declared in the `teams` block (with their
-members for `policy.read` holders), referenced without being declared (migration),
-derived from claims (`team_from` families, issuer `team_claim`), and the owners
-found in the store that nothing declares, with the number of RRsets each owns in the
-zones the caller can read; `require_second_approver` tells whether transfers and
-renames need another person's approval. `GET /api/v1/teams/{team}` adds what the team owns per
-zone, its pending transfers and, for `policy.read` holders and the team's members,
-the rules of its roles (`permissions`).
-
-A deleted RRset stays reserved for its team for `ownership.tombstone_ttl` (7 days):
-another team creating or adopting it gets `403 not_owner` and must ask for a
-transfer, whoever the caller is. The live tombstones of a managed zone are listed in
-the `tombstones` of `GET /api/v1/zones/{zone}/rrsets`.
-
-### Ownership transfers
-
-```sh
-# a member of either team allowed to write the RRsets through it (or a dns.ownership.approve holder) asks
-curl -sS "${auth[@]}" -X POST "$GATE/api/v1/zones/example.com/transfers" \
-  -H "Content-Type: application/json" -d '{
-  "rrsets": [{"host": "www", "type": "CNAME"}, {"host": "@", "type": "TXT"}],
-  "to_team": "corporate", "comment": "the corporate site moves to its own pipeline"}'
-
-# someone allowed to write every RRset through the owner team, or holding dns.ownership.approve on it, approves it
-curl -sS "${auth[@]}" -X POST "$GATE/api/v1/transfers/tr-1780000000000-0a1b2c3d4e/approve" \
-  -H "Content-Type: application/json" -d '{"comment": "ok"}'
-```
-
-The RRsets of a request belong to one team. The approver is a human (unless
-`ownership.machine_approvers`) with a recent login. With
-`ownership.require_second_approver: true` it must be another person than the
-requester, under any identity (`ownership.person_issuers`, `ownership.person_claims`);
-with the default `false` the requester may approve its own request, or propose and
-apply it at once with `"apply": true` (refused before anything is stored when the
-requester could not approve it) (`self_approved` in the answer, `approval:
-self` in the audit). The requester can always withdraw it (`/reject`).
-
-Approval applies it at once, under the zone lock, if every RRset still belongs to the
-team with the content hash it had when requested (store and provider); otherwise the
-transfer is `failed` and the answer is `412 precondition` with the transfer. When the
-zone is locked or the store or the provider is unavailable, the transfer stays
-`applying` (`423` or `502` with the transfer) and the gate retries it in the
-background for 24 hours, checking the rights of the approver again. A request not
-decided within `ownership.transfer_ttl` (7 days) expires (`410 expired`).
-`GET /api/v1/transfers?status=proposed` is the inbox: `can_decide` marks the requests
-the caller may approve. Every step is audited (`gate.transfer.propose`, `.approve`,
-`.reject`, `.apply`, with the requester, the approver and `approval`).
-
-`POST /api/v1/teams/{team}/rename` (`policy.propose`; approved by a `policy.approve`
-holder, another person with `require_second_approver`, or `"apply": true`) moves
-every RRset and tombstone of a team, in every zone of the store, for migrations. The
-approval answers `applying`: the gate applies the rename in the background within a
-few minutes, the approver needing `dns.ownership.approve` on every RRset of the team.
-The policy itself still names the old team: change the bindings in a policy revision
-too.
-
-The MCP server has the same operations: `list_teams`, `get_team` and
-`transfer_list` always, `transfer_propose`, `transfer_approve` and
-`transfer_reject` with `mcp.allow_writes`, and an optional `team` argument on
-`plan_rrset_change`, `apply_rrset_change`, `adopt_preview` and `adopt_apply`.
-`get_rrset` tells why the caller may or may not change an RRset ([CONFIG.md](CONFIG.md#mcp)).
+- The requester is a member of either team allowed to write the RRsets through it,
+  or holds `dns.ownership.approve`. The approver may write every RRset through the
+  owner team, or holds `dns.ownership.approve` on it; a human with a recent login
+  (unless `ownership.machine_approvers`); another person with
+  `ownership.require_second_approver`, otherwise possibly the requester
+  (`approval: self`). The requester can always withdraw (`/reject`).
+- Approval applies at once, under the zone lock, if every RRset still has the team and
+  content hash of the request (store and provider), else `412 precondition` and the
+  transfer is `failed`. A locked zone or an unavailable store or provider leaves it
+  `applying` (`423` or `502`), retried in the background for 24 hours with the
+  approver's rights checked again. Without a decision within
+  `ownership.transfer_ttl` (7 days) it expires (`410 expired`).
+- `GET /api/v1/transfers?status=proposed` is the inbox; `can_decide` marks what the
+  caller may approve.
+- `POST /api/v1/teams/{team}/rename` (`policy.propose`, approved by a
+  `policy.approve` holder) moves every RRset and tombstone of a team in every zone,
+  in the background; change the bindings in a policy revision too.
 
 ## Zone profiles
 
-A EuroDNS zone profile is an account-wide template (records, URL and mail
-forwards) that EuroDNS applies to a domain when it arrives on its nameservers,
-for example after a transfer: create and check it before the domain arrives.
-Profiles name no domain, so every operation needs `dns.zone.profile` granted on
-`*` ([CONFIG.md](CONFIG.md#zone-profiles)); each one is audited (`zone_profile.*`,
-with the profile content for writes; a delete reads the profile first). The body
-is the EuroDNS `ZoneProfilePage`, hosts relative to the domain.
+`/api/v1/providers/{provider}/zone-profiles` (`GET`, `POST`), `…/check` (`POST`,
+validate without saving), `…/{id}` (`GET`, `PUT`, `DELETE`): the EuroDNS
+`ZoneProfilePage`, hosts relative to the domain. See
+[Zone profiles](features/zone-profiles.md).
 
-```sh
-P="$GATE/api/v1/providers/eurodns/zone-profiles"
-# validate without saving: the answer carries the EuroDNS report
-curl -sS "${auth[@]}" -H 'Content-Type: application/json' -X POST "$P/check" -d '{
-  "name": "transfer-example.org",
-  "records": [
-    {"type": "A",  "host": "@",   "ttl": 3600, "rdata": "192.0.2.10"},
-    {"type": "MX", "host": "@",   "ttl": 3600, "rdata": "10 mx.example.net."},
-    {"type": "CNAME", "host": "www", "ttl": 3600, "rdata": "web.example.net."}
-  ],
-  "urlForwards": [], "mailForwards": []}'
-# create (201, with its id), list, read, replace, delete
-curl -sS "${auth[@]}" -H 'Content-Type: application/json' -X POST "$P" -d @profile.json
-curl -sS "${auth[@]}" "$P"
-curl -sS "${auth[@]}" "$P/42"
-curl -sS "${auth[@]}" -H 'Content-Type: application/json' -X PUT "$P/42" -d @profile.json
-curl -sS "${auth[@]}" -X DELETE "$P/42"
-```
-
-`{provider}` is a provider id of the configuration with
-`eurodns.zone_profiles: true` (`403 zone_profiles_disabled` otherwise); a
-provider of another kind answers `400 invalid_provider`. Writes need a recent
-login from humans (`403 reauth_required`); a record of the protected list is
-refused (`403 protected`), on check too; each subject may run 60 zone profile
-operations per minute (`429 rate_limited`). An update is audited with the
-previous content and the changed records (host, type and operation only in the
-journal, which shows zone profile events to `dns.zone.profile` holders only). EuroDNS refusals are `400 rejected`, with the
-EuroDNS report or errors in `details`. EuroDNS clients can also use the
-EuroDNS routes (`/zone-profiles`, `/zone-profiles/check`, `/zone-profiles/{id}`,
-pagination headers passed through) on the gate, with the same rule; when the gate
-has several EuroDNS providers, they name one in `X-DNS-Gate-Provider`.
+- `dns.zone.profile` granted on `*`; the provider must set `eurodns.zone_profiles:
+  true` (`403 zone_profiles_disabled`) and be a EuroDNS provider
+  (`400 invalid_provider`).
+- People need a recent login for writes; a protected record is refused (`403
+  protected`, on check too); 60 operations per minute per subject (`429`).
+- EuroDNS refusals are `400 rejected`, with the EuroDNS report in `details`.
+- EuroDNS clients can use the EuroDNS routes (`/zone-profiles`…) on the gate, naming
+  the provider in `X-DNS-Gate-Provider` when there are several.
 
 ## Errors
 
@@ -517,43 +287,45 @@ Errors are JSON, with a stable `reason` for programs:
 
 | Status | Reasons |
 |---|---|
-| 400 | `invalid` (request or provider validation), `relative_target` (single-label target), `bad_request`, `team_mismatch`, `rejected` (zone profile refused by EuroDNS), `invalid_provider` (zone profiles on a provider that is not EuroDNS) |
+| 400 | `invalid` (request or provider validation), `relative_target`, `bad_request`, `team_mismatch`, `rejected` (zone profile refused by EuroDNS), `invalid_provider` |
 | 401 | `unauthenticated` (also an unknown, revoked, expired or rotated API key) |
-| 403 | `forbidden` (RBAC, protected record, plan of another caller), `protected`, `zone_profiles_disabled` (zone profiles), `not_owner` (another team), `too_many_changes`, `reauth_required`, `csrf`, `session_required`, `source_ip` (key used outside its CIDRs), `role_widened` (API key whose role grew), `ephemeral_required` (ACME endpoints), `not_team_member` |
-| 404 | `not_found` (zone not managed, RRset unknown), `plan_not_found`, `zone_not_eurodns` (EuroDNS-compatible API on a zone of another provider) |
-| 409 | `foreign_rrset` (created outside the gate: adopt it first), `tainted` (changed outside the gate), `adopt_conflict`, `https_unavailable` (`require_https` on a zone whose forwards answer plain HTTP only), `immutable`, `revoked` (API keys), `too_many_values`, `too_many_registrations`, `value_taken` (ACME endpoints) |
+| 403 | `forbidden` (RBAC, protected record, plan of another caller), `protected`, `zone_profiles_disabled`, `not_owner`, `too_many_changes`, `reauth_required`, `csrf`, `session_required`, `source_ip`, `role_widened`, `ephemeral_required` (ACME), `not_team_member`, `no_binding` |
+| 404 | `not_found` (zone not managed, RRset unknown), `plan_not_found`, `zone_not_eurodns` |
+| 409 | `foreign_rrset` (adopt it first), `tainted`, `adopt_conflict`, `https_unavailable`, `immutable`, `revoked`, `too_many_values`, `too_many_registrations`, `value_taken` (ACME) |
 | 410 | `plan_expired`, `expired` (transfer request) |
-| 412 | `precondition` (If-Match, If-None-Match, `expected_hash`, `must_not_exist`, zone changed since the plan, transfer already decided or RRsets changed since the request, `expect` of a propagation check) |
-| 423 | `zone_locked`, with `Retry-After` |
+| 412 | `precondition` (`If-Match`, `If-None-Match`, `expected_hash`, `must_not_exist`, zone changed since the plan, transfer already decided or RRsets changed, `expect` of a propagation check) |
+| 423 | `zone_locked`, with `Retry-After` (`503` on the EuroDNS-compatible API) |
 | 429 | `rate_limited` (MCP, zone profiles, propagation checks), with `Retry-After` |
-| 503 | `busy` (too many propagation checks running), with `Retry-After` |
 | 501 | `not_implemented` (feature disabled in the configuration) |
 | 502 | `upstream` (provider error) |
+| 503 | `busy` (too many propagation checks running), with `Retry-After` |
 
 The full list is in the `Error` schema of the OpenAPI document.
 
-## Other endpoints
+## Endpoints
 
-- `GET /api/v1/audit` — audit log, newest first, filtered to the zones the caller
-  can read; `since`/`until` and `next_cursor` for pull-based collectors
-  ([AUDIT.md](AUDIT.md#pull-get-apiv1audit)). `source_ip` and `user_agent` are
-  shown to `policy.read` holders only.
-- `POST /api/v1/tokens` — a gate-issued bearer token for the signed-in UI user
-  (session cookie and CSRF header only), the *Get an API token* action of the
-  Connect page ([IDENTITY-CENTER.md](IDENTITY-CENTER.md)); its keys are at
-  `/.well-known/jwks.json`.
-- `POST /api/v1/zones/{zone}/adopt/preview` and `/adopt` — take over RRsets created
-  outside the gate ([ONBOARDING.md](ONBOARDING.md)).
-- `GET /api/v1/zones/{zone}/terraform` — managed RRsets as `dnsgate_record_set`
-  resources and URL forwards as `dnsgate_url_forward` resources, with `import`
-  blocks (`provider=eurodns` for `eurodns_record_set`, without forwards).
-- `/api/v1/policy/delegated/…` — roles and bindings managed by pipelines within a
-  delegation ([CONFIG.md](CONFIG.md)).
-- `/api/v1/policy/…` — the policy editor of the web UI. `explain` returns the
-  `folder` of the zone when the matching rule applied through its `folders`;
-  `who-can` returns the `folder` of the zone and flags `by_folder` the grants that
-  come from a folder selector.
-- `/acme/httpreq/present`, `/acme/httpreq/cleanup`, `/acme/acme-dns/update`,
-  `/acme/acme-dns/register` — DNS-01 challenges for certbot, acme.sh, lego,
-  win-acme, cert-manager and Caddy, with an OIDC token, a gate token or an API key
-  ([ACME.md](ACME.md)).
+| Path | Description |
+|---|---|
+| `GET /.well-known/dns-gate` | version and features, unauthenticated |
+| `/api/v1/me`, `/api/v1/connect`, `/api/v1/zones`, `/api/v1/zones/{zone}/rrsets` | identity and effective permissions, Connect page data, zones (managed, then unmanaged with `"unmanaged": true`), inventory; `ui.read` (`dns.read` for unmanaged zones) |
+| `/api/v1/zones/{zone}/rrsets/{host}/{type}`, `…/forwards[/{host}]` | single RRsets and URL forwards |
+| `…/rrsets/{host}/{type}/propagation` | [propagation check](#dns-propagation) |
+| `POST /api/v1/zones/{zone}/plan`, `/apply` | [plan and apply](#plan-and-apply) |
+| `POST /api/v1/zones/{zone}/adopt/preview`, `/adopt` | [adoption](api/ownership.md#adopt-existing-records) |
+| `GET /api/v1/zones/{zone}/terraform` | managed RRsets as `dnsgate_record_set` and forwards as `dnsgate_url_forward`, with `import` blocks (`provider=eurodns` for `eurodns_record_set`) |
+| `/api/v1/teams[/{team}[/rename]]`, `/api/v1/zones/{zone}/transfers`, `/api/v1/transfers[/{id}[/approve\|reject]]` | [teams and transfers](#teams-and-transfers) |
+| `GET /api/v1/audit` | the [audit journal](integrations/siem.md#pull-get-apiv1audit), newest first, filtered to readable zones; `source_ip` and `user_agent` for `policy.read` holders only |
+| `/api/v1/api-keys[/{id}[/rotate]]` | [API keys](#api-keys) |
+| `POST /api/v1/tokens` | gate token for the UI session (cookie and CSRF only), the Connect page |
+| `POST /api/v1/token-exchange` | [token exchange](#token-exchange) |
+| `/api/v1/providers/{provider}/zone-profiles[/check\|/{id}]` | [zone profiles](#zone-profiles) |
+| `/api/v1/policy[/…]` | policy editor of the UI: revisions, approve, reject, activate, rollback, export, `explain`, `who-can`, virtual key generation |
+| `/api/v1/policy/delegated[/roles\|bindings/{name}]` | [delegation API](config/managed-policy.md#delegation-api) |
+| `GET /api/v1/connect/claude-desktop.mcpb` | the [Claude Desktop extension](config/ui-mcp.md#claude-desktop-extension) |
+| `/mcp`, `/.well-known/oauth-protected-resource` | [MCP](config/ui-mcp.md#mcp) |
+| `/auth/login`, `/auth/callback`, `/auth/logout`, `POST /auth/saml/acs`, `GET /auth/saml/metadata` | UI login, OIDC or SAML |
+| `GET /.well-known/jwks.json`, `/.well-known/openid-configuration`, `/.well-known/oauth-authorization-server`, `/oauth/authorize`, `POST /oauth/token` | the gate issuer's keys and its authorization server for native clients |
+| `POST /acme/httpreq/present`, `/cleanup`, `/acme/acme-dns/update`, `/register` | [ACME endpoints](ACME.md) |
+| `POST /.well-known/dns-gate/zones/{zone}/adopt` | adoption for the `eurodns` Terraform provider on import (RRsets already owned by the caller's team: a no-op needing `dns.record.write`) |
+| EuroDNS API paths | for zones of a `eurodns` provider only (`404 zone_not_eurodns` otherwise): `getDnsZone`, `saveDnsZone`, `checkDnsZone`, `addDnsRecords`, `deleteDnsRecord` through the zone engine; `listDnsZoneSnapshots`, `getSnapShot`, `getDnssecStatus`, `getDomain` proxied; the zone profile operations. Every other operation is `403 operation_denied`; query strings, encoded separators and dot segments are refused |
+| `/healthz`, `/readyz` | probes |
