@@ -1002,8 +1002,10 @@ paths:
         name (`HTTPREQ_USERNAME`) and the key as password
         (`HTTPREQ_PASSWORD`). The caller's role must have an `ephemeral_ttl`
         (`403 ephemeral_required`). Each value belongs to its author: cleanup
-        removes only the caller's own values. An RRset holds at most
-        `acme.max_values` values (`409 too_many_values`).
+        removes only the caller's own values, and a value written by another
+        caller cannot be presented again (`409 value_taken`). An RRset holds
+        at most `acme.max_values` values, `acme.max_values_per_author` per
+        caller (`409 too_many_values`).
       security:
         - apiKeyBasic: []
         - apiKey: []
@@ -1266,7 +1268,7 @@ components:
                 type: string
                 description: |
                   forbidden, registration_requires_api_key, domain_required,
-                  bad_domain, bad_subdomain, bad_txt, invalid_allowfrom_cidr, too_many_values, too_many_registrations,
+                  bad_domain, bad_subdomain, bad_txt, invalid_allowfrom_cidr, too_many_values, too_many_registrations, value_taken,
                   malformed_json_payload, ephemeral_required, source_ip,
                   no_binding, unavailable, or a zone engine reason.
               message: { type: string }
@@ -1305,7 +1307,7 @@ components:
             501 not_implemented; 502 upstream; 503 store_unavailable,
             unavailable; 504 timeout. API keys and ACME add 403
             ephemeral_required, role_widened and 409 immutable, revoked,
-            too_many_values, too_many_registrations.
+            too_many_values, too_many_registrations, value_taken.
           enum:
             - invalid
             - relative_target
@@ -1355,6 +1357,7 @@ components:
             - revoked
             - role_widened
             - too_many_values
+            - value_taken
             - too_many_registrations
         message: { type: string }
         details: {}

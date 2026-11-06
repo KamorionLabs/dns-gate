@@ -41,7 +41,8 @@ Generate a session key with `openssl rand -hex 32`, a token signing key with `op
 | `limits.ephemeral_lifetime_factor` | `4` | An ephemeral RRset lives at most its creation plus this many `ephemeral_ttl`, however often values are added. |
 | `acme.max_registrations` | `100` | acme-dns registrations and httpreq value ledgers per API key or token subject. |
 | `acme.registration_idle` | `720h` | Registrations of token subjects and httpreq ledgers unused this long are purged (maintenance, DynamoDB TTL). |
-| `acme.max_values` | `10` | Values of one challenge TXT RRset. |
+| `acme.max_values` | `20` | Values of one challenge TXT RRset. |
+| `acme.max_values_per_author` | `4` | Values one API key or token subject may hold in a challenge TXT RRset (at most `acme.max_values`). |
 | `lock.ttl`, `lock.wait` | `60s`, `30s` | Per-zone write lease and how long a request waits for it (then `503 zone_locked`). |
 
 ## Providers

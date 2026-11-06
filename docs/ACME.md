@@ -15,8 +15,10 @@ The gate speaks two protocols that existing clients already support:
 Every write goes through the zone engine as the caller: the record scope of its
 role, ownership by its team, the zone lock, protected records and the audit log
 apply. A name and its wildcard are validated together: their values coexist in one
-TXT RRset (at most `acme.max_values`, 10 by default), and each value belongs to the
-caller that wrote it: only that caller removes it. The endpoints work the same way
+TXT RRset (at most `acme.max_values` values, 20 by default, and
+`acme.max_values_per_author`, 4, per caller), and each value belongs to the caller
+that wrote it: only that caller removes it, and nobody else can claim it
+(`409 value_taken`). The endpoints work the same way
 on AWS Lambda.
 
 Contents:
@@ -82,6 +84,8 @@ roles:
   `limits.ephemeral_lifetime_factor` (4) TTLs; the reconciler deletes expired RRsets
   (`reconcile_interval`, or the Lambda maintenance schedule). A caller that also
   holds a permanent write role is refused: bind the ACME identity to this role only.
+  The bound counts from the creation of the RRset: a caller that empties it and
+  writes again starts a new one.
 - The record scope keeps the caller on challenge records: a leaked credential cannot
   touch anything else.
 
@@ -569,9 +573,12 @@ example.com {
 | `/register` creates an anonymous account | `401 registration_requires_api_key`. With an API key (basic authentication, e.g. `https://<id>:<key>@dns-gate.example.com/acme/acme-dns`, or `X-Api-User`/`X-Api-Key`), `{"domain": "<name>", "allowfrom": [...]}` (`domain` is a gate extension) answers `201` with an account whose password is the key. Tokens cannot register (`403`). |
 | Two most recent TXT values per subdomain | Same, per registration (per subject and domain with a token). Values written by other means (httpreq) are left alone. Registrations and their values are saved only once the record is written. |
 | No cleanup | Same; the RRset expires with the role's `ephemeral_ttl`. |
-| `allowfrom` per registration | Stricter: for a key and a domain, the address must be allowed by every registration of that key for that domain that has an `allowfrom`, whatever the subdomain used (a registration UUID or the domain name). On top of the key's `allowed_cidrs`. |
+| `allowfrom` per registration | Stricter: for a key and a domain, the address must be allowed by every registration of that key for that domain that has an `allowfrom`, for every write of the key to the `_acme-challenge` RRset of that domain: acme-dns whatever the subdomain used, httpreq, the RRset API and the EuroDNS-compatible API. On top of the key's `allowed_cidrs`. |
 | Unlimited registrations | At most `acme.max_registrations` (100) per key or token subject (`409 too_many_registrations`); those of token subjects are purged after `acme.registration_idle` (30 days) without use. |
 | Errors `{"error": "..."}` | Same, with a `message`: `bad_subdomain`, `bad_txt`, `forbidden`, `ephemeral_required`… |
+
+The unmodified acme.sh `dns_acmedns` (with an API key, an exchanged token and an
+OIDC token) and certbot acme-dns hook run against the gate in CI, at pinned versions.
 
 ## 6. Security
 

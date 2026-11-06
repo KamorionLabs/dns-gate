@@ -188,9 +188,11 @@ never manages keys):
   (longer `ephemeral_ttl`, or permanent) or less capped (`max_changes_per_request`)
   than the caller's own write rights.
 
-The key records what its role granted at issuance; if the role later grants more
-(rules, ephemeral TTL, change limit), the key is refused (`403 role_widened`) until
-a new key is issued; a role that shrinks is fine. The creator of a key and the
+The key records what its role declared at issuance (rules, `ephemeral_ttl`,
+`max_changes_per_request`, 0 meaning "inherit the global default"); if the role later
+declares more, the key is refused (`403 role_widened`) until a new key is issued; a
+role that shrinks is fine, and changing the global limits or `policy.bounds` never
+invalidates keys. A key without a recorded grant is refused. The creator of a key and the
 members of its team holding `gate.apikey.manage` anywhere can always see and revoke
 it, even when they no longer manage the zones of its role.
 
@@ -250,7 +252,7 @@ Errors are JSON, with a stable `reason` for programs:
 | 401 | `unauthenticated` (also an unknown, revoked, expired or rotated API key) |
 | 403 | `forbidden` (RBAC, protected record, plan of another caller), `not_owner` (another team), `too_many_changes`, `reauth_required`, `csrf`, `session_required`, `source_ip` (key used outside its CIDRs), `role_widened` (API key whose role grew), `ephemeral_required` (ACME endpoints) |
 | 404 | `not_found` (zone not managed, RRset unknown), `plan_not_found`, `zone_not_eurodns` (EuroDNS-compatible API on a zone of another provider) |
-| 409 | `foreign_rrset` (created outside the gate: adopt it first), `tainted` (changed outside the gate), `adopt_conflict`, `immutable`, `revoked` (API keys), `too_many_values`, `too_many_registrations` (ACME endpoints) |
+| 409 | `foreign_rrset` (created outside the gate: adopt it first), `tainted` (changed outside the gate), `adopt_conflict`, `immutable`, `revoked` (API keys), `too_many_values`, `too_many_registrations`, `value_taken` (ACME endpoints) |
 | 410 | `plan_expired` |
 | 412 | `precondition` (If-Match, If-None-Match, `expected_hash`, `must_not_exist`, zone changed since the plan) |
 | 423 | `zone_locked`, with `Retry-After` |
