@@ -26,6 +26,7 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/config"
 	"github.com/KamorionLabs/dns-gate/internal/lambdarun"
 	"github.com/KamorionLabs/dns-gate/internal/oidctest"
+	"github.com/KamorionLabs/dns-gate/internal/store"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 	eurodns "github.com/KamorionLabs/eurodns-go"
 	"github.com/KamorionLabs/eurodns-go/eurodnstest"
@@ -44,6 +45,12 @@ type acmeEnv struct {
 }
 
 func newACMEEnv(t *testing.T) *acmeEnv {
+	t.Helper()
+	return newACMEEnvWith(t, "")
+}
+
+// newACMEEnvWith adds extra top-level YAML to the configuration.
+func newACMEEnvWith(t *testing.T, extra string) *acmeEnv {
 	t.Helper()
 	e := &acmeEnv{t: t, fake: eurodnstest.NewServer(eurodnstest.Options{AppID: "app", APIKey: "k"}), idp: oidctest.New(), other: oidctest.New()}
 	t.Cleanup(e.fake.Close)
@@ -88,7 +95,7 @@ bindings:
   - {role: key-admin, team: web, subjects: [{issuer: ci, claims: {sub: [admin]}}]}
   - {role: writer, team: web, subjects: [{issuer: ci, claims: {sub: [writer]}}]}
   - {role: acme, team: web, subjects: [{issuer: ci, claims: {sub: ["repo:example/certs:*"]}}, {issuer: other, claims: {sub: [acme]}}]}
-`
+` + extra
 	signingKey := signingKeyPEM(t)
 	cfg, err := config.Parse([]byte(yaml), func(k string) string {
 		switch k {
@@ -844,5 +851,107 @@ func TestACMEDNSAllowFromPerDomain(t *testing.T) {
 	}
 	if status, b := e.do("POST", "/acme/acme-dns/update", hdr, `{"subdomain":"www.example.com", "txt": "`+challenge("a")+`"}`); status != 200 {
 		t.Errorf("other domain: %d %s", status, b)
+	}
+}
+
+func (e *acmeEnv) registrations(id string) []uiapi.ACMEDNSRegistration {
+	e.t.Helper()
+	var v uiapi.APIKey
+	_, b := e.do("GET", "/api/v1/api-keys/"+id, e.bearer("admin"), "")
+	if err := json.Unmarshal(b, &v); err != nil {
+		e.t.Fatal(err)
+	}
+	return v.ACMEDNS
+}
+
+// Registrations and their values are persisted only after a successful
+// write; an owner has at most acme.max_registrations of them, and idle
+// registrations of token subjects are purged by the maintenance.
+func TestACMERegistrationsPostCommitAndBounded(t *testing.T) {
+	e := newACMEEnvWith(t, "acme: {max_registrations: 3, registration_idle: 24h}\n")
+	k := e.createKey(`{"name": "k", "team": "web", "role": "acme"}`)
+	hdr := map[string]string{"X-Api-User": k.ID, "X-Api-Key": k.Key}
+	if status, b := e.do("POST", "/acme/acme-dns/update", hdr, `{"subdomain":"legacy.example.com", "txt": "`+challenge("x")+`"}`); status != 409 {
+		t.Fatalf("foreign RRset: %d %s", status, b)
+	}
+	if regs := e.registrations(k.ID); len(regs) != 0 {
+		t.Fatalf("registration persisted by a refused write: %+v", regs)
+	}
+	for _, d := range []string{"a.example.com", "b.example.com", "c.example.com"} {
+		if status, b := e.do("POST", "/acme/acme-dns/update", hdr, `{"subdomain":"`+d+`", "txt": "`+challenge(d)+`"}`); status != 200 {
+			t.Fatalf("%s: %d %s", d, status, b)
+		}
+	}
+	status, b := e.do("POST", "/acme/acme-dns/update", hdr, `{"subdomain":"d.example.com", "txt": "`+challenge("d")+`"}`)
+	if status != 409 || !strings.Contains(string(b), "too_many_registrations") {
+		t.Fatalf("registration cap: %d %s", status, b)
+	}
+	if status, b := e.do("POST", "/acme/acme-dns/register", basic(k.ID, k.Key), `{"domain": "d.example.com"}`); status != 409 {
+		t.Fatalf("registration cap on /register: %d %s", status, b)
+	}
+
+	tok := map[string]string{"X-Api-User": "oidc", "X-Api-Key": e.idp.Sign(map[string]any{"sub": "repo:example/certs:ref:refs/heads/main", "aud": "dns-gate"})}
+	if status, b := e.do("POST", "/acme/acme-dns/update", tok, `{"subdomain":"e.example.com", "txt": "`+challenge("e")+`"}`); status != 200 {
+		t.Fatalf("token: %d %s", status, b)
+	}
+	owner := "ci:repo:example/certs:ref:refs/heads/main"
+	if regs, _ := e.app.Store.(store.APIKeyStore).ListACMERegistrations(context.Background(), owner); len(regs) != 1 || regs[0].ExpiresAt == nil {
+		t.Fatalf("token registration %+v", regs)
+	}
+	e.app.now = func() time.Time { return time.Now().Add(25 * time.Hour) }
+	if err := e.app.GCPlans(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if regs, _ := e.app.Store.(store.APIKeyStore).ListACMERegistrations(context.Background(), owner); len(regs) != 0 {
+		t.Fatalf("idle token registration kept: %+v", regs)
+	}
+	if regs := e.registrations(k.ID); len(regs) != 3 {
+		t.Fatalf("key registrations purged: %+v", regs)
+	}
+}
+
+// A PUT without acme_domains keeps every registration; with acme_domains it
+// syncs only those created through the API, never those of clients.
+func TestAPIKeyPutKeepsClientRegistrations(t *testing.T) {
+	e := newACMEEnv(t)
+	k := e.createKey(`{"name": "k", "team": "web", "role": "acme", "acme_domains": ["www.example.com"]}`)
+	if status, b := e.do("POST", "/acme/acme-dns/register", basic(k.ID, k.Key), `{"domain": "api.example.com"}`); status != 201 {
+		t.Fatalf("register: %d %s", status, b)
+	}
+	if status, b := e.do("PUT", "/api/v1/api-keys/"+k.ID, e.bearer("admin"), `{"name": "renamed"}`); status != 200 {
+		t.Fatalf("put: %d %s", status, b)
+	}
+	if regs := e.registrations(k.ID); len(regs) != 2 {
+		t.Fatalf("a PUT without acme_domains removed registrations: %+v", regs)
+	}
+	e.do("PUT", "/api/v1/api-keys/"+k.ID, e.bearer("admin"), `{"name": "renamed", "acme_domains": []}`)
+	regs := e.registrations(k.ID)
+	if len(regs) != 1 || regs[0].Domain != "api.example.com" {
+		t.Fatalf("client registration removed by the sync: %+v", regs)
+	}
+}
+
+// httpreq: each value belongs to its author, who alone cleans it up, and a
+// challenge RRset holds at most acme.max_values values.
+func TestHTTPReqValueAuthors(t *testing.T) {
+	e := newACMEEnvWith(t, "acme: {max_values: 3}\n")
+	k1 := e.createKey(`{"name": "one", "team": "web", "role": "acme"}`)
+	k2 := e.createKey(`{"name": "two", "team": "web", "role": "acme"}`)
+	body := func(v string) string { return `{"fqdn": "_acme-challenge.example.com.", "value": "` + v + `"}` }
+	e.do("POST", "/acme/httpreq/present", basic(k1.ID, k1.Key), body("v1"))
+	if status, b := e.do("POST", "/acme/httpreq/cleanup", basic(k2.ID, k2.Key), body("v1")); status != 200 {
+		t.Fatalf("cleanup of another's value: %d %s", status, b)
+	}
+	if got := e.txt("_acme-challenge"); !slices.Equal(got, []string{"v1"}) {
+		t.Fatalf("value of another key removed: %v", got)
+	}
+	e.do("POST", "/acme/httpreq/present", basic(k2.ID, k2.Key), body("v2"))
+	e.do("POST", "/acme/httpreq/present", basic(k2.ID, k2.Key), body("v3"))
+	if status, b := e.do("POST", "/acme/httpreq/present", basic(k1.ID, k1.Key), body("v4")); status != 409 || !strings.Contains(string(b), "too_many_values") {
+		t.Fatalf("values cap: %d %s", status, b)
+	}
+	e.do("POST", "/acme/httpreq/cleanup", basic(k1.ID, k1.Key), body("v1"))
+	if got := e.txt("_acme-challenge"); !slices.Equal(got, []string{"v2", "v3"}) {
+		t.Fatalf("after cleanup by its author: %v", got)
 	}
 }

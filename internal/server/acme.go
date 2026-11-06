@@ -6,11 +6,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/netip"
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/KamorionLabs/dns-gate/internal/apikey"
 	"github.com/KamorionLabs/dns-gate/internal/authn"
@@ -66,8 +68,8 @@ func (s *Server) handleACME(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "POST only")
 		return
 	}
-	if strings.HasPrefix(p, ACMEDNSPath+"/") && s.cfg.APIKeys == nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found", "message": "acme-dns needs a store"})
+	if s.cfg.APIKeys == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found", "message": "the ACME endpoints need a store"})
 		return
 	}
 	switch p {
@@ -159,14 +161,44 @@ func (s *Server) handleHTTPReq(w http.ResponseWriter, r *http.Request, present b
 		writeError(w, http.StatusBadRequest, "bad_request", msg)
 		return
 	}
-	err = s.acmeWrite(r.Context(), subj, t, op, func(vals []string) ([]string, error) {
-		if present {
-			if slices.Contains(vals, value) {
-				return vals, nil
+	owner, sub := acmeOwner(subj), "httpreq:"+t.domain
+	if present {
+		if _, err := s.cfg.APIKeys.GetACMERegistration(r.Context(), owner, sub); errors.Is(err, store.ErrNotFound) {
+			if ae := s.acmeRoom(r.Context(), owner); ae != nil {
+				writeError(w, ae.status, ae.reason, ae.message)
+				return
 			}
-			return append(vals, value), nil
 		}
-		return slices.DeleteFunc(vals, func(v string) bool { return v == value }), nil
+	}
+	err = s.acmeWrite(r.Context(), subj, t, op, func(vals []string) ([]string, func(context.Context) error, error) {
+		now := s.now().UTC()
+		led, err := s.cfg.APIKeys.GetACMERegistration(r.Context(), owner, sub)
+		switch {
+		case errors.Is(err, store.ErrNotFound):
+			led = &store.ACMERegistration{KeyID: owner, Subdomain: sub, Domain: t.domain, Origin: store.ACMEOriginHTTPReq, CreatedAt: now}
+		case err != nil:
+			return nil, nil, err
+		}
+		own := slices.Contains(led.Values, value)
+		switch {
+		case present && !own:
+			led.Values = append(led.Values, value)
+			if !slices.Contains(vals, value) {
+				vals = append(vals, value)
+			}
+		case !present && own:
+			led.Values = slices.DeleteFunc(led.Values, func(v string) bool { return v == value })
+			vals = slices.DeleteFunc(vals, func(v string) bool { return v == value })
+		case !present:
+			return vals, nil, nil
+		}
+		led.UpdatedAt, led.ExpiresAt = now, s.acmeIdle(now)
+		return vals, func(ctx context.Context) error {
+			if len(led.Values) == 0 {
+				return s.cfg.APIKeys.DeleteACMERegistration(ctx, owner, sub)
+			}
+			return s.cfg.APIKeys.PutACMERegistration(ctx, *led)
+		}, nil
 	})
 	if err != nil {
 		s.acmeFailure(w, r, err, false)
@@ -203,9 +235,10 @@ func (s *Server) acmeFailure(w http.ResponseWriter, r *http.Request, err error, 
 }
 
 // acmeWrite changes the values of the challenge RRset of t under the zone
-// lock; mutate gets the current values (nil when absent) and returns the
-// new ones (none deletes the RRset).
-func (s *Server) acmeWrite(ctx context.Context, subj *identity.Subject, t acmeTarget, op string, mutate func([]string) ([]string, error)) error {
+// lock. mutate gets the current values (nil when absent) and returns the
+// new ones (none deletes the RRset) and the state to persist once the write
+// succeeded, if any. An RRset never grows beyond acme.max_values values.
+func (s *Server) acmeWrite(ctx context.Context, subj *identity.Subject, t acmeTarget, op string, mutate func([]string) ([]string, func(context.Context) error, error)) error {
 	if s.cfg.Authz.EphemeralTTL(subj) <= 0 {
 		return &acmeError{http.StatusForbidden, "ephemeral_required", "ACME endpoints need a role with ephemeral_ttl: challenge records must expire"}
 	}
@@ -223,18 +256,21 @@ func (s *Server) acmeWrite(ctx context.Context, subj *identity.Subject, t acmeTa
 		if set, ok := cur.Set(t.key); ok {
 			old, vals, ttl = &set, slices.Clone(set.Values), set.TTL
 		}
-		next, err := mutate(slices.Clone(vals))
+		next, commit, err := mutate(slices.Clone(vals))
 		if err != nil {
 			return nil, err
 		}
+		if max := s.cfg.Config.ACME.MaxValues; len(next) > len(vals) && len(next) > max {
+			return nil, &acmeError{http.StatusConflict, "too_many_values", fmt.Sprintf("%s TXT already holds %d values (acme.max_values)", t.key.Host, len(vals))}
+		}
 		if sameValues(vals, next) {
-			return &zonewrite.Plan{}, nil
+			return &zonewrite.Plan{Committed: commit}, nil
 		}
 		c := dns.Change{Key: t.key, Old: old}
 		if len(next) > 0 {
 			c.New = &dns.RRset{Key: t.key, TTL: ttl, Values: next}
 		}
-		return &zonewrite.Plan{Changes: []dns.Change{c}}, nil
+		return &zonewrite.Plan{Changes: []dns.Change{c}, Committed: commit}, nil
 	})
 	return err
 }
@@ -383,8 +419,12 @@ func (s *Server) handleACMEDNSRegister(w http.ResponseWriter, r *http.Request) {
 			"message": "the role of this key may not answer challenges of " + t.domain + " (record scope or ephemeral_ttl)"})
 		return
 	}
+	if ae := s.acmeRoom(r.Context(), subj.ID); ae != nil {
+		writeJSON(w, ae.status, map[string]string{"error": ae.reason, "message": ae.message})
+		return
+	}
 	now := s.now().UTC()
-	rg := store.ACMERegistration{KeyID: subj.ID, Subdomain: newUUID(), Domain: t.domain, AllowFrom: allow, CreatedAt: now, UpdatedAt: now}
+	rg := store.ACMERegistration{KeyID: subj.ID, Subdomain: newUUID(), Domain: t.domain, Origin: store.ACMEOriginClient, AllowFrom: allow, CreatedAt: now, UpdatedAt: now}
 	if err := s.cfg.APIKeys.PutACMERegistration(r.Context(), rg); err != nil {
 		s.acmeFailure(w, r, err, true)
 		return
@@ -435,34 +475,38 @@ func (s *Server) handleACMEDNSUpdate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_subdomain", "message": msg})
 		return
 	}
-	err := s.acmeWrite(r.Context(), subj, t, op, func(vals []string) ([]string, error) {
-		cur := reg
+	if reg.Version == 0 {
+		if ae := s.acmeRoom(r.Context(), reg.KeyID); ae != nil {
+			writeJSON(w, ae.status, map[string]string{"error": ae.reason, "message": ae.message})
+			return
+		}
+	}
+	err := s.acmeWrite(r.Context(), subj, t, op, func(vals []string) ([]string, func(context.Context) error, error) {
+		cur := *reg
 		fresh, err := s.cfg.APIKeys.GetACMERegistration(r.Context(), reg.KeyID, reg.Subdomain)
 		switch {
 		case err == nil:
-			cur = fresh
+			cur = *fresh
 		case !errors.Is(err, store.ErrNotFound):
-			return nil, err
+			return nil, nil, err
 		case reg.Version > 0:
-			return nil, &acmeError{http.StatusConflict, "conflict", "the registration was removed meanwhile"}
+			return nil, nil, &acmeError{http.StatusConflict, "conflict", "the registration was removed meanwhile"}
 		}
 		recent := append(slices.DeleteFunc(slices.Clone(cur.Values), func(v string) bool { return v == req.TXT }), req.TXT)
 		var evicted []string
 		if n := len(recent) - store.MaxACMEValues; n > 0 {
 			evicted, recent = recent[:n], recent[n:]
 		}
-		cur.Values, cur.UpdatedAt = recent, s.now().UTC()
-		if err := s.cfg.APIKeys.PutACMERegistration(r.Context(), *cur); err != nil {
-			if errors.Is(err, store.ErrConflict) {
-				return nil, &acmeError{http.StatusConflict, "conflict", "concurrent update of the registration: retry"}
-			}
-			return nil, err
+		now := s.now().UTC()
+		cur.Values, cur.UpdatedAt = recent, now
+		if subj.Kind != identity.KindAPIKey {
+			cur.ExpiresAt = s.acmeIdle(now)
 		}
 		vals = slices.DeleteFunc(vals, func(v string) bool { return slices.Contains(evicted, v) })
 		if !slices.Contains(vals, req.TXT) {
 			vals = append(vals, req.TXT)
 		}
-		return vals, nil
+		return vals, func(ctx context.Context) error { return s.cfg.APIKeys.PutACMERegistration(ctx, cur) }, nil
 	})
 	if err != nil {
 		s.acmeFailure(w, r, err, true)
@@ -502,7 +546,28 @@ func (s *Server) acmeRegistration(ctx context.Context, subj *identity.Subject, s
 		return nil, &acmeError{http.StatusBadRequest, "bad_subdomain", "unknown subdomain: use a registration of this key or the domain name"}
 	}
 	now := s.now().UTC()
-	return &store.ACMERegistration{KeyID: owner, Subdomain: sub, Domain: sub, CreatedAt: now, UpdatedAt: now}, nil
+	return &store.ACMERegistration{KeyID: owner, Subdomain: sub, Domain: sub, Origin: store.ACMEOriginClient, CreatedAt: now, UpdatedAt: now}, nil
+}
+
+// acmeRoom refuses a new registration (or httpreq ledger) beyond
+// acme.max_registrations for its owner.
+func (s *Server) acmeRoom(ctx context.Context, owner string) *acmeError {
+	regs, err := s.cfg.APIKeys.ListACMERegistrations(ctx, owner)
+	if err != nil {
+		s.log.Error("acme registration list", "err", err)
+		return &acmeError{http.StatusServiceUnavailable, "unavailable", "registration store unavailable"}
+	}
+	if max := s.cfg.Config.ACME.MaxRegistrations; len(regs) >= max {
+		return &acmeError{http.StatusConflict, "too_many_registrations", fmt.Sprintf("%d ACME registrations already (acme.max_registrations)", len(regs))}
+	}
+	return nil
+}
+
+// acmeIdle is when an idle registration of a token subject, or an httpreq
+// ledger, is purged.
+func (s *Server) acmeIdle(now time.Time) *time.Time {
+	t := now.Add(s.cfg.Config.ACME.RegistrationIdle.D())
+	return &t
 }
 
 // acmeAllowed applies allowfrom: the client address must be allowed by

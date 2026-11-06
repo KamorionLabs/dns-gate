@@ -29,7 +29,6 @@ const (
 
 	defaultKeyOverlap = 24 * time.Hour
 	maxKeyOverlap     = 30 * 24 * time.Hour
-	maxACMEDomains    = 100
 )
 
 var (
@@ -125,13 +124,18 @@ func (s *Server) keyView(ctx context.Context, k store.APIKey) (uiapi.APIKey, []s
 	if k.PreviousHash != "" && k.PreviousExpiresAt != nil && now.Before(*k.PreviousExpiresAt) {
 		v.PreviousKeyExpiresAt = k.PreviousExpiresAt
 	}
+	var dns []store.ACMERegistration
 	for _, rg := range regs {
-		if !slices.Contains(v.ACMEDomains, rg.Domain) {
+		if rg.Origin == store.ACMEOriginHTTPReq {
+			continue
+		}
+		dns = append(dns, rg)
+		if rg.Origin == store.ACMEOriginAPI && !slices.Contains(v.ACMEDomains, rg.Domain) {
 			v.ACMEDomains = append(v.ACMEDomains, rg.Domain)
 		}
-		v.ACMEDNS = append(v.ACMEDNS, uiapi.ACMEDNSRegistration{Subdomain: rg.Subdomain, Domain: rg.Domain, AllowFrom: nonNil(rg.AllowFrom)})
+		v.ACMEDNS = append(v.ACMEDNS, uiapi.ACMEDNSRegistration{Subdomain: rg.Subdomain, Domain: rg.Domain, Origin: rg.Origin, AllowFrom: nonNil(rg.AllowFrom)})
 	}
-	return v, regs, nil
+	return v, dns, nil
 }
 
 // issued is the answer of a creation or rotation, with the acme-dns
@@ -215,8 +219,8 @@ func (s *Server) validateKeyRequest(snap *policy.Snapshot, req *uiapi.APIKeyRequ
 		}
 		req.AllowedCIDRs[i] = p.Masked().String()
 	}
-	if len(req.ACMEDomains) > maxACMEDomains {
-		return nil, perr(http.StatusBadRequest, "invalid", fmt.Sprintf("acme_domains: at most %d domains", maxACMEDomains))
+	if max := s.cfg.Config.ACME.MaxRegistrations; len(req.ACMEDomains) > max {
+		return nil, perr(http.StatusBadRequest, "invalid", fmt.Sprintf("acme_domains: at most %d domains (acme.max_registrations)", max))
 	}
 	var domains []string
 	for i, d := range req.ACMEDomains {
@@ -299,9 +303,9 @@ func (s *Server) createAPIKey(w http.ResponseWriter, r *http.Request, subj *iden
 	return nil
 }
 
-// syncRegistrations makes the API registrations of a key (one random
-// subdomain per domain) match domains. Registrations created by clients
-// whose subdomain is the domain itself are left alone.
+// syncRegistrations makes the registrations a key got through the API (one
+// random subdomain per domain) match domains. Registrations of clients
+// (/register, domain names used as subdomain) are left alone.
 func (s *Server) syncRegistrations(ctx context.Context, id string, domains []string, now time.Time) error {
 	regs, err := s.cfg.APIKeys.ListACMERegistrations(ctx, id)
 	if err != nil {
@@ -309,7 +313,7 @@ func (s *Server) syncRegistrations(ctx context.Context, id string, domains []str
 	}
 	have := map[string]bool{}
 	for _, rg := range regs {
-		if rg.Subdomain == rg.Domain {
+		if rg.Origin != store.ACMEOriginAPI {
 			continue
 		}
 		if !slices.Contains(domains, rg.Domain) {
@@ -324,7 +328,7 @@ func (s *Server) syncRegistrations(ctx context.Context, id string, domains []str
 		if have[d] {
 			continue
 		}
-		rg := store.ACMERegistration{KeyID: id, Subdomain: newUUID(), Domain: d, CreatedAt: now, UpdatedAt: now}
+		rg := store.ACMERegistration{KeyID: id, Subdomain: newUUID(), Domain: d, Origin: store.ACMEOriginAPI, CreatedAt: now, UpdatedAt: now}
 		if err := s.cfg.APIKeys.PutACMERegistration(ctx, rg); err != nil {
 			return err
 		}
@@ -358,8 +362,10 @@ func (s *Server) replaceAPIKey(w http.ResponseWriter, r *http.Request, subj *ide
 	if e := s.updateKey(r.Context(), *k); e != nil {
 		return e
 	}
-	if err := s.syncRegistrations(r.Context(), id, domains, s.now().UTC()); err != nil {
-		return perr(http.StatusServiceUnavailable, "unavailable", "API key store unavailable")
+	if req.ACMEDomains != nil {
+		if err := s.syncRegistrations(r.Context(), id, domains, s.now().UTC()); err != nil {
+			return perr(http.StatusServiceUnavailable, "unavailable", "API key store unavailable")
+		}
 	}
 	s.apiAudit(r, subj, "apikey.update", "", "allow", "", map[string]any{"key_id": id, "acme_domains": domains})
 	return s.getAPIKey(w, r, subj, snap, id)

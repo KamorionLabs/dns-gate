@@ -4,6 +4,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -50,6 +51,7 @@ type App struct {
 	handler   http.Handler
 	opts      Options
 	log       *slog.Logger
+	now       func() time.Time
 
 	// PlanGC deletes the expired RRset plans of MCP and of the REST API;
 	// Run and Maintenance call it when set. New sets it to GCPlans.
@@ -154,16 +156,24 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 	if err != nil {
 		return nil, err
 	}
-	a := &App{Config: cfg, Store: st, Engine: eng, Policy: holder, Discovery: disc, authz: authz, handler: srv.Handler(), opts: opts, log: log}
+	a := &App{Config: cfg, Store: st, Engine: eng, Policy: holder, Discovery: disc, authz: authz, handler: srv.Handler(), opts: opts, log: log, now: time.Now}
 	a.PlanGC = a.GCPlans
 	return a, nil
 }
 
-// GCPlans purges the expired RRset plans of the store.
+// GCPlans purges the expired RRset plans of the store, and the idle ACME
+// registrations.
 func (a *App) GCPlans(ctx context.Context) error {
-	n, err := a.Store.GCPlans(ctx, time.Now())
+	n, err := a.Store.GCPlans(ctx, a.now())
 	if n > 0 {
 		a.log.Info("plan gc", "removed", n)
+	}
+	if keys, ok := a.Store.(store.APIKeyStore); ok {
+		m, perr := keys.PurgeACMERegistrations(ctx, a.now())
+		if m > 0 {
+			a.log.Info("acme registration gc", "removed", m)
+		}
+		err = errors.Join(err, perr)
 	}
 	return err
 }

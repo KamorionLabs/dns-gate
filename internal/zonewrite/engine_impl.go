@@ -506,6 +506,7 @@ func (e *engine) Write(ctx context.Context, s *identity.Subject, zoneIn, ifMatch
 		e.log.Info("rebase ignored out-of-scope differences", "zone", zone, "subject", s.String(), "ignored", plan.Ignored)
 	}
 	if len(plan.Changes) == 0 && !plan.Settings {
+		e.committed(ctx, zone, plan)
 		return cur, version, nil
 	}
 	claims, err := e.validate(ctx, s, p, zone, sets, owns, plan, false)
@@ -584,7 +585,18 @@ func (e *engine) Write(ctx context.Context, s *identity.Subject, zoneIn, ifMatch
 		extra = map[string]any{"ignored_out_of_scope": plan.Ignored}
 	}
 	e.emit(ctx, s, action, zone, "allow", "", uiChanges(plan.Changes), snapshot, extra)
+	e.committed(ctx, zone, plan)
 	return result, newVersion, nil
+}
+
+// committed runs the Committed hook of a plan.
+func (e *engine) committed(ctx context.Context, zone string, plan *Plan) {
+	if plan.Committed == nil {
+		return
+	}
+	if err := plan.Committed(ctx); err != nil {
+		e.log.Warn("post-write hook failed", "zone", zone, "error", err)
+	}
 }
 
 // check runs the provider dry run when enabled and refuses blocking problems.

@@ -393,12 +393,11 @@ func (s *Server) handleGateInfo(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Ops != nil {
 		features = append(features, FeaturePlans, FeatureRRsetAPI)
 	}
-	features = append(features, FeatureACMEHTTPReq)
 	if s.tokenExchange() {
 		features = append(features, FeatureTokenExchange)
 	}
 	if s.cfg.APIKeys != nil {
-		features = append(features, FeatureAPIKeys, FeatureACMEDNS)
+		features = append(features, FeatureAPIKeys, FeatureACMEHTTPReq, FeatureACMEDNS)
 	}
 	writeJSON(w, http.StatusOK, GateInfo{Version: version.Version, Features: features})
 }

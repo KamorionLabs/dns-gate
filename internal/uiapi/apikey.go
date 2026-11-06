@@ -41,6 +41,7 @@ type APIKey struct {
 type ACMEDNSRegistration struct {
 	Subdomain string   `json:"subdomain"`
 	Domain    string   `json:"domain"`
+	Origin    string   `json:"origin"` // api (acme_domains) or client (acme-dns client)
 	AllowFrom []string `json:"allowfrom"`
 }
 
@@ -65,7 +66,8 @@ type ACMEDNSAccount struct {
 }
 
 // APIKeyRequest creates (POST) or replaces the mutable fields (PUT) of a
-// key. Team and role cannot change: on PUT they must be empty or equal.
+// key. Team and role cannot change: on PUT they must be empty or equal. On
+// PUT, an absent acme_domains keeps the registrations as they are.
 type APIKeyRequest struct {
 	Name         string     `json:"name"`
 	Description  string     `json:"description"`

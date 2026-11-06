@@ -40,6 +40,7 @@ type Config struct {
 	Groups            map[string]Group `yaml:"groups"`
 	Policy            Policy           `yaml:"policy"`
 	MCP               MCP              `yaml:"mcp"`
+	ACME              ACME             `yaml:"acme"`
 
 	Hash     string    `yaml:"-"` // sha256 of the file
 	LoadedAt time.Time `yaml:"-"`
@@ -171,6 +172,18 @@ type DelegationTeams struct {
 
 // DefaultDelegationMaxObjects is the default cap of objects per delegation.
 const DefaultDelegationMaxObjects = 100
+
+// ACME bounds the state of the ACME DNS-01 endpoints (/acme).
+type ACME struct {
+	// MaxRegistrations caps the acme-dns registrations (and httpreq value
+	// ledgers) of one API key or token subject (default 100).
+	MaxRegistrations int `yaml:"max_registrations"`
+	// RegistrationIdle: registrations of token subjects and httpreq ledgers
+	// unused for this long are purged (default 720h).
+	RegistrationIdle Duration `yaml:"registration_idle"`
+	// MaxValues caps the values of one challenge TXT RRset (default 10).
+	MaxValues int `yaml:"max_values"`
+}
 
 // MCP configures the Model Context Protocol endpoint (/mcp).
 type MCP struct {
@@ -594,6 +607,15 @@ func (c *Config) defaults() {
 			c.Policy.Delegations[i].Allow.MaxObjects = DefaultDelegationMaxObjects
 		}
 	}
+	if c.ACME.MaxRegistrations == 0 {
+		c.ACME.MaxRegistrations = 100
+	}
+	if c.ACME.RegistrationIdle == 0 {
+		c.ACME.RegistrationIdle = Duration(30 * 24 * time.Hour)
+	}
+	if c.ACME.MaxValues == 0 {
+		c.ACME.MaxValues = 10
+	}
 	if c.MCP.PlanTTL == 0 {
 		c.MCP.PlanTTL = Duration(10 * time.Minute)
 	}
@@ -961,6 +983,15 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if c.ACME.MaxRegistrations < 1 || c.ACME.MaxRegistrations > 10000 {
+		add("acme.max_registrations: must be between 1 and 10000")
+	}
+	if c.ACME.RegistrationIdle.D() < time.Hour {
+		add("acme.registration_idle: must be >= 1h")
+	}
+	if c.ACME.MaxValues < 2 || c.ACME.MaxValues > 100 {
+		add("acme.max_values: must be between 2 and 100")
+	}
 	if c.MCP.PlanTTL.D() < time.Minute || c.MCP.PlanTTL.D() > time.Hour {
 		add("mcp.plan_ttl: must be between 1m and 1h")
 	}
