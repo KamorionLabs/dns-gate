@@ -223,6 +223,9 @@ type Rate struct {
 type Limits struct {
 	MaxBodyBytes         int64 `yaml:"max_body_bytes"`
 	MaxChangesPerRequest int   `yaml:"max_changes_per_request"`
+	// EphemeralLifetimeFactor bounds an ephemeral RRset to its creation
+	// plus this many ephemeral TTLs (default 4).
+	EphemeralLifetimeFactor int `yaml:"ephemeral_lifetime_factor"`
 }
 
 // Lock configures the per-zone write lease.
@@ -702,6 +705,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Limits.MaxChangesPerRequest < 1 {
 		add("limits.max_changes_per_request: must be >= 1")
+	}
+	if c.Limits.EphemeralLifetimeFactor < 0 || c.Limits.EphemeralLifetimeFactor > 100 {
+		add("limits.ephemeral_lifetime_factor: must be between 1 and 100 (0: default 4)")
 	}
 
 	issuers := map[string]bool{}

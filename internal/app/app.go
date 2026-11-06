@@ -102,18 +102,19 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		opts.Holder, _ = os.Hostname()
 	}
 	eng, err := zonewrite.New(zonewrite.Config{
-		Providers:    disc,
-		Store:        st,
-		Authz:        authz,
-		Audit:        auditLog,
-		ZoneSet:      authz,
-		UnmanagedTTL: cfg.ReconcileInterval.D(),
-		Holder:       opts.Holder,
-		LockTTL:      cfg.Lock.TTL.D(),
-		LockWait:     cfg.Lock.Wait.D(),
-		CheckOnWrite: *cfg.CheckOnWrite,
-		Now:          time.Now,
-		Logger:       log,
+		Providers:               disc,
+		Store:                   st,
+		Authz:                   authz,
+		Audit:                   auditLog,
+		ZoneSet:                 authz,
+		UnmanagedTTL:            cfg.ReconcileInterval.D(),
+		Holder:                  opts.Holder,
+		LockTTL:                 cfg.Lock.TTL.D(),
+		LockWait:                cfg.Lock.Wait.D(),
+		CheckOnWrite:            *cfg.CheckOnWrite,
+		EphemeralLifetimeFactor: cfg.Limits.EphemeralLifetimeFactor,
+		Now:                     time.Now,
+		Logger:                  log,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("engine: %w", err)

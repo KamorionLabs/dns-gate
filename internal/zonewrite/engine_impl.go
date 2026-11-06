@@ -68,6 +68,9 @@ func newEngine(cfg Config) (*engine, error) {
 	if cfg.LockWait <= 0 {
 		cfg.LockWait = 30 * time.Second
 	}
+	if cfg.EphemeralLifetimeFactor <= 0 {
+		cfg.EphemeralLifetimeFactor = DefaultEphemeralLifetimeFactor
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -710,13 +713,35 @@ func (e *engine) validate(ctx context.Context, s *identity.Subject, p provider.P
 		}
 		prev := o
 		cl := claim{change: *c, prev: &prev, cur: o}
-		if ttl := e.cfg.Authz.EphemeralTTL(s); ttl > 0 && o.ExpiresAt != nil {
+		if ttl := e.cfg.Authz.EphemeralTTL(s); ttl > 0 && o.ExpiresAt != nil && addsValues(c.Old, c.New) {
 			exp := now.Add(ttl)
-			cl.cur.ExpiresAt = &exp
+			if limit := o.CreatedAt.Add(time.Duration(e.cfg.EphemeralLifetimeFactor) * ttl); exp.After(limit) {
+				exp = limit
+			}
+			if exp.After(*o.ExpiresAt) {
+				cl.cur.ExpiresAt = &exp
+			}
 		}
 		claims = append(claims, cl)
 	}
 	return claims, nil
+}
+
+// DefaultEphemeralLifetimeFactor is the default of
+// Config.EphemeralLifetimeFactor.
+const DefaultEphemeralLifetimeFactor = 4
+
+// addsValues reports whether a change adds a value to an RRset.
+func addsValues(old, new *dns.RRset) bool {
+	if old == nil || new == nil {
+		return new != nil
+	}
+	for _, v := range new.Values {
+		if !slices.Contains(old.Values, v) {
+			return true
+		}
+	}
+	return false
 }
 
 // confirm turns pending claims into their final state after a successful write.

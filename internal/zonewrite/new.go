@@ -31,8 +31,12 @@ type Config struct {
 	LockTTL      time.Duration // default 60s
 	LockWait     time.Duration // default 30s
 	CheckOnWrite bool          // run the provider check (provider.Checker) before every write
-	Now          func() time.Time
-	Logger       *slog.Logger
+	// EphemeralLifetimeFactor bounds the life of an ephemeral RRset to its
+	// creation plus this many ephemeral TTLs, however often values are
+	// added to it (default 4).
+	EphemeralLifetimeFactor int
+	Now                     func() time.Time
+	Logger                  *slog.Logger
 }
 
 // ZoneSet tells which zones the engine serves (policy.Engine implements it).
