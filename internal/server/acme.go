@@ -202,12 +202,12 @@ func (s *Server) handleHTTPReq(w http.ResponseWriter, r *http.Request, present b
 		case !present:
 			return vals, nil, nil
 		}
-		led.UpdatedAt, led.ExpiresAt = now, s.acmeIdle(now)
+		values, exp := led.Values, s.acmeIdle(now)
 		return vals, func(ctx context.Context) error {
-			if len(led.Values) == 0 {
+			if len(values) == 0 {
 				return s.cfg.APIKeys.DeleteACMERegistration(ctx, owner, sub)
 			}
-			return s.cfg.APIKeys.PutACMERegistration(ctx, *led)
+			return s.saveRegistration(ctx, *led, func(r *store.ACMERegistration) { r.Values, r.UpdatedAt, r.ExpiresAt = values, now, exp })
 		}, nil
 	})
 	if err != nil {
@@ -511,9 +511,9 @@ func (s *Server) handleACMEDNSUpdate(w http.ResponseWriter, r *http.Request) {
 			evicted, recent = recent[:n], recent[n:]
 		}
 		now := s.now().UTC()
-		cur.Values, cur.UpdatedAt = recent, now
+		exp := cur.ExpiresAt
 		if subj.Kind != identity.KindAPIKey {
-			cur.ExpiresAt = s.acmeIdle(now)
+			exp = s.acmeIdle(now)
 		}
 		vals = slices.DeleteFunc(vals, func(v string) bool { return slices.Contains(evicted, v) })
 		if !slices.Contains(vals, req.TXT) {
@@ -522,7 +522,9 @@ func (s *Server) handleACMEDNSUpdate(w http.ResponseWriter, r *http.Request) {
 				return nil, nil, err
 			}
 		}
-		return vals, func(ctx context.Context) error { return s.cfg.APIKeys.PutACMERegistration(ctx, cur) }, nil
+		return vals, func(ctx context.Context) error {
+			return s.saveRegistration(ctx, cur, func(r *store.ACMERegistration) { r.Values, r.UpdatedAt, r.ExpiresAt = recent, now, exp })
+		}, nil
 	})
 	if err != nil {
 		s.acmeFailure(w, r, err, true)
@@ -577,6 +579,33 @@ func (s *Server) acmeRoom(ctx context.Context, owner string) *acmeError {
 		return &acmeError{http.StatusConflict, "too_many_registrations", fmt.Sprintf("%d ACME registrations already (acme.max_registrations)", len(regs))}
 	}
 	return nil
+}
+
+// saveRegistration applies set to reg and stores it; on a version conflict
+// it reads the stored registration again and applies set to it, a few
+// times, then logs at error level and returns the error.
+func (s *Server) saveRegistration(ctx context.Context, reg store.ACMERegistration, set func(*store.ACMERegistration)) error {
+	var err error
+	for attempt := 0; attempt < 4; attempt++ {
+		set(&reg)
+		if err = s.cfg.APIKeys.PutACMERegistration(ctx, reg); !errors.Is(err, store.ErrConflict) {
+			break
+		}
+		fresh, gerr := s.cfg.APIKeys.GetACMERegistration(ctx, reg.KeyID, reg.Subdomain)
+		switch {
+		case errors.Is(gerr, store.ErrNotFound):
+			reg.Version = 0
+		case gerr != nil:
+			s.log.Error("acme registration not saved after the write", "owner", reg.KeyID, "subdomain", reg.Subdomain, "err", gerr)
+			return gerr
+		default:
+			reg = *fresh
+		}
+	}
+	if err != nil {
+		s.log.Error("acme registration not saved after the write", "owner", reg.KeyID, "subdomain", reg.Subdomain, "err", err)
+	}
+	return err
 }
 
 // authorRoom refuses an RRset in which an owner would hold more than
