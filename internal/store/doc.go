@@ -64,7 +64,10 @@
 // use without version check, so that authentication never conflicts with a
 // rotation or a revocation (UpdateAPIKey leaves the last use alone).
 //
-// Tombstones reserve a deleted RRset for the team that owned it. Transfers
+// Tombstones reserve a deleted RRset for the team that owned it;
+// DeleteWithTombstone removes an ownership entry and writes its tombstone in
+// one transaction. ListOwnedZones scans the DynamoDB table (team renames
+// only). Transfers
 // are ownership transfer requests; Reassign applies one atomically (SQL
 // transaction, DynamoDB TransactWriteItems with a condition per item, at most
 // MaxReassign items). GCTombstones and GCTransfers purge them on the SQL

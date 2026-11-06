@@ -267,37 +267,42 @@ team owns in the zones the caller can read and its pending transfers.
 
 A deleted RRset stays reserved for its team for `ownership.tombstone_ttl` (7 days):
 another team creating or adopting it gets `403 not_owner` and must ask for a
-transfer.
+transfer, whoever the caller is.
 
 ### Ownership transfers
 
 Moving RRsets to another team takes two people:
 
 ```sh
-# a member of either team (or a dns.ownership.approve holder) asks
+# a member of either team allowed to write the RRsets through it (or a dns.ownership.approve holder) asks
 curl -sS "${auth[@]}" -X POST "$GATE/api/v1/zones/example.com/transfers" \
   -H "Content-Type: application/json" -d '{
   "rrsets": [{"host": "www", "type": "CNAME"}, {"host": "@", "type": "TXT"}],
   "to_team": "corporate", "comment": "the corporate site moves to its own pipeline"}'
 
-# a member of the owner team with write access to the zone, or a dns.ownership.approve holder, approves it
+# another person, allowed to write every RRset through the owner team or holding dns.ownership.approve on it, approves it
 curl -sS "${auth[@]}" -X POST "$GATE/api/v1/transfers/tr-1780000000000-0a1b2c3d4e/approve" \
   -H "Content-Type: application/json" -d '{"comment": "ok"}'
 ```
 
 The RRsets of a request belong to one team. The requester can only withdraw it
-(`/reject`); approval applies it at once, under the zone lock, if every RRset still
-belongs to the team with the content hash it had when requested (store and
-provider); otherwise the transfer is `failed` and the answer is `412 precondition`
-with the transfer. A request not decided within `ownership.transfer_ttl` (7 days)
+(`/reject`); the approver is another person (a human unless
+`ownership.machine_approvers`, with a recent login, and not the requester under
+another identity: `ownership.person_claims`). Approval applies it at once, under the
+zone lock, if every RRset still belongs to the team with the content hash it had when
+requested (store and provider); otherwise the transfer is `failed` and the answer is
+`412 precondition` with the transfer. When the zone is locked or the store or the
+provider is unavailable, the transfer stays `applying` (`423` or `502` with the
+transfer) and the gate retries it for 24 hours. A request not decided within `ownership.transfer_ttl` (7 days)
 expires (`410 expired`). `GET /api/v1/transfers?status=proposed` is the inbox:
 `can_decide` marks the requests the caller may approve. Every step is audited
 (`gate.transfer.propose`, `.approve`, `.reject`, `.apply`, with the requester and the
 approver).
 
 `POST /api/v1/teams/{team}/rename` (`policy.propose`, approved by another
-`policy.approve` holder) moves every RRset and tombstone of a team, in every
-managed zone, for migrations. The policy itself still names the old team: change
+`policy.approve` holder with `dns.ownership.approve` on every RRset of the team)
+moves every RRset and tombstone of a team, in every zone of the store, for
+migrations. The policy itself still names the old team: change
 the bindings in a policy revision too.
 
 ## Errors

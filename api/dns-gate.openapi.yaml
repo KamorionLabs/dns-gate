@@ -454,10 +454,11 @@ paths:
       description: |
         Requires dns.record.adopt. The RRsets go to `owner`, the caller's
         team by default; another team than the caller's requires
-        dns.ownership.approve on the zone (`403 forbidden` otherwise). An
-        RRset deleted recently by another team (tombstone) is not adoptable
-        (`reserved_for_other_team`) unless the caller holds
-        dns.ownership.approve.
+        dns.ownership.approve on each RRset (`forbidden` candidates
+        otherwise, `403 forbidden` without it anywhere in the zone). An RRset
+        deleted recently by another team (tombstone) is never adoptable for
+        another team (`reserved_for_other_team`): it moves through a
+        transfer.
       requestBody:
         required: true
         content:
@@ -552,9 +553,9 @@ paths:
       description: |
         The RRsets must be owned by one team (or reserved for it by a
         tombstone after a recent delete). The caller needs dns.record.write
-        or dns.ownership.approve on the zone and must be a member of the
-        owner team or of the target team, unless it holds
-        dns.ownership.approve. The request waits for a second person
+        or dns.ownership.approve on the zone and, for every RRset, be allowed
+        to write it through the bindings of the owner team or of the target
+        team, or hold dns.ownership.approve on it (`403 not_owner`). The request waits for a second person
         (`ownership.transfer_ttl`, 7 days by default).
       requestBody:
         required: true
@@ -585,7 +586,7 @@ paths:
         `status=proposed`).
       parameters:
         - { name: zone, in: query, schema: { type: string } }
-        - { name: status, in: query, schema: { type: string, enum: [proposed, approved, applied, rejected, expired, failed] } }
+        - { name: status, in: query, schema: { type: string, enum: [proposed, applying, applied, rejected, expired, failed] } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 50 } }
         - { name: cursor, in: query, schema: { type: string } }
       responses:
@@ -621,17 +622,22 @@ paths:
       operationId: approveTransfer
       summary: Approve a transfer request, which applies it
       description: |
-        By a member of the owner team allowed to write in the zone, or a
-        holder of dns.ownership.approve on it (another policy.approve holder
-        for a team rename), never by
-        the requester (`403 forbidden`). The ownership entries change team
+        By another person than the requester (`403 forbidden`): a human
+        unless `ownership.machine_approvers`, after a recent login, whose
+        `ownership.person_claims` differ from the requester's. For every
+        RRset, the approver must be allowed to write it through the bindings
+        of the owner team, or hold dns.ownership.approve on it; a team rename
+        needs policy.approve and dns.ownership.approve on every RRset of the
+        team. The ownership entries change team
         in one store transaction, after checking under the zone lock that
         they still belong to the team with the content hash of the request,
         in the store and upstream; otherwise the transfer is `failed` and the
         answer is `412 precondition` with the transfer in `transfer`.
         `410 expired` when the request expired, `412 precondition` when it
         was already decided. When the zone is locked (`423`) or the store or
-        the provider is unavailable, the request stays proposed.
+        the provider is unavailable (`502`), the transfer stays `applying`,
+        returned in `transfer`, and the gate retries it for 24 hours before
+        marking it `failed`.
       requestBody:
         content:
           application/json:
@@ -647,6 +653,7 @@ paths:
         "410": { $ref: "#/components/responses/Error" }
         "412": { $ref: "#/components/responses/Error" }
         "423": { $ref: "#/components/responses/Locked" }
+        "502": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
 
   /api/v1/transfers/{id}/reject:
@@ -717,12 +724,14 @@ paths:
       operationId: renameTeam
       summary: Request moving every RRset of a team to another team
       description: |
-        Bulk transfer for migrations, in every managed zone, store only:
+        Bulk transfer for migrations, in the managed zones and every other
+        zone where the store holds RRsets or tombstones of the team, store
+        only:
         proposed by a policy.propose holder, applied when another
         policy.approve holder approves it (`/api/v1/transfers/{id}/approve`).
         The policy still names the old team: change the bindings in a policy
-        revision too. Applied zone by zone; a failure leaves the RRsets
-        already moved with the new team and a new rename moves the rest.
+        revision too. Applied zone by zone; an interruption leaves the
+        rename `applying` and the gate resumes it.
       requestBody:
         required: true
         content:
@@ -1829,7 +1838,7 @@ components:
         rrsets: { type: array, items: { $ref: "#/components/schemas/RRsetRef" } }
         hosts: { type: array, items: { type: string }, description: "Host globs, combined with types." }
         types: { type: array, items: { type: string } }
-        owner: { type: string, description: "Team; defaults to the caller's team. Another team requires dns.ownership.approve." }
+        owner: { type: string, description: "Team; defaults to the caller's team. Another team requires dns.ownership.approve on each RRset." }
 
     AdoptPreview:
       type: object
@@ -2097,7 +2106,7 @@ components:
               type: { type: string }
               hash: { type: string, description: "Content hash when the request was made." }
               tombstone: { type: boolean, description: "A recently deleted RRset still reserved for its team." }
-        status: { type: string, enum: [proposed, approved, applied, rejected, expired, failed] }
+        status: { type: string, enum: [proposed, applying, applied, rejected, expired, failed], description: "applying: approved, being applied or retried by the gate." }
         comment: { type: string }
         requester: { $ref: "#/components/schemas/Actor" }
         created_at: { type: string, format: date-time }

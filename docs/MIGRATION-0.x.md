@@ -96,12 +96,29 @@ version:
   teams as `auto`, and the teams found in the store that nothing names as `store`.
 - **Adding a `teams` block makes references strict**: every team named by a binding,
   a virtual key, a delegation or the managed layer must be declared there (or in the
-  managed layer), otherwise the file or the revision is refused. Values of an issuer
-  `team_claim` are kept only for declared teams and `team_from` families. Declare
+  managed layer), otherwise the file or the revision is refused. Families
+  (`team_from`, `allow.teams.from_subject`) then need a non-empty `prefix`, and no
+  declared or fixed team may carry the prefix of a family. Values of an issuer
+  `team_claim` are kept only for members of a `team_from` family, never for a declared
+  team: move such people and pipelines into `teams.<name>.members`. Declare
   every team the warnings listed, plus the store owners `GET /api/v1/teams` shows as
   `store`, before adding the block; or rename them with
   `POST /api/v1/teams/{team}/rename` (two policy administrators).
 - A later version will refuse undeclared teams even without the block.
+- **Check the active managed revision** before deploying a base file with a new
+  `teams` block: a managed binding or key naming an undeclared team makes the active
+  revision invalid against the new base, and the gate then serves the base policy
+  only (managed grants missing: error logs, `/healthz` and `/readyz` say so). Run
+  `dns-gate --check` with the new file and access to the store: it validates the
+  active revision and fails when it would be refused. Propose a revision that
+  declares the teams first, or declare them in the file.
+
+**Rolling deploy and rollback.** A gate older than this version refuses a managed
+revision holding `teams` (unknown field): it keeps its previous policy while running,
+and serves the base policy only after a restart. Upgrade every replica before
+activating a revision that declares teams; before rolling back to an older binary,
+activate a revision without `teams` (or the older binary loses the managed grants).
+The store migration `0004` stays in place on a rollback and is harmless.
 
 To declare the teams of an existing file, copy the team names from the warnings:
 
@@ -119,10 +136,13 @@ Other changes of the same version:
 
 - Adopting RRsets for another team than one's own (`owner` of the adopt endpoints and
   of the EuroDNS adopt extension) requires the new action `dns.ownership.approve` on
-  the zone; it was accepted from anyone allowed to adopt.
+  each RRset; it was accepted from anyone allowed to adopt.
+- Ownership transfers are approved by a human by default
+  (`ownership.machine_approvers: true` lets pipelines approve).
 - A deleted RRset stays reserved for its team for `ownership.tombstone_ttl` (7 days by
   default): other teams can no longer re-create it at once (`403 not_owner`), they ask
   for a transfer. Set `ownership.tombstone_ttl: 0s` to keep the previous behaviour.
 - SQL stores get migration `0004` (tables `ownership_tombstone` and
-  `ownership_transfer`, column `rrset_plan.team`), applied at startup. DynamoDB needs
-  no change (new `TOMB#` and `TR#` items, the existing `ttl` attribute).
+  `ownership_transfer`, column `rrset_plan.team`), applied at startup. The DynamoDB
+  table needs no change (new `TOMB#` and `TR#` items, the existing `ttl` attribute);
+  the gate role needs `dynamodb:Scan` on it for team renames.

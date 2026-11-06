@@ -295,8 +295,8 @@ Records that existed before the gate are foreign and read-only through the gate.
 admin role) creates ownership entries for listed RRsets, with their current content
 hash and `Adopted = true`. Adopting an RRset already owned by the caller's team is
 a no-op. The owner is one of the caller's teams; another team requires
-`dns.ownership.approve` on the zone, as does adopting an RRset reserved for another
-team by a tombstone. In gate mode, `terraform import` of an `eurodns_record_set` calls adopt.
+`dns.ownership.approve` on each adopted RRset. An RRset reserved for another team by
+a tombstone is never adopted for another team: it moves through a transfer. In gate mode, `terraform import` of an `eurodns_record_set` calls adopt.
 Bulk adoption with preview, Terraform export and onboarding of whole zones are
 described in section 16.
 
@@ -305,23 +305,38 @@ described in section 16.
 Teams are declared in the `teams` block (base file or managed layer) with their
 members; a binding naming a team without groups or subjects grants its role to the
 members. Once the block exists, references to undeclared teams are refused; before,
-they are declared automatically with a warning (migration).
+they are declared automatically with a warning (migration). Derived teams never take
+the name of a declared team: with the block, families (`team_from`, `from_subject`)
+need a prefix that no declared or fixed team carries, `Snapshot.Resolve` drops a
+binding whose derived team is declared, and a `team_claim` value is kept only for a
+family member that is not declared. A subject records the roles of each of its teams
+(`Subject.TeamRoles`): rights held through one team never count for another.
 
 Deleting an owned RRset (gate write, or a pending delete settled by the reconciler)
 writes a tombstone (`ZONE#<zone>`/`TOMB#<host>#<type>` in DynamoDB, table
-`ownership_tombstone` in SQL) with the team, the deleter and an expiry. Until it
-expires, only that team may create or adopt the RRset again; ephemeral RRsets leave
-no tombstone.
+`ownership_tombstone` in SQL) with the team, the deleter and an expiry, in the same
+store transaction as the removal of the ownership entry
+(`Store.DeleteWithTombstone`): when it fails the entry stays pending and the
+reconciler retries. Until it expires, only that team may create or adopt the RRset
+again; ephemeral RRsets leave no tombstone.
 
 A transfer request lists RRsets of one team (owned or tombstoned) and a target team,
-with their content hash. The approval, by a member of the owner team allowed to
-write in the zone or a holder of `dns.ownership.approve` on it, and never by the
-requester, takes the zone lock, reads the zone, checks that every entry still has
-the team, the state and the content hash of the request (store and upstream), then
-changes them all in one store transaction (`Store.Reassign`: SQL transaction,
-DynamoDB `TransactWriteItems` with a version or team condition per item, at most 100
-items). A team rename does the same for every RRset and tombstone of a team, zone by
-zone, approved by a second policy approver.
+with their content hash. The approval comes from another person (a human unless
+`ownership.machine_approvers`, whose `ownership.person_claims` differ from the
+requester's) who, for every RRset, may write it through the bindings of the owner
+team or holds `dns.ownership.approve` on it. The transfer is then `applying`: the
+engine takes the zone lock, reads the zone, checks that every entry still has the
+team, the state and the content hash of the request (store and upstream) or already
+belongs to the target team, then changes them all in one store transaction
+(`Store.Reassign`: SQL transaction, DynamoDB `TransactWriteItems` with a version or
+team condition per item, at most 100 items). The apply is idempotent: after an
+ambiguous store error it reads the entries back to tell whether the transaction
+committed, and a transfer left `applying` (zone locked, store unavailable, crash) is
+retried by the maintenance task for 24 hours, then failed. A team rename does the
+same for every RRset and tombstone of a team, in the managed zones and every zone
+the store still holds (`Store.ListOwnedZones`, a scan on DynamoDB), zone by zone,
+approved by a second policy approver holding `dns.ownership.approve` on every RRset
+of the team.
 
 ### 6.4 Rebase on full-zone PUT
 
