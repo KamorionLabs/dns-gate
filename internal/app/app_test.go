@@ -233,3 +233,56 @@ roles:
 		}
 	}
 }
+
+// A base file adding a teams block must be refused by --check while the
+// active managed revision names an undeclared team.
+func TestCheckManagedPolicy(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "g.db")
+	yaml := `
+providers:
+  - {id: eurodns, kind: eurodns, eurodns: {base_url: "http://127.0.0.1:1", app_id: app, max_retries: 0}}
+zones: [example.com]
+store: {type: sqlite, sqlite: {path: ` + db + `}}
+issuers:
+  - {name: ci, issuer: "https://token.example.net", audiences: [dns-gate]}
+roles:
+  reader:
+    rules: [{zones: [example.com], actions: [dns.read, ui.read]}]
+policy:
+  editable: true
+  bounds: {zones: [example.com], actions: [dns.read, ui.read]}
+`
+	parse := func(doc string) *config.Config {
+		cfg, err := config.Parse([]byte(doc), func(k string) string {
+			if k == "EURODNS_API_KEY" {
+				return "k"
+			}
+			return ""
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg
+	}
+	ctx := context.Background()
+	st, err := store.NewSQLite(ctx, store.SQLiteConfig{Path: db})
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := `{"groups":{},"roles":{"r":{"rules":[{"zones":["example.com"],"actions":["dns.read"]}]}},` +
+		`"bindings":[{"role":"r","team":"web","subjects":[{"issuer":"ci","claims":{"sub":["repo:acme/*"]}}]}],"virtual_keys":[]}`
+	if err := st.CreateRevision(ctx, store.PolicyRevision{ID: "rev-00000001", Document: []byte(doc), Status: "proposed", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Activate(ctx, "rev-00000001", "", "test", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	_ = st.(io.Closer).Close()
+	if problems, err := CheckManagedPolicy(ctx, parse(yaml)); err != nil || len(problems) != 0 {
+		t.Fatalf("valid revision: %v %v", problems, err)
+	}
+	problems, err := CheckManagedPolicy(ctx, parse(yaml+"teams: {}\n"))
+	if err != nil || len(problems) == 0 || !strings.Contains(strings.Join(problems, "\n"), `team "web" is not declared`) {
+		t.Fatalf("revision invalid against the new base not reported: %v %v", problems, err)
+	}
+}

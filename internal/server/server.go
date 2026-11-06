@@ -200,7 +200,11 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case p == "/healthz" || p == "/readyz":
 		w.Header().Set("Content-Type", "text/plain")
-		_, _ = w.Write([]byte("ok\n"))
+		body := "ok\n"
+		if msg := s.cfg.Policy.LoadError(); msg != "" {
+			body += "policy: the managed policy is not up to date, its grants may be missing: " + msg + "\n"
+		}
+		_, _ = w.Write([]byte(body))
 	case p == mcpPath && s.mcp != nil:
 		s.mcp.ServeHTTP(w, r)
 	case (p == resourceMetaPath || p == resourceMetaPath+mcpPath) && s.mcp != nil:

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -97,7 +98,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 	}
 	holder.SetDiscovery(disc)
 	if err := holder.Refresh(ctx, st); err != nil {
-		log.Error("managed policy not loaded, serving the base policy", "err", err)
+		log.Error("managed policy not loaded: serving the base policy only, the grants of the managed layer are missing", "err", err)
 	}
 	authz := policy.New(holder)
 	if opts.Holder == "" {
@@ -173,6 +174,40 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 	a := &App{Config: cfg, Store: st, Engine: eng, Policy: holder, Discovery: disc, authz: authz, handler: srv.Handler(), opts: opts, log: log, now: time.Now}
 	a.PlanGC = a.GCPlans
 	return a, nil
+}
+
+// CheckManagedPolicy validates the active managed revision of the store of
+// cfg against the base policy of cfg (dns-gate --check): it returns the
+// problems that would keep the gate from serving it, none when there is no
+// active revision. The error tells that the store could not be read.
+func CheckManagedPolicy(ctx context.Context, cfg *config.Config) ([]string, error) {
+	st, err := openStore(ctx, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		return nil, err
+	}
+	if c, ok := st.(io.Closer); ok {
+		defer c.Close()
+	}
+	rev, err := st.ActiveRevision(ctx)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	doc, err := policy.DecodeDocument(rev.Document)
+	if err != nil {
+		return []string{fmt.Sprintf("active revision %s: %v", rev.ID, err)}, nil
+	}
+	h, err := policy.NewHolder(cfg)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, e := range policy.ValidateManaged(cfg, h.Base(), doc) {
+		out = append(out, fmt.Sprintf("active revision %s: %s: %s", rev.ID, e.Path, e.Message))
+	}
+	return out, nil
 }
 
 // GCPlans purges the expired RRset plans, the idle ACME registrations, the

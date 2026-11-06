@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -244,5 +245,25 @@ func TestProposeKeepsActiveTeams(t *testing.T) {
 	_ = json.NewDecoder(r.Body).Decode(&d3)
 	if r.StatusCode != 201 || len(d3.Document.Teams) != 0 {
 		t.Fatalf("explicit empty teams: %d %+v", r.StatusCode, d3.Document.Teams)
+	}
+}
+
+type brokenRevision struct{}
+
+func (brokenRevision) ActiveRevision(context.Context) (*store.PolicyRevision, error) {
+	return &store.PolicyRevision{ID: "rev-broken", Document: []byte(`{"groups":{},"roles":{},"bindings":[{"role":"ghost","team":"web","groups":["nobody"]}],"virtual_keys":[]}`)}, nil
+}
+
+func TestHealthReportsAnUnloadedManagedPolicy(t *testing.T) {
+	e := policyEnv(t, true)
+	if err := e.holder.Refresh(context.Background(), brokenRevision{}); err == nil {
+		t.Fatal("an invalid revision loaded")
+	}
+	for _, path := range []string{"/healthz", "/readyz"} {
+		r := e.do(t, "GET", path, "", "", nil)
+		b, _ := io.ReadAll(r.Body)
+		if r.StatusCode != 200 || !strings.Contains(string(b), "rev-broken") {
+			t.Fatalf("%s: %d %q", path, r.StatusCode, b)
+		}
 	}
 }

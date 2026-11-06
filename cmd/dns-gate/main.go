@@ -64,6 +64,16 @@ func run() error {
 		for _, w := range cfg.Warnings {
 			fmt.Fprintln(os.Stderr, "warning:", w)
 		}
+		problems, err := app.CheckManagedPolicy(ctx, cfg)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "warning: the active managed revision was not checked (store unreachable):", err)
+		}
+		if len(problems) > 0 {
+			for _, p := range problems {
+				fmt.Fprintln(os.Stderr, "error:", p)
+			}
+			return errors.New("the active managed revision is invalid against this configuration: the gate would serve the base policy only")
+		}
 		fmt.Println("configuration OK")
 		return nil
 	}
