@@ -13,6 +13,7 @@
   import Icon from './Icon.svelte';
   import PropagationPanel from './PropagationPanel.svelte';
   import { expectOf } from '../lib/propagation';
+  import { isForward } from '../lib/forwards';
 
   let {
     zone,
@@ -114,6 +115,7 @@
     if (!dropped.length) await runPlan();
   }
 
+  const checkable = $derived((result?.changes ?? []).filter((c) => !isForward(c)));
   const planned = $derived((plan?.changes ?? []).map((c) => ({ c, shown: shownPlanChange(c) })));
   const n = $derived(staged.length);
   const opVerb = (op: string) => (op === 'create' || op === 'update' || op === 'delete' ? kindVerb[op] : undefined);
@@ -143,13 +145,13 @@
         {#each result.changes as c, i (i)}<div class="diff"><ChangeDiff change={shownPlanChange(c)} {zone} /></div>{/each}
       </div>
       <p class="dim small">Resolvers may keep the old answer for up to its previous TTL.</p>
-      {#if result.changes.length}
-        {@const c = result.changes[Math.min(propIndex, result.changes.length - 1)]}
+      {#if checkable.length}
+        {@const c = checkable[Math.min(propIndex, checkable.length - 1)]}
         <section class="prop">
           <h3 class="eyebrow">Propagation</h3>
-          {#if result.changes.length > 1}
+          {#if checkable.length > 1}
             <div class="pick" role="group" aria-label="Record set to check">
-              {#each result.changes as p, i (i)}
+              {#each checkable as p, i (i)}
                 <button class="btn small" class:on={propIndex === i} type="button" aria-pressed={propIndex === i} onclick={() => (propIndex = i)}>
                   <span class="mono">{p.host} {p.type}</span>
                 </button>

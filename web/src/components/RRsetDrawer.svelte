@@ -220,7 +220,7 @@
         {/if}
       </section>
 
-      {#if !unmanaged && canCheckPropagation}
+      {#if !unmanaged && !isFwd && canCheckPropagation}
         <section>
           <h3 class="eyebrow">Propagation</h3>
           <PropagationPanel {zone} host={rr.host} type={rr.type} />
