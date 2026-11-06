@@ -123,7 +123,8 @@ and never split, to stay atomic. Read-only RRsets (`server_managed`,
 `Apply` returns as soon as Route53 accepted the batch (`PENDING`). It does not
 wait for `INSYNC`: the change is visible right away through
 `ListResourceRecordSets`, and on the Route53 name servers usually within 60
-seconds.
+seconds. ACME DNS-01 clients writing through the gate should keep a propagation
+delay of about a minute before asking for validation ([ACME.md](../ACME.md)).
 
 ## IAM
 

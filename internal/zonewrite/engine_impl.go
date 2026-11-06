@@ -68,6 +68,9 @@ func newEngine(cfg Config) (*engine, error) {
 	if cfg.LockWait <= 0 {
 		cfg.LockWait = 30 * time.Second
 	}
+	if cfg.EphemeralLifetimeFactor <= 0 {
+		cfg.EphemeralLifetimeFactor = DefaultEphemeralLifetimeFactor
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -581,7 +584,18 @@ func (e *engine) Write(ctx context.Context, s *identity.Subject, zoneIn, ifMatch
 		extra = map[string]any{"ignored_out_of_scope": plan.Ignored}
 	}
 	e.emit(ctx, s, action, zone, "allow", "", uiChanges(plan.Changes), snapshot, extra)
+	e.committed(ctx, zone, plan)
 	return result, newVersion, nil
+}
+
+// committed runs the Committed hook of a plan.
+func (e *engine) committed(ctx context.Context, zone string, plan *Plan) {
+	if plan.Committed == nil {
+		return
+	}
+	if err := plan.Committed(ctx); err != nil {
+		e.log.Warn("post-write hook failed", "zone", zone, "error", err)
+	}
 }
 
 // check runs the provider dry run when enabled and refuses blocking problems.
@@ -640,6 +654,14 @@ func (e *engine) validate(ctx context.Context, s *identity.Subject, p provider.P
 		c := &plan.Changes[i]
 		if !e.cfg.Authz.AllowRRset(s, policy.ActionRecordWrite, zone, c.Key) {
 			return nil, fail(ReasonForbidden, "not allowed to write %s in %s", keyString(c.Key), zone)
+		}
+		if e.cfg.Guard != nil {
+			if err := e.cfg.Guard(ctx, s, zone, c.Key); err != nil {
+				if ze, ok := AsError(err); ok {
+					return nil, ze
+				}
+				return nil, &Error{Reason: ReasonForbidden, Message: err.Error(), Err: err}
+			}
 		}
 		cur, exists := sets[c.Key]
 		var curp *dns.RRset
@@ -709,9 +731,36 @@ func (e *engine) validate(ctx context.Context, s *identity.Subject, p provider.P
 			return nil, fail(ReasonTainted, "%s was changed outside the gate; an admin must adopt it again", keyString(c.Key))
 		}
 		prev := o
-		claims = append(claims, claim{change: *c, prev: &prev, cur: o})
+		cl := claim{change: *c, prev: &prev, cur: o}
+		if ttl := e.cfg.Authz.EphemeralTTL(s); ttl > 0 && o.ExpiresAt != nil && addsValues(c.Old, c.New) {
+			exp := now.Add(ttl)
+			if limit := o.CreatedAt.Add(time.Duration(e.cfg.EphemeralLifetimeFactor) * ttl); exp.After(limit) {
+				exp = limit
+			}
+			if exp.After(*o.ExpiresAt) {
+				cl.cur.ExpiresAt = &exp
+			}
+		}
+		claims = append(claims, cl)
 	}
 	return claims, nil
+}
+
+// DefaultEphemeralLifetimeFactor is the default of
+// Config.EphemeralLifetimeFactor.
+const DefaultEphemeralLifetimeFactor = 4
+
+// addsValues reports whether a change adds a value to an RRset.
+func addsValues(old, new *dns.RRset) bool {
+	if old == nil || new == nil {
+		return new != nil
+	}
+	for _, v := range new.Values {
+		if !slices.Contains(old.Values, v) {
+			return true
+		}
+	}
+	return false
 }
 
 // confirm turns pending claims into their final state after a successful write.

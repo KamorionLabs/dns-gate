@@ -16,14 +16,18 @@ of the gate is the EuroDNS-compatible API, documented by
 ```
 
 `rrset-api` means the single RRset endpoints below are served, `plans` the REST
-plan/apply, `policy-delegation` the delegated policy API.
+plan/apply, `policy-delegation` the delegated policy API, `api-keys` the API key
+endpoints, `acme-httpreq` and `acme-dns` the [ACME endpoints](ACME.md),
+`token-exchange` the token exchange.
 
 ## Authentication
 
 | Client | Credentials |
 |---|---|
 | Pipelines, CLIs, Terraform | `Authorization: Bearer <JWT>` from an issuer of the gate configuration (GitHub Actions, GitLab, Azure DevOps, Entra ID, any OIDC issuer), audience the gate |
-| Tools without OIDC | virtual key: `X-App-Id` + `X-Api-Key` |
+| Tools that keep one credential for a run (acme.sh) | a gate token from the [token exchange](#token-exchange) of such a JWT, as a bearer token |
+| Third parties without OIDC (ACME clients, appliances) | [API key](#api-keys) `dgk_<id>_<secret>`: `Authorization: Bearer dgk_…`, or basic authentication with the key id as user name and the key as password, or `X-Api-Key: dgk_…` (with `X-App-Id` or `X-Api-User` set to the key id, if sent) |
+| Tools without OIDC, static | virtual key from the configuration: `X-App-Id` + `X-Api-Key` |
 | Web UI | session cookie; every request other than GET also sends `X-Gate-CSRF` (the `gate_csrf` cookie) and a same-origin `Origin`, and humans need a recent login for writes (`403 reauth_required`) |
 
 Permissions are the policy actions: `ui.read` or `dns.read` to read, and
@@ -145,6 +149,95 @@ default). The apply writes exactly what was planned, or fails with
 again. The MCP tools
 `plan_rrset_change` and `apply_rrset_change` use the same plans.
 
+## Token exchange
+
+`POST /api/v1/token-exchange` (RFC 8693, form-encoded, no other authentication)
+trades a token of an issuer with `token_exchange: true` for a gate token with the
+same identity, valid 15 minutes (`expires_in` for another lifetime, within the
+issuer's `max_exchanged_ttl`, the gate issuer's `token_ttl` and 5 minutes past the
+expiry of the exchanged token). Gate tokens and API keys are never exchanged.
+
+```sh
+GATE_TOKEN=$(curl -fsS "$GATE/api/v1/token-exchange" \
+  -d grant_type=urn:ietf:params:oauth:grant-type:token-exchange \
+  -d subject_token_type=urn:ietf:params:oauth:token-type:jwt \
+  --data-urlencode "subject_token=$TOKEN" | jq -r .access_token)
+```
+
+Configuration and details: [CONFIG.md](CONFIG.md#token-exchange).
+
+## API keys
+
+API keys are issued by the gate at runtime, for third parties that have no OIDC
+identity: a hosting provider renewing certificates, an appliance. A key is bound
+to one team (the owner of the RRsets it creates) and one role, with an optional
+expiry and source CIDRs. Only its SHA-256 is stored; the key is shown once, at
+creation and at each rotation. The same key works on this API, on the
+[ACME endpoints](ACME.md) and on the EuroDNS-compatible API (`X-App-Id: <id>`,
+`X-Api-Key: dgk_…`).
+
+Managing keys needs the `gate.apikey.manage` action, from an OIDC identity (a key
+never manages keys):
+
+- the key's team must be one of the caller's teams, unless the caller holds
+  `gate.apikey.manage` on `*` (gate-wide managers);
+- the caller must hold `gate.apikey.manage` on every zone of the key's role, and
+  every action of the role on the same zones and records: a key never has more
+  rights than its issuer;
+- the role may not grant `policy.*` or `gate.*` actions, nor be less ephemeral
+  (longer `ephemeral_ttl`, or permanent) or less capped (`max_changes_per_request`)
+  than the caller's own write rights.
+
+The key records what its role declared at issuance (rules, `ephemeral_ttl`,
+`max_changes_per_request`, 0 meaning "inherit the global default"); if the role later
+declares more, the key is refused (`403 role_widened`) until a new key is issued; a
+role that shrinks is fine, and changing the global limits or `policy.bounds` never
+invalidates keys. A key without a recorded grant is refused. The creator of a key and the
+members of its team holding `gate.apikey.manage` anywhere can always see and revoke
+it, even when they no longer manage the zones of its role.
+
+```sh
+# create (201); the answer carries "key", shown once
+curl -sS "${auth[@]}" -X POST "$GATE/api/v1/api-keys" -H "Content-Type: application/json" -d '{
+  "name": "web certificates", "team": "web", "role": "acme-solver",
+  "expires_at": "2027-06-30T00:00:00Z", "allowed_cidrs": ["192.0.2.0/24"],
+  "acme_domains": ["www.example.com", "example.com"]}'
+
+curl -sS "${auth[@]}" "$GATE/api/v1/api-keys"                    # list, with last use
+curl -sS "${auth[@]}" "$GATE/api/v1/api-keys/3f9a0c1b2d4e5f60"   # one key
+
+# rotate: the previous key stays valid during the overlap (default 24h, "0s" for none)
+curl -sS "${auth[@]}" -X POST "$GATE/api/v1/api-keys/3f9a0c1b2d4e5f60/rotate" \
+  -H "Content-Type: application/json" -d '{"overlap": "1h"}'
+
+# replace the mutable fields (name, description, expiry, CIDRs, ACME domains);
+# without acme_domains the acme-dns registrations stay as they are, with it only
+# those created through the API are synced (never those of clients, "origin": "client")
+curl -sS "${auth[@]}" -X PUT "$GATE/api/v1/api-keys/3f9a0c1b2d4e5f60" \
+  -H "Content-Type: application/json" -d '{"name": "web certificates", "acme_domains": ["www.example.com"]}'
+
+# revoke (204): the key stops working at once, it stays listed with ?include_revoked=true
+curl -sS "${auth[@]}" -X DELETE "$GATE/api/v1/api-keys/3f9a0c1b2d4e5f60"
+```
+
+A listed key:
+
+```json
+{"id": "3f9a0c1b2d4e5f60", "name": "web certificates", "team": "web", "role": "acme-solver",
+ "status": "active", "expires_at": "2027-06-30T00:00:00Z", "allowed_cidrs": ["192.0.2.0/24"],
+ "acme_domains": ["example.com", "www.example.com"],
+ "acme_dns": [{"subdomain": "8e5700ea-a4bf-41c7-8a77-e990661dcc6a", "domain": "www.example.com", "allowfrom": []}],
+ "created_at": "…", "created_by": "github:repo:example/dns:ref:refs/heads/main",
+ "last_used_at": "…", "last_used_ip": "192.0.2.10"}
+```
+
+The creation and rotation answers add `key` and `acme_dns_accounts` (the acme-dns
+accounts of the key by domain, see [ACME.md](ACME.md)). Team and role never change
+(`409 immutable` on `PUT`): create another key. Humans need a recent login to
+create, change or rotate keys. Refused key uses are audited
+(`apikey.authenticate`, with the key id, never the key), as are creations,
+changes, rotations and revocations (`apikey.*`).
+
 ## Errors
 
 Errors are JSON, with a stable `reason` for programs:
@@ -156,10 +249,10 @@ Errors are JSON, with a stable `reason` for programs:
 | Status | Reasons |
 |---|---|
 | 400 | `invalid` (request or provider validation), `relative_target` (single-label target), `bad_request` |
-| 401 | `unauthenticated` |
-| 403 | `forbidden` (RBAC, protected record, plan of another caller), `not_owner` (another team), `too_many_changes`, `reauth_required`, `csrf`, `session_required` |
+| 401 | `unauthenticated` (also an unknown, revoked, expired or rotated API key) |
+| 403 | `forbidden` (RBAC, protected record, plan of another caller), `not_owner` (another team), `too_many_changes`, `reauth_required`, `csrf`, `session_required`, `source_ip` (key used outside its CIDRs), `role_widened` (API key whose role grew), `ephemeral_required` (ACME endpoints) |
 | 404 | `not_found` (zone not managed, RRset unknown), `plan_not_found`, `zone_not_eurodns` (EuroDNS-compatible API on a zone of another provider) |
-| 409 | `foreign_rrset` (created outside the gate: adopt it first), `tainted` (changed outside the gate), `adopt_conflict` |
+| 409 | `foreign_rrset` (created outside the gate: adopt it first), `tainted` (changed outside the gate), `adopt_conflict`, `immutable`, `revoked` (API keys), `too_many_values`, `too_many_registrations`, `value_taken` (ACME endpoints) |
 | 410 | `plan_expired` |
 | 412 | `precondition` (If-Match, If-None-Match, `expected_hash`, `must_not_exist`, zone changed since the plan) |
 | 423 | `zone_locked`, with `Retry-After` |
@@ -182,3 +275,7 @@ The full list is in the `Error` schema of the OpenAPI document.
 - `/api/v1/policy/delegated/…` — roles and bindings managed by pipelines within a
   delegation ([CONFIG.md](CONFIG.md)).
 - `/api/v1/policy/…` — the policy editor of the web UI.
+- `/acme/httpreq/present`, `/acme/httpreq/cleanup`, `/acme/acme-dns/update`,
+  `/acme/acme-dns/register` — DNS-01 challenges for certbot, acme.sh, lego,
+  win-acme, cert-manager and Caddy, with an OIDC token, a gate token or an API key
+  ([ACME.md](ACME.md)).

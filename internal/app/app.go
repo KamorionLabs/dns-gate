@@ -4,6 +4,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -50,6 +51,7 @@ type App struct {
 	handler   http.Handler
 	opts      Options
 	log       *slog.Logger
+	now       func() time.Time
 
 	// PlanGC deletes the expired RRset plans of MCP and of the REST API;
 	// Run and Maintenance call it when set. New sets it to GCPlans.
@@ -101,19 +103,22 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 	if opts.Holder == "" {
 		opts.Holder, _ = os.Hostname()
 	}
+	keys, _ := st.(store.APIKeyStore)
 	eng, err := zonewrite.New(zonewrite.Config{
-		Providers:    disc,
-		Store:        st,
-		Authz:        authz,
-		Audit:        auditLog,
-		ZoneSet:      authz,
-		UnmanagedTTL: cfg.ReconcileInterval.D(),
-		Holder:       opts.Holder,
-		LockTTL:      cfg.Lock.TTL.D(),
-		LockWait:     cfg.Lock.Wait.D(),
-		CheckOnWrite: *cfg.CheckOnWrite,
-		Now:          time.Now,
-		Logger:       log,
+		Guard:                   server.ACMEGuard(keys),
+		Providers:               disc,
+		Store:                   st,
+		Authz:                   authz,
+		Audit:                   auditLog,
+		ZoneSet:                 authz,
+		UnmanagedTTL:            cfg.ReconcileInterval.D(),
+		Holder:                  opts.Holder,
+		LockTTL:                 cfg.Lock.TTL.D(),
+		LockWait:                cfg.Lock.Wait.D(),
+		CheckOnWrite:            *cfg.CheckOnWrite,
+		EphemeralLifetimeFactor: cfg.Limits.EphemeralLifetimeFactor,
+		Now:                     time.Now,
+		Logger:                  log,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("engine: %w", err)
@@ -122,6 +127,9 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 	an, err := authn.New(cfg, &http.Client{Timeout: 10 * time.Second}, holder)
 	if err != nil {
 		return nil, err
+	}
+	if keys != nil {
+		an.SetAPIKeys(keys, auditLog)
 	}
 	scfg := server.Config{
 		Config:      cfg,
@@ -137,6 +145,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		Terraform:   server.InventoryTerraform(eng),
 		Plans:       st,
 		Versions:    st,
+		APIKeys:     keys,
 		UIFiles:     web.FS(),
 		Discovery:   disc,
 		Log:         log,
@@ -148,16 +157,24 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 	if err != nil {
 		return nil, err
 	}
-	a := &App{Config: cfg, Store: st, Engine: eng, Policy: holder, Discovery: disc, authz: authz, handler: srv.Handler(), opts: opts, log: log}
+	a := &App{Config: cfg, Store: st, Engine: eng, Policy: holder, Discovery: disc, authz: authz, handler: srv.Handler(), opts: opts, log: log, now: time.Now}
 	a.PlanGC = a.GCPlans
 	return a, nil
 }
 
-// GCPlans purges the expired RRset plans of the store.
+// GCPlans purges the expired RRset plans of the store, and the idle ACME
+// registrations.
 func (a *App) GCPlans(ctx context.Context) error {
-	n, err := a.Store.GCPlans(ctx, time.Now())
+	n, err := a.Store.GCPlans(ctx, a.now())
 	if n > 0 {
 		a.log.Info("plan gc", "removed", n)
+	}
+	if keys, ok := a.Store.(store.APIKeyStore); ok {
+		m, perr := keys.PurgeACMERegistrations(ctx, a.now())
+		if m > 0 {
+			a.log.Info("acme registration gc", "removed", m)
+		}
+		err = errors.Join(err, perr)
 	}
 	return err
 }

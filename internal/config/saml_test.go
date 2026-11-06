@@ -107,13 +107,15 @@ func TestGateIssuerValidation(t *testing.T) {
 		vars map[string]string
 		want string
 	}{
-		"missing key":   {withGate(base), map[string]string{"EURODNS_API_KEY": "k"}, "signing key missing"},
-		"rsa key":       {withGate(base), map[string]string{"EURODNS_API_KEY": "k", "DNS_GATE_TOKEN_SIGNING_KEY": "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n"}, "unsupported PEM block"},
-		"path":          {strings.Replace(withGate(base), "issuer: https://dns.example.com", "issuer: https://dns.example.com/gate", 1), vars, "without a path"},
-		"ttl":           {strings.Replace(withGate(base), "    self: true\n", "    self: true\n    token_ttl: 48h\n", 1), vars, "token_ttl"},
-		"ttl on oidc":   {strings.Replace(base, "audiences: [dns-gate]", "audiences: [dns-gate]\n    token_ttl: 1h", 1), vars, "only for the gate issuer"},
-		"two gates":     {strings.Replace(withGate(base), "roles:\n", strings.ReplaceAll(gateIssuer, "name: gate", "name: gate2")+"roles:\n", 1), vars, "only one gate issuer"},
-		"bound as gate": {strings.Replace(withGate(base), "      - issuer: ci", "      - issuer: gate", 1), vars, "unknown issuer \"gate\""},
+		"missing key":           {withGate(base), map[string]string{"EURODNS_API_KEY": "k"}, "signing key missing"},
+		"rsa key":               {withGate(base), map[string]string{"EURODNS_API_KEY": "k", "DNS_GATE_TOKEN_SIGNING_KEY": "-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n"}, "unsupported PEM block"},
+		"path":                  {strings.Replace(withGate(base), "issuer: https://dns.example.com", "issuer: https://dns.example.com/gate", 1), vars, "without a path"},
+		"ttl":                   {strings.Replace(withGate(base), "    self: true\n", "    self: true\n    token_ttl: 48h\n", 1), vars, "token_ttl"},
+		"ttl on oidc":           {strings.Replace(base, "audiences: [dns-gate]", "audiences: [dns-gate]\n    token_ttl: 1h", 1), vars, "only for the gate issuer"},
+		"two gates":             {strings.Replace(withGate(base), "roles:\n", strings.ReplaceAll(gateIssuer, "name: gate", "name: gate2")+"roles:\n", 1), vars, "only one gate issuer"},
+		"bound as gate":         {strings.Replace(withGate(base), "      - issuer: ci", "      - issuer: gate", 1), vars, "unknown issuer \"gate\""},
+		"exchange without gate": {strings.Replace(base, "audiences: [dns-gate]", "audiences: [dns-gate]\n    token_exchange: true", 1), vars, "needs a gate issuer"},
+		"exchange of the gate":  {strings.Replace(withGate(base), "    self: true\n", "    self: true\n    token_exchange: true\n", 1), vars, "never exchanged"},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {

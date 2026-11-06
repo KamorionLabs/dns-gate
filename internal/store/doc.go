@@ -37,6 +37,8 @@
 //	POLICY                  REV#<id>                 one policy revision (document as binary)
 //	POLICY                  ACTIVE                   revision_id of the active revision
 //	PLAN#<id>               PLAN                     one RRset plan (subject, zone, changes as JSON, zone_version, expires_at)
+//	APIKEY                  KEY#<id>                 one API key (hashes, team, role, expiries, last use)
+//	APIKEY#<key id>         ACMEDNS#<subdomain>      one acme-dns registration of a key (domain, txt_values)
 //
 // Ownership attributes: owner, created_by, created_at, updated_at,
 // request_id, content_hash, pending_hash, state, adopted, expires_at
@@ -53,6 +55,10 @@
 // DELETE ... RETURNING, DynamoDB DeleteItem with ReturnValues ALL_OLD), so
 // that one plan is never applied twice, even by two gate instances. GCPlans
 // purges expired plans on the SQL backends; call it from a periodic task.
+//
+// API keys keep only the SHA-256 of the key; TouchAPIKey writes the last
+// use without version check, so that authentication never conflicts with a
+// rotation or a revocation (UpdateAPIKey leaves the last use alone).
 //
 // Put semantics: Version 0 creates (fails with ErrConflict if the entry
 // exists); any other Version must match the stored one. On success the

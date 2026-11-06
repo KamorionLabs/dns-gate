@@ -15,7 +15,9 @@ info:
     [docs/API.md](https://github.com/KamorionLabs/dns-gate/blob/main/docs/API.md).
 
     **Authentication.** A bearer token (JWT from an issuer declared in the gate
-    configuration), a virtual key (`X-App-Id` + `X-Api-Key`), or the web UI
+    configuration), a gate API key (`dgk_...`, as a bearer token, as the
+    password of basic authentication with the key id as user name, or in
+    `X-Api-Key`), a virtual key (`X-App-Id` + `X-Api-Key`), or the web UI
     session cookie. With the session cookie, every request other than GET must
     carry the `X-Gate-CSRF` header (equal to the `gate_csrf` cookie) and a
     same-origin `Origin` header; humans need a recent login for writes
@@ -37,6 +39,18 @@ info:
     for the Claude Desktop extension (`/.well-known/oauth-authorization-server`,
     `/.well-known/openid-configuration`, `/oauth/authorize`, `/oauth/token`),
     standard OAuth 2.0 with PKCE not described here.
+
+    **Token exchange.** `POST /api/v1/token-exchange` (RFC 8693) turns a
+    token of an opted-in issuer (`token_exchange: true`) into a short-lived
+    gate token with the same identity, for tools that need a credential
+    longer than the CI or workload token lives.
+
+    **ACME DNS-01.** `/acme/httpreq/present` and `/cleanup` serve the lego
+    `httpreq` DNS provider, `/acme/acme-dns/update` and `/register` the
+    acme-dns API (acme.sh `dns_acmedns`, the certbot acme-dns hook,
+    cert-manager, Caddy). They write `_acme-challenge` TXT RRsets through the
+    engine, as the caller, whose role must have an `ephemeral_ttl`. Guide:
+    [docs/ACME.md](https://github.com/KamorionLabs/dns-gate/blob/main/docs/ACME.md).
   license:
     name: MIT
     url: https://github.com/KamorionLabs/dns-gate/blob/main/LICENSE
@@ -51,6 +65,7 @@ servers:
         description: Host name of the gate.
 security:
   - bearer: []
+  - apiKey: []
   - virtualKey: []
     virtualKeyApp: []
   - session: []
@@ -73,6 +88,10 @@ tags:
     description: Policy delegation API, used by the Terraform provider to manage roles and bindings.
   - name: policy
     description: Policy editor of the web UI (managed layer, revisions, approvals).
+  - name: api-keys
+    description: Gate-issued API keys for third parties without OIDC (ACME clients, appliances).
+  - name: acme
+    description: ACME DNS-01 endpoints compatible with lego httpreq and acme-dns.
 
 paths:
   /.well-known/dns-gate:
@@ -132,6 +151,63 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/token-exchange:
+    post:
+      tags: [identity]
+      operationId: exchangeToken
+      summary: Exchange an OIDC token for a short-lived gate token (RFC 8693)
+      description: |
+        OAuth 2.0 token exchange. The subject token is validated exactly as a
+        bearer token of its issuer (signature, audiences, `bound_claims`,
+        bindings), and its issuer must have `token_exchange: true`. The
+        answer is a token signed by the gate issuer (`self: true`) with the
+        same identity (issuer, subject, name, category, teams and claims),
+        plus the claim `gate_xchg` (the `jti` of the exchanged token).
+        Gate tokens and API keys are never exchanged, and an exchanged token
+        is refused once its issuer no longer opts in. The lifetime is 15
+        minutes, or `expires_in` (a gate extension, seconds), capped by the
+        issuer's `max_exchanged_ttl` (15m by default), the `token_ttl` of the
+        gate issuer and the subject token expiry plus 5 minutes. Every exchange is audited
+        (`gate.token.exchange`). `404 token_exchange_disabled` without a gate
+        issuer or an opted-in issuer. Errors follow RFC 6749
+        (`{"error", "error_description"}`).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [grant_type, subject_token, subject_token_type]
+              properties:
+                grant_type: { type: string, enum: ["urn:ietf:params:oauth:grant-type:token-exchange"] }
+                subject_token: { type: string, description: A JWT of an issuer with token_exchange. }
+                subject_token_type:
+                  type: string
+                  enum:
+                    - urn:ietf:params:oauth:token-type:jwt
+                    - urn:ietf:params:oauth:token-type:id_token
+                    - urn:ietf:params:oauth:token-type:access_token
+                requested_token_type:
+                  type: string
+                  enum: [urn:ietf:params:oauth:token-type:access_token, urn:ietf:params:oauth:token-type:jwt]
+                expires_in: { type: integer, minimum: 60, description: "Requested lifetime in seconds (default 900)." }
+      responses:
+        "200":
+          description: Gate token.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [access_token, issued_token_type, token_type, expires_in]
+                properties:
+                  access_token: { type: string }
+                  issued_token_type: { type: string }
+                  token_type: { type: string, enum: [Bearer] }
+                  expires_in: { type: integer }
+        "400": { $ref: "#/components/responses/OAuthError" }
+        "404": { $ref: "#/components/responses/OAuthError" }
 
   /api/v1/me:
     get:
@@ -785,6 +861,281 @@ paths:
                   key_sha256: { type: string }
         default: { $ref: "#/components/responses/Error" }
 
+  /api/v1/api-keys:
+    get:
+      tags: [api-keys]
+      operationId: listAPIKeys
+      summary: API keys the caller manages
+      description: |
+        Keys of the caller's teams (of every team for a holder of
+        `gate.apikey.manage` on `*`) whose role zones it manages. Never the
+        key itself. Needs `gate.apikey.manage`; keys cannot manage keys.
+      parameters:
+        - { name: team, in: query, schema: { type: string } }
+        - { name: include_revoked, in: query, schema: { type: boolean } }
+      responses:
+        "200":
+          description: Keys, oldest first.
+          content:
+            application/json:
+              schema: { type: array, items: { $ref: "#/components/schemas/APIKey" } }
+        "403": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+    post:
+      tags: [api-keys]
+      operationId: createAPIKey
+      summary: Create an API key (the key is returned once)
+      description: |
+        Binds a new key to one team of the caller and one role. The role
+        must not grant `policy.*` nor `gate.*` actions, and the caller must
+        hold `gate.apikey.manage` on every zone of the role and every action
+        of the role on the same zones and records, with an ephemeral TTL and
+        a change limit no looser than its own (`403 forbidden` otherwise).
+        The grant of the role is recorded: if the role later grants more,
+        the key is refused (`403 role_widened`). `acme_domains` creates one acme-dns registration per
+        domain (the role must allow `_acme-challenge.<domain>` TXT and have
+        an `ephemeral_ttl`); `acme_dns_accounts` in the answer is the storage
+        file of acme-dns clients. Humans need a recent login.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/APIKeyRequest" }
+      responses:
+        "201":
+          description: Key, with the secret (shown once).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IssuedAPIKey" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/api-keys/{id}:
+    parameters:
+      - $ref: "#/components/parameters/APIKeyID"
+    get:
+      tags: [api-keys]
+      operationId: getAPIKey
+      summary: One API key (404 when the caller does not manage it)
+      responses:
+        "200":
+          description: Key.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/APIKey" }
+        "404": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+    put:
+      tags: [api-keys]
+      operationId: replaceAPIKey
+      summary: Replace the mutable fields of an API key
+      description: |
+        Replaces name, description, expires_at and allowed_cidrs (omitted
+        fields are cleared). `acme_domains`, when present, syncs the
+        registrations created through the API (kept domains keep their
+        subdomain); when absent, registrations stay as they are; those of
+        clients are never touched. Team and role cannot change
+        (`409 immutable`); a revoked key cannot change (`409 revoked`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/APIKeyRequest" }
+      responses:
+        "200":
+          description: Key.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/APIKey" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [api-keys]
+      operationId: revokeAPIKey
+      summary: Revoke an API key
+      description: The key stops working at once; it stays listed with `include_revoked=true`. Idempotent. Besides its managers, its creator and the members of its team holding `gate.apikey.manage` anywhere may revoke it.
+      responses:
+        "204": { description: Revoked. }
+        "404": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/api-keys/{id}/rotate:
+    parameters:
+      - $ref: "#/components/parameters/APIKeyID"
+    post:
+      tags: [api-keys]
+      operationId: rotateAPIKey
+      summary: Rotate an API key (the new key is returned once)
+      description: |
+        Issues a new key for the same id; the previous key stays valid during
+        `overlap` (default 24h, `0s` to stop it at once). Only one previous
+        key is kept: rotating again ends the previous overlap.
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/APIKeyRotate" }
+      responses:
+        "200":
+          description: Key, with the new secret.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/IssuedAPIKey" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /acme/httpreq/present:
+    post:
+      tags: [acme]
+      operationId: httpreqPresent
+      summary: Add a DNS-01 challenge value (lego httpreq)
+      description: |
+        lego `httpreq` provider with `HTTPREQ_ENDPOINT=https://<gate>/acme/httpreq`.
+        Default mode: `fqdn` and `value`; RAW mode (`HTTPREQ_MODE=RAW`):
+        `domain` and `keyAuth`, the value being base64url(SHA-256(keyAuth)).
+        The value is added to the `_acme-challenge` TXT RRset (several
+        challenges, a wildcard and its apex, coexist). Any credential of the
+        gate; with an API key, basic authentication with the key id as user
+        name (`HTTPREQ_USERNAME`) and the key as password
+        (`HTTPREQ_PASSWORD`). The caller's role must have an `ephemeral_ttl`
+        (`403 ephemeral_required`). Each value belongs to its author: cleanup
+        removes only the caller's own values, and a value written by another
+        caller cannot be presented again (`409 value_taken`). An RRset holds
+        at most `acme.max_values` values, `acme.max_values_per_author` per
+        caller (`409 too_many_values`).
+      security:
+        - apiKeyBasic: []
+        - apiKey: []
+        - bearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HTTPReqRequest" }
+      responses:
+        "200":
+          description: Present.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HTTPReqResult" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /acme/httpreq/cleanup:
+    post:
+      tags: [acme]
+      operationId: httpreqCleanup
+      summary: Remove a DNS-01 challenge value (lego httpreq)
+      description: Removes the value; the RRset is deleted with its last value. Same body and credentials as present.
+      security:
+        - apiKeyBasic: []
+        - apiKey: []
+        - bearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/HTTPReqRequest" }
+      responses:
+        "200":
+          description: Cleaned up (also when the value was absent).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HTTPReqResult" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /acme/acme-dns/update:
+    post:
+      tags: [acme]
+      operationId: acmeDNSUpdate
+      summary: Set a DNS-01 challenge value (acme-dns)
+      description: |
+        acme-dns `/update` with base URL `https://<gate>/acme/acme-dns`.
+        `X-Api-User` is the key id and `X-Api-Key` the key; or `X-Api-Key` is
+        a token (a gate token from the token exchange, or an OIDC token) and
+        `X-Api-User` any non-empty value. These headers win over basic
+        authentication taken from the URL; `Authorization: Bearer` also
+        works. `subdomain` is a registration of the key (from
+        `acme_dns_accounts` or `/register`) or a domain name
+        (`www.example.com`, the only form with a token): the value is written to
+        `_acme-challenge.<domain>` in its managed zone, no CNAME needed. As
+        acme-dns, the two most recent values of a registration are kept;
+        there is no cleanup call, the ephemeral TTL of the role removes the
+        RRset. With a token, the two values are tracked per subject and
+        domain. Errors are `{"error", "message"}`.
+      security:
+        - acmeDNSUser: []
+          acmeDNSKey: []
+        - apiKeyBasic: []
+        - bearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [subdomain, txt]
+              properties:
+                subdomain: { type: string, examples: ["8e5700ea-a4bf-41c7-8a77-e990661dcc6a", "www.example.com"] }
+                txt: { type: string, pattern: "^[A-Za-z0-9_-]{43}$" }
+      responses:
+        "200":
+          description: Written.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  txt: { type: string }
+        "400": { $ref: "#/components/responses/ACMEDNSError" }
+        "401": { $ref: "#/components/responses/ACMEDNSError" }
+        "403": { $ref: "#/components/responses/ACMEDNSError" }
+        default: { $ref: "#/components/responses/ACMEDNSError" }
+
+  /acme/acme-dns/register:
+    post:
+      tags: [acme]
+      operationId: acmeDNSRegister
+      summary: Create an acme-dns registration of an API key
+      description: |
+        Unlike acme-dns, registration is not anonymous: without credentials
+        the answer is `401 registration_requires_api_key`. With a key (basic
+        authentication, e.g. from the user info of the base URL, or
+        `X-Api-User` / `X-Api-Key`), the body names the domain (`domain`, a
+        gate extension; `400 domain_required` otherwise) and the answer is an
+        acme-dns account whose password is the presented key.
+      security:
+        - apiKeyBasic: []
+        - acmeDNSUser: []
+          acmeDNSKey: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                domain: { type: string, examples: ["www.example.com"] }
+                allowfrom: { type: array, items: { type: string }, description: "CIDR prefixes allowed to call /update for this registration." }
+      responses:
+        "201":
+          description: Account.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ACMEDNSAccount" }
+        "400": { $ref: "#/components/responses/ACMEDNSError" }
+        "401": { $ref: "#/components/responses/ACMEDNSError" }
+        "403": { $ref: "#/components/responses/ACMEDNSError" }
+        default: { $ref: "#/components/responses/ACMEDNSError" }
+
 components:
   securitySchemes:
     bearer:
@@ -801,6 +1152,25 @@ components:
       type: apiKey
       in: header
       name: X-App-Id
+    apiKey:
+      type: http
+      scheme: bearer
+      bearerFormat: dgk
+      description: Gate API key (`dgk_<id>_<secret>`) as a bearer token.
+    apiKeyBasic:
+      type: http
+      scheme: basic
+      description: Gate API key as the password, its id as the user name.
+    acmeDNSUser:
+      type: apiKey
+      in: header
+      name: X-Api-User
+      description: Id of the gate API key (acme-dns user name).
+    acmeDNSKey:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: Gate API key (acme-dns password), or a token on /update.
     session:
       type: apiKey
       in: cookie
@@ -851,6 +1221,11 @@ components:
       in: query
       description: Delegation acting, when the caller matches several.
       schema: { type: string }
+    APIKeyID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, pattern: "^[0-9a-f]{16}$" }
     RevisionID:
       name: id
       in: path
@@ -871,6 +1246,32 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    OAuthError:
+      description: OAuth 2.0 error (RFC 6749).
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error: { type: string, examples: [invalid_grant, invalid_request, unsupported_grant_type, token_exchange_disabled] }
+              error_description: { type: string }
+    ACMEDNSError:
+      description: acme-dns error.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error:
+                type: string
+                description: |
+                  forbidden, registration_requires_api_key, domain_required,
+                  bad_domain, bad_subdomain, bad_txt, invalid_allowfrom_cidr, too_many_values, too_many_registrations, value_taken,
+                  malformed_json_payload, ephemeral_required, source_ip,
+                  no_binding, unavailable, or a zone engine reason.
+              message: { type: string }
     Locked:
       description: The zone is locked by another write; retry after Retry-After seconds.
       headers:
@@ -903,7 +1304,10 @@ components:
             stale_revision, approval_required, invalid_status, already_decided;
             410 plan_expired; 412 precondition; 413 too_large; 415 bad_request;
             423 zone_locked; 429 rate_limited; 500 internal;
-            501 not_implemented; 502 upstream; 503 store_unavailable; 504 timeout.
+            501 not_implemented; 502 upstream; 503 store_unavailable,
+            unavailable; 504 timeout. API keys and ACME add 403
+            ephemeral_required, role_widened and 409 immutable, revoked,
+            too_many_values, too_many_registrations, value_taken.
           enum:
             - invalid
             - relative_target
@@ -946,7 +1350,15 @@ components:
             - not_implemented
             - upstream
             - store_unavailable
+            - unavailable
             - timeout
+            - ephemeral_required
+            - immutable
+            - revoked
+            - role_widened
+            - too_many_values
+            - value_taken
+            - too_many_registrations
         message: { type: string }
         details: {}
         errors:
@@ -969,7 +1381,9 @@ components:
             if-match, ownership, adopt (EuroDNS-compatible API extensions),
             policy-delegation (/api/v1/policy/delegated), plans
             (/api/v1/zones/{zone}/plan and apply), rrset-api
-            (/api/v1/zones/{zone}/rrsets/{host}/{type}).
+            (/api/v1/zones/{zone}/rrsets/{host}/{type}), api-keys
+            (/api/v1/api-keys), acme-httpreq (/acme/httpreq), acme-dns
+            (/acme/acme-dns), token-exchange (/api/v1/token-exchange).
           items: { type: string }
 
     Actor:
@@ -1360,3 +1774,95 @@ components:
         (EffectivePolicy, RevisionPage, RevisionDetail, ProposeRequest,
         ExplainRequest, ExplainResponse, WhoCanResponse) are documented in
         internal/uiapi/policy.go and may change before 1.0.
+
+    APIKey:
+      type: object
+      required: [id, name, team, role, status, allowed_cidrs, acme_domains, acme_dns, created_at, created_by]
+      properties:
+        id: { type: string, pattern: "^[0-9a-f]{16}$", description: "Key id: user name of basic authentication and acme-dns, X-App-Id." }
+        name: { type: string }
+        description: { type: string }
+        team: { type: string, description: Team owning the RRsets the key creates. }
+        role: { type: string }
+        status: { type: string, enum: [active, expired, revoked] }
+        expires_at: { type: string, format: date-time }
+        allowed_cidrs: { type: array, items: { type: string } }
+        acme_domains: { type: array, items: { type: string } }
+        acme_dns:
+          type: array
+          items:
+            type: object
+            properties:
+              subdomain: { type: string }
+              domain: { type: string }
+              origin: { type: string, enum: [api, client], description: "api: from acme_domains, synced by PUT; client: /register or the domain name used as subdomain." }
+              allowfrom: { type: array, items: { type: string } }
+        created_at: { type: string, format: date-time }
+        created_by: { type: string }
+        created_by_name: { type: string }
+        rotated_at: { type: string, format: date-time }
+        previous_key_expires_at: { type: string, format: date-time, description: End of the overlap of the last rotation. }
+        revoked_at: { type: string, format: date-time }
+        revoked_by: { type: string }
+        last_used_at: { type: string, format: date-time, description: "Last successful authentication (updated at most once a minute)." }
+        last_used_ip: { type: string }
+
+    IssuedAPIKey:
+      allOf:
+        - $ref: "#/components/schemas/APIKey"
+        - type: object
+          required: [key, acme_dns_accounts]
+          properties:
+            key: { type: string, description: "dgk_<id>_<secret>, shown once." }
+            acme_dns_accounts:
+              type: object
+              description: |
+                acme-dns accounts by domain: the storage file of the certbot
+                acme-dns hook (acmedns.json), the registration file of
+                certbot-dns-acmedns and the cert-manager acmeDNS secret.
+              additionalProperties: { $ref: "#/components/schemas/ACMEDNSAccount" }
+
+    ACMEDNSAccount:
+      type: object
+      required: [username, password, fulldomain, subdomain, allowfrom]
+      properties:
+        username: { type: string, description: Key id. }
+        password: { type: string, description: The key. }
+        fulldomain: { type: string, description: "_acme-challenge.<domain>, the RRset written (no CNAME needed)." }
+        subdomain: { type: string }
+        allowfrom: { type: array, items: { type: string } }
+
+    APIKeyRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, pattern: "^[A-Za-z0-9][A-Za-z0-9 ._@-]{0,63}$" }
+        description: { type: string, maxLength: 512 }
+        team: { type: string, description: Required on creation; on PUT empty or unchanged. }
+        role: { type: string, description: Required on creation; on PUT empty or unchanged. }
+        expires_at: { type: string, format: date-time }
+        allowed_cidrs: { type: array, items: { type: string }, maxItems: 64 }
+        acme_domains:
+          type: array
+          maxItems: 100
+          items: { type: string, examples: ["www.example.com", "*.example.com"] }
+
+    APIKeyRotate:
+      type: object
+      properties:
+        overlap: { type: string, description: "Go duration, default 24h, at most 720h.", examples: ["24h", "0s"] }
+
+    HTTPReqRequest:
+      type: object
+      properties:
+        fqdn: { type: string, examples: ["_acme-challenge.www.example.com."] }
+        value: { type: string }
+        domain: { type: string, description: RAW mode. }
+        token: { type: string, description: RAW mode. }
+        keyAuth: { type: string, description: RAW mode. }
+
+    HTTPReqResult:
+      type: object
+      properties:
+        fqdn: { type: string }
+        value: { type: string }

@@ -256,6 +256,8 @@ func validateSAML(c *Config, issuers map[string]bool) []string {
 		add("ui.saml.issuer: %q must be a lowercase identifier", s.Issuer)
 	} else if issuers[s.Issuer] {
 		add("ui.saml.issuer: %q is already the name of a token issuer", s.Issuer)
+	} else if ReservedIssuers[s.Issuer] {
+		add("ui.saml.issuer: %q is reserved for subjects of the gate itself", s.Issuer)
 	}
 	if s.EntityID == "" || len(s.EntityID) > 1024 {
 		add("ui.saml.entity_id: required (at most 1024 characters)")

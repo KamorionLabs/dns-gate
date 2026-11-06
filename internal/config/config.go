@@ -40,6 +40,7 @@ type Config struct {
 	Groups            map[string]Group `yaml:"groups"`
 	Policy            Policy           `yaml:"policy"`
 	MCP               MCP              `yaml:"mcp"`
+	ACME              ACME             `yaml:"acme"`
 
 	Hash     string    `yaml:"-"` // sha256 of the file
 	LoadedAt time.Time `yaml:"-"`
@@ -172,6 +173,21 @@ type DelegationTeams struct {
 // DefaultDelegationMaxObjects is the default cap of objects per delegation.
 const DefaultDelegationMaxObjects = 100
 
+// ACME bounds the state of the ACME DNS-01 endpoints (/acme).
+type ACME struct {
+	// MaxRegistrations caps the acme-dns registrations (and httpreq value
+	// ledgers) of one API key or token subject (default 100).
+	MaxRegistrations int `yaml:"max_registrations"`
+	// RegistrationIdle: registrations of token subjects and httpreq ledgers
+	// unused for this long are purged (default 720h).
+	RegistrationIdle Duration `yaml:"registration_idle"`
+	// MaxValues caps the values of one challenge TXT RRset (default 20).
+	MaxValues int `yaml:"max_values"`
+	// MaxValuesPerAuthor caps the values one API key or token subject has
+	// in a challenge RRset (default 4, at most MaxValues).
+	MaxValuesPerAuthor int `yaml:"max_values_per_author"`
+}
+
 // MCP configures the Model Context Protocol endpoint (/mcp).
 type MCP struct {
 	Enabled           bool     `yaml:"enabled"`
@@ -223,6 +239,9 @@ type Rate struct {
 type Limits struct {
 	MaxBodyBytes         int64 `yaml:"max_body_bytes"`
 	MaxChangesPerRequest int   `yaml:"max_changes_per_request"`
+	// EphemeralLifetimeFactor bounds an ephemeral RRset to its creation
+	// plus this many ephemeral TTLs (default 4).
+	EphemeralLifetimeFactor int `yaml:"ephemeral_lifetime_factor"`
 }
 
 // Lock configures the per-zone write lease.
@@ -289,9 +308,16 @@ type Issuer struct {
 	// origin of the gate; the tokens are bound as the issuer of the session
 	// they come from, so this issuer is never named in bindings.
 	Self bool `yaml:"self"`
-	// TokenTTL is the lifetime of gate-issued tokens (default 1h).
-	TokenTTL   Duration `yaml:"token_ttl"`
-	SigningKey []byte   `yaml:"-"`
+	// TokenTTL is the lifetime of gate-issued tokens (default 1h). It also
+	// caps the tokens of the token exchange.
+	TokenTTL Duration `yaml:"token_ttl"`
+	// TokenExchange lets the tokens of this issuer be exchanged for gate
+	// tokens (POST /api/v1/token-exchange, RFC 8693); needs a gate issuer.
+	TokenExchange bool `yaml:"token_exchange"`
+	// MaxExchangedTTL caps the lifetime of the gate tokens exchanged for
+	// tokens of this issuer (default 15m).
+	MaxExchangedTTL Duration `yaml:"max_exchanged_ttl"`
+	SigningKey      []byte   `yaml:"-"`
 	// SAML marks the subject issuer of the SAML login (AllIssuers).
 	SAML bool `yaml:"-"`
 }
@@ -363,17 +389,27 @@ type Protected struct {
 	Types []string `yaml:"types"`
 }
 
+// DefaultMaxExchangedTTL caps the lifetime of exchanged gate tokens.
+const DefaultMaxExchangedTTL = 15 * time.Minute
+
+// ReservedIssuers are issuer names of subjects the gate makes itself: API
+// keys, virtual keys and the gate's own actors ("gate:reconciler"). No
+// token issuer may use them; the gate issuer (self: true) may be named
+// "gate", its tokens being bound as their original issuer.
+var ReservedIssuers = map[string]bool{"api-key": true, "virtual-key": true, "gate": true}
+
 // Known actions.
 var knownActions = map[string]bool{
-	"dns.read":         true,
-	"dns.record.write": true,
-	"dns.record.adopt": true,
-	"dns.zone.admin":   true,
-	"ui.read":          true,
-	"policy.read":      true,
-	"policy.propose":   true,
-	"policy.approve":   true,
-	"domain.read":      true,
+	"dns.read":           true,
+	"dns.record.write":   true,
+	"dns.record.adopt":   true,
+	"dns.zone.admin":     true,
+	"ui.read":            true,
+	"policy.read":        true,
+	"policy.propose":     true,
+	"policy.approve":     true,
+	"domain.read":        true,
+	"gate.apikey.manage": true,
 }
 
 var asymmetricAlgs = map[string]bool{
@@ -574,6 +610,18 @@ func (c *Config) defaults() {
 			c.Policy.Delegations[i].Allow.MaxObjects = DefaultDelegationMaxObjects
 		}
 	}
+	if c.ACME.MaxRegistrations == 0 {
+		c.ACME.MaxRegistrations = 100
+	}
+	if c.ACME.RegistrationIdle == 0 {
+		c.ACME.RegistrationIdle = Duration(30 * 24 * time.Hour)
+	}
+	if c.ACME.MaxValues == 0 {
+		c.ACME.MaxValues = 20
+	}
+	if c.ACME.MaxValuesPerAuthor == 0 {
+		c.ACME.MaxValuesPerAuthor = min(4, c.ACME.MaxValues)
+	}
 	if c.MCP.PlanTTL == 0 {
 		c.MCP.PlanTTL = Duration(10 * time.Minute)
 	}
@@ -616,6 +664,9 @@ func (c *Config) defaults() {
 		}
 		if c.Issuers[i].ClockSkew == 0 {
 			c.Issuers[i].ClockSkew = Duration(60 * time.Second)
+		}
+		if c.Issuers[i].TokenExchange && c.Issuers[i].MaxExchangedTTL == 0 {
+			c.Issuers[i].MaxExchangedTTL = Duration(DefaultMaxExchangedTTL)
 		}
 	}
 }
@@ -683,6 +734,9 @@ func (c *Config) Validate() error {
 	if c.Limits.MaxChangesPerRequest < 1 {
 		add("limits.max_changes_per_request: must be >= 1")
 	}
+	if c.Limits.EphemeralLifetimeFactor < 0 || c.Limits.EphemeralLifetimeFactor > 100 {
+		add("limits.ephemeral_lifetime_factor: must be between 1 and 100 (0: default 4)")
+	}
 
 	issuers := map[string]bool{}
 	selfName := ""
@@ -693,6 +747,9 @@ func (c *Config) Validate() error {
 		}
 		if issuers[is.Name] {
 			add("%s.name: %q duplicated", at, is.Name)
+		}
+		if ReservedIssuers[is.Name] && !(is.Self && is.Name == "gate") {
+			add("%s.name: %q is reserved for subjects of the gate itself", at, is.Name)
 		}
 		issuers[is.Name] = true
 		if u, err := url.Parse(is.Issuer); err != nil || u.Scheme != "https" || u.Host == "" {
@@ -727,6 +784,12 @@ func (c *Config) Validate() error {
 		} else if is.TokenTTL != 0 {
 			add("%s.token_ttl: only for the gate issuer (self: true)", at)
 		}
+		if is.TokenExchange && is.Self {
+			add("%s.token_exchange: gate tokens are never exchanged", at)
+		}
+		if is.MaxExchangedTTL != 0 && (!is.TokenExchange || is.MaxExchangedTTL.D() < time.Minute || is.MaxExchangedTTL.D() > 24*time.Hour) {
+			add("%s.max_exchanged_ttl: between 1m and 24h, with token_exchange only", at)
+		}
 		if is.SubjectClaim != "" && is.SubjectTemplate != "" {
 			add("%s: subject_claim and subject_template are exclusive", at)
 		}
@@ -748,6 +811,11 @@ func (c *Config) Validate() error {
 		}
 		if is.ClockSkew.D() < 0 || is.ClockSkew.D() > 5*time.Minute {
 			add("%s.clock_skew: must be between 0 and 5m", at)
+		}
+	}
+	for i, is := range c.Issuers {
+		if is.TokenExchange && !is.Self && selfName == "" {
+			add("issuers[%d].token_exchange: needs a gate issuer (an issuer with self: true) to sign the exchanged tokens", i)
 		}
 	}
 	if c.UI.SAML != nil {
@@ -921,6 +989,18 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if c.ACME.MaxRegistrations < 1 || c.ACME.MaxRegistrations > 10000 {
+		add("acme.max_registrations: must be between 1 and 10000")
+	}
+	if c.ACME.RegistrationIdle.D() < time.Hour {
+		add("acme.registration_idle: must be >= 1h")
+	}
+	if c.ACME.MaxValues < 2 || c.ACME.MaxValues > 100 {
+		add("acme.max_values: must be between 2 and 100")
+	}
+	if c.ACME.MaxValuesPerAuthor < 2 || c.ACME.MaxValuesPerAuthor > c.ACME.MaxValues {
+		add("acme.max_values_per_author: must be between 2 and acme.max_values")
+	}
 	if c.MCP.PlanTTL.D() < time.Minute || c.MCP.PlanTTL.D() > time.Hour {
 		add("mcp.plan_ttl: must be between 1m and 1h")
 	}

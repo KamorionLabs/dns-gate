@@ -95,31 +95,7 @@ func (e *Engine) OwnerTeam(s *identity.Subject, zone string) (string, bool) {
 // MaxChangesPerRequest returns the most permissive limit among the
 // subject's roles (0 means unlimited).
 func (e *Engine) MaxChangesPerRequest(s *identity.Subject) int {
-	sn := e.snap()
-	if s == nil {
-		return sn.maxChanges
-	}
-	best := -2
-	for _, name := range s.Roles {
-		cr := sn.role(name)
-		if cr == nil {
-			continue
-		}
-		v := cr.role.MaxChangesPerRequest
-		switch {
-		case v == -1:
-			return 0
-		case v == 0:
-			v = sn.maxChanges
-		}
-		if v > best {
-			best = v
-		}
-	}
-	if best < 0 {
-		return sn.maxChanges
-	}
-	return best
+	return e.snap().MaxChanges(roles(s))
 }
 
 // RebaseOnSave is true when any role of the subject enables it.
@@ -139,13 +115,41 @@ func (e *Engine) RebaseOnSave(s *identity.Subject) bool {
 // EphemeralTTL is the shortest ephemeral TTL among the subject's write
 // roles, or 0 if any write role creates permanent records.
 func (e *Engine) EphemeralTTL(s *identity.Subject) time.Duration {
-	if s == nil {
-		return 0
+	return e.snap().EphemeralTTL(roles(s))
+}
+
+// MaxChanges is the most permissive blast-radius limit among roles, 0 for
+// unlimited; without any known role, the global default.
+func (s *Snapshot) MaxChanges(roles []string) int {
+	best := -2
+	for _, name := range roles {
+		cr := s.role(name)
+		if cr == nil {
+			continue
+		}
+		v := cr.role.MaxChangesPerRequest
+		switch {
+		case v == -1:
+			return 0
+		case v == 0:
+			v = s.maxChanges
+		}
+		if v > best {
+			best = v
+		}
 	}
-	sn := e.snap()
+	if best < 0 {
+		return s.maxChanges
+	}
+	return best
+}
+
+// EphemeralTTL is the shortest ephemeral TTL among the write roles of
+// roles, or 0 if any write role creates permanent records (or none writes).
+func (s *Snapshot) EphemeralTTL(roles []string) time.Duration {
 	var ttl time.Duration
-	for _, name := range s.Roles {
-		cr := sn.role(name)
+	for _, name := range roles {
+		cr := s.role(name)
 		if cr == nil {
 			continue
 		}

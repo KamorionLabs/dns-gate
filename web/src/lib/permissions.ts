@@ -46,6 +46,7 @@ export function describePermissions(perms: Permission[]): string[] {
     else if (p.actions.includes('ui.read')) zone.push(`Browse ${at} in this console`);
     if (p.actions.includes('dns.zone.admin')) zone.push(`Manage DNSSEC and zone settings of ${at}`);
     if (p.actions.includes('domain.read')) zone.push(`Read domain details of ${at}`);
+    if (p.actions.includes('gate.apikey.manage')) zone.push(`Manage the API keys of your teams for ${at}`);
     for (const a of p.actions) if (meta[a]) policy.push(meta[a]);
   }
   return [...new Set([...zone, ...policy])];

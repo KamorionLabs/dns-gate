@@ -19,6 +19,8 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 
+	"github.com/KamorionLabs/dns-gate/internal/apikey"
+	"github.com/KamorionLabs/dns-gate/internal/audit"
 	"github.com/KamorionLabs/dns-gate/internal/config"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
@@ -40,7 +42,7 @@ func unauthorized(msg string) *Error {
 }
 
 // Header names stripped from every request after authentication.
-var credentialHeaders = []string{"Authorization", "X-App-Id", "X-Api-Key", "Cookie"}
+var credentialHeaders = []string{"Authorization", "X-App-Id", "X-Api-Key", "X-Api-User", "Cookie"}
 
 type issuer struct {
 	cfg    config.Issuer
@@ -57,6 +59,9 @@ type Authenticator struct {
 	policy  *policy.Holder
 	trusted []netip.Prefix
 	self    *TokenIssuer
+	keys    APIKeys
+	audit   audit.Logger
+	noise   noiseCounter
 	now     func() time.Time
 }
 
@@ -119,7 +124,9 @@ func (a *Authenticator) SetClock(now func() time.Time) {
 }
 
 // Authenticate reads the credentials of r. Bearer tokens and virtual keys
-// are exclusive.
+// are exclusive. A gate API key (dgk_...) is accepted as a bearer token, as
+// the password of basic authentication (user name: the key id) and in
+// X-Api-Key (X-App-Id or X-Api-User, when set: the key id).
 func (a *Authenticator) Authenticate(r *http.Request) (*identity.Subject, error) {
 	authz := r.Header.Get("Authorization")
 	appID, apiKey := r.Header.Get("X-App-Id"), r.Header.Get("X-Api-Key")
@@ -128,10 +135,27 @@ func (a *Authenticator) Authenticate(r *http.Request) (*identity.Subject, error)
 		return nil, unauthorized("use either a bearer token or a virtual key, not both")
 	case authz != "":
 		scheme, tok, ok := strings.Cut(authz, " ")
+		if ok && strings.EqualFold(scheme, "Basic") {
+			user, pass, ok := basicAuth(tok)
+			if !ok || !apikey.Looks(pass) {
+				return nil, unauthorized("basic authentication is only accepted with a gate API key")
+			}
+			return a.authenticateAPIKey(r.Context(), user, pass, a.ClientIP(r))
+		}
 		if !ok || !strings.EqualFold(scheme, "Bearer") || tok == "" {
 			return nil, unauthorized("bearer token expected")
 		}
-		return a.authenticateToken(r.Context(), strings.TrimSpace(tok))
+		tok = strings.TrimSpace(tok)
+		if apikey.Looks(tok) {
+			return a.authenticateAPIKey(r.Context(), "", tok, a.ClientIP(r))
+		}
+		return a.authenticateToken(r.Context(), tok)
+	case apikey.Looks(apiKey):
+		user := appID
+		if user == "" {
+			user = r.Header.Get("X-Api-User")
+		}
+		return a.authenticateAPIKey(r.Context(), user, apiKey, a.ClientIP(r))
 	case appID != "" || apiKey != "":
 		return a.authenticateVirtualKey(appID, apiKey, a.ClientIP(r))
 	default:

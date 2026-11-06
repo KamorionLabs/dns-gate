@@ -8,8 +8,8 @@ front of EuroDNS** (see [below](#why-not-in-front-of-eurodns)).
 ## Architecture
 
 ```
- clients (Terraform, CI, MCP, browser)
-        │ HTTPS, Authorization: Bearer <OIDC token> / session cookie
+ clients (Terraform, CI, MCP, ACME clients, browser)
+        │ HTTPS, Authorization: Bearer <OIDC or gate token> / API key / session cookie
         ▼
  API Gateway HTTP API ── custom domain (regional ACM certificate), $default stage
         │ $default route, Lambda proxy integration, payload format 2.0
@@ -21,13 +21,13 @@ front of EuroDNS** (see [below](#why-not-in-front-of-eurodns)).
         │   EventBridge Scheduler, rate(5 minutes)
         ▼
  DynamoDB table (on-demand, PITR, TTL on "ttl"):
- ownership, zone versions and locks, audit, policy revisions, MCP plans
+ ownership, zone versions and locks, audit, policy revisions, plans, API keys
 ```
 
 - **API Gateway HTTP API** terminates TLS on the custom domain and invokes the function
-  with the 2.0 payload. The gate does its own authentication (OIDC bearer tokens,
-  virtual keys, UI session): no API Gateway authorizer. Use an empty API mapping key so
-  that paths reach the gate unchanged.
+  with the 2.0 payload. The gate does its own authentication (OIDC and gate tokens,
+  API keys, virtual keys, UI session): no API Gateway authorizer. Use an empty API
+  mapping key so that paths reach the gate unchanged.
 - **Lambda**: one execution environment serves one request at a time. Nothing runs
   between invocations: the work the container does in background goroutines happens
   either lazily on requests or in the scheduled maintenance pass.
@@ -35,7 +35,8 @@ front of EuroDNS** (see [below](#why-not-in-front-of-eurodns)).
   `{"dns_gate_task":"maintenance"}`.
 - **DynamoDB** is the only supported store on Lambda (`store.type: dynamodb`, any other
   type is a configuration error when `AWS_LAMBDA_RUNTIME_API` is set): every instance
-  shares ownership, zone locks and versions, the managed policy and the MCP plans.
+  shares ownership, zone locks and versions, the managed policy, the RRset plans and
+  the API keys.
 - **No VPC, no NAT**: DynamoDB, Route 53, Secrets Manager, S3 and SSM are reached over
   their public endpoints with the function role.
 
@@ -45,7 +46,7 @@ front of EuroDNS** (see [below](#why-not-in-front-of-eurodns)).
 |---|---|---|
 | Policy reload (active managed revision) | every 10 s | before a request when the last check is older than 10 s; every maintenance pass |
 | Zone discovery (`providers[].zones`) | each provider every `refresh`, 5 min after a failure | before a request and in the maintenance pass, for the providers listed longer than `refresh` ago (5 min after a failure) |
-| Reconcile of the managed zones | every `reconcile_interval` | every maintenance pass (5 min) |
+| Reconcile of the managed zones (drift, expired ACME challenges) | every `reconcile_interval` | every maintenance pass (5 min) |
 | Expired RRset plans (MCP and REST) | every 15 min (DynamoDB: the table TTL) | every maintenance pass (DynamoDB: the table TTL) |
 
 The maintenance pass runs every step even when one fails and returns the joined errors:
@@ -93,6 +94,9 @@ Configuration notes for Lambda:
   given to the gate is the `sourceIp` of the API Gateway event, not `X-Forwarded-For`.
 - `lock.wait` at most 20 s: API Gateway HTTP API ends an integration after 30 s.
 - `ui.redirect_url`, `mcp.public_url`: the custom domain.
+- Gate-issued tokens and the token exchange (`issuers[].self`) need
+  `DNS_GATE_TOKEN_SIGNING_KEY`, and the UI `DNS_GATE_SESSION_KEY`: put them in the
+  secret, so that every execution environment shares them.
 
 Function settings: memory 512 MB (CPU grows with memory; JWT verification and TLS
 handshakes are faster), timeout 120 s (the maintenance pass reconciles every managed

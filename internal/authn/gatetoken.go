@@ -27,7 +27,7 @@ const (
 // registeredClaims are set by the gate and never copied from a session.
 var registeredClaims = map[string]bool{
 	"iss": true, "aud": true, "exp": true, "nbf": true, "iat": true, "jti": true,
-	"auth_time": true, "amr": true, ClaimOrigin: true, ClaimCategory: true,
+	"auth_time": true, "amr": true, ClaimOrigin: true, ClaimCategory: true, ClaimExchanged: true,
 }
 
 // TokenIssuer signs the gate's own access tokens (issuer with self: true).
@@ -58,6 +58,8 @@ type TokenRequest struct {
 	AMR      []string
 	// MaxExpiry caps the token lifetime (end of the session), zero for none.
 	MaxExpiry time.Time
+	// Exchanged is the jti of the token a token exchange took, "" otherwise.
+	Exchanged string
 }
 
 func newTokenIssuer(ic config.Issuer) (*TokenIssuer, error) {
@@ -137,6 +139,9 @@ func (t *TokenIssuer) Issue(req TokenRequest, now time.Time) (*IssuedToken, erro
 	if len(req.AMR) > 0 {
 		claims["amr"] = req.AMR
 	}
+	if req.Exchanged != "" {
+		claims[ClaimExchanged] = req.Exchanged
+	}
 	id := randomID()
 	std := jwt.Claims{
 		Issuer: t.url, Audience: jwt.Audience{t.audience}, ID: id,
@@ -157,6 +162,9 @@ func (a *Authenticator) bindGateToken(claims map[string]any) (*identity.Subject,
 	is := a.byName[origin]
 	if is == nil || is.cfg.Self {
 		return nil, unauthorized("gate token of an unknown issuer")
+	}
+	if _, exchanged := claims[ClaimExchanged]; exchanged && !is.cfg.TokenExchange {
+		return nil, unauthorized("exchanged token of an issuer without token_exchange")
 	}
 	cat, _ := claims[ClaimCategory].(string)
 	if cat != identity.CategoryHuman && cat != identity.CategoryPipeline {

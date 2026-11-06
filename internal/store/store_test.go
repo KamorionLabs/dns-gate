@@ -154,6 +154,7 @@ func conformance(t *testing.T, s Store, clock *fakeClock) {
 
 	t.Run("policy", func(t *testing.T) { policyConformance(t, s) })
 	t.Run("plans", func(t *testing.T) { planConformance(t, s, clock) })
+	t.Run("api_keys", func(t *testing.T) { apiKeyConformance(t, s, clock) })
 
 	t.Run("lock", func(t *testing.T) {
 		z := "lock.example.com"
@@ -269,7 +270,7 @@ func TestPostgres(t *testing.T) {
 	}
 	s := st.(*sqlStore)
 	defer s.Close()
-	for _, table := range []string{"policy_active", "policy_revision", "ownership", "zone_meta", "zone_lock", "audit"} {
+	for _, table := range []string{"acme_registration", "api_key", "policy_active", "policy_revision", "ownership", "zone_meta", "zone_lock", "audit"} {
 		if _, err := s.db.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			t.Fatal(err)
 		}
@@ -297,7 +298,8 @@ func TestPostgres(t *testing.T) {
 func testSQLMigrationsAndPurge(t *testing.T, s *sqlStore, clock *fakeClock) {
 	ctx := context.Background()
 	var n int
-	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&n); err != nil || n != 3 {
+	entries, _ := migrationsFS.ReadDir("migrations/" + string(s.dialect))
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations").Scan(&n); err != nil || n != len(entries) {
 		t.Fatalf("schema_migrations %d %v", n, err)
 	}
 	if err := s.migrate(ctx); err != nil {

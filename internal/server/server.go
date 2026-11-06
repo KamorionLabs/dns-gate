@@ -72,6 +72,9 @@ type Config struct {
 	// HTTPClient is used for the UI OIDC login (discovery, token exchange)
 	// and the SAML IdP metadata.
 	HTTPClient *http.Client
+	// APIKeys stores the gate-issued API keys and their acme-dns
+	// registrations; nil disables /api/v1/api-keys and acme-dns.
+	APIKeys store.APIKeyStore
 	// SAMLGroups resolves the groups of SAML users; nil builds the AWS
 	// identity store lookup of ui.saml.groups_from_identity_store, if any.
 	SAMLGroups GroupLookup
@@ -207,6 +210,10 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		s.handleToken(w, r)
 	case strings.HasPrefix(p, GateInfoPath+"/"):
 		s.handleExtension(w, r)
+	case strings.HasPrefix(p, "/acme/"):
+		s.handleACME(w, r)
+	case p == TokenExchangePath:
+		s.handleTokenExchange(w, r)
 	case p == "/" && s.ui != nil:
 		http.Redirect(w, r, "/ui/", http.StatusFound)
 	case p == "/ui" && s.ui != nil:
@@ -269,7 +276,9 @@ func (s *Server) handleEuroDNS(w http.ResponseWriter, r *http.Request) {
 		if !errors.As(aerr, &ae) {
 			ae = &authn.Error{Status: http.StatusUnauthorized, Reason: "unauthenticated", Message: "authentication failed"}
 		}
-		s.audit(r, nil, m.Operation.ID, m.Zone, "deny", ae.Reason)
+		if !presentsAPIKey(r) {
+			s.audit(r, nil, m.Operation.ID, m.Zone, "deny", ae.Reason)
+		}
 		writeError(w, ae.Status, ae.Reason, ae.Message)
 		return
 	}
@@ -384,6 +393,12 @@ func (s *Server) handleGateInfo(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.Ops != nil {
 		features = append(features, FeaturePlans, FeatureRRsetAPI)
 	}
+	if s.tokenExchange() {
+		features = append(features, FeatureTokenExchange)
+	}
+	if s.cfg.APIKeys != nil {
+		features = append(features, FeatureAPIKeys, FeatureACMEHTTPReq, FeatureACMEDNS)
+	}
 	writeJSON(w, http.StatusOK, GateInfo{Version: version.Version, Features: features})
 }
 
@@ -398,6 +413,11 @@ const (
 	FeatureIfMatch   = "if-match"
 	FeatureOwnership = "ownership"
 	FeatureAdopt     = "adopt"
+	// FeatureAPIKeys: /api/v1/api-keys; FeatureACMEHTTPReq and
+	// FeatureACMEDNS: the lego httpreq and acme-dns endpoints under /acme.
+	FeatureAPIKeys     = "api-keys"
+	FeatureACMEHTTPReq = "acme-httpreq"
+	FeatureACMEDNS     = "acme-dns"
 )
 
 // GateInfoPath is the gate's discovery document, also used by clients to
@@ -427,7 +447,9 @@ func (s *Server) handleExtension(w http.ResponseWriter, r *http.Request) {
 		if !errors.As(aerr, &ae) {
 			ae = &authn.Error{Status: http.StatusUnauthorized, Reason: "unauthenticated", Message: "authentication failed"}
 		}
-		s.audit(r, nil, "adopt", zone, "deny", ae.Reason)
+		if !presentsAPIKey(r) {
+			s.audit(r, nil, "adopt", zone, "deny", ae.Reason)
+		}
 		writeError(w, ae.Status, ae.Reason, ae.Message)
 		return
 	}

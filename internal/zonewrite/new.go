@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/KamorionLabs/dns-gate/internal/audit"
+	"github.com/KamorionLabs/dns-gate/internal/dns"
+	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
 	"github.com/KamorionLabs/dns-gate/internal/provider"
 	"github.com/KamorionLabs/dns-gate/internal/store"
@@ -31,8 +33,15 @@ type Config struct {
 	LockTTL      time.Duration // default 60s
 	LockWait     time.Duration // default 30s
 	CheckOnWrite bool          // run the provider check (provider.Checker) before every write
-	Now          func() time.Time
-	Logger       *slog.Logger
+	// EphemeralLifetimeFactor bounds the life of an ephemeral RRset to its
+	// creation plus this many ephemeral TTLs, however often values are
+	// added to it (default 4).
+	EphemeralLifetimeFactor int
+	// Guard, when set, may refuse a change of one RRset by a subject, after
+	// RBAC and before ownership; a non-*Error refusal is forbidden.
+	Guard  func(ctx context.Context, s *identity.Subject, zone string, key dns.Key) error
+	Now    func() time.Time
+	Logger *slog.Logger
 }
 
 // ZoneSet tells which zones the engine serves (policy.Engine implements it).

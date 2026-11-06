@@ -347,3 +347,17 @@ func TestBindingTeamFrom(t *testing.T) {
 		}
 	}
 }
+
+// Issuer names used by internal subjects (API keys, virtual keys, the
+// gate's own actors) are reserved: an OIDC issuer named like them would
+// share their subject ids.
+func TestReservedIssuerNames(t *testing.T) {
+	e := env(map[string]string{"EURODNS_API_KEY": "k"})
+	for _, name := range []string{"api-key", "virtual-key", "gate"} {
+		doc := strings.ReplaceAll(base, "issuer: ci", "issuer: "+name)
+		doc = strings.Replace(doc, "name: ci", "name: "+name, 1)
+		if _, err := Parse([]byte(doc), e); err == nil || !strings.Contains(err.Error(), "reserved") {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}

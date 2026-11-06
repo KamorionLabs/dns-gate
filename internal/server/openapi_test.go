@@ -55,6 +55,10 @@ func TestOpenAPICoversRoutes(t *testing.T) {
 	for _, rt := range apiRoutes {
 		served[rt.Method+" "+rt.Pattern] = true
 	}
+	for _, p := range acmeRoutes {
+		served["POST "+p] = true
+	}
+	served["POST "+TokenExchangePath] = true
 	var missing, extra []string
 	for k := range served {
 		if !spec[k] {
