@@ -74,9 +74,11 @@ const (
 )
 
 // Transfer statuses. Approval applies the transfer at once: a transfer is
-// applied, or failed when its RRsets changed since the request.
+// applied, or failed when its RRsets changed since the request; approved
+// only lasts while it is applied.
 const (
 	TransferProposed = "proposed"
+	TransferApproved = "approved"
 	TransferApplied  = "applied"
 	TransferRejected = "rejected"
 	TransferExpired  = "expired"
