@@ -26,6 +26,8 @@ type memory struct {
 	revisions      map[string]PolicyRevision
 	activeRevision string
 	plans          map[string]Plan
+	apiKeys        map[string]APIKey
+	acmeRegs       map[memRegKey]ACMERegistration
 	now            func() time.Time
 }
 
