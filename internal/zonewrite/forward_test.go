@@ -9,6 +9,7 @@ import (
 
 	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
+	"github.com/KamorionLabs/dns-gate/internal/policy"
 	"github.com/KamorionLabs/dns-gate/internal/provider"
 	eurodnsprov "github.com/KamorionLabs/dns-gate/internal/provider/eurodns"
 	"github.com/KamorionLabs/dns-gate/internal/store"
@@ -222,4 +223,79 @@ func TestForwardInterference(t *testing.T) {
 	if err := e.add(bob, zoneName, rec("TXT", "promo", "verification")); err != nil {
 		t.Fatalf("a TXT next to a forward: %v", err)
 	}
+}
+
+func TestForwardInterferenceHonoursTombstonesAndMissingOwners(t *testing.T) {
+	e := newEnvConfig(t, eurodnstest.Options{}, nil, func(c *Config) { c.TombstoneTTL = time.Hour })
+	ctx := context.Background()
+	e.mustAdd(alice, rec("A", "shop", "192.0.2.1"))
+	if _, err := e.eng.ApplyRRsets(ctx, alice, zoneName, []uiapi.RRsetChange{{Host: "shop", Type: "A", Delete: true}}, 0); err != nil {
+		t.Fatal(err)
+	}
+	_, err := e.eng.ApplyRRsets(ctx, fwdB, zoneName, []uiapi.RRsetChange{fwd("shop", "301", "https://example.net/")}, 0)
+	e.wantReason(err, ReasonNotOwner)
+	e.mustAdd(alice, rec("A", "shop", "192.0.2.1"))
+
+	if _, err := e.eng.ApplyRRsets(ctx, fwdA, zoneName, []uiapi.RRsetChange{fwd("promo", "301", "https://example.net/")}, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.eng.ApplyRRsets(ctx, fwdA, zoneName, []uiapi.RRsetChange{{Host: "promo", Type: dns.TypeURLForward, Delete: true}}, 0); err != nil {
+		t.Fatal(err)
+	}
+	e.wantReason(e.add(bob, zoneName, rec("A", "promo", "192.0.2.9")), ReasonNotOwner)
+
+	e.mustAdd(alice, rec("AAAA", "api", "2001:db8::1"))
+	z := e.srv.Zone(zoneName)
+	kept := z.Records[:0]
+	for _, r := range z.Records {
+		if r.Host != "api" {
+			kept = append(kept, r)
+		}
+	}
+	z.Records = kept
+	e.srv.Seed(z)
+	_, err = e.eng.ApplyRRsets(ctx, fwdB, zoneName, []uiapi.RRsetChange{fwd("api", "301", "https://example.net/")}, 0)
+	e.wantReason(err, ReasonNotOwner)
+}
+
+// adminFolderAuthz grants dns.zone.admin through the folder /ADMIN.
+type adminFolderAuthz struct{ fakeAuthz }
+
+func (a *adminFolderAuthz) AllowRRsetFolder(s *identity.Subject, action, zone string, k dns.Key) (bool, string) {
+	ok := a.AllowRRset(s, action, zone, k)
+	if ok && action == policy.ActionZoneAdmin {
+		return true, "/ADMIN"
+	}
+	return ok, ""
+}
+
+func TestForwardWriteFolderIsNotZoneAdmins(t *testing.T) {
+	e := newEnvConfig(t, eurodnstest.Options{}, nil, func(c *Config) { c.Authz = &adminFolderAuthz{} })
+	both := bound(&identity.Subject{Issuer: "idp", ID: "ra", Name: "ra@example.com", Category: identity.CategoryHuman, Roles: []string{"forwarder", "admin"}, Teams: []string{"team-a"}})
+	_, _, err := e.eng.Write(context.Background(), both, zoneName, "", "saveDnsZone", func(cur *dns.Zone) (*Plan, error) {
+		n := dns.RRset{Key: dns.ForwardKey("promo"), Forward: &dns.Forward{Mode: "301", URL: "https://example.net/"}}
+		return &Plan{ForeignForwards: true, Changes: []dns.Change{{Key: n.Key, New: &n}}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evs := e.audit.find("saveDnsZone", "allow")
+	if len(evs) != 1 || evs[0].Extra["folder"] != nil {
+		t.Fatalf("folder of dns.zone.admin recorded for a forward write: %+v", evs)
+	}
+}
+
+func TestRequireHTTPSAfterAuthorization(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t, eurodnstest.Options{})
+	e.eng, _ = New(Config{Providers: provider.Single(httpsProvider{e.prov, provider.HTTPSInactive, nil, nil}), Store: e.st, Authz: e.authz, Zones: []string{zoneName}, Holder: "test"})
+	c := fwd("www", "301", "https://example.net/")
+	c.RequireHTTPS = true
+	_, err := e.eng.ApplyRRsets(ctx, alice, zoneName, []uiapi.RRsetChange{c}, 0)
+	e.wantReason(err, ReasonForbidden)
+	if res, err := e.eng.PlanRRsets(ctx, alice, zoneName, []uiapi.RRsetChange{c}); err != nil || res.Reason != string(ReasonForbidden) {
+		t.Fatalf("plan: %+v %v", res, err)
+	}
+	_, err = e.eng.ApplyRRsets(ctx, fwdA, zoneName, []uiapi.RRsetChange{c}, 0)
+	e.wantReason(err, ReasonHTTPS)
 }

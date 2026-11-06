@@ -675,7 +675,8 @@ func (e *engine) validate(ctx context.Context, s *identity.Subject, p provider.P
 	for i := range plan.Changes {
 		c := &plan.Changes[i]
 		writes := e.allowRRset(&plan.grants, s, policy.WriteAction(c.Key), zone, c.Key)
-		zoneAdmin := c.Key.IsForward() && plan.ForeignForwards && e.allowRRset(&plan.grants, s, policy.ActionZoneAdmin, zone, c.Key)
+		legacy := c.Key.IsForward() && plan.ForeignForwards
+		zoneAdmin := legacy && !writes && e.allowRRset(&plan.grants, s, policy.ActionZoneAdmin, zone, c.Key)
 		if !writes && !zoneAdmin {
 			return nil, fail(ReasonForbidden, "not allowed to write %s in %s", keyString(c.Key), zone)
 		}
@@ -715,7 +716,13 @@ func (e *engine) validate(ctx context.Context, s *identity.Subject, p provider.P
 				keyString(c.Key), policy.ActionForwardWrite, policy.ActionZoneAdmin)
 		}
 		if c.Old == nil {
-			if err := e.interference(s, c.Key, sets, owns); err != nil {
+			if tombs == nil {
+				var err error
+				if tombs, err = e.liveTombstones(ctx, zone); err != nil {
+					return nil, err
+				}
+			}
+			if err := e.interference(s, c.Key, sets, owns, tombs); err != nil {
 				return nil, err
 			}
 			cl := claim{change: *c}
@@ -758,6 +765,9 @@ func (e *engine) validate(ctx context.Context, s *identity.Subject, p provider.P
 			}
 			claims = append(claims, cl)
 			continue
+		}
+		if !owned && legacy && !zoneAdmin {
+			zoneAdmin = e.allowRRset(&plan.grants, s, policy.ActionZoneAdmin, zone, c.Key)
 		}
 		if !owned && zoneAdmin {
 			plan.zoneAdminForwards = append(plan.zoneAdminForwards, keyString(c.Key))
@@ -802,8 +812,10 @@ func (e *engine) validate(ctx context.Context, s *identity.Subject, p provider.P
 // of its host (policy.ForwardShadowTypes), so a forward is created only
 // where those records are absent or owned by one of s's teams, and such a
 // record only where the forward of the host is absent or owned by one of
-// s's teams.
-func (e *engine) interference(s *identity.Subject, k dns.Key, sets map[dns.Key]dns.RRset, owns map[dns.Key]store.Ownership) error {
+// s's teams. A competing RRset owned by another team but missing upstream,
+// or reserved for another team by a tombstone, refuses the creation too.
+func (e *engine) interference(s *identity.Subject, k dns.Key, sets map[dns.Key]dns.RRset, owns map[dns.Key]store.Ownership,
+	tombs map[dns.Key]store.Tombstone) error {
 	var others []dns.Key
 	switch {
 	case k.IsForward():
@@ -814,14 +826,17 @@ func (e *engine) interference(s *identity.Subject, k dns.Key, sets map[dns.Key]d
 		others = []dns.Key{dns.ForwardKey(k.Host)}
 	}
 	for _, other := range others {
-		if _, key, present := findSet(sets, other); present {
-			o, owned := owns[key]
-			switch {
-			case !owned:
-				return fail(ReasonForeignRRset, "%s exists and is not managed by the gate: %s would replace it; adopt it first", keyString(key), keyString(k))
-			case !slices.Contains(s.Teams, o.Owner):
-				return fail(ReasonNotOwner, "%s is owned by team %s: %s would replace it", keyString(key), o.Owner, keyString(k))
-			}
+		_, key, present := findSet(sets, other)
+		o, owned := owns[key]
+		tb, reserved := tombs[key]
+		switch {
+		case present && !owned:
+			return fail(ReasonForeignRRset, "%s exists and is not managed by the gate: %s would replace it; adopt it first", keyString(key), keyString(k))
+		case owned && !slices.Contains(s.Teams, o.Owner):
+			return fail(ReasonNotOwner, "%s is owned by team %s: %s would replace it", keyString(key), o.Owner, keyString(k))
+		case !owned && reserved && !slices.Contains(s.Teams, tb.Team):
+			return fail(ReasonNotOwner, "%s was deleted by team %s and stays reserved for it until %s: %s would take its host; ask for a transfer",
+				keyString(key), tb.Team, tb.ExpiresAt.UTC().Format(time.RFC3339), keyString(k))
 		}
 	}
 	return nil

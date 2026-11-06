@@ -150,20 +150,22 @@ func (e *engine) PlanRRsets(ctx context.Context, s *identity.Subject, zoneIn str
 		return nil, err
 	}
 	sets := index(cur)
-	if err := e.requireHTTPS(ctx, p, zone, changes); err != nil {
-		return refuse(err)
-	}
 	plan, err := rrsetPlan(zone, p, sets, owns, changes)
 	if err != nil {
 		return refuse(err)
 	}
 	res.Changes = uiChanges(plan.Changes)
+	if len(plan.Changes) > 0 {
+		if _, err := e.validate(ctx, s, p, zone, sets, owns, plan, true); err != nil {
+			return refuse(err)
+		}
+	}
+	if err := e.requireHTTPS(ctx, p, zone, changes); err != nil {
+		return refuse(err)
+	}
 	if len(plan.Changes) == 0 {
 		res.Allowed = true
 		return res, nil
-	}
-	if _, err := e.validate(ctx, s, p, zone, sets, owns, plan, true); err != nil {
-		return refuse(err)
 	}
 	res.Changes = uiChanges(plan.Changes)
 	if err := e.check(ctx, p, zone, cur, plan.Changes); err != nil {
@@ -180,7 +182,7 @@ func (e *engine) ApplyRRsets(ctx context.Context, s *identity.Subject, zoneIn st
 		ifMatch = etag(expectedZoneVersion)
 	}
 	zone := normZone(zoneIn)
-	if p, err := e.provider(zone); err == nil && e.zones.Managed(zone) {
+	if p, err := e.provider(zone); err == nil && e.zones.Managed(zone) && e.mayWriteForwards(s, zone, changes) {
 		if err := e.requireHTTPS(ctx, p, zone, changes); err != nil {
 			return nil, e.deny(WithRequestID(ctx, requestID(ctx)), s, "applyRRsets", zone, err)
 		}
@@ -250,6 +252,23 @@ func (e *engine) requireHTTPS(ctx context.Context, p provider.Provider, zone str
 		return &Error{Reason: ReasonHTTPS, Message: keyString(dns.ForwardKey(host)) + ": require_https: " + msg +
 			"; an HTTPS redirect subscription is ordered at the provider, not through the gate", Details: st}
 	}
+}
+
+// mayWriteForwards reports whether s may write every forward a change set
+// asks HTTPS for: the HTTPS check runs before the zone lock, but only once
+// the request is authorized, so that a forbidden write is refused as such.
+func (e *engine) mayWriteForwards(s *identity.Subject, zone string, changes []uiapi.RRsetChange) bool {
+	if !e.writesIn(s, zone) {
+		return false
+	}
+	for _, c := range changes {
+		if c.RequireHTTPS && !c.Delete && c.Forward != nil {
+			if k := dns.ForwardKey(dns.NormalizeHost(c.Host, zone)); !e.cfg.Authz.AllowRRset(s, policy.ActionForwardWrite, zone, k) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func (e *engine) HTTPSRedirect(ctx context.Context, s *identity.Subject, zoneIn string) (provider.HTTPSRedirect, error) {
