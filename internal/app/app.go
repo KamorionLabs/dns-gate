@@ -103,7 +103,9 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 	if opts.Holder == "" {
 		opts.Holder, _ = os.Hostname()
 	}
+	keys, _ := st.(store.APIKeyStore)
 	eng, err := zonewrite.New(zonewrite.Config{
+		Guard:                   server.ACMEGuard(keys),
 		Providers:               disc,
 		Store:                   st,
 		Authz:                   authz,
@@ -126,7 +128,6 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 	if err != nil {
 		return nil, err
 	}
-	keys, _ := st.(store.APIKeyStore)
 	if keys != nil {
 		an.SetAPIKeys(keys, auditLog)
 	}

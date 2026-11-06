@@ -640,3 +640,37 @@ func (s *Server) auditAuthFailure(r *http.Request, op, reason string) {
 		s.audit(r, nil, op, "", "deny", reason)
 	}
 }
+
+// ACMEGuard is the zonewrite.Config Guard that applies the allowfrom of
+// acme-dns registrations to every write: an API key may change the
+// _acme-challenge RRset of a domain only from an address that each of its
+// registrations for that domain allows, whatever the entry point (ACME
+// endpoints, RRset API, EuroDNS-compatible API, MCP).
+func ACMEGuard(keys store.APIKeyStore) func(context.Context, *identity.Subject, string, dns.Key) error {
+	return func(ctx context.Context, s *identity.Subject, zone string, key dns.Key) error {
+		if keys == nil || s == nil || s.Kind != identity.KindAPIKey {
+			return nil
+		}
+		host := strings.ToLower(key.Host)
+		domain := ""
+		switch {
+		case host == "_acme-challenge":
+			domain = zone
+		case strings.HasPrefix(host, acmeChallengePrefix):
+			domain = strings.TrimPrefix(host, acmeChallengePrefix) + "." + zone
+		default:
+			return nil
+		}
+		regs, err := keys.ListACMERegistrations(ctx, s.ID)
+		if err != nil {
+			return &zonewrite.Error{Reason: zonewrite.ReasonUpstream, Message: "registration store unavailable", Err: err}
+		}
+		for _, r := range regs {
+			if r.Domain == domain && !cidrsAllow(r.AllowFrom, s.Addr) {
+				return &zonewrite.Error{Reason: zonewrite.ReasonForbidden,
+					Message: "source address not allowed by the acme-dns registrations of this key for " + domain}
+			}
+		}
+		return nil
+	}
+}

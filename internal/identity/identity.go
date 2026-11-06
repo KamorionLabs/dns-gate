@@ -1,7 +1,10 @@
 // Package identity defines the authenticated caller.
 package identity
 
-import "context"
+import (
+	"context"
+	"net/netip"
+)
 
 // Kind is how the caller authenticated.
 type Kind string
@@ -27,6 +30,9 @@ type Subject struct {
 
 	Name     string // display name (email, pipeline name, key id)
 	Category string // CategoryHuman | CategoryPipeline | CategoryKey
+
+	// Addr is the source address of the request of an API key subject.
+	Addr netip.Addr
 }
 
 // Subject categories, shown in the UI and the audit log.

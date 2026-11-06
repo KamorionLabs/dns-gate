@@ -112,6 +112,7 @@ func (a *Authenticator) authenticateAPIKey(ctx context.Context, user, token stri
 		Teams:    []string{k.Team},
 		Name:     name,
 		Category: identity.CategoryKey,
+		Addr:     ip,
 	}, nil
 }
 

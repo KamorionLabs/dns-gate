@@ -1001,3 +1001,27 @@ func TestHTTPReqNoClaimOfOthersValue(t *testing.T) {
 		t.Errorf("acme-dns claim of another's value: %d %s", status, b)
 	}
 }
+
+// The allowfrom of a key's registrations for a domain also holds on the
+// httpreq endpoints and the RRset API: every write by that key to the
+// _acme-challenge RRset of the domain.
+func TestACMEAllowFromAllEntryPoints(t *testing.T) {
+	e := newACMEEnv(t)
+	k := e.createKey(`{"name": "k", "team": "web", "role": "acme"}`)
+	if status, b := e.do("POST", "/acme/acme-dns/register", basic(k.ID, k.Key), `{"allowfrom": ["192.0.2.0/24"], "domain": "api.example.com"}`); status != 201 {
+		t.Fatalf("register: %d %s", status, b)
+	}
+	if status, b := e.do("POST", "/acme/httpreq/present", basic(k.ID, k.Key), `{"fqdn": "_acme-challenge.api.example.com.", "value": "v"}`); status != 403 {
+		t.Errorf("httpreq from a refused address: %d %s", status, b)
+	}
+	put := map[string]string{"Authorization": "Bearer " + k.Key, "Content-Type": "application/json"}
+	if status, b := e.do("PUT", "/api/v1/zones/example.com/rrsets/_acme-challenge.api/TXT", put, `{"ttl": 600, "values": ["v"]}`); status != 403 {
+		t.Errorf("RRset API from a refused address: %d %s", status, b)
+	}
+	if got := e.txt("_acme-challenge.api"); len(got) != 0 {
+		t.Fatalf("written: %v", got)
+	}
+	if status, b := e.do("POST", "/acme/httpreq/present", basic(k.ID, k.Key), `{"fqdn": "_acme-challenge.www.example.com.", "value": "v"}`); status != 200 {
+		t.Errorf("other domain: %d %s", status, b)
+	}
+}

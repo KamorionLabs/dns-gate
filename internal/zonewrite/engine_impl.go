@@ -655,6 +655,14 @@ func (e *engine) validate(ctx context.Context, s *identity.Subject, p provider.P
 		if !e.cfg.Authz.AllowRRset(s, policy.ActionRecordWrite, zone, c.Key) {
 			return nil, fail(ReasonForbidden, "not allowed to write %s in %s", keyString(c.Key), zone)
 		}
+		if e.cfg.Guard != nil {
+			if err := e.cfg.Guard(ctx, s, zone, c.Key); err != nil {
+				if ze, ok := AsError(err); ok {
+					return nil, ze
+				}
+				return nil, &Error{Reason: ReasonForbidden, Message: err.Error(), Err: err}
+			}
+		}
 		cur, exists := sets[c.Key]
 		var curp *dns.RRset
 		if exists {
