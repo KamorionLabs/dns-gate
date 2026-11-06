@@ -367,6 +367,12 @@ type Protected struct {
 	Types []string `yaml:"types"`
 }
 
+// ReservedIssuers are issuer names of subjects the gate makes itself: API
+// keys, virtual keys and the gate's own actors ("gate:reconciler"). No
+// token issuer may use them; the gate issuer (self: true) may be named
+// "gate", its tokens being bound as their original issuer.
+var ReservedIssuers = map[string]bool{"api-key": true, "virtual-key": true, "gate": true}
+
 // Known actions.
 var knownActions = map[string]bool{
 	"dns.read":           true,
@@ -698,6 +704,9 @@ func (c *Config) Validate() error {
 		}
 		if issuers[is.Name] {
 			add("%s.name: %q duplicated", at, is.Name)
+		}
+		if ReservedIssuers[is.Name] && !(is.Self && is.Name == "gate") {
+			add("%s.name: %q is reserved for subjects of the gate itself", at, is.Name)
 		}
 		issuers[is.Name] = true
 		if u, err := url.Parse(is.Issuer); err != nil || u.Scheme != "https" || u.Host == "" {
