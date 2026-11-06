@@ -181,8 +181,11 @@ type ACME struct {
 	// RegistrationIdle: registrations of token subjects and httpreq ledgers
 	// unused for this long are purged (default 720h).
 	RegistrationIdle Duration `yaml:"registration_idle"`
-	// MaxValues caps the values of one challenge TXT RRset (default 10).
+	// MaxValues caps the values of one challenge TXT RRset (default 20).
 	MaxValues int `yaml:"max_values"`
+	// MaxValuesPerAuthor caps the values one API key or token subject has
+	// in a challenge RRset (default 4, at most MaxValues).
+	MaxValuesPerAuthor int `yaml:"max_values_per_author"`
 }
 
 // MCP configures the Model Context Protocol endpoint (/mcp).
@@ -614,7 +617,10 @@ func (c *Config) defaults() {
 		c.ACME.RegistrationIdle = Duration(30 * 24 * time.Hour)
 	}
 	if c.ACME.MaxValues == 0 {
-		c.ACME.MaxValues = 10
+		c.ACME.MaxValues = 20
+	}
+	if c.ACME.MaxValuesPerAuthor == 0 {
+		c.ACME.MaxValuesPerAuthor = min(4, c.ACME.MaxValues)
 	}
 	if c.MCP.PlanTTL == 0 {
 		c.MCP.PlanTTL = Duration(10 * time.Minute)
@@ -991,6 +997,9 @@ func (c *Config) Validate() error {
 	}
 	if c.ACME.MaxValues < 2 || c.ACME.MaxValues > 100 {
 		add("acme.max_values: must be between 2 and 100")
+	}
+	if c.ACME.MaxValuesPerAuthor < 2 || c.ACME.MaxValuesPerAuthor > c.ACME.MaxValues {
+		add("acme.max_values_per_author: must be between 2 and acme.max_values")
 	}
 	if c.MCP.PlanTTL.D() < time.Minute || c.MCP.PlanTTL.D() > time.Hour {
 		add("mcp.plan_ttl: must be between 1m and 1h")

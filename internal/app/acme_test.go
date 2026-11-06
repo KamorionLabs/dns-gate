@@ -1025,3 +1025,27 @@ func TestACMEAllowFromAllEntryPoints(t *testing.T) {
 		t.Errorf("other domain: %d %s", status, b)
 	}
 }
+
+// One author cannot fill a challenge RRset: values are capped per author
+// below the RRset cap.
+func TestHTTPReqValuesPerAuthor(t *testing.T) {
+	e := newACMEEnvWith(t, "acme: {max_values_per_author: 2}\n")
+	k1 := e.createKey(`{"name": "one", "team": "web", "role": "acme"}`)
+	k2 := e.createKey(`{"name": "two", "team": "web", "role": "acme"}`)
+	body := func(v string) string { return `{"fqdn": "_acme-challenge.example.com.", "value": "` + v + `"}` }
+	for _, v := range []string{"v1", "v2"} {
+		if status, b := e.do("POST", "/acme/httpreq/present", basic(k1.ID, k1.Key), body(v)); status != 200 {
+			t.Fatalf("%s: %d %s", v, status, b)
+		}
+	}
+	if status, b := e.do("POST", "/acme/httpreq/present", basic(k1.ID, k1.Key), body("v3")); status != 409 || !strings.Contains(string(b), "too_many_values") {
+		t.Fatalf("per-author cap: %d %s", status, b)
+	}
+	if status, b := e.do("POST", "/acme/httpreq/present", basic(k2.ID, k2.Key), body("w1")); status != 200 {
+		t.Fatalf("another author blocked: %d %s", status, b)
+	}
+	hdr := map[string]string{"X-Api-User": k1.ID, "X-Api-Key": k1.Key}
+	if status, b := e.do("POST", "/acme/acme-dns/update", hdr, `{"subdomain":"example.com", "txt": "`+challenge("d")+`"}`); status != 409 {
+		t.Fatalf("per-author cap across protocols: %d %s", status, b)
+	}
+}

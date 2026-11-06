@@ -193,6 +193,9 @@ func (s *Server) handleHTTPReq(w http.ResponseWriter, r *http.Request, present b
 			if !slices.Contains(vals, value) {
 				vals = append(vals, value)
 			}
+			if err := s.authorRoom(r.Context(), owner, t.domain, sub, led.Values, vals); err != nil {
+				return nil, nil, err
+			}
 		case !present && own:
 			led.Values = slices.DeleteFunc(led.Values, func(v string) bool { return v == value })
 			vals = slices.DeleteFunc(vals, func(v string) bool { return v == value })
@@ -515,6 +518,9 @@ func (s *Server) handleACMEDNSUpdate(w http.ResponseWriter, r *http.Request) {
 		vals = slices.DeleteFunc(vals, func(v string) bool { return slices.Contains(evicted, v) })
 		if !slices.Contains(vals, req.TXT) {
 			vals = append(vals, req.TXT)
+			if err := s.authorRoom(r.Context(), cur.KeyID, cur.Domain, cur.Subdomain, recent, vals); err != nil {
+				return nil, nil, err
+			}
 		}
 		return vals, func(ctx context.Context) error { return s.cfg.APIKeys.PutACMERegistration(ctx, cur) }, nil
 	})
@@ -569,6 +575,37 @@ func (s *Server) acmeRoom(ctx context.Context, owner string) *acmeError {
 	}
 	if max := s.cfg.Config.ACME.MaxRegistrations; len(regs) >= max {
 		return &acmeError{http.StatusConflict, "too_many_registrations", fmt.Sprintf("%d ACME registrations already (acme.max_registrations)", len(regs))}
+	}
+	return nil
+}
+
+// authorRoom refuses an RRset in which an owner would hold more than
+// acme.max_values_per_author values: those of mine (the registration or
+// ledger sub being written) and of its other registrations for domain.
+func (s *Server) authorRoom(ctx context.Context, owner, domain, sub string, mine, vals []string) *acmeError {
+	regs, err := s.cfg.APIKeys.ListACMERegistrations(ctx, owner)
+	if err != nil {
+		return &acmeError{http.StatusServiceUnavailable, "unavailable", "registration store unavailable"}
+	}
+	own := map[string]bool{}
+	for _, v := range mine {
+		own[v] = true
+	}
+	for _, r := range regs {
+		if r.Domain == domain && r.Subdomain != sub {
+			for _, v := range r.Values {
+				own[v] = true
+			}
+		}
+	}
+	n := 0
+	for _, v := range vals {
+		if own[v] {
+			n++
+		}
+	}
+	if max := s.cfg.Config.ACME.MaxValuesPerAuthor; n > max {
+		return &acmeError{http.StatusConflict, "too_many_values", fmt.Sprintf("this caller already has %d values in the RRset (acme.max_values_per_author)", n-1)}
 	}
 	return nil
 }
