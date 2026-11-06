@@ -697,38 +697,42 @@ Both are mutations for CSRF (cookie sessions) and the apply requires the same re
 
 ## Propagation check
 
-`GET /api/v1/zones/{zone}/rrsets/{host}/{type}/propagation` ([API.md](API.md#dns-propagation)), the `check_propagation` MCP tool and the *Propagation* panel of the UI (RRset drawer, and right after an apply) ask the authoritative name servers of a managed zone and a list of public resolvers for one RRset, and compare their answers with the RRset as read from the provider.
+`GET /api/v1/zones/{zone}/rrsets/{host}/{type}/propagation` ([API.md](API.md#dns-propagation)), the `check_propagation` MCP tool and the *Propagation* panel of the UI (RRset drawer when the viewer holds `dns.read` on the RRset, and right after an apply) ask the authoritative name servers of a managed zone and a list of public resolvers for one RRset, and compare their answers with the RRset as read from the provider.
 
 | Field | Default | Description |
 |---|---|---|
-| `propagation.enabled` | `true` | Serves the check (`501 not_implemented` and no MCP tool when `false`). |
-| `propagation.resolvers` | the list below | Public resolvers asked, replacing the default list: `name`, `address` (an IP address with an optional port, never a host name), and for display `location`, `country` (ISO code) and `region` (the UI groups by region: `anycast`, `europe`, `north-america`, `south-america`, `asia`, `oceania`, `africa`, or free text). At most 64. |
-| `propagation.query_timeout` | `2s` | Timeout of one query (100ms to 10s). |
-| `propagation.timeout` | `6s` | Deadline of a whole check (`query_timeout` to 30s): servers that did not answer by then are reported as `error` (`timeout`). |
+| `propagation.enabled` | `true`, `false` on AWS Lambda | Serves the check (`501 not_implemented` and no MCP tool when `false`). On Lambda it must be enabled explicitly, see [DEPLOY-LAMBDA.md](DEPLOY-LAMBDA.md). |
+| `propagation.resolvers` | the list below | Public resolvers asked, replacing the default list: `name`, `address` (an IP address with an optional port, never a host name), `filtering` (`true` for a resolver that blocks names by policy), and for display `location`, `country` (ISO code) and `region` (the UI groups by region: `anycast`, `europe`, `north-america`, `south-america`, `asia`, `oceania`, `africa`, or free text). At most 64. |
+| `propagation.allow_private_resolvers` | `false` | Accepts resolver addresses outside the public unicast space (private, loopback, link-local, shared, documentation and the other IANA special-purpose blocks, also when embedded in IPv6). Such a resolver may answer internal names of a split-horizon DNS: anyone allowed to check an RRset would learn its internal answer. |
+| `propagation.query_timeout` | `1.5s` | Timeout of one query (100ms to 10s, at most `timeout`). |
+| `propagation.timeout` | `4s` | Deadline of a whole check (`query_timeout` to 5s): servers that did not answer by then are reported as `error` (`timeout`). |
 | `propagation.concurrency` | `16` | Servers one check asks at once (1 to 64). |
+| `propagation.max_in_flight` | `3` | Checks running at once in one process (1 to 64, `503 busy` beyond). |
 | `propagation.cache_ttl` | `10s` | A result is reused for the same RRset content during this time (1s to 5m), whoever asks. |
 | `propagation.requests_per_minute` | `30` | Checks of one subject that are not served from the cache (1 to 600, `429` beyond). The UI asks every 5 seconds while a panel is open, for at most 2 minutes. |
+
+**Per instance.** The cache, the per-subject limit (the 4096 most recently seen subjects) and `max_in_flight` are kept in memory by each process: with several replicas or Lambda instances, a subject can run `requests_per_minute` checks on each of them, and a load balancer spreading the polls of one panel over replicas finds a cold cache on each.
 
 ```yaml
 propagation:
   resolvers:
     - {name: Cloudflare, address: 1.1.1.1, location: Anycast, country: US, region: anycast}
-    - {name: Corporate resolver, address: 10.0.0.2, location: Paris, country: FR, region: europe}
+    - {name: Quad9, address: 9.9.9.9, location: Anycast, country: CH, region: anycast, filtering: true}
 ```
 
-Network: the gate needs outbound **UDP and TCP port 53** to the resolvers and to the name servers of its zones (TCP when an answer is truncated or UDP fails). AWS Lambda functions outside a VPC have it; in a VPC, the security group and the network ACLs must allow it through a NAT gateway. The name servers of a zone are its apex NS as read from the provider (looked up with the system resolver when the gate has none), resolved with the system resolver; those at private, loopback, link-local or shared (100.64.0.0/10) addresses are skipped. The default resolvers are IPv4, as Lambda functions outside a VPC have no IPv6 egress.
+Network: the gate needs outbound **UDP and TCP port 53** to the resolvers and to the name servers of its zones (TCP when an answer is truncated or UDP fails). AWS Lambda functions outside a VPC have it; in a VPC, the security group and the network ACLs must allow it through a NAT gateway. The name servers of a zone are its apex NS as read from the provider (looked up with the system resolver when the gate has none), resolved with the system resolver; those whose address is not public (same check as `allow_private_resolvers`, never overridable) are skipped. The default resolvers are IPv4, as Lambda functions outside a VPC have no IPv6 egress.
 
-Default resolvers, all documented open resolvers needing no account, unfiltered services where the operator offers one:
+Default resolvers, all documented open resolvers needing no account, unfiltered services where the operator offers one (*filtering* marks those that block malware or phishing domains):
 
 | Resolver | Address | Location |
 |---|---|---|
 | Cloudflare | `1.1.1.1` | Anycast (US) |
 | Google Public DNS | `8.8.8.8` | Anycast (US) |
-| Quad9 | `9.9.9.9` | Anycast (CH) |
-| OpenDNS (Cisco) | `208.67.222.222` | Anycast (US) |
+| Quad9 (filtering) | `9.9.9.9` | Anycast (CH) |
+| OpenDNS (Cisco, filtering) | `208.67.222.222` | Anycast (US) |
 | AdGuard DNS, unfiltered | `94.140.14.140` | Anycast (CY) |
 | Control D, unfiltered | `76.76.2.0` | Anycast (CA) |
-| CleanBrowsing, security filter | `185.228.168.9` | Anycast (US) |
+| CleanBrowsing, security filter (filtering) | `185.228.168.9` | Anycast (US) |
 | UltraDNS Public | `64.6.64.6` | Anycast (US) |
 | NextDNS | `45.90.28.0` | Anycast (US) |
 | DNS.SB | `185.222.222.222` | Anycast (DE) |
@@ -748,9 +752,17 @@ Keep in mind when reading a check:
 - **Resolvers answer from their cache**: one keeps the previous answer (`stale`) or a negative answer (`missing`, for the SOA minimum) until its TTL runs out; `ttl_left` and `max_ttl_left` tell how long at most. Asking again does not refresh their cache.
 - Some resolvers refuse some clients: OpenDNS refuses queries from France (court order, `refused (censored)`), and a resolver may be unreachable from a given network. Errors do not count against convergence.
 
-Each answer is compared after normalization: values sorted, names absolute and lowercase (a EuroDNS target stored relative to the zone is completed with it), TXT compared on their content whatever the splitting in strings or the quoting, hexadecimal and base64 fields as a server prints them. The CNAME chain of an answer is followed and shown; a name answering a CNAME where another type is expected is `stale`. Alias RRsets (Route53) and EuroDNS `APEX` RRsets are compared on addresses: the authoritative answers, and the target asked from the same resolver (a CDN answers per location, a load balancer rotates its addresses); sharing one address is a match.
+How answers are compared:
 
-A check is a read: no audit event, a debug log line (`propagation`).
+- Values are normalized on both sides: sorted, names absolute and lowercase (a EuroDNS target stored relative to the zone is completed with it), TXT on their content whatever the splitting in strings or the quoting, hexadecimal and base64 fields as a server prints them. The CNAME chain of an answer is followed and shown; a name answering a CNAME where another type is expected is `stale`.
+- **TTL**: an authoritative answer must carry the expected TTL, and a cached answer may not have more TTL left than it, so a TTL-only change is not reported up to date at once.
+- **Alias** RRsets (Route53) and EuroDNS `APEX` RRsets have no values: every address answered must be one of the target's, resolved by the gate (system resolver) for the authoritative servers and asked from the same resolver otherwise. Anything else, including a target that could not be resolved, is `indeterminate`: a CDN answers per location, so sharing an edge address proves nothing. Indeterminate answers never count as up to date.
+- **Deletions** (`expect=absent`): an empty answer is a match. An answer section holding records of another name or type, or an answer the resolver flags as its own decision (extended DNS errors Blocked, Censored, Filtered), is an `error`; negative answers of resolvers marked `filtering` are flagged.
+- **Converged** needs at least one authoritative answer that matches, and no `stale`, `missing` or `indeterminate` answer.
+- **Size**: an answer reports at most 32 values of at most 512 bytes (`truncated`), and a result at most 1 MiB of values.
+- **expect**: the inventory a check compares with is the cache of the instance that answers. With `expect` (the `new_hash` of an apply result, the ETag of a `PUT`, or `absent`), an inventory that differs is refreshed from the provider first, at most 6 times a minute per subject; `412 precondition` if it still differs.
+
+A check is a read: no audit event, a debug log line (`propagation`). A refused provider re-read on `expect` is audited as `api.propagation`.
 
 ## MCP
 

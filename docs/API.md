@@ -240,7 +240,8 @@ answer with the RRset as read from the provider.
 
 ```sh
 curl -sS "${auth[@]}" "$GATE/api/v1/zones/example.com/rrsets/app/CNAME/propagation"
-# right after a PUT, refused (412 precondition) if the RRset is no longer the one written
+# right after a PUT (its ETag) or an apply (new_hash of each change), refused (412 precondition)
+# if the RRset is no longer the one written
 curl -sS "${auth[@]}" "$GATE/api/v1/zones/example.com/rrsets/app/CNAME/propagation?expect=9f2c…"
 # after a DELETE
 curl -sS "${auth[@]}" "$GATE/api/v1/zones/example.com/rrsets/old/A/propagation?expect=absent"
@@ -264,14 +265,23 @@ curl -sS "${auth[@]}" "$GATE/api/v1/zones/example.com/rrsets/old/A/propagation?e
 Each answer is `match`, `stale` (other values: the previous content, cached until
 `ttl_left` runs out), `missing` (NXDOMAIN or no record of the type, possibly a cached
 negative answer) or `error` (timeout, `SERVFAIL`, `REFUSED`, a name server
-answering without authority). `summary.converged` is true when every server that
-answered matches; `max_ttl_left` bounds when the stale caches expire. An RRset that
-does not exist matches empty answers, so a deletion can be followed too. Alias
-RRsets are compared on the addresses of their target.
+answering without authority, records of another name, an answer filtered by the
+resolver) or, for alias RRsets, `indeterminate` (addresses that are not all the
+target's: a CDN answers per location). `summary.converged` is true when every server
+that answered matches, with at least one authoritative server, and none is
+indeterminate; `max_ttl_left` bounds when the stale caches expire. A TTL change
+counts too: authoritative answers must carry the new TTL. An RRset that does not
+exist matches empty answers, so a deletion can be followed too.
+
+The inventory a check compares with is the cache of the gate instance answering.
+Pass `expect` after a write: the apply result carries `new_hash` for every created
+or updated RRset (use `absent` for a deletion). An instance whose inventory differs
+reads the zone from the provider again before answering.
 
 The check requires `dns.read` on the RRset, in a zone managed by the gate: names
 outside the managed zones are never asked. Results are cached for a few seconds per
-RRset content and checks are rate limited per caller (`429`, `Retry-After`): poll
+RRset content, checks are rate limited per caller (`429`, `Retry-After`) and a few
+at a time per instance (`503 busy`, `Retry-After`): poll
 every few seconds, resolvers only update when the TTL of their cached answer runs
 out. Resolver list, timeouts and network requirements:
 [CONFIG.md](CONFIG.md#propagation-check). The MCP tool `check_propagation` does the
@@ -516,6 +526,7 @@ Errors are JSON, with a stable `reason` for programs:
 | 412 | `precondition` (If-Match, If-None-Match, `expected_hash`, `must_not_exist`, zone changed since the plan, transfer already decided or RRsets changed since the request, `expect` of a propagation check) |
 | 423 | `zone_locked`, with `Retry-After` |
 | 429 | `rate_limited` (MCP, zone profiles, propagation checks), with `Retry-After` |
+| 503 | `busy` (too many propagation checks running), with `Retry-After` |
 | 501 | `not_implemented` (feature disabled in the configuration) |
 | 502 | `upstream` (provider error) |
 
