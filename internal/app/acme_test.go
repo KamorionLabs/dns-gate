@@ -695,3 +695,80 @@ func TestTokenExchangeRefusals(t *testing.T) {
 		t.Errorf("feature not advertised: %s", b)
 	}
 }
+
+// docBlock returns the first fenced code block of docs/ACME.md after marker.
+func docBlock(t *testing.T, marker string) string {
+	t.Helper()
+	b, err := os.ReadFile("../../docs/ACME.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	doc := string(b)
+	i := strings.Index(doc, marker)
+	if i < 0 {
+		t.Fatalf("%q not found in docs/ACME.md", marker)
+	}
+	rest := doc[i:]
+	start := strings.Index(rest, "```sh\n")
+	end := strings.Index(rest[start+6:], "```")
+	if start < 0 || end < 0 {
+		t.Fatalf("no code block after %q", marker)
+	}
+	return rest[start+6 : start+6+end]
+}
+
+// The certbot hook and the exchange function of docs/ACME.md, run as
+// certbot and the recipes run them, with a token and with an API key.
+func TestDocsACMEScripts(t *testing.T) {
+	for _, tool := range []string{"sh", "curl", "base64", "jq"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skip(tool + " not found")
+		}
+	}
+	e := newACMEEnv(t)
+	dir := t.TempDir()
+	hook := filepath.Join(dir, "dns-gate-hook.sh")
+	if err := os.WriteFile(hook, []byte(docBlock(t, "Save it as `dns-gate-hook.sh`")), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	exchange := docBlock(t, "as a shell function")
+	ci := e.idp.Sign(map[string]any{"sub": "repo:example/certs:ref:refs/heads/main", "aud": "dns-gate"})
+	cmd := exec.Command("sh", "-ec", exchange+"\nexchange \"$OIDC_TOKEN\"")
+	cmd.Env = append(os.Environ(), "GATE="+e.gate.URL, "OIDC_TOKEN="+ci)
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("exchange: %v %s", err, out)
+	}
+	gateToken := strings.TrimSpace(string(out))
+	k := e.createKey(`{"name": "certbot", "team": "web", "role": "acme"}`)
+
+	run := func(env []string, cleanup bool, domain, value string) {
+		t.Helper()
+		cmd := exec.Command("sh", hook)
+		cmd.Env = append(os.Environ(), append(env, "DNS_GATE="+e.gate.URL, "DNS_GATE_PROPAGATION=0",
+			"CERTBOT_DOMAIN="+domain, "CERTBOT_VALIDATION="+value)...)
+		if cleanup {
+			cmd.Env = append(cmd.Env, "CERTBOT_AUTH_OUTPUT=")
+		}
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("hook %v: %v\n%s", env, err, out)
+		}
+	}
+	for _, creds := range [][]string{
+		{"DNS_GATE_TOKEN=" + gateToken},
+		{"DNS_GATE_TOKEN=" + ci},
+		{"DNS_GATE_KEY_ID=" + k.ID, "DNS_GATE_KEY=" + k.Key},
+	} {
+		apex, wild := challenge("hook-apex"), challenge("hook-wild")
+		run(creds, false, "example.com", apex)
+		run(creds, false, "*.example.com", wild)
+		if got := e.txt("_acme-challenge"); !slices.Equal(got, sortedOf(apex, wild)) {
+			t.Fatalf("%v: after present %v", creds, got)
+		}
+		run(creds, true, "example.com", apex)
+		run(creds, true, "*.example.com", wild)
+		if got := e.txt("_acme-challenge"); len(got) != 0 {
+			t.Fatalf("%v: after cleanup %v", creds, got)
+		}
+	}
+}
