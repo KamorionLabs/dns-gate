@@ -16,7 +16,7 @@ func apiKeyConformance(t *testing.T, s Store, clock *fakeClock) {
 	}
 	now := clock.Now().Truncate(time.Millisecond)
 	exp := now.Add(24 * time.Hour)
-	k := APIKey{ID: "0123456789abcdef", Name: "certbot web", Description: "renewals", Team: "web", Role: "acme",
+	k := APIKey{ID: "0123456789abcdef", Name: "certbot web", Description: "renewals", Team: "web", Role: "acme", RoleGrant: `{"rules":[]}`,
 		SecretHash: "h1", ExpiresAt: &exp, AllowedCIDRs: []string{"192.0.2.0/24"}, CreatedAt: now,
 		CreatedBy: "idp:alice", CreatedByName: "alice"}
 	if _, err := ks.GetAPIKey(ctx, k.ID); !errors.Is(err, ErrNotFound) {
@@ -35,7 +35,7 @@ func apiKeyConformance(t *testing.T, s Store, clock *fakeClock) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Version != 1 || got.Name != k.Name || got.Team != "web" || got.Role != "acme" || got.SecretHash != "h1" ||
+	if got.Version != 1 || got.Name != k.Name || got.Team != "web" || got.Role != "acme" || got.RoleGrant != k.RoleGrant || got.SecretHash != "h1" ||
 		got.ExpiresAt == nil || !got.ExpiresAt.Equal(exp) || !slices.Equal(got.AllowedCIDRs, k.AllowedCIDRs) ||
 		!got.CreatedAt.Equal(now) || got.CreatedBy != "idp:alice" || got.LastUsedAt != nil || got.RevokedAt != nil {
 		t.Fatalf("stored %+v", got)
@@ -62,7 +62,7 @@ func apiKeyConformance(t *testing.T, s Store, clock *fakeClock) {
 	}
 	got, _ = ks.GetAPIKey(ctx, k.ID)
 	if got.Version != 2 || got.SecretHash != "h2" || got.PreviousHash != "h1" || !got.PreviousExpiresAt.Equal(overlap) ||
-		!got.RotatedAt.Equal(rot) || got.Team != "web" || got.Role != "acme" || len(got.AllowedCIDRs) != 0 || got.ExpiresAt != nil ||
+		!got.RotatedAt.Equal(rot) || got.Team != "web" || got.Role != "acme" || got.RoleGrant != k.RoleGrant || len(got.AllowedCIDRs) != 0 || got.ExpiresAt != nil ||
 		got.LastUsedAt == nil || !got.LastUsedAt.Equal(used) || got.LastUsedIP != "192.0.2.7" {
 		t.Fatalf("after update %+v", got)
 	}

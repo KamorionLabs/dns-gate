@@ -91,9 +91,14 @@ roles:
     rules:
       - zones: [example.com]
         actions: [dns.read, dns.record.write, ui.read]
+  keys-elsewhere:
+    rules:
+      - zones: [example.org]
+        actions: [dns.read, gate.apikey.manage]
 bindings:
   - {role: key-admin, team: web, subjects: [{issuer: ci, claims: {sub: [admin]}}]}
   - {role: writer, team: web, subjects: [{issuer: ci, claims: {sub: [writer]}}]}
+  - {role: keys-elsewhere, team: web, subjects: [{issuer: ci, claims: {sub: [teammate]}}]}
   - {role: acme, team: web, subjects: [{issuer: ci, claims: {sub: ["repo:example/certs:*"]}}, {issuer: other, claims: {sub: [acme]}}]}
 ` + extra
 	signingKey := signingKeyPEM(t)
@@ -953,5 +958,21 @@ func TestHTTPReqValueAuthors(t *testing.T) {
 	e.do("POST", "/acme/httpreq/cleanup", basic(k1.ID, k1.Key), body("v1"))
 	if got := e.txt("_acme-challenge"); !slices.Equal(got, []string{"v2", "v3"}) {
 		t.Fatalf("after cleanup by its author: %v", got)
+	}
+}
+
+// A member of the key's team holding gate.apikey.manage anywhere can always
+// see and revoke the key, even without rights on the zones of its role.
+func TestAPIKeyRevocationByTeam(t *testing.T) {
+	e := newACMEEnv(t)
+	k := e.createKey(`{"name": "k", "team": "web", "role": "acme"}`)
+	if status, _ := e.do("POST", "/api/v1/api-keys/"+k.ID+"/rotate", e.bearer("teammate"), ""); status != 404 {
+		t.Fatalf("rotation by a teammate without rights on the zones: %d", status)
+	}
+	if status, b := e.do("DELETE", "/api/v1/api-keys/"+k.ID, e.bearer("teammate"), ""); status != 204 {
+		t.Fatalf("revocation by a teammate: %d %s", status, b)
+	}
+	if status, _ := e.do("POST", "/acme/httpreq/present", basic(k.ID, k.Key), `{"fqdn": "_acme-challenge.example.com.", "value": "v"}`); status != 401 {
+		t.Fatalf("revoked key accepted: %d", status)
 	}
 }

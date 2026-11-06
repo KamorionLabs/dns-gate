@@ -25,6 +25,7 @@ type apiKeyItem struct {
 	Description       string   `dynamodbav:"description,omitempty"`
 	Team              string   `dynamodbav:"team"`
 	Role              string   `dynamodbav:"role"`
+	RoleGrant         string   `dynamodbav:"role_grant,omitempty"`
 	SecretHash        string   `dynamodbav:"secret_hash"`
 	PreviousHash      string   `dynamodbav:"previous_hash,omitempty"`
 	PreviousExpiresAt string   `dynamodbav:"previous_expires_at,omitempty"`
@@ -61,7 +62,7 @@ func parseTime(s string) *time.Time {
 
 func toAPIKeyItem(k APIKey) apiKeyItem {
 	return apiKeyItem{
-		PK: apiKeyPK, SK: apiKeySK(k.ID), ID: k.ID, Name: k.Name, Description: k.Description, Team: k.Team, Role: k.Role,
+		PK: apiKeyPK, SK: apiKeySK(k.ID), ID: k.ID, Name: k.Name, Description: k.Description, Team: k.Team, Role: k.Role, RoleGrant: k.RoleGrant,
 		SecretHash: k.SecretHash, PreviousHash: k.PreviousHash, PreviousExpiresAt: fmtTime(k.PreviousExpiresAt),
 		ExpiresAt: fmtTime(k.ExpiresAt), AllowedCIDRs: k.AllowedCIDRs, CreatedAt: fmtTime(&k.CreatedAt),
 		CreatedBy: k.CreatedBy, CreatedByName: k.CreatedByName, RotatedAt: fmtTime(k.RotatedAt),
@@ -72,7 +73,7 @@ func toAPIKeyItem(k APIKey) apiKeyItem {
 
 func fromAPIKeyItem(it apiKeyItem) APIKey {
 	k := APIKey{
-		ID: it.ID, Name: it.Name, Description: it.Description, Team: it.Team, Role: it.Role,
+		ID: it.ID, Name: it.Name, Description: it.Description, Team: it.Team, Role: it.Role, RoleGrant: it.RoleGrant,
 		SecretHash: it.SecretHash, PreviousHash: it.PreviousHash, PreviousExpiresAt: parseTime(it.PreviousExpiresAt),
 		ExpiresAt: parseTime(it.ExpiresAt), AllowedCIDRs: append([]string{}, it.AllowedCIDRs...),
 		CreatedBy: it.CreatedBy, CreatedByName: it.CreatedByName, RotatedAt: parseTime(it.RotatedAt),

@@ -3,6 +3,7 @@ package policy
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 )
@@ -167,6 +168,66 @@ func (s *Snapshot) writes(role string) bool {
 	}
 	for _, r := range cr.role.Rules {
 		if contains(r.Actions, ActionRecordWrite) {
+			return true
+		}
+	}
+	return false
+}
+
+// RoleGrant is what a role grants: its effective rules (actions the layer
+// and the bounds let it grant), ephemeral TTL and change limit (0 for
+// unlimited). An API key records the grant of its role at issuance.
+type RoleGrant struct {
+	Rules        []uiapi.Rule  `json:"rules"`
+	EphemeralTTL time.Duration `json:"ephemeral_ttl"`
+	MaxChanges   int           `json:"max_changes"`
+}
+
+// RoleGrant returns the grant of a role, false if it does not exist.
+func (s *Snapshot) RoleGrant(name string) (RoleGrant, bool) {
+	cr := s.roles[name]
+	if cr == nil {
+		return RoleGrant{}, false
+	}
+	g := RoleGrant{Rules: []uiapi.Rule{}, EphemeralTTL: s.EphemeralTTL([]string{name}), MaxChanges: s.MaxChanges([]string{name})}
+	for _, r := range cr.role.Rules {
+		var actions []string
+		for _, a := range r.Actions {
+			if s.ruleEffective(cr, r, a) {
+				actions = append(actions, a)
+			}
+		}
+		if len(actions) > 0 {
+			g.Rules = append(g.Rules, uiapi.Rule{Zones: r.Zones, Actions: actions, Records: r.Records})
+		}
+	}
+	return g, true
+}
+
+// Within reports whether g grants nothing beyond limit: every action of
+// every rule on the same zones and records, an ephemeral TTL no longer and a
+// change limit no higher.
+func (g RoleGrant) Within(limit RoleGrant) bool {
+	writes := false
+	for _, r := range g.Rules {
+		for _, a := range r.Actions {
+			writes = writes || a == ActionRecordWrite
+			for _, z := range r.Zones {
+				if !rulesCover(limit.Rules, a, strings.ToLower(z), r.Records) {
+					return false
+				}
+			}
+		}
+	}
+	if writes && limit.EphemeralTTL > 0 && (g.EphemeralTTL <= 0 || g.EphemeralTTL > limit.EphemeralTTL) {
+		return false
+	}
+	return limit.MaxChanges <= 0 || (g.MaxChanges > 0 && g.MaxChanges <= limit.MaxChanges)
+}
+
+func rulesCover(rules []uiapi.Rule, action, pattern string, records *uiapi.RecordScope) bool {
+	for _, r := range rules {
+		if contains(r.Actions, action) && ZoneCovered(r.Zones, pattern) && scopeCovered(r.Records, records) {
 			return true
 		}
 	}

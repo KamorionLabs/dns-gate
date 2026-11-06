@@ -6,6 +6,7 @@ CREATE TABLE api_key (
     description         TEXT   NOT NULL DEFAULT '',
     team                TEXT   NOT NULL,
     role                TEXT   NOT NULL,
+    role_grant          TEXT   NOT NULL DEFAULT '',
     secret_hash         TEXT   NOT NULL,
     previous_hash       TEXT   NOT NULL DEFAULT '',
     previous_expires_at BIGINT,

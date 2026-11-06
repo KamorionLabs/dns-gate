@@ -3,6 +3,7 @@ package authn
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"net/http/httptest"
 	"sync"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/KamorionLabs/dns-gate/internal/apikey"
 	"github.com/KamorionLabs/dns-gate/internal/audit"
+	"github.com/KamorionLabs/dns-gate/internal/config"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/store"
 )
@@ -200,5 +202,53 @@ func TestAPIKeyFailureAuditAggregated(t *testing.T) {
 	}
 	if len(log.events) != 6 || log.events[5].Subject != "api-key:"+id {
 		t.Fatalf("refusals of an existing key: %+v", log.events)
+	}
+}
+
+// A key is refused once its role grants more than at issuance (the grant
+// snapshot); a role that shrank is fine.
+func TestAPIKeyRoleWidened(t *testing.T) {
+	scope := &config.RecordScope{Hosts: []string{"_acme-challenge", "_acme-challenge.**"}, Types: []string{"TXT"}}
+	write := []string{"dns.read", "dns.record.write"}
+	c := &config.Config{
+		Zones:  []string{"example.com"},
+		Limits: config.Limits{MaxChangesPerRequest: 20},
+		Roles: map[string]config.Role{
+			"narrow": {EphemeralTTL: config.Duration(time.Hour), Rules: []config.Rule{{Zones: []string{"example.com"}, Actions: write, Records: scope}}},
+			"wide":   {EphemeralTTL: config.Duration(time.Hour), Rules: []config.Rule{{Zones: []string{"example.com"}, Actions: write}}},
+		},
+	}
+	a, err := New(c, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := store.NewMemory().(store.APIKeyStore)
+	log := &auditLog{}
+	a.SetAPIKeys(st, log)
+	snap := a.policy.Current()
+	grant := func(role string) string {
+		g, _ := snap.RoleGrant(role)
+		b, _ := json.Marshal(g)
+		return string(b)
+	}
+	try := func(role, issued string) error {
+		id := apikey.NewID()
+		key := apikey.NewSecret(id)
+		if err := st.CreateAPIKey(context.Background(), store.APIKey{ID: id, Team: "web", Role: role, RoleGrant: issued, SecretHash: apikey.Hash(key), CreatedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+		r := httptest.NewRequest("GET", "/", nil)
+		r.Header.Set("Authorization", "Bearer "+key)
+		_, err := a.Authenticate(r)
+		return err
+	}
+	if err := try("wide", grant("narrow")); status(err) != 403 || log.events[len(log.events)-1].Reason != "role_widened" {
+		t.Fatalf("widened role: %v %+v", err, log.events)
+	}
+	if err := try("narrow", grant("wide")); err != nil {
+		t.Fatalf("narrowed role: %v", err)
+	}
+	if err := try("narrow", grant("narrow")); err != nil {
+		t.Fatalf("same role: %v", err)
 	}
 }

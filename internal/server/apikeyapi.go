@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -44,7 +45,8 @@ func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request, subj *ide
 		return
 	}
 	snap := s.cfg.Policy.Current()
-	if subj.Kind == identity.KindAPIKey || subj.Kind == identity.KindVirtualKey || !snap.GrantsAnywhere(subj.Roles, policy.ActionAPIKeyManage) {
+	relaxed := pattern == routeAPIKey && (r.Method == http.MethodDelete || r.Method == http.MethodGet)
+	if subj.Kind == identity.KindAPIKey || subj.Kind == identity.KindVirtualKey || (!relaxed && !snap.GrantsAnywhere(subj.Roles, policy.ActionAPIKeyManage)) {
 		s.apiAudit(r, subj, "apikey.manage", "", "deny", "forbidden", nil)
 		writeError(w, http.StatusForbidden, "forbidden", policy.ActionAPIKeyManage+" not granted")
 		return
@@ -88,12 +90,24 @@ func canManageKey(snap *policy.Snapshot, subj *identity.Subject, team, role stri
 	return true
 }
 
+// canRevokeKey: managers of the key, its creator, and the members of its
+// team holding gate.apikey.manage anywhere may always see and revoke it,
+// even after its role changed.
+func canRevokeKey(snap *policy.Snapshot, subj *identity.Subject, k *store.APIKey) bool {
+	return canManageKey(snap, subj, k.Team, k.Role) || k.CreatedBy == subj.String() ||
+		(slices.Contains(subj.Teams, k.Team) && snap.GrantsAnywhere(subj.Roles, policy.ActionAPIKeyManage))
+}
+
 func (s *Server) loadKey(ctx context.Context, snap *policy.Snapshot, subj *identity.Subject, id string) (*store.APIKey, *policyError) {
+	return s.loadKeyFor(ctx, id, func(k *store.APIKey) bool { return canManageKey(snap, subj, k.Team, k.Role) })
+}
+
+func (s *Server) loadKeyFor(ctx context.Context, id string, allowed func(*store.APIKey) bool) (*store.APIKey, *policyError) {
 	if !apikey.ValidID(id) {
 		return nil, perr(http.StatusNotFound, "not_found", "unknown API key")
 	}
 	k, err := s.cfg.APIKeys.GetAPIKey(ctx, id)
-	if errors.Is(err, store.ErrNotFound) || (err == nil && !canManageKey(snap, subj, k.Team, k.Role)) {
+	if errors.Is(err, store.ErrNotFound) || (err == nil && !allowed(k)) {
 		return nil, perr(http.StatusNotFound, "not_found", "unknown API key")
 	}
 	if err != nil {
@@ -184,7 +198,7 @@ func (s *Server) listAPIKeys(w http.ResponseWriter, r *http.Request, subj *ident
 }
 
 func (s *Server) getAPIKey(w http.ResponseWriter, r *http.Request, subj *identity.Subject, snap *policy.Snapshot, id string) *policyError {
-	k, e := s.loadKey(r.Context(), snap, subj, id)
+	k, e := s.loadKeyFor(r.Context(), id, func(k *store.APIKey) bool { return canRevokeKey(snap, subj, k) })
 	if e != nil {
 		return e
 	}
@@ -276,8 +290,13 @@ func (s *Server) createAPIKey(w http.ResponseWriter, r *http.Request, subj *iden
 	now := s.now().UTC()
 	id := apikey.NewID()
 	key := apikey.NewSecret(id)
+	grant, _ := snap.RoleGrant(req.Role)
+	grantJSON, err := json.Marshal(grant)
+	if err != nil {
+		return perr(http.StatusInternalServerError, "internal", "role grant")
+	}
 	k := store.APIKey{
-		ID: id, Name: req.Name, Description: req.Description, Team: req.Team, Role: req.Role,
+		ID: id, Name: req.Name, Description: req.Description, Team: req.Team, Role: req.Role, RoleGrant: string(grantJSON),
 		SecretHash: apikey.Hash(key), ExpiresAt: req.ExpiresAt, AllowedCIDRs: req.AllowedCIDRs,
 		CreatedAt: now, CreatedBy: subj.String(), CreatedByName: subj.Name,
 	}
@@ -384,7 +403,7 @@ func (s *Server) updateKey(ctx context.Context, k store.APIKey) *policyError {
 }
 
 func (s *Server) revokeAPIKey(w http.ResponseWriter, r *http.Request, subj *identity.Subject, snap *policy.Snapshot, id string) *policyError {
-	k, e := s.loadKey(r.Context(), snap, subj, id)
+	k, e := s.loadKeyFor(r.Context(), id, func(k *store.APIKey) bool { return canRevokeKey(snap, subj, k) })
 	if e != nil {
 		return e
 	}

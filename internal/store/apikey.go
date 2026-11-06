@@ -15,11 +15,14 @@ import (
 // rotation PreviousHash stays valid until PreviousExpiresAt (the overlap
 // period). A revoked key is kept, for the listing and the audit trail.
 type APIKey struct {
-	ID                string
-	Name              string
-	Description       string
-	Team              string
-	Role              string
+	ID          string
+	Name        string
+	Description string
+	Team        string
+	Role        string
+	// RoleGrant is the JSON of what the role granted at issuance
+	// (policy.RoleGrant): the key is refused once its role grants more.
+	RoleGrant         string
 	SecretHash        string
 	PreviousHash      string
 	PreviousExpiresAt *time.Time
@@ -47,8 +50,8 @@ type APIKeyStore interface {
 	ListAPIKeys(ctx context.Context) ([]APIKey, error)
 	// UpdateAPIKey writes the mutable fields of a key (name, description,
 	// hashes, expiries, CIDRs, rotation and revocation); k.Version must
-	// match the stored one, which becomes k.Version + 1. Team, role,
-	// creation and last use never change.
+	// match the stored one, which becomes k.Version + 1. Team, role, role
+	// grant, creation and last use never change.
 	UpdateAPIKey(ctx context.Context, k APIKey) error
 	// TouchAPIKey records the last use of a key, without version check;
 	// ErrNotFound if unknown.
@@ -309,7 +312,7 @@ func (m *memory) UpdateAPIKey(_ context.Context, k APIKey) error {
 		return ErrConflict
 	}
 	n := cloneAPIKey(k)
-	n.Team, n.Role, n.CreatedAt, n.CreatedBy, n.CreatedByName = cur.Team, cur.Role, cur.CreatedAt, cur.CreatedBy, cur.CreatedByName
+	n.Team, n.Role, n.RoleGrant, n.CreatedAt, n.CreatedBy, n.CreatedByName = cur.Team, cur.Role, cur.RoleGrant, cur.CreatedAt, cur.CreatedBy, cur.CreatedByName
 	n.LastUsedAt, n.LastUsedIP = cur.LastUsedAt, cur.LastUsedIP
 	n.Version = cur.Version + 1
 	m.apiKeys[k.ID] = n
@@ -328,14 +331,14 @@ func (m *memory) TouchAPIKey(_ context.Context, id string, at time.Time, ip stri
 	return nil
 }
 
-const apiKeyColumns = "id, name, description, team, role, secret_hash, previous_hash, previous_expires_at, expires_at, allowed_cidrs, created_at, created_by, created_by_name, rotated_at, revoked_at, revoked_by, last_used_at, last_used_ip, version"
+const apiKeyColumns = "id, name, description, team, role, role_grant, secret_hash, previous_hash, previous_expires_at, expires_at, allowed_cidrs, created_at, created_by, created_by_name, rotated_at, revoked_at, revoked_by, last_used_at, last_used_ip, version"
 
 func scanAPIKey(r scanner) (APIKey, error) {
 	var k APIKey
 	var cidrs string
 	var created int64
 	var prevExp, exp, rotated, revoked, used sql.NullInt64
-	if err := r.Scan(&k.ID, &k.Name, &k.Description, &k.Team, &k.Role, &k.SecretHash, &k.PreviousHash, &prevExp, &exp,
+	if err := r.Scan(&k.ID, &k.Name, &k.Description, &k.Team, &k.Role, &k.RoleGrant, &k.SecretHash, &k.PreviousHash, &prevExp, &exp,
 		&cidrs, &created, &k.CreatedBy, &k.CreatedByName, &rotated, &revoked, &k.RevokedBy, &used, &k.LastUsedIP, &k.Version); err != nil {
 		return k, err
 	}
@@ -364,8 +367,8 @@ func (s *sqlStore) CreateAPIKey(ctx context.Context, k APIKey) error {
 	if err != nil {
 		return err
 	}
-	n, err := s.exec(ctx, "INSERT INTO api_key ("+apiKeyColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
-		k.ID, k.Name, k.Description, k.Team, k.Role, k.SecretHash, k.PreviousHash, nullMicros(k.PreviousExpiresAt), nullMicros(k.ExpiresAt),
+	n, err := s.exec(ctx, "INSERT INTO api_key ("+apiKeyColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING",
+		k.ID, k.Name, k.Description, k.Team, k.Role, k.RoleGrant, k.SecretHash, k.PreviousHash, nullMicros(k.PreviousExpiresAt), nullMicros(k.ExpiresAt),
 		cidrs, micros(k.CreatedAt), k.CreatedBy, k.CreatedByName, nullMicros(k.RotatedAt), nullMicros(k.RevokedAt), k.RevokedBy,
 		nullMicros(k.LastUsedAt), k.LastUsedIP, 1)
 	if err != nil {
