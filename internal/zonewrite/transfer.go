@@ -81,6 +81,9 @@ func (e *engine) ProposeTransfer(ctx context.Context, s *identity.Subject, zoneI
 	if err := e.checkRequester(s); err != nil {
 		return nil, e.deny(ctx, s, actionTransferPropose, zone, err)
 	}
+	if req.Apply && e.cfg.RequireSecondApprover {
+		return nil, fail(ReasonInvalid, "apply: a second approver is required (ownership.require_second_approver)")
+	}
 	if !e.cfg.Authz.Allow(s, policy.ActionOwnershipApprove, zone) && !e.cfg.Authz.Allow(s, policy.ActionRecordWrite, zone) {
 		return nil, e.deny(ctx, s, actionTransferPropose, zone, fail(ReasonForbidden, "%s or %s is required on %s", policy.ActionRecordWrite, policy.ActionOwnershipApprove, zone))
 	}
@@ -150,6 +153,9 @@ func (e *engine) ProposeTransfer(ctx context.Context, s *identity.Subject, zoneI
 		return nil, &Error{Reason: ReasonUpstream, Message: "store transfer failed", Err: err}
 	}
 	e.emit(ctx, s, actionTransferPropose, zone, "allow", "", transferChanges(t), "", transferExtra(t))
+	if req.Apply {
+		return e.DecideTransfer(ctx, s, t.ID, true, req.Comment)
+	}
 	return e.transferView(s, t), nil
 }
 
@@ -160,6 +166,9 @@ func (e *engine) ProposeRename(ctx context.Context, s *identity.Subject, from st
 	}
 	if err := e.checkRequester(s); err != nil {
 		return nil, e.deny(ctx, s, actionTransferPropose, "", err)
+	}
+	if req.Apply && e.cfg.RequireSecondApprover {
+		return nil, fail(ReasonInvalid, "apply: a second approver is required (ownership.require_second_approver)")
 	}
 	if err := checkComment(req.Comment); err != nil {
 		return nil, err
@@ -180,6 +189,9 @@ func (e *engine) ProposeRename(ctx context.Context, s *identity.Subject, from st
 		return nil, &Error{Reason: ReasonUpstream, Message: "store transfer failed", Err: err}
 	}
 	e.emit(ctx, s, actionTransferPropose, "", "allow", "", nil, "", transferExtra(t))
+	if req.Apply {
+		return e.DecideTransfer(ctx, s, t.ID, true, req.Comment)
+	}
 	return e.transferView(s, t), nil
 }
 
@@ -252,7 +264,7 @@ func (e *engine) DecideTransfer(ctx context.Context, s *identity.Subject, id str
 			return nil, e.deny(ctx, s, action, t.Zone, err)
 		}
 	}
-	if !self && !e.mayDecide(s, *t) {
+	if (approve || !self) && !e.mayDecide(s, *t) {
 		return nil, e.deny(ctx, s, action, t.Zone, fail(ReasonForbidden, "%s", e.decideRule(*t)))
 	}
 	if approve && t.Kind == uiapi.TransferKindRename && !e.cfg.Authz.Allow(s, uiapi.ActionPolicyApprove, "") {
@@ -366,6 +378,9 @@ func (e *engine) approverNow(t store.Transfer) (*identity.Subject, error) {
 	}
 	if !e.mayDecide(s, t) {
 		return nil, fail(ReasonForbidden, "the approver %s lost the right to approve this transfer: %s", s.String(), e.decideRule(t))
+	}
+	if err := e.checkApprover(s, t); err != nil {
+		return nil, err
 	}
 	return s, nil
 }
@@ -793,9 +808,9 @@ func (e *engine) personIssuer(s *identity.Subject) bool {
 }
 
 // checkRequester applies ownership.person_issuers to the requester of a
-// transfer or rename.
+// transfer or rename when a second approver is required.
 func (e *engine) checkRequester(s *identity.Subject) error {
-	if len(e.cfg.PersonIssuers) > 0 && !e.personIssuer(s) {
+	if e.cfg.RequireSecondApprover && len(e.cfg.PersonIssuers) > 0 && !e.personIssuer(s) {
 		return fail(ReasonForbidden, "transfers are requested by people signed in with %s (ownership.person_issuers)", strings.Join(e.cfg.PersonIssuers, ", "))
 	}
 	return nil
@@ -806,6 +821,12 @@ func (e *engine) checkRequester(s *identity.Subject) error {
 // are set, and, unless ownership.machine_approvers, both are humans that
 // the person keys identify.
 func (e *engine) checkApprover(s *identity.Subject, t store.Transfer) error {
+	if !e.cfg.RequireSecondApprover {
+		if !e.cfg.MachineApprovers && s.Category != identity.CategoryHuman {
+			return fail(ReasonForbidden, "transfers are approved by a person, not by a %s identity (ownership.machine_approvers)", s.Category)
+		}
+		return nil
+	}
 	if s.String() == t.Requester {
 		return fail(ReasonForbidden, "the requester cannot approve its own transfer: a second person must")
 	}
@@ -871,8 +892,8 @@ func (e *engine) transferView(s *identity.Subject, t store.Transfer) *uiapi.Tran
 	if t.Status == uiapi.TransferProposed && !e.now().Before(t.ExpiresAt) {
 		v.Status = uiapi.TransferExpired
 	}
-	v.CanDecide = v.Status == uiapi.TransferProposed && s.String() != t.Requester && e.mayDecide(s, t) &&
-		e.checkApprover(s, t) == nil
+	v.CanDecide = v.Status == uiapi.TransferProposed && e.mayDecide(s, t) && e.checkApprover(s, t) == nil
+	v.SelfApproved = t.Approver != nil && t.DecidedBy == t.Requester
 	return v
 }
 
@@ -891,6 +912,12 @@ func transferExtra(t store.Transfer) map[string]any {
 	}
 	if t.DecidedBy != "" {
 		x["decided_by"], x["decided_by_name"] = t.DecidedBy, t.DecidedByName
+	}
+	if t.Approver != nil {
+		x["approval"] = "second"
+		if t.DecidedBy == t.Requester {
+			x["approval"] = "self"
+		}
 	}
 	if t.Comment != "" {
 		x["comment"] = t.Comment

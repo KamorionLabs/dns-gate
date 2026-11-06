@@ -46,6 +46,10 @@ type Config struct {
 	// TransferTTL is how long a transfer request waits for approval
 	// (default 7 days).
 	TransferTTL time.Duration
+	// RequireSecondApprover makes transfers and renames need the approval
+	// of a second person (PersonClaims, PersonIssuers); without it the
+	// requester may approve its own request, every other check applying.
+	RequireSecondApprover bool
 	// MachineApprovers lets pipelines and virtual keys approve transfers;
 	// by default only humans may.
 	MachineApprovers bool

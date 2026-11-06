@@ -323,7 +323,7 @@ func TestTransferApprovalRequiresAnotherPerson(t *testing.T) {
 	}
 
 	m := newEnvConfig(t, eurodnstest.Options{}, nil, func(c *Config) {
-		c.Teams, c.MachineApprovers = teamList{"team-a": true, "team-b": true}, true
+		c.Teams, c.MachineApprovers, c.RequireSecondApprover = teamList{"team-a": true, "team-b": true}, true, true
 	})
 	if _, err := m.eng.ApplyRRsets(ctx, alice, zoneName, put("p3", "192.0.2.1"), 0); err != nil {
 		t.Fatal(err)
@@ -358,6 +358,7 @@ func newReassignEnv(t *testing.T) (*env, *reassignFailStore) {
 	c := &clock{t: time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)}
 	fs := &reassignFailStore{Store: store.NewMemoryWithClock(c.Now)}
 	e := newEnvConfig(t, eurodnstest.Options{}, fs, func(cfg *Config) {
+		cfg.RequireSecondApprover = true
 		cfg.TombstoneTTL, cfg.TransferTTL = 7*24*time.Hour, 24*time.Hour
 		cfg.Teams = teamList{"team-a": true, "team-b": true, "team-c": true}
 		cfg.Now = c.Now
@@ -483,7 +484,7 @@ func TestTransferPersonRules(t *testing.T) {
 	run := func(t *testing.T, mut func(*Config), requester, approver *identity.Subject) error {
 		t.Helper()
 		e := newEnvConfig(t, eurodnstest.Options{}, nil, func(c *Config) {
-			c.Teams = teamList{"team-a": true, "team-b": true}
+			c.Teams, c.RequireSecondApprover = teamList{"team-a": true, "team-b": true}, true
 			if mut != nil {
 				mut(c)
 			}
@@ -574,7 +575,7 @@ func newRaceEnv(t *testing.T, rb Rebinder) (*env, *updateFailStore) {
 	c := &clock{t: time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)}
 	fs := &updateFailStore{reassignFailStore: &reassignFailStore{Store: store.NewMemoryWithClock(c.Now)}}
 	e := newEnvConfig(t, eurodnstest.Options{}, fs, func(cfg *Config) {
-		cfg.TombstoneTTL, cfg.TransferTTL = 7*24*time.Hour, 24*time.Hour
+		cfg.TombstoneTTL, cfg.TransferTTL, cfg.RequireSecondApprover = 7*24*time.Hour, 24*time.Hour, true
 		cfg.Teams = teamList{"team-a": true, "team-b": true, "team-c": true}
 		cfg.Now, cfg.Rebinder = c.Now, rb
 	})
@@ -708,5 +709,62 @@ func TestRenameApprovalDoesNotScanTheStore(t *testing.T) {
 	res, err := tr.DecideTransfer(ctx, auditor, v.ID, true, "")
 	if err != nil || res.Status != uiapi.TransferApplying || fs.listedZones != 0 {
 		t.Fatalf("rename approval: %+v %v, %d store scans", res, err, fs.listedZones)
+	}
+}
+
+func TestTransferSelfApprovalWithoutSecondApprover(t *testing.T) {
+	e := newEnvConfig(t, eurodnstest.Options{}, nil, func(c *Config) {
+		c.Teams = teamList{"team-a": true, "team-b": true}
+	})
+	ctx := context.Background()
+	for _, h := range []string{"@", "s1"} {
+		if _, err := e.eng.ApplyRRsets(ctx, alice, zoneName, put(h, "192.0.2.1"), 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tr := e.eng.(Transfers)
+	v, err := tr.ProposeTransfer(ctx, alice, zoneName, uiapi.TransferProposal{RRsets: adoptRefs("s1 A"), ToTeam: "team-b", Comment: "hand over"})
+	if err != nil || !v.CanDecide {
+		t.Fatalf("the requester decides its own request when no second approver is required: %+v %v", v, err)
+	}
+	done, err := tr.DecideTransfer(ctx, alice, v.ID, true, "")
+	if err != nil || done.Status != uiapi.TransferApplied || !done.SelfApproved {
+		t.Fatalf("self approval: %+v %v", done, err)
+	}
+	ev := e.audit.find("gate.transfer.approve", "allow")
+	if len(ev) != 1 || ev[0].Extra["approval"] != "self" {
+		t.Fatalf("self approval not audited as such: %+v", ev)
+	}
+	one, err := tr.ProposeTransfer(ctx, alice, zoneName, uiapi.TransferProposal{RRsets: adoptRefs("s1 A"), ToTeam: "team-a", Comment: "back", Apply: true})
+	if err == nil {
+		t.Fatalf("alice no longer writes s1 through team-b: %+v", one)
+	}
+	if one, err = tr.ProposeTransfer(ctx, bob, zoneName, uiapi.TransferProposal{RRsets: adoptRefs("s1 A"), ToTeam: "team-a", Comment: "back", Apply: true}); err != nil || one.Status != uiapi.TransferApplied {
+		t.Fatalf("propose and apply in one step: %+v %v", one, err)
+	}
+
+	acmeKey := bound(&identity.Subject{Issuer: "idp", ID: "acme-key", Name: "acme@example.com", Category: identity.CategoryHuman, Roles: []string{"acme"}, Teams: []string{"team-a"}})
+	if _, err := tr.ProposeTransfer(ctx, acmeKey, zoneName, uiapi.TransferProposal{RRsets: adoptRefs("@ A"), ToTeam: "team-b", Comment: "x", Apply: true}); reasonOf(err) != ReasonNotOwner {
+		t.Fatalf("per-RRset rights still apply to a self approval: %v", err)
+	}
+	pipeline := bound(&identity.Subject{Issuer: "ci", ID: "deploy", Category: identity.CategoryPipeline, Roles: []string{"writer"}, Teams: []string{"team-a"}})
+	w, err := tr.ProposeTransfer(ctx, pipeline, zoneName, uiapi.TransferProposal{RRsets: adoptRefs("@ A"), ToTeam: "team-b", Comment: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = tr.DecideTransfer(ctx, pipeline, w.ID, true, "")
+	e.wantReason(err, ReasonForbidden)
+
+	r, err := tr.ProposeRename(ctx, admin, "team-b", uiapi.TeamRenameRequest{To: "team-a", Comment: "merge", Apply: true})
+	if err != nil || r.Status != uiapi.TransferApplying || !r.SelfApproved {
+		t.Fatalf("rename approved by its requester: %+v %v", r, err)
+	}
+
+	strict := newTeamsEnv(t)
+	if _, err := strict.eng.ApplyRRsets(ctx, alice, zoneName, put("s2", "192.0.2.1"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := strict.eng.(Transfers).ProposeTransfer(ctx, alice, zoneName, uiapi.TransferProposal{RRsets: adoptRefs("s2 A"), ToTeam: "team-b", Comment: "x", Apply: true}); reasonOf(err) != ReasonInvalid {
+		t.Fatalf("apply on propose with a second approver required: %v", err)
 	}
 }

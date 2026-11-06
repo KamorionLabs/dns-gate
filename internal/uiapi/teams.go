@@ -116,8 +116,12 @@ type Transfer struct {
 	DecisionComment string          `json:"decision_comment,omitempty"`
 	Moved           int             `json:"moved,omitempty"` // RRsets and tombstones moved by the apply
 	Error           string          `json:"error,omitempty"` // why a failed transfer was not applied
-	// CanDecide tells whether the caller may approve or reject it.
+	// CanDecide tells whether the caller may approve it (the requester may
+	// always withdraw a proposed request).
 	CanDecide bool `json:"can_decide"`
+	// SelfApproved marks a request approved by its requester
+	// (ownership.require_second_approver is false).
+	SelfApproved bool `json:"self_approved,omitempty"`
 }
 
 // TransferProposal is the body of POST /api/v1/zones/{zone}/transfers. Every
@@ -126,12 +130,18 @@ type TransferProposal struct {
 	RRsets  []RRsetRef `json:"rrsets"`
 	ToTeam  string     `json:"to_team"`
 	Comment string     `json:"comment"`
+	// Apply approves the request at once, by its requester: only when
+	// ownership.require_second_approver is false.
+	Apply bool `json:"apply,omitempty"`
 }
 
 // TeamRenameRequest is the body of POST /api/v1/teams/{team}/rename.
 type TeamRenameRequest struct {
 	To      string `json:"to"`
 	Comment string `json:"comment"`
+	// Apply approves the rename at once, by its requester: only when
+	// ownership.require_second_approver is false.
+	Apply bool `json:"apply,omitempty"`
 }
 
 // TransferPage lists transfers, newest first.

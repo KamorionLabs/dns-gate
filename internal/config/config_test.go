@@ -465,15 +465,16 @@ func TestTeamClaimFamilies(t *testing.T) {
 
 func TestPersonIssuers(t *testing.T) {
 	e := env(map[string]string{"EURODNS_API_KEY": "k"})
-	ok := base + "ownership: {person_issuers: [ci], person_claims: [tid+oid, email]}\n"
+	ok := base + "ownership: {require_second_approver: true, person_issuers: [ci], person_claims: [tid+oid, email]}\n"
 	c, err := Parse([]byte(ok), e)
 	if err != nil || c.Ownership.PersonIssuers[0] != "ci" {
 		t.Fatalf("%v %+v", err, c)
 	}
 	for name, doc := range map[string]string{
-		"unknown person issuer":  base + "ownership: {person_issuers: [nope]}\n",
-		"with machine approvers": base + "ownership: {person_issuers: [ci], machine_approvers: true}\n",
-		"broken composite claim": base + "ownership: {person_claims: [tid+]}\n",
+		"unknown person issuer":   base + "ownership: {require_second_approver: true, person_issuers: [nope]}\n",
+		"with machine approvers":  base + "ownership: {require_second_approver: true, person_issuers: [ci], machine_approvers: true}\n",
+		"without second approver": base + "ownership: {person_issuers: [ci]}\n",
+		"broken composite claim":  base + "ownership: {person_claims: [tid+]}\n",
 	} {
 		if _, err := Parse([]byte(doc), e); err == nil {
 			t.Errorf("%s: expected an error", name)

@@ -34,6 +34,7 @@ func newTeamsEnv(t *testing.T) *env {
 	return newEnvConfig(t, eurodnstest.Options{}, nil, func(c *Config) {
 		c.TombstoneTTL = 7 * 24 * time.Hour
 		c.TransferTTL = 24 * time.Hour
+		c.RequireSecondApprover = true
 		c.Teams = teamList{"team-a": true, "team-b": true, "team-c": true}
 	})
 }

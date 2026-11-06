@@ -136,6 +136,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		MachineApprovers:        cfg.Ownership.MachineApprovers,
 		PersonIssuers:           cfg.Ownership.PersonIssuers,
 		UntrustedEmail:          untrustedEmail(cfg),
+		RequireSecondApprover:   cfg.Ownership.RequireSecondApprover,
 		Now:                     time.Now,
 		Logger:                  log,
 	})

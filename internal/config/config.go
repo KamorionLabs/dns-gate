@@ -143,6 +143,11 @@ type Ownership struct {
 	// TransferTTL is how long a transfer request waits for its approval
 	// (default 7 days).
 	TransferTTL Duration `yaml:"transfer_ttl"`
+	// RequireSecondApprover makes ownership transfers and renames need the
+	// approval of a second person, as policy.require_approval does for
+	// policy revisions. Default false: the requester may approve its own
+	// request (audited as self-approved), every other check applying.
+	RequireSecondApprover bool `yaml:"require_second_approver"`
 	// MachineApprovers lets pipelines and virtual keys approve transfers
 	// and renames, and lets transfers requested by identities the person
 	// claims do not identify be approved: it weakens the two-person rule.
@@ -1069,6 +1074,9 @@ func (c *Config) Validate() error {
 		if strings.TrimSpace(pc) == "" || strings.Contains(pc, "++") || strings.HasPrefix(pc, "+") || strings.HasSuffix(pc, "+") {
 			add("ownership.person_claims[%d]: %q is not a claim name or a + composite of claim names", i, pc)
 		}
+	}
+	if len(c.Ownership.PersonIssuers) > 0 && !c.Ownership.RequireSecondApprover {
+		add("ownership.person_issuers: only used with require_second_approver: true")
 	}
 	if len(c.Ownership.PersonIssuers) > 0 && c.Ownership.MachineApprovers {
 		add("ownership: person_issuers and machine_approvers are exclusive (person issuers only admit humans)")
