@@ -45,9 +45,16 @@ auth=(-H "Authorization: Bearer $TOKEN")
 
 ```sh
 curl -sS "${auth[@]}" "$GATE/api/v1/zones"
+curl -sS "${auth[@]}" "$GATE/api/v1/zones?folder=/ES/**"
 curl -sS "${auth[@]}" "$GATE/api/v1/zones/example.com/rrsets"
 curl -sS -i "${auth[@]}" "$GATE/api/v1/zones/example.com/rrsets/www/CNAME"
 ```
+
+A zone summary carries the provider `folder` of the zone for EuroDNS accounts
+(`"/ES/Madrid"`, `"/"` for a domain in no folder; absent for Route53), and
+`?folder=` keeps the zones whose folder matches a folder glob (`/ES` the folder
+ES, `/ES/**` every folder below it), see
+[EuroDNS folders](CONFIG.md#eurodns-folders).
 
 Hosts are relative to the zone, `@` is the apex, `*` is allowed as the first label
 (`*.app`); the type is case-insensitive. An RRset:
@@ -183,9 +190,10 @@ never manages keys):
 
 - the key's team must be one of the caller's teams, unless the caller holds
   `gate.apikey.manage` on `*` (gate-wide managers);
-- the caller must hold `gate.apikey.manage` on every zone of the key's role, and
-  every action of the role on the same zones and records: a key never has more
-  rights than its issuer;
+- the caller must hold `gate.apikey.manage` on every zone and folder pattern of
+  the key's role, and every action of the role on the same zones, folders and
+  records (a folder pattern is covered by a rule whose `folders` cover it, or by
+  a rule on every zone, `*`): a key never has more rights than its issuer;
 - the role may not grant `policy.*` or `gate.*` actions, nor be less ephemeral
   (longer `ephemeral_ttl`, or permanent) or less capped (`max_changes_per_request`)
   than the caller's own write rights.
@@ -402,7 +410,10 @@ The full list is in the `Error` schema of the OpenAPI document.
   resources with `import` blocks (`provider=eurodns` for `eurodns_record_set`).
 - `/api/v1/policy/delegated/…` — roles and bindings managed by pipelines within a
   delegation ([CONFIG.md](CONFIG.md)).
-- `/api/v1/policy/…` — the policy editor of the web UI.
+- `/api/v1/policy/…` — the policy editor of the web UI. `explain` returns the
+  `folder` of the zone when the matching rule applied through its `folders`;
+  `who-can` returns the `folder` of the zone and flags `by_folder` the grants that
+  come from a folder selector.
 - `/acme/httpreq/present`, `/acme/httpreq/cleanup`, `/acme/acme-dns/update`,
   `/acme/acme-dns/register` — DNS-01 challenges for certbot, acme.sh, lego,
   win-acme, cert-manager and Caddy, with an OIDC token, a gate token or an API key

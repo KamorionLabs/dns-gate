@@ -55,6 +55,7 @@ A provider is one DNS account: a EuroDNS account or an AWS account for Route53. 
 | `providers[].kind` | (required) | `eurodns` or `route53` ([providers/route53.md](providers/route53.md)). |
 | `providers[].zones.include` | `["*"]` | Zone globs (`*` wildcards) the provider serves. |
 | `providers[].zones.exclude` | `[]` | Zone globs removed; they win over `include`. |
+| `providers[].zones.folders` | `[]` | EuroDNS only: keep the zones whose [folder](#eurodns-folders) matches one of these folder globs (`/ES` the folder ES, `/ES/**` every folder below it, `/` the domains in no folder). Empty: every folder. |
 | `providers[].zones.refresh` | `1h` | Account listing period (minimum `5m`), see [Zone discovery](#zone-discovery). |
 | `providers[].eurodns.base_url` | `https://rest-api.eurodns.com` | EuroDNS API. HTTPS is required (loopback excepted, for tests). |
 | `providers[].eurodns.app_id` | | EuroDNS application id (or the variables of [Secrets](#secrets)). |
@@ -94,6 +95,16 @@ The gate lists every provider account each `zones.refresh`, keeps the zones its 
 - **Unmanaged zones are read-only.** Their RRsets are readable with `dns.read` on the zone (UI and MCP; the UI also requires `ui.read`), evaluated by RBAC as usual: the zone globs of the role rules apply, so `zones: ["*"]` in a read role covers every discovered zone. They are never writable nor adoptable, the EuroDNS-compatible API (`/dns-zones/...`), the Terraform export and adoption refuse them, and reconcile does not run on them. Their content is read on demand, when someone opens the zone, and reused for `reconcile_interval`; listing zones never reads them.
 - **Bringing a zone under management**: add it to the `zones` list of the managed policy (the UI offers "Manage this zone" to policy administrators), then approve and activate as any revision. It must match `policy.bounds.zones` and be in a discovered list. Once active, the zone behaves as a base zone: writes within the roles, adoption, reconcile. The `zones` filters of the providers therefore also bound what can be managed from the UI.
 - The EuroDNS listing uses the key of the provider: its EuroDNS user must be allowed to search domains. Domains whose DNS is not hosted at EuroDNS are listed too: exclude them, reading them fails upstream.
+
+### EuroDNS folders
+
+EuroDNS organises domains in folders (`folderFullPath` of `POST /domains/search`). The listing of a `eurodns` provider keeps the folder of each domain, at no extra cost: `/ES/Madrid`, and `/` for a domain in no folder. It is shown in `GET /api/v1/zones` (`folder`, with a `?folder=` glob filter), in the Zones view of the UI (column and filter) and in the MCP `list_zones` tool. Route53 zones have no folder (empty): folder selectors never match them.
+
+Folder globs use the segments of host patterns, matched case-sensitively: `*` matches one segment, `**` one or more segments, `*` inside a segment any run of characters. `/ES` is the folder ES only, `/ES/**` every folder below it (not ES itself: write both to cover the folder and its subfolders), `/` the domains in no folder.
+
+- **Serving**: `providers[].zones.folders` keeps only the domains of the selected folders, after `include` and `exclude`. A zone of such a provider is served once a listing has seen it in a selected folder; until the first listing, or after it left the selected folders, it is served by no provider (writes fail, and a base `zones` entry outside them is an error at every write).
+- **Rights**: role rules, `policy.bounds` and delegations accept `folders` next to `zones` ([Roles](#roles)). A folder selector never makes a zone managed: the zone must still be in the base or managed `zones`, or discovered to be readable.
+- **Moves**: the folder is the one of the last successful listing (`zones.refresh`, and the on-demand refresh of policy proposals). Moving a domain to another folder in the EuroDNS console changes the rights of folder rules at the next listing, without a policy revision; each change found by a listing is audited as `gate.zone.folder_changed` (`extra.old`, `extra.new`, subject `gate:discovery`) by the replica that saw it. A replica (or a Lambda instance) started after the move has no previous folder and records no event. Whoever may move domains between folders in the EuroDNS account therefore controls folder-based rights: see the [threat model](THREAT-MODEL.md).
 
 ## Store
 
@@ -336,12 +347,22 @@ A map of named roles. Deny by default: an action is allowed only if a rule of on
 | Field | Description |
 |---|---|
 | `rules[].zones` | Zone globs (`*` matches any sequence, `*` alone any managed zone, and for `dns.read` and `ui.read` any [discovered](#zone-discovery) zone). |
+| `rules[].folders` | [EuroDNS folder](#eurodns-folders) globs: the rule also applies to the zones whose folder matches one (`/ES`, `/ES/**`, `/` for the domains in no folder), with the folder known at decision time. A rule needs `zones`, `folders` or both. |
 | `rules[].actions` | `dns.read`, `dns.record.write`, `dns.record.adopt`, `dns.zone.admin`, `dns.zone.profile` ([zone profiles](#zone-profiles), on `*` only), `dns.ownership.approve`, `domain.read`, `ui.read`, `gate.apikey.manage` (manage the [API keys](API.md#api-keys) of the subject's teams whose role zones it covers). |
 | `rules[].records.hosts` | Host patterns relative to the zone, `@` is the apex. `*` matches one label, `**` one or more labels (a bare `**` matches every host, apex included). |
 | `rules[].records.types` | Record types, `*` for any. Omit `records` to cover the whole zone. |
 | `rebase_on_save` | On a full-zone PUT, ignore differences outside the role's scope instead of refusing them (stale zones sent by ACME clients). Granted if any role of the subject enables it. |
 | `ephemeral_ttl` | RRsets created by the role expire and are garbage-collected after this duration (ACME challenges); a write adding a value pushes the expiry back, never beyond the creation plus `limits.ephemeral_lifetime_factor` TTLs. Applies only if every write role of the subject is ephemeral. Required by the [ACME endpoints](ACME.md). |
 | `max_changes_per_request` | `0` = global default, `-1` = unlimited, otherwise a limit. The most permissive role of the subject wins. |
+
+```yaml
+roles:
+  spain-dns:
+    rules:
+      - folders: ["/ES", "/ES/**"]          # every domain of the ES folder and its subfolders
+        zones: ["example.es"]               # plus this zone, wherever it is
+        actions: [dns.read, dns.record.write, ui.read]
+```
 
 `dns.record.write` and `dns.record.adopt` are further limited by ownership: the gate only modifies or deletes RRsets it created or adopted, owned by one of the subject's teams. `dns.ownership.approve` lets a subject adopt RRsets for a team it is not a member of and approve the [ownership transfers](#ownership) of the zone: give it to the people who arbitrate between teams.
 
@@ -507,7 +528,7 @@ Rules of the managed layer:
 
 - a managed role, group or team cannot reuse a base name;
 - managed teams follow the revision cycle like the rest of the document; a proposal without a `teams` field keeps the teams of the active revision (`"teams": {}` removes them), and the impact analysis reports declared, removed and changed teams;
-- managed rules cannot grant `policy.*` actions and must stay within `policy.bounds` (zone globs, actions); a managed binding may reuse a base role only if that role also stays within the bounds;
+- managed rules cannot grant `policy.*` actions and must stay within `policy.bounds` (zone globs, folder globs, actions): their `zones` must be covered by `bounds.zones` and their `folders` by `bounds.folders`; a managed binding may reuse a base role only if that role also stays within the bounds;
 - protected records still win over everything;
 - managed `zones` are brought under management in addition to the base `zones`: each must match `policy.bounds.zones` and, when it is not managed yet, exist in a provider account ([zone discovery](#zone-discovery) must be enabled); a zone already managed by the active revision is not checked again, so a domain removed from the account does not block unrelated changes;
 - managed virtual keys must have `expires_at`, and only their SHA-256 is stored (`POST /api/v1/policy/virtual-keys/generate` returns a random key once);
@@ -519,7 +540,8 @@ Rules of the managed layer:
 | `policy.require_approval` | `true` | Activation of a proposal requires an approval by an approver other than the author. With `false`, a `policy.propose` holder (a policy administrator included) activates their own proposal alone; approving one's own proposal stays refused. [Delegated changes](#policy-delegations) never require approval, whatever this setting. |
 | `policy.edit_max_age` | `15m` | Humans must have authenticated at the IdP within this delay to change the policy. |
 | `policy.require_amr` | `[]` | Authentication methods required for changes, e.g. `["mfa"]` (the IdP must emit the `amr` claim). |
-| `policy.bounds.zones` | (required if editable) | Zone globs managed rules may target (`*` wildcards only). |
+| `policy.bounds.zones` | (required if editable, or `folders`) | Zone globs managed rules may target (`*` wildcards only), and zones the managed layer may bring under management. |
+| `policy.bounds.folders` | `[]` | [Folder](#eurodns-folders) globs managed rules may target (`/ES/**` covers `/ES/Madrid` and `/ES/*`, not `/ES`). It never lets the managed layer bring a zone under management: managed `zones` stay bounded by `bounds.zones`. |
 | `policy.bounds.actions` | (required if editable) | Actions managed rules may grant (`policy.*` refused). |
 | `policy.delegations` | `[]` | Identities allowed to manage their own roles and bindings in the managed layer, within limits, see [Policy delegations](#policy-delegations). |
 
@@ -572,7 +594,8 @@ policy:
 | `name` | (required) | Lowercase identifier, recorded as the owner of every object the delegation creates. |
 | `description` | | Free text shown in the UI and the API. |
 | `subjects[]` | (required) | Matchers (`issuer`, `claims` globs) of the identities that may use the delegation. A subject of a delegation needs no binding: it authenticates on the delegation API even if no role is bound to it (and gets nothing else). |
-| `allow.zones` | (required) | Zone globs delegated role rules may target; each must be covered by `policy.bounds.zones`. |
+| `allow.zones` | (required, or `allow.folders`) | Zone globs delegated role rules may target; each must be covered by `policy.bounds.zones`. |
+| `allow.folders` | `[]` | [Folder](#eurodns-folders) globs delegated role rules may target; each must be covered by `policy.bounds.folders`. |
 | `allow.actions` | (required) | Actions delegated role rules may grant; within `policy.bounds.actions`, `policy.*` refused. |
 | `allow.records.hosts`, `allow.records.types` | | When set, every delegated rule must name hosts (types) and each must be covered by these patterns (same host syntax as rules; `*` for any type). Without it, a delegated rule may cover whole zones. |
 | `allow.binding_subjects[]` | (required) | Every subject of a delegated binding must be covered by one of these matchers: same issuer, and each claim of the matcher constrained by the binding with patterns it covers (`sc://o/p/dns-gate-web` and `sc://o/p/dns-gate-*` are covered by `sc://o/p/dns-gate-*`; `sc://o/*` is not). `*` alone is refused. |
@@ -665,11 +688,11 @@ Tools:
 
 | Tool | Kind | Description |
 |---|---|---|
-| `list_zones` | read | Readable zones with their counts; zones discovered in the account but not managed are flagged `unmanaged`. |
+| `list_zones` | read | Readable zones with their counts and [EuroDNS folder](#eurodns-folders) (optional `folder` glob filter); zones discovered in the account but not managed are flagged `unmanaged`. |
 | `list_rrsets` | read | RRsets of a zone (managed, or unmanaged with `dns.read`) with their owner team, and the tombstones (deleted RRsets still reserved for their team); filters on status, host glob, type, owner. |
 | `get_rrset` | read | One RRset, its tombstone, why the caller may or may not change it (`ownership`), and its recent audit history. |
 | `search_audit` | read | Audit search, same visibility as the UI. |
-| `explain`, `who_can` | read | Policy simulation (`policy.read`); `explain` adds the teams and default team of the simulated subject and, for an RRset, its owner team or reservation. |
+| `explain`, `who_can` | read | Policy simulation (`policy.read`); `explain` adds the teams and default team of the simulated subject and, for an RRset, its owner team or reservation; both tell when a rule applied through the folder of the zone (`folder`, `by_folder`). |
 | `list_teams`, `get_team` | read | Teams as `GET /api/v1/teams[/{team}]`, plus the caller's teams (`my_teams`). |
 | `transfer_list` | read | Transfer requests the caller may see (`status=proposed` is the inbox, `can_decide`). |
 | `plan_rrset_change` | dry run | Desired state of RRsets, checked without writing; returns a `plan_id` bound to the caller, the zone, the changes, the zone version and the optional `team` (one of the caller's teams). |

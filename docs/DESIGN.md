@@ -160,7 +160,14 @@ otherwise the claims are settled against a fresh read at once), `ConditionalWrit
 
 A zone is served by exactly one provider: the only one whose `zones` include/exclude
 globs select it, or, when several do, the only one of them whose account lists it
-(`internal/discovery`). Ownership, locks and the audit stay keyed by zone name.
+(`internal/discovery`); a provider with a `zones.folders` filter selects only the
+zones its last listing found in a selected folder. Ownership, locks and the audit
+stay keyed by zone name.
+
+Providers organising zones in folders (EuroDNS) also implement `FolderLister`:
+`ListZoneFolders` returns each zone with its folder (`folderFullPath` of
+`searchDomains`, normalized: leading `/`, no trailing `/`, `/` for a domain in no
+folder). Discovery uses it instead of `ListZones`; it costs the same requests.
 
 **EuroDNS adapter.** One rate-limited transport per account carries every call
 (reads, writes, checks, snapshots, listing, passthrough). RRsets are grouped with
@@ -688,6 +695,9 @@ bindings:
 Host patterns are relative to the zone: `*` matches exactly one label, `**` one or
 more labels (`glob.MatchHost`).
 
+A rule applies to the zones matching its `zones` globs, and to the zones whose
+provider folder matches its `folders` globs (EuroDNS folders, section 15.9).
+
 ## 13. Audit
 
 One event per request (`audit.Event`): time, request id, subject (`issuer:id`),
@@ -712,7 +722,8 @@ policy layer (section 15).
 
 ### 14.1 Views
 
-- **Zones**: managed zones with counters (RRsets, managed, tainted, pending,
+- **Zones**: managed zones with their provider folder (EuroDNS, with a folder
+  filter) and counters (RRsets, managed, tainted, pending,
   foreign), last upstream sync, last gate write (latest successful write found
   in the journal, so it survives restarts and is the same on every replica); with zone discovery (15.7), the
   zones of the provider accounts that are not managed, flagged unmanaged, with a
@@ -984,6 +995,37 @@ change is then activated without approval.
   derived from its own subject, so a pipeline created by the stack owns its records
   and cannot touch those of another pipeline, even though the stack wrote both
   bindings.
+
+### 15.9 EuroDNS folders
+
+Teams often map to EuroDNS folders (one per country or business unit), so rights can
+follow a folder instead of a zone list to maintain. Discovery keeps the folder of
+each EuroDNS zone (4.1); `Snapshot.Folder` reads it from the live discovery lists, so
+the authorizer uses the folder known at decision time, without recompiling the
+policy.
+
+- **Selection**: a role rule applies to a zone listed in `zones` or whose folder
+  matches `folders` (`glob.MatchFolder`: segments as host patterns, `/ES` exact,
+  `/ES/**` below, `/` the root, case-sensitive). The decision records the folder when
+  the rule applied through it (`Decision.Folder`), shown by `explain` (`folder`) and
+  `who-can` (`by_folder`). Zones without folder (Route53, or not listed yet) never
+  match a folder selector: folder rules fail closed while discovery has not listed
+  the account.
+- **Management**: a folder selector never makes a zone managed. Managed zones stay
+  the base and managed `zones`; a discovered zone in a selected folder is only
+  readable, as any unmanaged zone. `zones.folders` of a provider narrows what the
+  provider serves and what discovery shows.
+- **Bounds**: `policy.bounds.folders` and delegation `allow.folders` bound the
+  `folders` of managed and delegated rules by static coverage
+  (`glob.FolderCovered`), as zone globs; a zone glob of a managed rule is never
+  covered by a folder bound, nor the reverse. API keys and their recorded grants
+  compare folders the same way; a rule on every zone (`*`) covers any folder.
+- **Changes**: a listing that finds a zone in another folder than the previous one
+  calls `discovery.Config.OnFolderChange`; the app records it as
+  `gate.zone.folder_changed` (old and new folder). The previous folders are only in
+  memory: a process started after a move records nothing. Folder-based rights are
+  therefore delegated to whoever can move domains in the EuroDNS account
+  ([THREAT-MODEL.md](THREAT-MODEL.md)).
 
 ## 16. Onboarding and adoption
 

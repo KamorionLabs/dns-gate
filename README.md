@@ -54,6 +54,9 @@ Also included:
 - **zone discovery**: the zones of the provider accounts outside the configured ones
   are listed read-only and brought under management from the UI by a reviewed
   policy revision, without a redeploy — see [docs/CONFIG.md](docs/CONFIG.md#zone-discovery);
+- **EuroDNS folders**: role rules select zones by EuroDNS folder (`folders: ["/ES/**"]`)
+  as well as by name, with the folder shown in the UI, the API and MCP and every move
+  audited — see [docs/CONFIG.md](docs/CONFIG.md#eurodns-folders);
 - **one binding for many pipelines**: the owner team derived from a claim
   (`team_from`), so each pipeline matched by a glob owns its own records — see
   [docs/CONFIG.md](docs/CONFIG.md#team-derived-from-a-claim);
