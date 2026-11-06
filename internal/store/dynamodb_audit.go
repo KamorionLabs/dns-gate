@@ -13,8 +13,9 @@ import (
 )
 
 // Audit items: pk=AUDIT#<zone> (AUDIT#_global for zone-less events) plus a
-// copy under AUDIT#_all for cross-zone queries; sk=<time>#<request id>;
-// attribute "event" holds the JSON event, "ttl" the retention.
+// copy under AUDIT#_all for cross-zone queries; sk=<time>#<event id>
+// (<time>#<request id> for events recorded before event ids); attribute
+// "event" holds the JSON event, "event_id" its id, "ttl" the retention.
 const (
 	auditGlobal = "_global"
 	auditAll    = "_all"
@@ -34,15 +35,16 @@ func (d *dynamo) AppendAudit(ctx context.Context, e audit.Event) error {
 	sk := auditSortKey(e)
 	ttl := e.Time.Add(d.retention).Unix()
 	for _, p := range []string{partition, auditAll} {
-		_, err := d.api.PutItem(ctx, &dynamodb.PutItemInput{
-			TableName: aws.String(d.table),
-			Item: map[string]types.AttributeValue{
-				"pk":    strAttr(auditPK(p)),
-				"sk":    strAttr(sk),
-				"event": strAttr(string(body)),
-				"ttl":   numAttr(ttl),
-			},
-		})
+		item := map[string]types.AttributeValue{
+			"pk":    strAttr(auditPK(p)),
+			"sk":    strAttr(sk),
+			"event": strAttr(string(body)),
+			"ttl":   numAttr(ttl),
+		}
+		if e.EventID != "" {
+			item["event_id"] = strAttr(e.EventID)
+		}
+		_, err := d.api.PutItem(ctx, &dynamodb.PutItemInput{TableName: aws.String(d.table), Item: item})
 		if err != nil {
 			return fmt.Errorf("store: append audit: %w", err)
 		}
@@ -88,6 +90,9 @@ func (d *dynamo) ListAudit(ctx context.Context, q AuditQuery) ([]audit.Event, st
 			var e audit.Event
 			if err := json.Unmarshal([]byte(raw.Value), &e); err != nil {
 				return nil, "", fmt.Errorf("store: decode audit: %w", err)
+			}
+			if !q.Since.IsZero() && e.Time.Before(q.Since) {
+				return out, "", nil
 			}
 			if !matchAudit(e, q) {
 				continue

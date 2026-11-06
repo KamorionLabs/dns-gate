@@ -126,6 +126,18 @@ Whoever may move domains between folders in the EuroDNS account therefore contro
 | `store.postgres.max_conns` | `5` | Pool size (1 to 100). The DSN comes from `DNS_GATE_POSTGRES_DSN`. |
 | `store.dynamodb.table`, `region`, `endpoint` | | Single-table backend; credentials from the default AWS chain (EKS Pod Identity, IRSA, environment). |
 
+## Audit
+
+| Field | Default | Description |
+|---|---|---|
+| `audit.format` | `native` | Format of the audit lines on stdout: `native`, `ecs` (Elastic Common Schema 8.x) or `ocsf` (OCSF 1.3). The store, the UI and `GET /api/v1/audit` always keep the native event. Every format keeps `"type": "audit"`. |
+| `audit.hash_chain` | `false` | Adds `instance_id`, `seq`, `prev_hash`, `hash_alg` and `hash` (SHA-256 chain per process) to every stdout line, checked by `dns-gate audit verify`. |
+| `audit.hash_chain_key` | | From `DNS_GATE_AUDIT_CHAIN_KEY` or `DNS_GATE_AUDIT_CHAIN_KEY_FILE` only (32 bytes, hex or base64): the chain becomes an HMAC-SHA256 that cannot be recomputed without the key. Requires `audit.hash_chain: true`. |
+
+Schema, actions, reasons, mappings, the limits of the chain and export recipes
+(CloudWatch subscription filter, Kubernetes collectors, API pull) are in
+[AUDIT.md](AUDIT.md).
+
 `memory` loses ownership on restart: tests only. `memory` and `sqlite` support **one replica** (the chart refuses `replicaCount > 1` with them); use `postgres` or `dynamodb` to run several replicas.
 
 ## Issuers
@@ -760,9 +772,9 @@ How answers are compared:
 - **Deletions** (`expect=absent`): an empty answer is a match. An answer section holding records of another name or type, or an answer the resolver flags as its own decision (extended DNS errors Blocked, Censored, Filtered), is an `error`; negative answers of resolvers marked `filtering` are flagged.
 - **Converged** needs at least one authoritative answer that matches, and no `stale`, `missing` or `indeterminate` answer.
 - **Size**: an answer reports at most 32 values of at most 512 bytes (`truncated`), and a result at most 1 MiB of values.
-- **expect**: the inventory a check compares with is the cache of the instance that answers. With `expect` (the `new_hash` of an apply result, the ETag of a `PUT`, or `absent`), an inventory that differs is refreshed from the provider first, at most 6 times a minute per subject; `412 precondition` if it still differs.
+- **expect**: the inventory a check compares with is the cache of the instance that answers. With `expect` (the `new_hash` of an apply result, the ETag of a `PUT`, or `absent`), an inventory that differs is refreshed from the provider first, at most 6 times a minute per subject and only for subjects holding `dns.read` on the zone; `412 precondition` if it still differs.
 
-A check is a read: no audit event, a debug log line (`propagation`). A refused provider re-read on `expect` is audited as `api.propagation`.
+A check is a read: no audit event, a debug log line (`propagation`). The provider re-read of `expect` runs only for callers holding `dns.read` on the whole zone (a record-scoped reader gets the `412`), so no refusal is audited either ([AUDIT.md](AUDIT.md#not-audited)).
 
 ## MCP
 

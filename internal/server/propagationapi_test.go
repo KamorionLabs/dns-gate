@@ -14,6 +14,7 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/config"
 	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
+	"github.com/KamorionLabs/dns-gate/internal/policy"
 	"github.com/KamorionLabs/dns-gate/internal/propagation"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 	"github.com/KamorionLabs/dns-gate/internal/zonewrite"
@@ -282,5 +283,26 @@ func TestPropagationBusy(t *testing.T) {
 	f.err = propagation.ErrBusy
 	if r := e.do(t, "GET", "/api/v1/zones/example.com/rrsets/www/A/propagation", e.token("writer"), "", nil); r.StatusCode != 503 || r.Header.Get("Retry-After") == "" {
 		t.Fatalf("busy: %d", r.StatusCode)
+	}
+}
+
+type recordScopedAuthz struct{ policy.Authorizer }
+
+func (a recordScopedAuthz) Allow(s *identity.Subject, action, zone string) bool {
+	return action != policy.ActionDNSRead && a.Authorizer.Allow(s, action, zone)
+}
+
+func TestPropagationRereadNeedsZoneRead(t *testing.T) {
+	e, _ := propagationEnv(t)
+	eng := &staleEngine{nsEngine: nsEngine{e.engine}, values: []string{"192.0.2.99"}}
+	e.server.cfg.Engine = eng
+	e.server.cfg.Authz = recordScopedAuthz{e.server.cfg.Authz}
+	events := len(e.audit.events)
+	written := dns.ContentHash(dns.RRset{Key: dns.Key{Host: "www", Type: "A"}, TTL: 600, Values: []string{"192.0.2.99"}})
+	if r := e.do(t, "GET", "/api/v1/zones/example.com/rrsets/www/A/propagation?expect="+written, e.token("writer"), "", nil); r.StatusCode != 412 || eng.reads != 0 {
+		t.Fatalf("record-scoped reader: %d, %d provider reads", r.StatusCode, eng.reads)
+	}
+	if len(e.audit.events) != events {
+		t.Errorf("audited: %+v", e.audit.events[events:])
 	}
 }

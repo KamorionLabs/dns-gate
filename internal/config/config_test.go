@@ -591,6 +591,21 @@ func TestEuroDNSZoneProfilesOptIn(t *testing.T) {
 	}
 }
 
+func TestAuditConfig(t *testing.T) {
+	e := env(map[string]string{"EURODNS_API_KEY": "x"})
+	c, err := Parse([]byte(base), e)
+	if err != nil || c.Audit.Format != AuditNative || c.Audit.HashChain {
+		t.Fatalf("default: %+v %v", c.Audit, err)
+	}
+	c, err = Parse([]byte(base+"\naudit: {format: ocsf, hash_chain: true}\n"), e)
+	if err != nil || c.Audit.Format != AuditOCSF || !c.Audit.HashChain {
+		t.Fatalf("ocsf: %+v %v", c.Audit, err)
+	}
+	if _, err := Parse([]byte(base+"\naudit: {format: cef}\n"), e); err == nil || !strings.Contains(err.Error(), "audit.format") {
+		t.Fatalf("unknown format: %v", err)
+	}
+}
+
 func TestFolders(t *testing.T) {
 	e := env(map[string]string{"EURODNS_API_KEY": "k"})
 	groups := "\ngroups:\n  admins:\n    members:\n      - issuer: ci\n        claims: {roles: [Gate.PolicyAdmin]}\n"
@@ -671,6 +686,23 @@ func TestFolderWarnings(t *testing.T) {
 	}
 	if len(fw(c)) != 1 || !strings.Contains(fw(c)[0], "no EuroDNS provider") {
 		t.Fatalf("no EuroDNS provider: %q", fw(c))
+	}
+}
+
+func TestAuditChainKey(t *testing.T) {
+	key := strings.Repeat("ab", 32)
+	c, err := Parse([]byte(base+"\naudit: {hash_chain: true}\n"), env(map[string]string{"EURODNS_API_KEY": "x", EnvAuditChainKey: key}))
+	if err != nil || len(c.Audit.HashChainKey) != 32 {
+		t.Fatalf("key: %v", err)
+	}
+	if _, err := Parse([]byte(base), env(map[string]string{"EURODNS_API_KEY": "x", EnvAuditChainKey: key})); err == nil || !strings.Contains(err.Error(), "hash_chain") {
+		t.Fatalf("key without chain: %v", err)
+	}
+	if _, err := Parse([]byte(base+"\naudit: {hash_chain: true}\n"), env(map[string]string{"EURODNS_API_KEY": "x", EnvAuditChainKey: "short"})); err == nil {
+		t.Fatal("short key accepted")
+	}
+	if _, err := Parse([]byte(base+"\naudit: {hash_chain_key: x}\n"), env(map[string]string{"EURODNS_API_KEY": "x"})); err == nil {
+		t.Fatal("key in the file accepted")
 	}
 }
 

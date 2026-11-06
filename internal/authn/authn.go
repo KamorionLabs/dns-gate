@@ -156,6 +156,7 @@ func (a *Authenticator) Authenticate(r *http.Request) (*identity.Subject, error)
 	case authz != "":
 		scheme, tok, ok := strings.Cut(authz, " ")
 		if ok && strings.EqualFold(scheme, "Basic") {
+			audit.SetAuthMethod(r.Context(), audit.AuthAPIKey)
 			user, pass, ok := basicAuth(tok)
 			if !ok || !apikey.Looks(pass) {
 				return nil, unauthorized("basic authentication is only accepted with a gate API key")
@@ -167,16 +168,19 @@ func (a *Authenticator) Authenticate(r *http.Request) (*identity.Subject, error)
 		}
 		tok = strings.TrimSpace(tok)
 		if apikey.Looks(tok) {
+			audit.SetAuthMethod(r.Context(), audit.AuthAPIKey)
 			return a.authenticateAPIKey(r.Context(), "", tok, a.ClientIP(r))
 		}
 		return a.authenticateToken(r.Context(), tok)
 	case apikey.Looks(apiKey):
+		audit.SetAuthMethod(r.Context(), audit.AuthAPIKey)
 		user := appID
 		if user == "" {
 			user = r.Header.Get("X-Api-User")
 		}
 		return a.authenticateAPIKey(r.Context(), user, apiKey, a.ClientIP(r))
 	case appID != "" || apiKey != "":
+		audit.SetAuthMethod(r.Context(), audit.AuthVirtualKey)
 		return a.authenticateVirtualKey(appID, apiKey, a.ClientIP(r))
 	default:
 		return nil, unauthorized("credentials required")
@@ -209,6 +213,7 @@ func (a *Authenticator) Middleware(next http.Handler, onError func(http.Response
 }
 
 func (a *Authenticator) authenticateToken(ctx context.Context, raw string) (*identity.Subject, error) {
+	audit.SetAuthMethod(ctx, audit.AuthOIDC)
 	tok, err := jwt.ParseSigned(raw, allAlgs)
 	if err != nil {
 		return nil, unauthorized("malformed token")
@@ -221,11 +226,17 @@ func (a *Authenticator) authenticateToken(ctx context.Context, raw string) (*ide
 	if is == nil {
 		return nil, unauthorized("untrusted issuer")
 	}
+	if is.cfg.Self {
+		audit.SetAuthMethod(ctx, audit.AuthGateToken)
+	}
 	claims, err := a.verify(ctx, is, raw, is.cfg.Audiences)
 	if err != nil {
 		return nil, err
 	}
 	if is.cfg.Self {
+		if _, ok := claims[ClaimExchanged]; ok {
+			audit.SetAuthMethod(ctx, audit.AuthTokenExchange)
+		}
 		return a.bindGateToken(claims)
 	}
 	for name, patterns := range is.cfg.BoundClaims {
@@ -533,7 +544,7 @@ func (a *Authenticator) ClientIP(r *http.Request) netip.Addr {
 	if !a.isTrusted(peer) {
 		return peer
 	}
-	hops := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	hops := strings.Split(strings.Join(r.Header.Values("X-Forwarded-For"), ","), ",")
 	for i := len(hops) - 1; i >= 0; i-- {
 		ip, err := netip.ParseAddr(strings.TrimSpace(hops[i]))
 		if err != nil {

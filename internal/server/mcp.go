@@ -408,8 +408,9 @@ func (m *mcpServer) addReadTools(srv *mcp.Server) {
 		if m.s.cfg.AuditReader != nil {
 			events, _, err := m.s.cfg.AuditReader.ListAudit(ctx, store.AuditQuery{Zone: zone, Host: host, Type: strings.ToUpper(in.Type), Limit: 20})
 			if err == nil {
+				client := m.s.pol.AllowMeta(subj, uiapi.ActionPolicyRead)
 				for _, e := range events {
-					out.History = append(out.History, toAuditEntry(e))
+					out.History = append(out.History, toAuditEntry(e, client))
 				}
 			}
 		}
@@ -455,10 +456,11 @@ func (m *mcpServer) addReadTools(srv *mcp.Server) {
 			return nil, uiapi.AuditPage{}, errors.New("invalid audit query")
 		}
 		all := m.s.readsEveryManagedZone(readable)
+		client := m.s.pol.AllowMeta(subj, uiapi.ActionPolicyRead)
 		page := uiapi.AuditPage{Entries: []uiapi.AuditEntry{}, NextCursor: next}
 		for _, e := range events {
 			if ((e.Zone == "" && all) || readable[e.Zone]) && m.s.auditVisible(subj, e) {
-				page.Entries = append(page.Entries, toAuditEntry(e))
+				page.Entries = append(page.Entries, toAuditEntry(e, client))
 			}
 		}
 		return nil, page, nil

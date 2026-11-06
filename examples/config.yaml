@@ -50,6 +50,12 @@ store:
   sqlite:
     path: /var/lib/dns-gate/gate.db
 
+# Audit lines on stdout (docs/AUDIT.md): native, ecs or ocsf, and an optional
+# hash chain checked by `dns-gate audit verify`.
+audit:
+  format: native
+  hash_chain: true
+
 issuers:
   # AWS IAM outbound identity federation (sts:GetWebIdentityToken).
   # The issuer URL is account specific: aws iam get-outbound-web-identity-federation-info

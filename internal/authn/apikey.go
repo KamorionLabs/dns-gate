@@ -238,6 +238,7 @@ func (a *Authenticator) keyRefusal(ctx context.Context, id string, ip netip.Addr
 		Action: "apikey.authenticate", Decision: "deny", Reason: e.Reason,
 		Extra: map[string]any{"message": msg, "remote_addr": src},
 	}
+	audit.Capture(ctx, &ev)
 	for _, out := range a.noise.note(subject+"|"+src, a.now(), ev) {
 		a.audit.Log(ctx, out)
 	}

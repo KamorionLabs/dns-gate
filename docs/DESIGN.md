@@ -1248,7 +1248,8 @@ RRsets of the gate only.
   another replica or Lambda instance, or a write whose read-back failed. An apply
   result carries `new_hash` per created or updated RRset, and the UI and clients pass
   it (or `absent` after a delete) as `expect`: when the inventory differs, the zone
-  is read again from the provider (at most 6 times a minute per subject) and the
+  is read again from the provider (at most 6 times a minute per subject, only for
+  subjects holding `dns.read` on the zone, so that no refusal is audited) and the
   check answers `412 precondition` only if it still differs. Without `expect` the
   check compares with whatever this process has.
 - **Aliases.** Route53 alias and EuroDNS `APEX` RRsets have no values. Every address

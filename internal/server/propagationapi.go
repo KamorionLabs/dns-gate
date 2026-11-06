@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/KamorionLabs/dns-gate/internal/config"
@@ -77,7 +78,8 @@ func (s *Server) handlePropagation(w http.ResponseWriter, r *http.Request, subj 
 // is a cache of this process: when it differs from expect (another replica
 // or Lambda instance wrote, or the read after the write failed), the zone
 // is read again from the provider, at most rereadsPerMinute times a minute
-// per subject; a content still different is a 412 precondition.
+// per subject holding dns.read on the zone (so that the engine never audits
+// a refusal for a check); a content still different is a 412 precondition.
 func (s *Server) checkPropagation(ctx context.Context, subj *identity.Subject, zoneIn, hostIn, typeIn, expect string) (*propagation.Result, *policyError) {
 	zone, key, msg := rrsetKey(zoneIn, hostIn, typeIn)
 	switch {
@@ -98,7 +100,7 @@ func (s *Server) checkPropagation(ctx context.Context, subj *identity.Subject, z
 	if e := s.expectedRRset(ctx, subj, zone, key, &req); e != nil {
 		return nil, e
 	}
-	if expect != "" && !expectMatches(expect, req) && s.rereads.allow(subj.String()) {
+	if expect != "" && !expectMatches(expect, req) && s.cfg.Authz.Allow(subj, policy.ActionDNSRead, zone) && s.rereads.allow(subj.String()) {
 		if _, _, err := s.cfg.Engine.ReadZone(ctx, subj, zone, "api.propagation"); err == nil {
 			if e := s.expectedRRset(ctx, subj, zone, key, &req); e != nil {
 				return nil, e
@@ -160,6 +162,7 @@ func expectMatches(expect string, req propagation.Request) bool {
 // withNewHashes sets the content hash of every RRset an apply created or
 // updated, so that clients can check its propagation with expect.
 func withNewHashes(res *uiapi.PlanResult) {
+	res.Changes = slices.Clone(res.Changes)
 	for i, c := range res.Changes {
 		if c.Op != "create" && c.Op != "update" {
 			continue

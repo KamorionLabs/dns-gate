@@ -535,7 +535,9 @@ The full list is in the `Error` schema of the OpenAPI document.
 ## Other endpoints
 
 - `GET /api/v1/audit` — audit log, newest first, filtered to the zones the caller
-  can read.
+  can read; `since`/`until` and `next_cursor` for pull-based collectors
+  ([AUDIT.md](AUDIT.md#pull-get-apiv1audit)). `source_ip` and `user_agent` are
+  shown to `policy.read` holders only.
 - `POST /api/v1/tokens` — a gate-issued bearer token for the signed-in UI user
   (session cookie and CSRF header only), the *Get an API token* action of the
   Connect page ([IDENTITY-CENTER.md](IDENTITY-CENTER.md)); its keys are at

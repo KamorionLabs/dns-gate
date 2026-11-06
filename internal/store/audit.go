@@ -17,9 +17,14 @@ const (
 
 var errBadCursor = errors.New("store: invalid audit cursor")
 
-// auditSortKey orders events chronologically as a string.
+// auditSortKey orders events chronologically as a string. The event id
+// makes it unique; events recorded before event ids use the request id.
 func auditSortKey(e audit.Event) string {
-	return e.Time.UTC().Format(auditTimeLayout) + "#" + e.RequestID
+	id := e.EventID
+	if id == "" {
+		id = e.RequestID
+	}
+	return e.Time.UTC().Format(auditTimeLayout) + "#" + id
 }
 
 func encodeCursor(sk string) string { return base64.RawURLEncoding.EncodeToString([]byte(sk)) }
