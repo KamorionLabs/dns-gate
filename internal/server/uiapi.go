@@ -434,9 +434,6 @@ func toAuditEntry(e audit.Event) uiapi.AuditEntry {
 		Provider:   e.Provider,
 		SnapshotID: e.SnapshotID,
 	}
-	if len(e.Extra) > 0 {
-		ae.Extra = e.Extra
-	}
 	return ae
 }
 

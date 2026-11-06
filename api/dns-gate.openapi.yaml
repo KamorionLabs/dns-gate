@@ -2073,7 +2073,6 @@ components:
         changes: { type: array, items: { $ref: "#/components/schemas/Change" } }
         provider: { type: string, description: "Provider instance id of the zone." }
         snapshot_id: { type: string, description: "Provider snapshot taken before the write (EuroDNS)." }
-        extra: { type: object, description: "Action-specific details (docs/AUDIT.md)." }
 
     AuditPage:
       type: object

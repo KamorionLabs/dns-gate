@@ -588,6 +588,9 @@ func TestEuroDNSZoneProfilesOptIn(t *testing.T) {
 	c, err = Parse([]byte(strings.Replace(base, "eurodns: {app_id: app}", "eurodns: {app_id: app, zone_profiles: true}", 1)), e)
 	if err != nil || !c.Providers[0].EuroDNS.ZoneProfiles {
 		t.Fatalf("zone_profiles: %v", err)
+	}
+}
+
 func TestAuditConfig(t *testing.T) {
 	e := env(map[string]string{"EURODNS_API_KEY": "x"})
 	c, err := Parse([]byte(base), e)

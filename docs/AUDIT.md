@@ -137,6 +137,7 @@ Refused authentications on this API carry the operation id of the request.
 | `policy.generate_key` | Virtual key generated from the UI. | allow | no |
 | `policy.delegated.put_role`, `.put_binding`, `.delete_role`, `.delete_binding` | Delegated objects written by pipelines. Each write is followed by `policy.activate`. | allow, deny | no |
 | `policy.delegated.take_over` | A proposal takes delegated objects back. | allow | no |
+| `zone_profile.list`, `.get`, `.check`, `.create`, `.update`, `.delete` | EuroDNS zone profiles via the REST API. The EuroDNS-compatible API uses its operation ids (`listZoneProfiles`, `createZoneProfile`, ...), MCP uses `mcp.*_zone_profile(s)`. `provider` is the EuroDNS provider, `changes` lists host, type and op without values, and `extra` has `via`, `profile_id`, `profile` and `previous` (content), and `valid` (check). The journal shows them only to holders of `dns.zone.profile` on `*`. | allow, deny, error | no |
 | `mcp` | MCP endpoint authentication refused. | deny | no |
 | `mcp.<tool>` | MCP tool calls: `list_zones`, `list_rrsets`, `get_rrset`, `plan_rrset_change`, `apply_rrset_change`, `adopt_preview`, `adopt_apply`, `list_teams`, `get_team`, `transfer_list`, `transfer_propose`, `transfer_approve`, `transfer_reject`. `extra.via` is `mcp` and `extra.mcp_client` names the client. | allow, deny, error | per tool |
 
@@ -180,6 +181,8 @@ key, `api-key:<id>`, when the id was readable):
 | `adopt_conflict` | error | Adoption preview no longer matches. |
 | `expired` | error, deny | Transfer expired or not applied in time. |
 | `error` | error | Any other failure, with the detail in `extra.message`. |
+| `rate_limited`, `zone_profiles_disabled`, `protected`, `bad_request` | deny | Zone profiles: per-subject limit, profiles not enabled on the provider, protected record in the profile, invalid request. |
+| `rejected`, `timeout`, `upstream_<status>` | error | Zone profile refused by EuroDNS, timed out, or another EuroDNS HTTP status. |
 | `self_approval`, `conflict`, `invalid_policy`, `delegated_object`, `delegation_required`, `name_taken`, `policy_busy`, `bad_request` | deny | Policy workflow refusals (see [CONFIG.md](CONFIG.md#managed-policy-editing-from-the-ui)). |
 
 `api.plan` and `mcp.plan_rrset_change` are `allow` events. When the plan would
@@ -505,8 +508,10 @@ events without a zone (authentication failures) are filtered out.
   continues to older events until it is absent.
 - `since` and `until` (RFC 3339, fractional seconds accepted) bound the window.
   Also available: `zone`, `decision`, `category`, `subject`, `host`, `type`.
-- Entries carry `event_id`, `auth_method`, `source_ip`, `user_agent` and `extra`,
-  besides the UI fields.
+- Entries carry `event_id`, `auth_method`, `source_ip` and `user_agent` besides
+  the UI fields (actor, teams, action, zone, decision, reason, changes, provider,
+  snapshot). `extra` is not served: it can hold content, such as zone profile
+  records, that only the audit sink keeps.
 
 A polling loop: keep a high-water mark `T` (the newest `time` seen). On each
 poll, request `since=T - 5m` and follow `next_cursor` until it is absent.
@@ -535,7 +540,7 @@ These requests produce no event:
   REST inventory reads, adoption previews and the Terraform export.
 - Requests refused before routing: unknown path, wrong method, malformed
   parameters.
-- The MCP rate limit (`429`).
+- The MCP endpoint rate limit (`429`); the zone profile limit is audited.
 - Some workflow refusals answered before the decision point, such as
   `policy_not_editable`, `stale_revision`, `approval_required`, ACME request
   validation errors, and step-up refusals outside DNS writes.
