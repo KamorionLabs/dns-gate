@@ -21,6 +21,7 @@
   import ActorChip from '../components/ActorChip.svelte';
   import RelTime from '../components/RelTime.svelte';
   import RRsetDrawer from '../components/RRsetDrawer.svelte';
+  import { canCheckPropagation } from '../lib/propagation';
   import Icon from '../components/Icon.svelte';
   import ManageZone from '../components/ManageZone.svelte';
   import ZoneAccessView from '../components/policy/ZoneAccess.svelte';
@@ -829,6 +830,7 @@
       rr={selected}
       onclose={close}
       {unmanaged}
+      canCheckPropagation={canCheckPropagation(me, zone, selected.host, selected.type)}
       writable={selectedVerdict?.ok ?? false}
       readOnlyWhy={selectedVerdict && !selectedVerdict.ok ? selectedVerdict.text : ''}
       stagedKind={stagedFor(staged, selected.host, selected.type)?.kind}

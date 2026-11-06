@@ -19,6 +19,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/KamorionLabs/dns-gate/internal/glob"
+	"github.com/KamorionLabs/dns-gate/internal/propagation"
 )
 
 // Config is the root configuration document.
@@ -43,6 +44,7 @@ type Config struct {
 	Policy            Policy           `yaml:"policy"`
 	MCP               MCP              `yaml:"mcp"`
 	ACME              ACME             `yaml:"acme"`
+	Propagation       Propagation      `yaml:"propagation"`
 	Audit             Audit            `yaml:"audit"`
 
 	Hash     string    `yaml:"-"` // sha256 of the file
@@ -304,6 +306,54 @@ type ACME struct {
 	// MaxValuesPerAuthor caps the values one API key or token subject has
 	// in a challenge RRset (default 4, at most MaxValues).
 	MaxValuesPerAuthor int `yaml:"max_values_per_author"`
+}
+
+// Propagation configures the DNS propagation check of an RRset: its
+// authoritative name servers and public resolvers are asked over UDP and
+// TCP port 53 (outbound). Cache, rate limit and in-flight cap are per
+// process (per replica, per Lambda instance).
+type Propagation struct {
+	// Enabled serves the check (default true, false on AWS Lambda).
+	Enabled *bool `yaml:"enabled"`
+	// Resolvers replace the default list of public resolvers.
+	Resolvers []PropagationResolver `yaml:"resolvers"`
+	// AllowPrivateResolvers accepts resolvers at private, loopback,
+	// link-local or other special-purpose addresses: such a resolver may
+	// answer internal (split-horizon) names to whoever can check.
+	AllowPrivateResolvers bool `yaml:"allow_private_resolvers"`
+	// MaxInFlight bounds the checks running at once in one process
+	// (default 3, 503 beyond).
+	MaxInFlight int `yaml:"max_in_flight"`
+	// QueryTimeout bounds one query (default 1.5s), Timeout a whole check
+	// (default 4s, at most 5s).
+	QueryTimeout Duration `yaml:"query_timeout"`
+	Timeout      Duration `yaml:"timeout"`
+	// Concurrency is the number of servers one check asks at once
+	// (default 16).
+	Concurrency int `yaml:"concurrency"`
+	// CacheTTL is how long a result is reused for the same RRset content
+	// (default 10s).
+	CacheTTL Duration `yaml:"cache_ttl"`
+	// RequestsPerMinute bounds the checks of one subject not served from
+	// the cache (default 30).
+	RequestsPerMinute int `yaml:"requests_per_minute"`
+}
+
+// On reports whether the propagation check is served.
+func (p Propagation) On() bool { return p.Enabled == nil || *p.Enabled }
+
+// PropagationResolver is a public resolver asked by the propagation check.
+type PropagationResolver struct {
+	Name string `yaml:"name"`
+	// Address is an IP address, with an optional port ("192.0.2.53",
+	// "[2001:db8::53]:5353").
+	Address  string `yaml:"address"`
+	Location string `yaml:"location"`
+	Country  string `yaml:"country"`
+	Region   string `yaml:"region"`
+	// Filtering marks a resolver that blocks names by policy (malware,
+	// phishing): its negative answers are flagged.
+	Filtering bool `yaml:"filtering"`
 }
 
 // MCP configures the Model Context Protocol endpoint (/mcp).
@@ -607,6 +657,10 @@ func Parse(data []byte, getenv func(string) string) (*Config, error) {
 		return nil, err
 	}
 	c.defaults()
+	if getenv(EnvLambdaRuntime) != "" && c.Propagation.Enabled == nil {
+		off := false
+		c.Propagation.Enabled = &off
+	}
 	err := c.Validate()
 	if getenv(EnvLambdaRuntime) != "" && c.Store.Type != "dynamodb" {
 		err = errors.Join(err, fmt.Errorf("store.type: %q is not supported on AWS Lambda, dynamodb required", c.Store.Type))
@@ -802,6 +856,24 @@ func (c *Config) defaults() {
 	}
 	if c.MCP.RequestsPerMinute == 0 {
 		c.MCP.RequestsPerMinute = 120
+	}
+	if c.Propagation.QueryTimeout == 0 {
+		c.Propagation.QueryTimeout = Duration(1500 * time.Millisecond)
+	}
+	if c.Propagation.Timeout == 0 {
+		c.Propagation.Timeout = Duration(4 * time.Second)
+	}
+	if c.Propagation.MaxInFlight == 0 {
+		c.Propagation.MaxInFlight = 3
+	}
+	if c.Propagation.Concurrency == 0 {
+		c.Propagation.Concurrency = 16
+	}
+	if c.Propagation.CacheTTL == 0 {
+		c.Propagation.CacheTTL = Duration(10 * time.Second)
+	}
+	if c.Propagation.RequestsPerMinute == 0 {
+		c.Propagation.RequestsPerMinute = 30
 	}
 	if c.UI.SessionTTL == 0 {
 		c.UI.SessionTTL = Duration(8 * time.Hour)
@@ -1285,6 +1357,7 @@ func (c *Config) Validate() error {
 	if c.MCP.RequestsPerMinute < 1 || c.MCP.RequestsPerMinute > 6000 {
 		add("mcp.requests_per_minute: must be between 1 and 6000")
 	}
+	c.validatePropagation(add)
 	if c.MCP.PublicURL != "" {
 		if u, err := url.Parse(c.MCP.PublicURL); err != nil || u.Host == "" || u.Path != "" && u.Path != "/" || (u.Scheme != "https" && !isLoopback(u.Hostname())) {
 			add("mcp.public_url: https base URL without path required")
@@ -1979,6 +2052,53 @@ func (c *Config) ProvidersFor(zone string) []string {
 		}
 	}
 	return out
+}
+
+func (c *Config) validatePropagation(add func(string, ...any)) {
+	p := c.Propagation
+	if p.QueryTimeout.D() < 100*time.Millisecond || p.QueryTimeout.D() > 10*time.Second {
+		add("propagation.query_timeout: must be between 100ms and 10s")
+	}
+	if p.Timeout.D() < p.QueryTimeout.D() || p.Timeout.D() > 5*time.Second {
+		add("propagation.timeout: must be between propagation.query_timeout and 5s")
+	}
+	if p.MaxInFlight < 1 || p.MaxInFlight > 64 {
+		add("propagation.max_in_flight: must be between 1 and 64")
+	}
+	if p.Concurrency < 1 || p.Concurrency > 64 {
+		add("propagation.concurrency: must be between 1 and 64")
+	}
+	if p.CacheTTL.D() < time.Second || p.CacheTTL.D() > 5*time.Minute {
+		add("propagation.cache_ttl: must be between 1s and 5m")
+	}
+	if p.RequestsPerMinute < 1 || p.RequestsPerMinute > 600 {
+		add("propagation.requests_per_minute: must be between 1 and 600")
+	}
+	if len(p.Resolvers) > 64 {
+		add("propagation.resolvers: at most 64")
+	}
+	names := map[string]bool{}
+	for i, r := range p.Resolvers {
+		at := fmt.Sprintf("propagation.resolvers[%d]", i)
+		if strings.TrimSpace(r.Name) == "" {
+			add("%s.name: required", at)
+		} else if names[r.Name] {
+			add("%s.name: %q is used twice", at, r.Name)
+		}
+		names[r.Name] = true
+		addr, err := netip.ParseAddr(r.Address)
+		if err != nil {
+			ap, err := netip.ParseAddrPort(r.Address)
+			if err != nil || ap.Port() == 0 {
+				add("%s.address: an IP address with an optional port is required, not a host name", at)
+				continue
+			}
+			addr = ap.Addr()
+		}
+		if !p.AllowPrivateResolvers && !propagation.PublicAddr(addr) {
+			add("%s.address: %s is not a public address (propagation.allow_private_resolvers)", at, addr)
+		}
+	}
 }
 
 func (c *Config) validateProviders(add func(string, ...any)) {

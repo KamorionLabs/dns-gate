@@ -231,6 +231,62 @@ default). The apply writes exactly what was planned, or fails with
 again. The MCP tools
 `plan_rrset_change` and `apply_rrset_change` use the same plans.
 
+## DNS propagation
+
+After a change, `GET …/rrsets/{host}/{type}/propagation` tells whether the DNS
+already answers it: the gate asks the authoritative name servers of the zone (no
+recursion) and a list of public resolvers around the world, and compares each
+answer with the RRset as read from the provider.
+
+```sh
+curl -sS "${auth[@]}" "$GATE/api/v1/zones/example.com/rrsets/app/CNAME/propagation"
+# right after a PUT (its ETag) or an apply (new_hash of each change), refused (412 precondition)
+# if the RRset is no longer the one written
+curl -sS "${auth[@]}" "$GATE/api/v1/zones/example.com/rrsets/app/CNAME/propagation?expect=9f2c…"
+# after a DELETE
+curl -sS "${auth[@]}" "$GATE/api/v1/zones/example.com/rrsets/old/A/propagation?expect=absent"
+```
+
+```json
+{
+  "zone": "example.com", "host": "app", "type": "CNAME", "name": "app.example.com.", "query_type": "CNAME",
+  "expected": {"exists": true, "hash": "9f2c…", "ttl": 3600, "values": ["site.example.net."]},
+  "checked_at": "2026-11-06T10:00:00Z", "cached": false,
+  "summary": {"total": 21, "match": 17, "stale": 2, "missing": 0, "error": 2, "converged": false, "max_ttl_left": 1740},
+  "answers": [
+    {"kind": "authoritative", "name": "ns1.example-dns.net", "address": "192.0.2.53", "status": "match",
+     "values": ["site.example.net."], "ttl_left": 3600, "rcode": "NOERROR", "latency_ms": 12},
+    {"kind": "resolver", "name": "Cloudflare", "address": "1.1.1.1", "location": "Anycast", "country": "US",
+     "region": "anycast", "status": "stale", "values": ["old.example.net."], "ttl_left": 1740, "rcode": "NOERROR", "latency_ms": 9}
+  ]
+}
+```
+
+Each answer is `match`, `stale` (other values: the previous content, cached until
+`ttl_left` runs out), `missing` (NXDOMAIN or no record of the type, possibly a cached
+negative answer) or `error` (timeout, `SERVFAIL`, `REFUSED`, a name server
+answering without authority, records of another name, an answer filtered by the
+resolver) or, for alias RRsets, `indeterminate` (addresses that are not all the
+target's: a CDN answers per location). `summary.converged` is true when every server
+that answered matches, with at least one authoritative server, and none is
+indeterminate; `max_ttl_left` bounds when the stale caches expire. A TTL change
+counts too: authoritative answers must carry the new TTL. An RRset that does not
+exist matches empty answers, so a deletion can be followed too.
+
+The inventory a check compares with is the cache of the gate instance answering.
+Pass `expect` after a write: the apply result carries `new_hash` for every created
+or updated RRset (use `absent` for a deletion). An instance whose inventory differs
+reads the zone from the provider again before answering.
+
+The check requires `dns.read` on the RRset, in a zone managed by the gate: names
+outside the managed zones are never asked. Results are cached for a few seconds per
+RRset content, checks are rate limited per caller (`429`, `Retry-After`) and a few
+at a time per instance (`503 busy`, `Retry-After`): poll
+every few seconds, resolvers only update when the TTL of their cached answer runs
+out. Resolver list, timeouts and network requirements:
+[CONFIG.md](CONFIG.md#propagation-check). The MCP tool `check_propagation` does the
+same.
+
 ## Token exchange
 
 `POST /api/v1/token-exchange` (RFC 8693, form-encoded, no other authentication)
@@ -467,9 +523,11 @@ Errors are JSON, with a stable `reason` for programs:
 | 404 | `not_found` (zone not managed, RRset unknown), `plan_not_found`, `zone_not_eurodns` (EuroDNS-compatible API on a zone of another provider) |
 | 409 | `foreign_rrset` (created outside the gate: adopt it first), `tainted` (changed outside the gate), `adopt_conflict`, `https_unavailable` (`require_https` on a zone whose forwards answer plain HTTP only), `immutable`, `revoked` (API keys), `too_many_values`, `too_many_registrations`, `value_taken` (ACME endpoints) |
 | 410 | `plan_expired`, `expired` (transfer request) |
-| 412 | `precondition` (If-Match, If-None-Match, `expected_hash`, `must_not_exist`, zone changed since the plan, transfer already decided or RRsets changed since the request) |
+| 412 | `precondition` (If-Match, If-None-Match, `expected_hash`, `must_not_exist`, zone changed since the plan, transfer already decided or RRsets changed since the request, `expect` of a propagation check) |
 | 423 | `zone_locked`, with `Retry-After` |
-| 429 | `rate_limited` (zone profiles, with `Retry-After`) |
+| 429 | `rate_limited` (MCP, zone profiles, propagation checks), with `Retry-After` |
+| 503 | `busy` (too many propagation checks running), with `Retry-After` |
+| 501 | `not_implemented` (feature disabled in the configuration) |
 | 502 | `upstream` (provider error) |
 
 The full list is in the `Error` schema of the OpenAPI document.

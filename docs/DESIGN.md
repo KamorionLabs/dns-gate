@@ -136,6 +136,7 @@ Main packages of the gate:
 | `internal/audit` | Structured audit events (stdout and store). |
 | `internal/discovery` | Listing of the zones of every provider account, filtered and cached in memory; resolves the provider of a zone. |
 | `internal/uiapi` | JSON types of the `/api/v1` API (inventory, RRsets, plans, audit, policy revisions, adoption, Terraform export). |
+| `internal/propagation` | DNS propagation check of one RRset: authoritative name servers and public resolvers asked in parallel, answers compared with the provider content (section 19). |
 | MCP server | `/mcp` endpoint for LLM agents (section 17). |
 
 ### 4.1 Providers
@@ -1177,6 +1178,7 @@ Go SDK), so LLM agents can inspect DNS and, if explicitly allowed, propose chang
 | `who_can` | read | who may act on an RRset |
 | `list_teams`, `get_team` | read | `GET /api/v1/teams[/{team}]` |
 | `transfer_list` | read | `GET /api/v1/transfers` |
+| `check_propagation` | read (not audited) | `GET /api/v1/zones/{zone}/rrsets/{host}/{type}/propagation` (section 19) |
 | `plan_rrset_change` | write (disabled by default) | dry run of desired RRset states; returns the changes, the decision and a `plan_id` |
 | `apply_rrset_change` | write (disabled by default) | applies exactly one plan, by `plan_id` |
 | `adopt_preview`, `adopt_apply` | write (disabled by default) | bulk adoption (16.1), with the same token and comment rules |
@@ -1214,3 +1216,74 @@ Writes are **disabled by default** in the configuration. When enabled:
 | Lock holder dies | lock held until lease expiry | lease TTL (default 60 s) |
 | EuroDNS API change | new operations denied by default; changed schemas preserved through `Extra` raw fields | vendored spec diffed in CI |
 | Lost store | ownership lost: every RRset becomes foreign (safe, fail closed) | restore from PITR, or re-adopt from audit trail; optional TXT markers later |
+
+## 19. DNS propagation check
+
+After a write the provider has the new content at once, but clients see it only
+once the caches of the resolvers expire. `GET /api/v1/zones/{zone}/rrsets/{host}/{type}/propagation`,
+the `check_propagation` MCP tool and the *Propagation* panel of the UI (RRset drawer
+for viewers holding `dns.read` on the RRset, and right after an apply) show where
+the change is already visible, like the public propagation checkers but for the
+RRsets of the gate only.
+
+- **What is asked.** The authoritative name servers of the zone (its apex NS as read
+  from the provider, resolved with the system resolver, one public address each,
+  IPv4 first, recursion off, the answer must carry the AA flag) and the configured
+  public resolvers (`propagation.resolvers`, a default list of 19 documented open
+  resolvers: anycast services plus resolvers with a fixed location in Europe, North
+  America and Asia). One query per server: UDP with EDNS0 (1232 bytes), again over
+  TCP when the answer is truncated or UDP fails before the timeout; 1.5 s per query,
+  4 s per check (at most 5 s), 16 servers at once (`internal/propagation`,
+  `github.com/miekg/dns`).
+- **What is compared.** The RRset of the gate inventory, the per-process cache the
+  single-RRset read serves (refreshed by the writes and the reconciles of that
+  process), against the records of the asked type at the end of the CNAME chain of
+  each answer. Both sides are normalized the same way: the provider value is parsed
+  relative to the zone (EuroDNS relative targets), packed and unpacked like a server
+  answer (hex, base64, IPv6 forms), domain names lowercased, TXT reduced to their
+  content, sets sorted. Authoritative answers must carry the expected TTL and cached
+  answers may not have more TTL left than it (TTL-only changes). Statuses: `match`,
+  `stale`, `missing`, `error`, `indeterminate`.
+- **Which content.** The inventory of one process can lag behind a write made by
+  another replica or Lambda instance, or a write whose read-back failed. An apply
+  result carries `new_hash` per created or updated RRset, and the UI and clients pass
+  it (or `absent` after a delete) as `expect`: when the inventory differs, the zone
+  is read again from the provider (at most 6 times a minute per subject, only for
+  subjects holding `dns.read` on the zone, so that no refusal is audited) and the
+  check answers `412 precondition` only if it still differs. Without `expect` the
+  check compares with whatever this process has.
+- **Aliases.** Route53 alias and EuroDNS `APEX` RRsets have no values. Every address
+  an authoritative server answers must be one of the target's as the gate resolves
+  it, and every address a resolver answers one of the target's as that resolver
+  answers it. Anything else is `indeterminate`, never a match: CDN edges are shared
+  by many names, so an address in common proves nothing.
+- **Deletions and filtering.** An RRset that does not exist matches empty answers.
+  Records of another name or type, and answers flagged by the resolver as its own
+  decision (extended DNS errors Blocked, Censored, Filtered), are errors; negative
+  answers of resolvers marked `filtering` are flagged. `converged` needs at least one
+  matching authoritative answer and no `stale`, `missing` or `indeterminate` one.
+- **Cost and abuse.** Results are cached `propagation.cache_ttl` (10 s) per RRset
+  content and shared by concurrent callers (one check in flight per key); checks
+  that miss the cache are limited per subject (`requests_per_minute`, 30, buckets of
+  the 4096 most recent subjects) and per process (`max_in_flight`, 3, then `503
+  busy`). All of this is per process: each replica or Lambda instance has its own
+  cache, buckets and in-flight count. An answer reports at most 32 values of 512
+  bytes, a result 1 MiB of values. The UI refreshes every 5 s while a panel is open,
+  until converged or 2 minutes. A check reads the inventory and asks DNS servers:
+  no provider request unless `expect` forces a re-read, no audit event (a debug
+  log line).
+- **Safety.** Only names of zones managed by the gate are asked, built from a zone,
+  host and type the gate validated, and only the configured resolvers and the name
+  servers of the zone are contacted: the endpoint is not an open resolver and takes
+  no address from the caller. Name server addresses and configured resolver
+  addresses must be public unicast, outside the IANA special-purpose blocks,
+  embedded IPv4 (NAT64, 6to4, IPv4-mapped) checked as IPv4; private resolvers need
+  `propagation.allow_private_resolvers`.
+- **Reading the result.** Anycast resolvers answer from their site nearest to the
+  gate: the regional view comes from the resolvers with a fixed location. Resolvers
+  answer from their cache: asking again does not refresh it, `ttl_left` says when it
+  expires.
+- **Deployment.** Outbound UDP and TCP port 53. AWS Lambda functions outside a VPC
+  have it (IPv4 only, hence IPv4 default resolvers); in a VPC it goes through a NAT
+  gateway. Off by default on Lambda, where a check holds an execution environment
+  for up to 4 s.

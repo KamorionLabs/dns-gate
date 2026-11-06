@@ -40,6 +40,7 @@ var apiRoutes = []apiRoute{
 	{http.MethodGet, routeForward},
 	{http.MethodPut, routeForward},
 	{http.MethodDelete, routeForward},
+	{http.MethodGet, routePropagation},
 	{http.MethodPost, routePlan},
 	{http.MethodPost, routeApply},
 	{http.MethodPost, "/api/v1/zones/{zone}/adopt/preview"},

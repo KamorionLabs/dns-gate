@@ -87,6 +87,10 @@ type Config struct {
 	SAMLGroups GroupLookup
 	Log        *slog.Logger
 	Now        func() time.Time
+
+	// Propagation checks the propagation of RRsets; nil builds the checker
+	// of the propagation section, unless disabled.
+	Propagation Propagator
 }
 
 // EuroDNSAPI is the EuroDNS-compatible API facade (internal/eurodnsapi).
@@ -134,6 +138,8 @@ type Server struct {
 	owners  ownerCounts
 	// profileLimiter bounds the zone profile operations per subject.
 	profileLimiter *subjectLimiter
+	// rereads bounds the provider reads triggered by a propagation expect.
+	rereads *subjectLimiter
 }
 
 // New builds the server.
@@ -153,6 +159,9 @@ func New(c Config) (*Server, error) {
 	if c.Plans == nil {
 		c.Plans = store.NewMemory()
 	}
+	if c.Propagation == nil {
+		c.Propagation = newPropagator(c)
+	}
 	if c.Policy == nil {
 		h, err := policy.NewHolder(c.Config)
 		if err != nil {
@@ -160,7 +169,7 @@ func New(c Config) (*Server, error) {
 		}
 		c.Policy = h
 	}
-	s := &Server{cfg: c, log: c.Log, now: c.Now, pol: policy.New(c.Policy), profileLimiter: newSubjectLimiter(profileRequestsPerMinute, c.Now)}
+	s := &Server{cfg: c, log: c.Log, now: c.Now, pol: policy.New(c.Policy), rereads: newSubjectLimiter(rereadsPerMinute, c.Now), profileLimiter: newSubjectLimiter(profileRequestsPerMinute, c.Now)}
 	s.table = routes.NewDynamic(s.pol.Managed)
 	if c.Config.MCP.Enabled {
 		s.mcp = s.newMCP()

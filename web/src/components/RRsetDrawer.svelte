@@ -17,6 +17,7 @@
   import Icon from './Icon.svelte';
   import { teamFromText, teamLabel } from '../lib/team';
   import HclBlock from './HclBlock.svelte';
+  import PropagationPanel from './PropagationPanel.svelte';
   import { readOnlyLabel, writeAction } from '../lib/rights';
   import { isForward, modeLabel, typeLabel } from '../lib/forwards';
   import type { StagedKind } from '../lib/staging';
@@ -36,6 +37,7 @@
     ondelete,
     ownership,
     ontransfer,
+    canCheckPropagation = false,
   }: {
     zone: string;
     rr: RRset;
@@ -53,6 +55,8 @@
     ownership?: { mine: boolean; text: string };
     /** Opens a transfer request with this record set. */
     ontransfer?: () => void;
+    /** The viewer holds dns.read on the record set: the propagation check is offered. */
+    canCheckPropagation?: boolean;
   } = $props();
   const roTag = $derived(readOnlyLabel(rr));
   const isFwd = $derived(isForward(rr));
@@ -215,6 +219,13 @@
           <div><span class="eyebrow">Last request</span><CopyText text={rr.last_request_id} label="request id" /></div>
         {/if}
       </section>
+
+      {#if !unmanaged && !isFwd && canCheckPropagation}
+        <section>
+          <h3 class="eyebrow">Propagation</h3>
+          <PropagationPanel {zone} host={rr.host} type={rr.type} />
+        </section>
+      {/if}
 
       {#if rr.created_by || rr.updated_by}
         <section>

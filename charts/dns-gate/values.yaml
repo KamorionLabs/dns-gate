@@ -73,7 +73,8 @@ networkPolicy:
   enabled: false
   # Sources allowed to reach the gate (NetworkPolicy "from" entries).
   ingressFrom: []
-  # Egress: DNS plus HTTPS to these CIDRs (EuroDNS API, OIDC issuers,
+  # Egress: DNS anywhere (also the propagation check: public resolvers and
+  # name servers of the zones) plus HTTPS to these CIDRs (EuroDNS API, OIDC issuers,
   # AWS endpoints). Vanilla NetworkPolicy has no FQDN rules: use your CNI
   # (Cilium, Calico) for FQDN-based egress to rest-api.eurodns.com.
   egressCIDRs: ["0.0.0.0/0"]

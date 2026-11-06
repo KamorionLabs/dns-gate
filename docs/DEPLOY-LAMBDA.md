@@ -38,7 +38,16 @@ front of EuroDNS** (see [below](#why-not-in-front-of-eurodns)).
   shares ownership, zone locks and versions, the managed policy, the RRset plans and
   the API keys.
 - **No VPC, no NAT**: DynamoDB, Route 53, Secrets Manager, S3 and SSM are reached over
-  their public endpoints with the function role.
+  their public endpoints with the function role. The [propagation check](CONFIG.md#propagation-check)
+  is **off by default on Lambda**: set `propagation.enabled: true` to serve it. It
+  sends DNS queries (UDP and TCP port 53, IPv4) to public resolvers and to the name
+  servers of the zones, which a function outside a VPC may do; in a VPC, allow them
+  through a NAT gateway. A check holds its execution environment for up to
+  `propagation.timeout` (4 s, at most 5 s), and an open UI panel asks every 5 s for
+  2 minutes: with reserved concurrency, count those environments, which no longer
+  serve API requests meanwhile. Its cache, per-subject limit and `max_in_flight`
+  (3) are per execution environment, which serves one request at a time, so on
+  Lambda the effective limit is the concurrency of the function.
 
 ### What happens where
 

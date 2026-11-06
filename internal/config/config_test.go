@@ -716,3 +716,59 @@ func TestForwardWriteWithoutHostsWarns(t *testing.T) {
 		t.Fatalf("warnings %q", w)
 	}
 }
+
+func TestPropagation(t *testing.T) {
+	key := env(map[string]string{"EURODNS_API_KEY": "k"})
+	c, err := Parse([]byte(base), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := c.Propagation
+	if !p.On() || len(p.Resolvers) != 0 || p.QueryTimeout.D() != 1500*time.Millisecond || p.Timeout.D() != 4*time.Second ||
+		p.Concurrency != 16 || p.CacheTTL.D() != 10*time.Second || p.RequestsPerMinute != 30 || p.MaxInFlight != 3 {
+		t.Fatalf("defaults: %+v", p)
+	}
+	c, err = Parse([]byte(base+`propagation:
+  enabled: false
+  allow_private_resolvers: true
+  resolvers:
+    - {name: Corp, address: 10.0.0.53, location: Paris, country: FR, region: europe, filtering: true}
+    - {name: Lab, address: "[2001:db8::53]:5353"}
+`), key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Propagation.On() || len(c.Propagation.Resolvers) != 2 || c.Propagation.Resolvers[0].Location != "Paris" || !c.Propagation.Resolvers[0].Filtering {
+		t.Fatalf("parsed: %+v", c.Propagation)
+	}
+	lambda := env(map[string]string{"EURODNS_API_KEY": "k", EnvLambdaRuntime: "127.0.0.1:9001"})
+	dynamo := base + "store: {type: dynamodb, dynamodb: {table: gate}}\n"
+	if c, err := Parse([]byte(dynamo), lambda); err != nil || c.Propagation.On() {
+		t.Fatalf("Lambda default: %v %v", err, c != nil && c.Propagation.On())
+	}
+	if c, err := Parse([]byte(dynamo+"propagation: {enabled: true}\n"), lambda); err != nil || !c.Propagation.On() {
+		t.Fatalf("Lambda opt-in: %v", err)
+	}
+	for name, doc := range map[string]string{
+		"host name":      "propagation: {resolvers: [{name: a, address: dns.google}]}\n",
+		"no name":        "propagation: {resolvers: [{address: 1.1.1.1}]}\n",
+		"duplicate":      "propagation: {resolvers: [{name: a, address: 1.1.1.1}, {name: a, address: 8.8.8.8}]}\n",
+		"port zero":      "propagation: {resolvers: [{name: a, address: \"1.1.1.1:0\"}]}\n",
+		"query timeout":  "propagation: {query_timeout: 20s}\n",
+		"timeout":        "propagation: {query_timeout: 3s, timeout: 2s}\n",
+		"concurrency":    "propagation: {concurrency: 100}\n",
+		"cache":          "propagation: {cache_ttl: 1h}\n",
+		"rate":           "propagation: {requests_per_minute: 1000}\n",
+		"long timeout":   "propagation: {timeout: 6s}\n",
+		"in flight":      "propagation: {max_in_flight: 65}\n",
+		"private":        "propagation: {resolvers: [{name: a, address: 10.0.0.2}]}\n",
+		"loopback":       "propagation: {resolvers: [{name: a, address: \"127.0.0.1:5353\"}]}\n",
+		"link-local":     "propagation: {resolvers: [{name: a, address: \"fe80::1\"}]}\n",
+		"nat64 private":  "propagation: {resolvers: [{name: a, address: \"64:ff9b::a00:1\"}]}\n",
+		"unknown option": "propagation: {resolver: []}\n",
+	} {
+		if _, err := Parse([]byte(base+doc), key); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

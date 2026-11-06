@@ -586,6 +586,13 @@ These requests produce no event:
 - Requests refused before routing: unknown path, wrong method, malformed
   parameters.
 - The MCP endpoint rate limit (`429`); the zone profile limit is audited.
+- DNS propagation checks (`GET /api/v1/zones/{zone}/rrsets/{host}/{type}/propagation`
+  and the MCP tool `check_propagation`), allowed or refused, including their
+  rate limit (`429`) and in-flight cap (`503`): they only read the inventory and
+  ask DNS servers. The provider re-read an `expect` may trigger runs only for
+  callers holding `dns.read` on the zone, so it never produces a refusal event;
+  `extra` and `changes` of audited applies never carry the `new_hash` of the
+  apply result.
 - Some workflow refusals answered before the decision point, such as
   `policy_not_editable`, `stale_revision`, `approval_required`, ACME request
   validation errors, and step-up refusals outside DNS writes.

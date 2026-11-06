@@ -379,6 +379,7 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request, subj *ident
 		return
 	}
 	s.apiAudit(r, subj, "api.apply", zone, "allow", "", extra)
+	withNewHashes(res)
 	res.PlanID, res.Team = req.PlanID, team
 	if res.Changes == nil {
 		res.Changes = []uiapi.Change{}

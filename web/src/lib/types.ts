@@ -264,6 +264,8 @@ export interface PlanChange {
   new?: PlanSide | null;
   reason?: string;
   message?: string;
+  /** Content hash after an applied create or update: the expect of a propagation check. */
+  new_hash?: string;
 }
 
 export interface PlanResult {
@@ -726,4 +728,56 @@ export interface TransferQuery {
   status?: TransferStatus;
   limit?: number;
   cursor?: string;
+}
+
+// DNS propagation (GET /api/v1/zones/{zone}/rrsets/{host}/{type}/propagation, internal/propagation)
+
+export type PropagationStatus = 'match' | 'stale' | 'missing' | 'error' | 'indeterminate';
+
+export interface PropagationAnswer {
+  kind: 'authoritative' | 'resolver';
+  name: string;
+  address: string;
+  location?: string;
+  country?: string;
+  region?: string;
+  status: PropagationStatus;
+  values: string[];
+  cnames?: string[];
+  ttl_left?: number;
+  rcode?: string;
+  latency_ms: number;
+  tcp?: boolean;
+  error?: string;
+  /** The resolver blocks some names by policy: its negative answers may be a filter decision. */
+  filtering?: boolean;
+  /** Values left out or cut. */
+  truncated?: boolean;
+}
+
+export interface PropagationSummary {
+  total: number;
+  match: number;
+  stale: number;
+  missing: number;
+  error: number;
+  /** Alias answers that could not be tied to the target (never up to date). */
+  indeterminate: number;
+  /** Every server that answered has the expected content, an authoritative one at least. */
+  converged: boolean;
+  /** Longest TTL left among the stale and missing answers, in seconds. */
+  max_ttl_left: number;
+}
+
+export interface Propagation {
+  zone: string;
+  host: string;
+  type: string;
+  name: string;
+  query_type: string;
+  expected: { exists: boolean; hash?: string; ttl?: number; values: string[]; alias_target?: string };
+  checked_at: string;
+  cached: boolean;
+  summary: PropagationSummary;
+  answers: PropagationAnswer[];
 }
