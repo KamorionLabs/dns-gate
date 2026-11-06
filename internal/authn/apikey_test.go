@@ -1,0 +1,161 @@
+package authn
+
+import (
+	"context"
+	"encoding/base64"
+	"net/http/httptest"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/KamorionLabs/dns-gate/internal/apikey"
+	"github.com/KamorionLabs/dns-gate/internal/audit"
+	"github.com/KamorionLabs/dns-gate/internal/identity"
+	"github.com/KamorionLabs/dns-gate/internal/store"
+)
+
+type auditLog struct {
+	mu     sync.Mutex
+	events []audit.Event
+}
+
+func (l *auditLog) Log(_ context.Context, e audit.Event) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.events = append(l.events, e)
+}
+
+func TestAPIKeys(t *testing.T) {
+	a, _ := setup(t)
+	now := time.Now()
+	a.SetClock(func() time.Time { return now })
+	st := store.NewMemory().(store.APIKeyStore)
+	log := &auditLog{}
+	a.SetAPIKeys(st, log)
+	ctx := context.Background()
+
+	mk := func(team, role string, mod func(*store.APIKey)) (string, string) {
+		id := apikey.NewID()
+		key := apikey.NewSecret(id)
+		k := store.APIKey{ID: id, Name: "lego", Team: team, Role: role, SecretHash: apikey.Hash(key), CreatedAt: now}
+		if mod != nil {
+			mod(&k)
+		}
+		if err := st.CreateAPIKey(ctx, k); err != nil {
+			t.Fatal(err)
+		}
+		return id, key
+	}
+	id, key := mk("edge", "acme-solver", nil)
+	req := func(remote string, hdr map[string]string) error {
+		r := httptest.NewRequest("POST", "/acme/httpreq/present", nil)
+		r.RemoteAddr = remote
+		for k, v := range hdr {
+			r.Header.Set(k, v)
+		}
+		s, err := a.Authenticate(r)
+		if err == nil && (s.Kind != identity.KindAPIKey || s.String() != "api-key:"+id || s.Teams[0] != "edge" || s.Roles[0] != "acme-solver" || s.Category != identity.CategoryKey) {
+			t.Fatalf("subject %+v", s)
+		}
+		return err
+	}
+	basicAuth := func(u, p string) map[string]string {
+		return map[string]string{"Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte(u+":"+p))}
+	}
+	for name, hdr := range map[string]map[string]string{
+		"bearer":         {"Authorization": "Bearer " + key},
+		"basic":          basicAuth(id, key),
+		"basic no user":  basicAuth("", key),
+		"x-api-key":      {"X-Api-Key": key},
+		"x-app-id":       {"X-App-Id": id, "X-Api-Key": key},
+		"acme-dns style": {"X-Api-User": id, "X-Api-Key": key},
+	} {
+		if err := req("192.0.2.1:1", hdr); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	got, _ := st.GetAPIKey(ctx, id)
+	if got.LastUsedAt == nil || got.LastUsedIP != "192.0.2.1" {
+		t.Fatalf("last use not recorded: %+v", got)
+	}
+	for name, hdr := range map[string]map[string]string{
+		"wrong user":       basicAuth("0123456789abcdef", key),
+		"wrong app id":     {"X-App-Id": "0123456789abcdef", "X-Api-Key": key},
+		"basic not a key":  basicAuth(id, "password"),
+		"tampered":         {"Authorization": "Bearer " + tampered(key)},
+		"malformed":        {"Authorization": "Bearer dgk_nope"},
+		"unknown":          {"Authorization": "Bearer " + apikey.NewSecret("0123456789abcdef")},
+		"both credentials": {"Authorization": "Bearer " + key, "X-Api-Key": key},
+	} {
+		if err := req("192.0.2.1:1", hdr); status(err) != 401 {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	if len(log.events) < 5 || log.events[0].Action != "apikey.authenticate" || log.events[0].Decision != "deny" {
+		t.Fatalf("failures not audited: %+v", log.events)
+	}
+	for _, e := range log.events {
+		if e.Extra["message"] == nil || e.Subject == key {
+			t.Fatalf("audit event %+v", e)
+		}
+	}
+
+	past := now.Add(-time.Minute)
+	later := now.Add(time.Hour)
+	expID, expKey := mk("edge", "acme-solver", func(k *store.APIKey) { k.ExpiresAt = &past })
+	revID, revKey := mk("edge", "acme-solver", func(k *store.APIKey) { k.RevokedAt = &past })
+	_, cidrKey := mk("edge", "acme-solver", func(k *store.APIKey) { k.AllowedCIDRs = []string{"198.51.100.0/24"} })
+	_, roleKey := mk("edge", "gone", nil)
+	for name, tc := range map[string]struct {
+		key  string
+		want int
+	}{
+		"expired": {expKey, 401}, "revoked": {revKey, 401}, "cidr": {cidrKey, 403}, "role removed": {roleKey, 403},
+	} {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.RemoteAddr = "192.0.2.1:1"
+		r.Header.Set("Authorization", "Bearer "+tc.key)
+		if _, err := a.Authenticate(r); status(err) != tc.want {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	_, _ = expID, revID
+
+	rotID, oldKey := mk("edge", "acme-solver", nil)
+	k, _ := st.GetAPIKey(ctx, rotID)
+	newKey := apikey.NewSecret(rotID)
+	k.PreviousHash, k.PreviousExpiresAt, k.SecretHash = k.SecretHash, &later, apikey.Hash(newKey)
+	if err := st.UpdateAPIKey(ctx, *k); err != nil {
+		t.Fatal(err)
+	}
+	try := func(key string) error {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.RemoteAddr = "192.0.2.1:1"
+		r.Header.Set("Authorization", "Bearer "+key)
+		_, err := a.Authenticate(r)
+		return err
+	}
+	if try(oldKey) != nil || try(newKey) != nil {
+		t.Fatal("overlap not honoured")
+	}
+	now = later.Add(time.Second)
+	if status(try(oldKey)) != 401 || try(newKey) != nil {
+		t.Fatal("previous key accepted after the overlap")
+	}
+
+	b, _ := setup(t)
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Authorization", "Bearer "+key)
+	if _, err := b.Authenticate(r); status(err) != 401 {
+		t.Fatal("API key accepted without a key store")
+	}
+}
+
+func tampered(key string) string {
+	i := len(key) - 10
+	c := byte('A')
+	if key[i] == 'A' {
+		c = 'B'
+	}
+	return key[:i] + string(c) + key[i+1:]
+}

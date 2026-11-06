@@ -365,15 +365,16 @@ type Protected struct {
 
 // Known actions.
 var knownActions = map[string]bool{
-	"dns.read":         true,
-	"dns.record.write": true,
-	"dns.record.adopt": true,
-	"dns.zone.admin":   true,
-	"ui.read":          true,
-	"policy.read":      true,
-	"policy.propose":   true,
-	"policy.approve":   true,
-	"domain.read":      true,
+	"dns.read":           true,
+	"dns.record.write":   true,
+	"dns.record.adopt":   true,
+	"dns.zone.admin":     true,
+	"ui.read":            true,
+	"policy.read":        true,
+	"policy.propose":     true,
+	"policy.approve":     true,
+	"domain.read":        true,
+	"gate.apikey.manage": true,
 }
 
 var asymmetricAlgs = map[string]bool{

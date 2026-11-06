@@ -9,13 +9,14 @@ type Kind string
 const (
 	KindOIDC       Kind = "oidc"
 	KindVirtualKey Kind = "virtual-key"
+	KindAPIKey     Kind = "api-key"
 )
 
 // Subject is an authenticated caller after role binding.
 type Subject struct {
 	Kind   Kind
 	Issuer string         // issuer name from config (not the URL)
-	ID     string         // "sub" claim, or virtual key id
+	ID     string         // "sub" claim, virtual key id or API key id
 	Claims map[string]any // raw claims (empty for virtual keys)
 	Roles  []string       // bound roles
 	Teams  []string       // owner teams the subject acts for
