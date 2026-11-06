@@ -516,7 +516,9 @@ func TestACMEDNSRealCertbotHook(t *testing.T) {
 
 // TestACMEDNSRealAcmeSh sources the unmodified dnsapi/dns_acmedns.sh of
 // acme.sh when DNS_GATE_TEST_ACMESH_DNSAPI names it, with the few acme.sh
-// helpers it uses (_post is curl, as in acme.sh).
+// helpers it uses (_post is curl, as in acme.sh), for a name and its
+// wildcard: with an API key, with a gate token from the token exchange and
+// with an OIDC token (ACMEDNS_USERNAME=oidc, the domain as subdomain).
 func TestACMEDNSRealAcmeSh(t *testing.T) {
 	dnsapi := os.Getenv("DNS_GATE_TEST_ACMESH_DNSAPI")
 	if dnsapi == "" {
@@ -524,23 +526,38 @@ func TestACMEDNSRealAcmeSh(t *testing.T) {
 	}
 	e := newACMEEnv(t)
 	k := e.createKey(`{"name": "acme.sh", "team": "web", "role": "acme"}`)
+	ci := e.idp.Sign(map[string]any{"sub": "repo:example/certs:ref:refs/heads/main", "aud": "dns-gate"})
+	_, out := e.exchange(exchangeForm(ci))
+	exchanged, _ := out["access_token"].(string)
+	if exchanged == "" {
+		t.Fatalf("exchange: %v", out)
+	}
 	shim := `
 _info() { :; }; _debug() { :; }; _err() { echo "$@" >&2; }
 _readaccountconf_mutable() { :; }; _clearaccountconf_mutable() { :; }
 _readdomainconf() { :; }; _savedomainconf() { :; }
 _post() { curl -sS -X "$4" -H "Content-Type: $5" -H "$_H1" -H "$_H2" --data "$1" "$2"; }
 . "$DNSAPI"
-dns_acmedns_add "_acme-challenge.example.com" "$V1" && dns_acmedns_add "_acme-challenge.example.com" "$V2"
+dns_acmedns_add "_acme-challenge.$ACMEDNS_SUBDOMAIN" "$V1" && dns_acmedns_add "_acme-challenge.$ACMEDNS_SUBDOMAIN" "$V2"
 `
-	v1, v2 := challenge("acmesh-apex"), challenge("acmesh-wildcard")
-	cmd := exec.Command("sh", "-c", shim)
-	cmd.Env = append(os.Environ(), "DNSAPI="+dnsapi, "V1="+v1, "V2="+v2,
-		"ACMEDNS_BASE_URL="+e.gate.URL+"/acme/acme-dns", "ACMEDNS_USERNAME="+k.ID, "ACMEDNS_PASSWORD="+k.Key, "ACMEDNS_SUBDOMAIN=example.com")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("dns_acmedns_add: %v\n%s", err, out)
-	}
-	if got := e.txt("_acme-challenge"); !slices.Equal(got, sortedOf(v1, v2)) {
-		t.Fatalf("values %v", got)
+	for _, tc := range []struct{ name, user, password, domain, host string }{
+		{"api key", k.ID, k.Key, "example.com", "_acme-challenge"},
+		{"exchanged token", "oidc", exchanged, "www.example.com", "_acme-challenge.www"},
+		{"oidc token", "oidc", ci, "api.example.com", "_acme-challenge.api"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			v1, v2 := challenge(tc.name+"-apex"), challenge(tc.name+"-wildcard")
+			cmd := exec.Command("sh", "-c", shim)
+			cmd.Env = append(os.Environ(), "DNSAPI="+dnsapi, "V1="+v1, "V2="+v2,
+				"ACMEDNS_BASE_URL="+e.gate.URL+"/acme/acme-dns", "ACMEDNS_USERNAME="+tc.user, "ACMEDNS_PASSWORD="+tc.password,
+				"ACMEDNS_SUBDOMAIN="+tc.domain)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("dns_acmedns_add: %v\n%s", err, out)
+			}
+			if got := e.txt(tc.host); !slices.Equal(got, sortedOf(v1, v2)) {
+				t.Fatalf("values %v", got)
+			}
+		})
 	}
 }
 

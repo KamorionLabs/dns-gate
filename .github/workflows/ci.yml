@@ -35,6 +35,53 @@ jobs:
         working-directory: dns-gate
         run: go test -race ./...
 
+  # Unmodified ACME clients against the gate: acme.sh dnsapi/dns_acmedns.sh
+  # and the certbot acme-dns hook (acme-dns-auth.py), fetched at pinned
+  # commits and checked against their SHA-256; they are never vendored.
+  # To bump a pin: pick the new commit, compute the hash with
+  #   curl -fsSL https://raw.githubusercontent.com/<repo>/<commit>/<path> | sha256sum
+  # review the diff of the file between the two commits, then update the
+  # *_REF and *_SHA256 variables below together.
+  acme-clients:
+    runs-on: ubuntu-latest
+    env:
+      ACMESH_REF: 37d064f7b580055d3f2ddf9a9c960f754f3694d6
+      ACMESH_SHA256: 8a325d23ad708b7abcbd13e9d5d42aab70aa9e4a81095f709f56448064660f7a
+      CERTBOT_HOOK_REF: 908aefb0ea3925aaeaf78a7ca32e6a526b1bb563
+      CERTBOT_HOOK_SHA256: af0490c7045e96dad15912db4fc23c8ee0c3e8854b9228eac63b459a75aa620c
+      REQUESTS_VERSION: 2.34.2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: fetch the pinned client scripts
+        run: |
+          dir="$RUNNER_TEMP/acme-clients"
+          mkdir -p "$dir"
+          curl -fsSL -o "$dir/dns_acmedns.sh" "https://raw.githubusercontent.com/acmesh-official/acme.sh/$ACMESH_REF/dnsapi/dns_acmedns.sh"
+          curl -fsSL -o "$dir/acme-dns-auth.py" "https://raw.githubusercontent.com/joohoi/acme-dns-certbot-joohoi/$CERTBOT_HOOK_REF/acme-dns-auth.py"
+          echo "$ACMESH_SHA256  $dir/dns_acmedns.sh" | sha256sum -c -
+          echo "$CERTBOT_HOOK_SHA256  $dir/acme-dns-auth.py" | sha256sum -c -
+      - name: python requests for the certbot hook
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install "requests==$REQUESTS_VERSION"
+      - name: run the clients against the gate
+        run: |
+          set -o pipefail
+          export PATH="$RUNNER_TEMP/venv/bin:$PATH"
+          export DNS_GATE_TEST_CERTBOT_HOOK="$RUNNER_TEMP/acme-clients/acme-dns-auth.py"
+          export DNS_GATE_TEST_ACMESH_DNSAPI="$RUNNER_TEMP/acme-clients/dns_acmedns.sh"
+          go test -count=1 -v -run TestACMEDNSReal ./internal/app/ | tee "$RUNNER_TEMP/acme-clients.log"
+          for t in TestACMEDNSRealCertbotHook TestACMEDNSRealAcmeSh/api_key TestACMEDNSRealAcmeSh/exchanged_token TestACMEDNSRealAcmeSh/oidc_token; do
+            grep -q -- "--- PASS: $t " "$RUNNER_TEMP/acme-clients.log" || { echo "$t did not run"; exit 1; }
+          done
+
   web:
     runs-on: ubuntu-latest
     defaults:
