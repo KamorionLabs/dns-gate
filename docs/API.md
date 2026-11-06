@@ -17,13 +17,15 @@ of the gate is the EuroDNS-compatible API, documented by
 
 `rrset-api` means the single RRset endpoints below are served, `plans` the REST
 plan/apply, `policy-delegation` the delegated policy API, `api-keys` the API key
-endpoints, `acme-httpreq` and `acme-dns` the [ACME endpoints](ACME.md).
+endpoints, `acme-httpreq` and `acme-dns` the [ACME endpoints](ACME.md),
+`token-exchange` the token exchange.
 
 ## Authentication
 
 | Client | Credentials |
 |---|---|
 | Pipelines, CLIs, Terraform | `Authorization: Bearer <JWT>` from an issuer of the gate configuration (GitHub Actions, GitLab, Azure DevOps, Entra ID, any OIDC issuer), audience the gate |
+| Tools that keep one credential for a run (acme.sh) | a gate token from the [token exchange](#token-exchange) of such a JWT, as a bearer token |
 | Third parties without OIDC (ACME clients, appliances) | [API key](#api-keys) `dgk_<id>_<secret>`: `Authorization: Bearer dgk_…`, or basic authentication with the key id as user name and the key as password, or `X-Api-Key: dgk_…` (with `X-App-Id` or `X-Api-User` set to the key id, if sent) |
 | Tools without OIDC, static | virtual key from the configuration: `X-App-Id` + `X-Api-Key` |
 | Web UI | session cookie; every request other than GET also sends `X-Gate-CSRF` (the `gate_csrf` cookie) and a same-origin `Origin`, and humans need a recent login for writes (`403 reauth_required`) |
@@ -147,6 +149,22 @@ default). The apply writes exactly what was planned, or fails with
 again. The MCP tools
 `plan_rrset_change` and `apply_rrset_change` use the same plans.
 
+## Token exchange
+
+`POST /api/v1/token-exchange` (RFC 8693, form-encoded, no other authentication)
+trades a token of an issuer with `token_exchange: true` for a gate token with the
+same identity, valid 15 minutes (`expires_in` for another lifetime, capped by the
+gate issuer's `token_ttl`). Gate tokens and API keys are never exchanged.
+
+```sh
+GATE_TOKEN=$(curl -fsS "$GATE/api/v1/token-exchange" \
+  -d grant_type=urn:ietf:params:oauth:grant-type:token-exchange \
+  -d subject_token_type=urn:ietf:params:oauth:token-type:jwt \
+  --data-urlencode "subject_token=$TOKEN" | jq -r .access_token)
+```
+
+Configuration and details: [CONFIG.md](CONFIG.md#token-exchange).
+
 ## API keys
 
 API keys are issued by the gate at runtime, for third parties that have no OIDC
@@ -245,5 +263,6 @@ The full list is in the `Error` schema of the OpenAPI document.
   delegation ([CONFIG.md](CONFIG.md)).
 - `/api/v1/policy/…` — the policy editor of the web UI.
 - `/acme/httpreq/present`, `/acme/httpreq/cleanup`, `/acme/acme-dns/update`,
-  `/acme/acme-dns/register` — DNS-01 challenges for lego, certbot, acme.sh,
-  win-acme, cert-manager and Caddy ([ACME.md](ACME.md)).
+  `/acme/acme-dns/register` — DNS-01 challenges for certbot, acme.sh, lego,
+  win-acme, cert-manager and Caddy, with an OIDC token, a gate token or an API key
+  ([ACME.md](ACME.md)).

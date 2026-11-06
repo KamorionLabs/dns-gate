@@ -259,7 +259,7 @@ policy:
     zones: [example.com, "*.example.com", example.org]
     actions: [dns.read, dns.record.write, ui.read]
   # The stack that creates pipelines manages their gate roles and bindings
-  # (Terraform eurodns_gate_role / eurodns_gate_binding), without approval,
+  # (Terraform dnsgate_role / dnsgate_binding), without approval,
   # within these limits.
   delegations:
     - name: workloads-pipelines

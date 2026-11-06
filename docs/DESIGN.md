@@ -6,6 +6,12 @@ explicit test are tracked in [GitHub issues](https://github.com/KamorionLabs/dns
 
 ## 1. Problem
 
+DNS provider APIs hand automation coarse credentials: they are scoped to an account
+or a hosted zone at best, know nothing of teams or of who created a record, and leave
+concurrency and rate limits to each client. EuroDNS, the first provider behind the
+gate, is the extreme case; Route 53 IAM policies can restrict record names and types,
+but not ownership, and only for AWS identities.
+
 EuroDNS exposes a REST API (`https://rest-api.eurodns.com`, spec published at
 `https://docapi.eurodns.com/openapi.json`, OpenAPI 3.0.1, 92 operations). Using it
 from automation (Terraform, CI pipelines, ACME clients) raises several problems:
@@ -28,16 +34,20 @@ whole zone, with no concurrency control.
 
 Goals:
 
-- Keep the **EuroDNS API contract**: an existing EuroDNS client works against the
-  gate by changing only its base URL (and credentials).
-- The gate is the **only holder** of the EuroDNS key.
-- Clients authenticate with **short-lived OIDC tokens** (or scoped virtual keys).
+- One **provider-neutral API** (`/api/v1`, used by the UI, MCP and the `dnsgate`
+  Terraform provider) whatever the provider of a zone.
+- For EuroDNS zones, keep the **EuroDNS API contract**: an existing EuroDNS client
+  works against the gate by changing only its base URL (and credentials).
+- The gate is the **only holder** of the provider credentials.
+- Clients authenticate with **short-lived OIDC tokens**; gate-issued API keys only
+  for third parties that have no OIDC identity.
 - Fine-grained authorization: zone, host pattern, record type.
 - **Ownership**: the gate only modifies or deletes RRsets it created (or that an
   admin explicitly adopted), and only for the owning team.
 - Respect the upstream rate limit for all clients combined; serialize writes per zone.
 - Full audit trail.
-- Generic: nothing specific to one organization; EuroDNS is the first upstream adapter.
+- Generic: nothing specific to one organization or provider; each provider is an
+  adapter behind the neutral model (section 4.1).
 
 Non-goals (v0.x):
 
@@ -51,9 +61,9 @@ Non-goals (v0.x):
 
 ```
  ┌──────────────────────────────────────────────────────────────────────┐
- │ Layer 1 — EuroDNS user scope (upstream)                              │
- │   The gate's EuroDNS user is restricted to DNS management of the     │
- │   domains it serves. Protects against a compromised gate.            │
+ │ Layer 1 — Provider credential scope (upstream)                       │
+ │   The gate's provider credentials are restricted to DNS management   │
+ │   of the zones it serves. Protects against a compromised gate.       │
  │ ┌──────────────────────────────────────────────────────────────────┐ │
  │ │ Layer 2 — RBAC (gate)                                            │ │
  │ │   Who may read/write which zone, host pattern, record type.      │ │
@@ -67,21 +77,23 @@ Non-goals (v0.x):
  └──────────────────────────────────────────────────────────────────────┘
 ```
 
-Layer 1 is configured in the EuroDNS console (granularity to be confirmed). Layers 2
-and 3 are enforced by the gate on every request.
+Layer 1 is configured at the provider: the permissions of the gate's EuroDNS user
+(granularity to be confirmed), an IAM policy for Route 53
+([providers/route53.md](providers/route53.md#iam)). Layers 2 and 3 are enforced by
+the gate on every request.
 
 ## 4. Architecture
 
 ```
-  Terraform provider     ACME clients (lego, Caddy…)    humans (CLI)
-  Bearer JWT (OIDC)      scoped virtual key             OIDC device flow
+  Terraform, CI, MCP     ACME clients, appliances       humans
+  Bearer JWT (OIDC)      gate API key (dgk_…)           UI session (OIDC, SAML)
           │                      │                        │
           └──────────────────────┼────────────────────────┘
                                  ▼
    ┌──────────────────────────────────────────────────────────┐
-   │ dns-gate                                             │
+   │ dns-gate                                                 │
    │                                                          │
-   │ 1. authn     multi-issuer JWT (JWKS), audience enforced  │
+   │ 1. authn     multi-issuer JWT (JWKS), audience; API keys │
    │ 2. routing   operationId → action, deny by default       │
    │ 3. authz     RBAC zone / host / type                     │
    │ 4. engine    ownership, delta, protected, blast radius   │
@@ -95,7 +107,8 @@ and 3 are enforced by the gate on every request.
        EuroDNS (X-APP-ID / X-API-KEY,     Route53 (AWS credentials,
        allowlisted IP)                    optional assumed role)
 
-   store (memory | sqlite | postgres | DynamoDB): ownership, zone versions, zone locks
+   store (memory | sqlite | postgres | DynamoDB): ownership, zone versions, zone locks,
+   audit, policy revisions, plans, API keys
 ```
 
 Repositories:
@@ -112,13 +125,14 @@ Main packages of the gate:
 | Package | Role |
 |---|---|
 | `internal/identity` | `Subject` (issuer, id, claims, roles, teams). |
+| `internal/authn` | Authentication: OIDC issuers (JWKS), gate-issued tokens and the token exchange, API keys (format in `internal/apikey`), virtual keys. |
 | `internal/dns` | Provider-neutral model: `Zone`, `RRset` (values or alias, read-only reason), `Change`, `ContentHash`. |
 | `internal/provider` | Provider contract (`Provider`, `Checker`, `Snapshotter`, `Resolver`, capabilities, errors); `provider/eurodns` and `provider/route53` adapters. |
 | `internal/eurodnsapi` | EuroDNS-compatible API facade (full-zone PUT, record ids, forwards, passthrough) over the neutral engine, for EuroDNS zones only. |
 | `internal/policy` | RBAC engine implementing `Authorizer`. |
 | `internal/routes` | Route table generated from `api/eurodns.openapi.json`, plus the hand-written operation → action mapping. |
 | `internal/zonewrite` | `Engine`: every DNS zone read/write on behalf of a subject on the neutral model, provider resolved per zone, ownership enforcement, reconcile. |
-| `internal/store` | `Store`: ownership entries, zone versions, zone locks, persisted RRset plans (memory, SQLite, Postgres, DynamoDB). |
+| `internal/store` | `Store`: ownership entries, zone versions, zone locks, persisted RRset plans, API keys and their acme-dns registrations (memory, SQLite, Postgres, DynamoDB). |
 | `internal/audit` | Structured audit events (stdout and store). |
 | `internal/discovery` | Listing of the zones of every provider account, filtered and cached in memory; resolves the provider of a zone. |
 | `internal/uiapi` | JSON types of the `/api/v1` API (inventory, RRsets, plans, audit, policy revisions, adoption, Terraform export). |
@@ -180,6 +194,7 @@ request
   ├─ normalize path (reject encoded slashes, dot segments, unknown query params)
   ├─ authenticate ── Bearer JWT ─────► issuer match, signature (JWKS), exp/nbf, aud,
   │                                    bound claims → Subject{roles, teams}
+  │                └─ API key dgk_… ─► key lookup (hashed), expiry, CIDRs → Subject (9.5)
   │                └─ X-APP-ID/X-API-KEY ─► virtual key lookup (hashed) → Subject
   │                └─ none ──────────► 401
   ├─ route lookup (method + path template → operationId)
@@ -196,6 +211,11 @@ request
 
 Client credential headers (`Authorization`, `X-APP-ID`, `X-API-KEY`) are never
 forwarded upstream; the upstream credentials are injected by the shared transport.
+
+The tree above is the EuroDNS-compatible API. The neutral API under `/api/v1` and the
+ACME endpoints (`/acme/...`) authenticate the same way, check the action of their
+route on the zone, host and type, and write through the same `zonewrite.Engine`:
+ownership, zone locks and the audit do not depend on the entry point.
 
 ### 5.1 Route table
 
@@ -297,7 +317,8 @@ a failed challenge is retried).
 
 Roles may set an ephemeral TTL (`Authorizer.EphemeralTTL`). RRsets they create get
 `ExpiresAt`; the reconciler deletes expired ones. This cleans up ACME challenge
-records left behind by clients that do not clean up.
+records left behind by clients that do not clean up; the ACME endpoints refuse
+callers whose role has no ephemeral TTL ([ACME.md](ACME.md)).
 
 ### 6.6 Reconcile
 
@@ -358,7 +379,7 @@ per-zone lease lock. It also holds the inventory cache, the audit events used by
 the managed policy revisions with the pointer to the active one (section 15).
 
 It also persists the RRset plans of MCP and of the REST API (section 17.3), taken
-once.
+once, and the gate-issued API keys with their acme-dns registrations (9.5).
 
 - **Memory**: single replica and tests.
 - **SQLite**: single replica with a persistent volume.
@@ -432,11 +453,12 @@ Rules:
 
 ### 9.3 Virtual keys
 
-For existing EuroDNS clients that only know `X-APP-ID`/`X-API-KEY` (Caddy via
-libdns-eurodns, lego once it accepts a custom URL), the gate issues virtual keys:
-`X-APP-ID` = key id, `X-API-KEY` = high-entropy secret stored hashed. Each key is
-bound to one role and team, has an expiry, and can be bound to source CIDRs.
-Recommended only for the `acme-solver` role.
+Static keys declared in the policy (`virtual_keys`, base file or managed layer) for
+existing EuroDNS clients that only know `X-APP-ID`/`X-API-KEY`: `X-APP-ID` = key id,
+`X-API-KEY` = high-entropy secret stored hashed. Each key grants roles and teams
+directly, has an expiry, and can be bound to source CIDRs. Changing one is a policy
+change; API keys (9.5) are issued, rotated and revoked at runtime instead, and work on
+the same headers.
 
 ### 9.4 SAML users and gate-issued tokens
 
@@ -456,6 +478,59 @@ only, consent page) used by the Claude Desktop extension. Codes and refresh toke
 are sealed with the session key; nothing is stored, so the gate stays stateless
 across instances (Lambda).
 
+### 9.5 API keys
+
+For third parties with no OIDC identity (a hosting provider renewing certificates,
+an appliance), the gate issues API keys at runtime (`/api/v1/api-keys`, guide in
+[API.md](API.md)). OIDC stays the first choice; a key is a long-lived secret held
+outside the organization.
+
+- **Format**: `dgk_<id>_<secret>`, `id` 16 hex characters (the public key id, also
+  the user name of basic authentication and of acme-dns), `secret` 32 random bytes
+  in base64url. Only the SHA-256 of the whole key is stored; the key is returned
+  once, at creation and at each rotation.
+- **Presentation**: `Authorization: Bearer dgk_…`, basic authentication (user = key
+  id), or `X-Api-Key` (with `X-App-Id` or `X-Api-User` = key id when sent), so the
+  same key serves the neutral API, the ACME endpoints and EuroDNS-header clients.
+- **Scope**: one team (owner of the RRsets it creates) and one role, optional expiry
+  and source CIDRs. The role may not grant `policy.*` or `gate.*` actions, checked at
+  creation and again at each use: a key whose role disappeared or gained such an
+  action stops working.
+- **Management**: `gate.apikey.manage`, held by a token or session identity, never
+  by an API key or a virtual key. The key's team must be one of the caller's teams (unless the caller holds
+  the action on `*`), and the caller must hold the action on every zone of the key's
+  role, plus every action of that role on the same records: a key never exceeds its
+  issuer.
+- **Rotation and revocation**: a rotation issues a new secret and keeps the previous
+  one valid for an overlap (default 24 h, at most 30 days, `0s` for none); a
+  revocation is immediate. Team and role never change. Requests made with a key are
+  audited as `api-key:<id>`; refused keys and every management call are audited
+  too, with the key id, never the key.
+- **ACME**: a key may carry acme-dns registrations, one per domain, mapping an
+  acme-dns subdomain to the `_acme-challenge` TXT RRset of the managed zone
+  ([ACME.md](ACME.md)).
+
+### 9.6 Token exchange
+
+Some clients keep a credential for minutes or hours (certbot and acme.sh hooks,
+long scripts), longer than the CI or workload token they start with. Instead of an
+API key, they exchange that token for a gate token (OAuth 2.0 token exchange,
+RFC 8693, `POST /api/v1/token-exchange`, configuration in
+[CONFIG.md](CONFIG.md#token-exchange)):
+
+- opt-in per issuer (`token_exchange: true`), and only with a gate issuer
+  (`self: true`, 9.4) to sign the result. Gate tokens and API keys are never
+  exchanged;
+- the subject token is checked exactly as a bearer token of its issuer (signature,
+  audience, bound claims, bindings); the gate token carries its claims, binds back as
+  that issuer and records the exchanged `jti` (`gate_xchg`), so bindings and audit
+  see the same identity;
+- lifetime 15 minutes by default, `expires_in` (at least 60 s) to ask for another,
+  capped by the gate issuer's `token_ttl`. Roles are recomputed at every request, so
+  a removed binding takes effect at once;
+- every exchange, and every refused subject token, is audited
+  (`gate.token.exchange`).
+
 ## 10. Extensions to the EuroDNS contract
 
 Kept minimal and invisible to plain EuroDNS clients:
@@ -464,7 +539,7 @@ Kept minimal and invisible to plain EuroDNS clients:
 |---|---|
 | `ETag` on `GET /dns-zones/{d}` | zone version |
 | `If-Match` on writes | `412` if the zone version changed. EuroDNS ignores the header, so clients can always send it. |
-| `GET /.well-known/dns-gate` | `{"version": "...", "features": ["if-match", "ownership", "adopt"]}`. Plain EuroDNS returns 404: this is how the provider detects a gate. |
+| `GET /.well-known/dns-gate` | `{"version": "...", "features": [...]}`: `if-match`, `ownership`, `adopt`, `policy-delegation`, `plans`, `rrset-api`, `acme-httpreq`, plus `api-keys`, `acme-dns` and `token-exchange` when served ([API.md](API.md)). Plain EuroDNS returns 404: this is how clients detect a gate. |
 | `POST /.well-known/dns-gate/zones/{d}/adopt` | adoption (see 6.3) |
 | Error body | `{"reason": "<code>", "message": "..."}` with the reason codes of 6.2 |
 
@@ -544,7 +619,7 @@ policy layer (section 15).
 - **Zones**: managed zones with counters (RRsets, managed, tainted, pending,
   foreign), last upstream sync, last gate write (latest successful write found
   in the journal, so it survives restarts and is the same on every replica); with zone discovery (15.7), the
-  zones of the EuroDNS account that are not managed, flagged unmanaged, with a
+  zones of the provider accounts that are not managed, flagged unmanaged, with a
   "Manage this zone" action for policy proposers.
 - **Inventory of a zone**: every RRset with its status, owner team, protected flag,
   created by / updated by (actor and category: `human`, `pipeline` or `key`),
@@ -589,6 +664,8 @@ API under `/api/v1` (contract in `internal/uiapi`, reference in
 | `GET /api/v1/audit?zone=&host=&type=&subject=&category=&decision=&since=&until=&limit=&cursor=` | audit page, newest first, cursor pagination |
 | `POST /api/v1/zones/{zone}/plan`, `/apply` | RRset plan, then its application |
 | `POST /api/v1/tokens` | gate-issued token of the session (9.4) |
+| `/api/v1/api-keys` | API key management (9.5) |
+| `POST /api/v1/token-exchange` | gate token for an OIDC token (9.6) |
 
 The same API accepts bearer tokens, for scripts and the Terraform provider, with
 `GET`/`PUT`/`DELETE /api/v1/zones/{zone}/rrsets/{host}/{type}` for single RRsets.
@@ -617,11 +694,12 @@ view is.
 - Strict Content Security Policy (no inline script, `default-src 'self'`,
   `frame-ancestors 'none'`).
 - The mutations reachable from the browser are DNS writes through plan/apply, gate
-  tokens and policy revisions (section 15). Every one requires the CSRF token and a
-  same-origin `Origin`; DNS applies, single-RRset writes and policy changes also
-  require step-up authentication (a login more recent than `policy.edit_max_age`,
-  and the `policy.require_amr` methods), otherwise `403 reauth_required` and the UI
-  sends the user through `/auth/login?reauth=1`. The plan itself is a dry run and
+  tokens, API keys and policy revisions (section 15). Every one requires the CSRF
+  token and a same-origin `Origin`; DNS applies, single-RRset writes, API key
+  creations, changes and rotations, and policy changes also require step-up
+  authentication (a login more recent than `policy.edit_max_age`, and the
+  `policy.require_amr` methods), otherwise `403 reauth_required` and the UI sends
+  the user through `/auth/login?reauth=1`. The plan itself is a dry run and
   needs no step-up.
 
 ## 15. Editable policy
@@ -646,8 +724,8 @@ managed layer, checked at proposal and again at activation:
 - every managed rule must stay within the **bounds** declared in base
   (`bounds.zones` globs, `bounds.actions` list);
 - protected records (base) win over any managed grant;
-- zones it brings under management must match `bounds.zones` and exist in the
-  EuroDNS account (15.7).
+- zones it brings under management must match `bounds.zones` and exist in a
+  provider account (15.7).
 
 Validation errors come back as `400 {"reason":"invalid_policy","errors":[{"path","message"}]}`.
 
@@ -753,7 +831,8 @@ round), the UI and MCP. Activating a revision that adds a zone is therefore enou
 to manage it, on every replica within the reload interval.
 
 `internal/discovery` lists the zones of every provider account (`ListZones`: EuroDNS
-`searchDomains`, paginated, through the shared rate-limited transport) at start and
+`searchDomains` through the shared rate-limited transport, Route 53
+`ListHostedZones`, both paginated) at start and
 every `providers[].zones.refresh`, filtered by the `include`/`exclude` globs of the
 provider, and keeps the lists in memory. Discovered zones that are not managed are **unmanaged**:
 
@@ -851,12 +930,14 @@ investigated before going further.
 Two paths, same result:
 
 1. adopt in the gate (UI or API), then export HCL and plan;
-2. write or export the HCL first, then `terraform import` / `import` blocks in gate
-   mode: the provider asks the gate to adopt each RRset, which requires
+2. EuroDNS zones only: write or export the HCL first, then `terraform import` /
+   `import` blocks with the `eurodns` provider in gate mode: the provider asks the
+   gate to adopt each RRset (`/.well-known/dns-gate/zones/{d}/adopt`), which requires
    `dns.record.adopt` for the identity running the plan.
 
 Path 1 keeps the adoption right with admins and lets pipelines run with write
-permissions only; it is the recommended one.
+permissions only; it is the recommended one, and the only one with the `dnsgate`
+provider, which imports only RRsets the team already owns.
 
 ## 17. MCP server
 
@@ -865,14 +946,16 @@ Go SDK), so LLM agents can inspect DNS and, if explicitly allowed, propose chang
 
 ### 17.1 Same controls
 
-- Same authentication (bearer token in v1), same RBAC, same ownership rules, same
-  rate budget as the REST API. MCP is another entry point, not another privilege.
+- Same authentication (bearer tokens: OIDC, gate tokens, API keys), same RBAC, same
+  ownership rules, same rate budget as the REST API. MCP is another entry point, not
+  another privilege.
 - The gate publishes OAuth 2.0 Protected Resource Metadata (RFC 9728,
   `/.well-known/oauth-protected-resource`) pointing to the configured authorization
   server.
-- v1 limitation: Entra ID does not support dynamic client registration, so MCP
-  clients cannot register and log in on their own. The token is passed in the
-  `Authorization` header by the client configuration.
+- Entra ID does not support dynamic client registration, so MCP clients cannot
+  register with it and log in on their own: the token is passed in the
+  `Authorization` header by the client configuration, or obtained from the gate's
+  own authorization server (9.4), as the Claude Desktop extension does.
 - Every tool call is audited with `via=mcp`.
 - No policy tool: the policy (section 15) cannot be read in full or changed through
   MCP.

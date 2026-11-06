@@ -13,7 +13,8 @@ Example used below: zone `example.com`, team `web` taking over `www`, `shop` and
   [zone discovery](CONFIG.md#zone-discovery), in the managed policy (open the
   unmanaged zone in the UI, "Manage this zone", then approve and activate the
   revision; `example.com` must match `policy.bounds.zones`).
-- The EuroDNS user of the gate has access to the zone.
+- The provider credentials of the gate reach the zone (EuroDNS user, Route 53 IAM
+  policy: see [providers/route53.md](providers/route53.md#iam)).
 - An admin holds `dns.record.adopt` on the zone (base policy).
 - Team `web` has a role allowing `dns.record.write` on the hosts it will own, bound
   to its pipeline identity (base or managed policy).
@@ -23,8 +24,8 @@ Example used below: zone `example.com`, team `web` taking over `www`, `shop` and
 ## 1. Inventory
 
 Open the zone in the web UI (or `GET /api/v1/zones/example.com/rrsets`). The first
-read fills the inventory cache with one EuroDNS GET; afterwards the view is refreshed
-by reconcile.
+read fills the inventory cache with one provider read; afterwards the view is
+refreshed by reconcile.
 
 All RRsets show as *Not managed* (status `foreign` in the API). Decide, with the teams, who owns what. Typical split:
 
@@ -107,8 +108,9 @@ The resources target the `KamorionLabs/dnsgate` provider, which works for every
 DNS provider behind the gate. Add `&provider=eurodns` to the URL to export
 `eurodns_record_set` resources of the `kamorionlabs/eurodns` provider instead.
 
-Move it into the team's stack, with the provider in gate mode (see the provider
-README) and the team's pipeline identity.
+Move it into the team's stack, with the provider pointed at the gate (`endpoint`, see
+the [provider README](https://github.com/KamorionLabs/terraform-provider-dnsgate))
+and authenticated as the team's pipeline identity.
 
 ## 5. Import and first plan
 
@@ -127,9 +129,10 @@ Any change means the HCL and the zone disagree (value edited in the console sinc
 the export, normalization difference). Do not apply: re-export, or fix the HCL, until
 the plan is empty. Then apply to record the imports in the state.
 
-Alternative without adopting first: write the HCL yourself and let `import` blocks
-adopt during the plan. This requires `dns.record.adopt` for the pipeline identity,
-which is usually not wanted; the adopt-then-export path keeps that right with admins.
+The `dnsgate` provider only imports RRsets the team already owns, so adopt first.
+The `eurodns` provider in gate mode (EuroDNS zones only) can instead adopt during the
+import, which requires `dns.record.adopt` for the pipeline identity: usually not
+wanted, the adopt-then-export path keeps that right with admins.
 
 ## 6. After the takeover
 

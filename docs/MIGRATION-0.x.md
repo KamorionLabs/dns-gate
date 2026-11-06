@@ -61,6 +61,11 @@ every EuroDNS provider. A second EuroDNS account reads `EURODNS_<ID>_API_KEY` an
 character than letters and digits replaced by `_`. The Helm chart renders a default
 `eurodns` provider and keeps mounting the same Secret.
 
+The gate's own secrets (`DNS_GATE_SESSION_KEY`, `DNS_GATE_UI_CLIENT_SECRET`,
+`DNS_GATE_POSTGRES_DSN`... and their `_FILE` variants) are still read under their
+names from the time the project was called eurodns-gate (`EURODNS_GATE_*`) when the
+`DNS_GATE_*` variable is not set. Rename them at your next change.
+
 ## Behaviour changes
 
 - The EuroDNS-compatible API (`/dns-zones/...`) and the adopt extension only serve

@@ -122,6 +122,7 @@ Trusted OIDC token issuers, for bearer tokens (`Authorization: Bearer <JWT>`) an
 | `clock_skew` | `60s` | Leeway on `exp`, `nbf`, `iat` (maximum `5m`). |
 | `self` | `false` | This issuer is the gate itself, see [Gate-issued tokens](#gate-issued-tokens). |
 | `token_ttl` | `1h` | Lifetime of gate-issued tokens (`self: true` only, 1m to 24h). |
+| `token_exchange` | `false` | Tokens of this issuer can be exchanged for gate tokens, see [Token exchange](#token-exchange). Needs a gate issuer; refused on it. |
 
 Tokens must carry `exp` and the subject claim(s). Keys are cached and refetched on an unknown `kid` (at most every 30 s).
 
@@ -154,6 +155,35 @@ Tokens are obtained:
 - by the [Claude Desktop extension](#claude-desktop-extension) and other native clients, through the gate authorization server: `GET /.well-known/openid-configuration` (also `/.well-known/oauth-authorization-server`) describes `/oauth/authorize` and `/oauth/token`. Only the public client `dns-gate-relay` with a loopback redirect `http://localhost:<port>` or `http://127.0.0.1:<port>` (no path) is accepted, with PKCE S256 required. `/oauth/authorize` sends a user without session through the UI login (SAML or OIDC), then shows a consent page ("Allow" posts back with the CSRF token and the origin checked). The authorization code (2 minutes) and the refresh token (until the end of the session) are sealed with the session key: nothing is stored, any instance redeems them. A code is not single-use within its 2 minutes, but it is useless without the PKCE verifier that only the client holds. The refresh grant re-checks the bindings of the subject before signing a new token.
 
 The authorization server also works with an OIDC UI login, but the Claude Desktop extension keeps signing in with the OIDC issuer in that case.
+
+### Token exchange
+
+`POST /api/v1/token-exchange` (OAuth 2.0 token exchange, RFC 8693) turns a token of an issuer with `token_exchange: true` into a gate token with the same identity. It serves tools that hold one credential for a whole run while the CI or workload token lives a few minutes (acme.sh, see [ACME.md](ACME.md#1-choose-your-credential)).
+
+```yaml
+issuers:
+  - name: github
+    issuer: https://token.actions.githubusercontent.com
+    audiences: [dns-gate]
+    token_exchange: true
+  - name: gate
+    self: true
+    issuer: https://dns.example.com
+```
+
+```sh
+curl -fsS https://dns.example.com/api/v1/token-exchange \
+  -d grant_type=urn:ietf:params:oauth:grant-type:token-exchange \
+  -d subject_token_type=urn:ietf:params:oauth:token-type:jwt \
+  --data-urlencode "subject_token=$OIDC_TOKEN"
+# {"access_token": "…", "issued_token_type": "urn:ietf:params:oauth:token-type:access_token", "token_type": "Bearer", "expires_in": 900}
+```
+
+- The subject token is validated exactly as a bearer token of its issuer: signature, audiences, `bound_claims`, and the identity must be bound (`no_binding` otherwise). `subject_token_type` is `…:jwt`, `…:id_token` or `…:access_token`; `actor_token` (delegation) is refused.
+- The gate token carries the claims of the subject token, `gate_iss` (its issuer), `gate_cat` and `gate_xchg` (the `jti` of the exchanged token). It is bound as that issuer, like every gate token: same subject, bindings, teams and category.
+- Lifetime: 15 minutes, or `expires_in` (seconds, at least 60), capped by `token_ttl`. It does not depend on the expiry of the subject token.
+- Gate tokens and API keys are never exchanged: no chaining. Errors follow RFC 6749 (`400 invalid_grant` with a description); without a gate issuer or an opted-in issuer the endpoint answers `404 token_exchange_disabled`.
+- Every exchange is audited (`gate.token.exchange`, with the new `jti` and the exchanged one); refusals too.
 
 ### Entra ID
 
@@ -274,7 +304,7 @@ When the pipeline already logs in to Azure, the Entra token above (audience = th
 
 ## Virtual keys
 
-Gate-issued credentials for clients that only speak the EuroDNS `X-APP-ID` / `X-API-KEY` scheme (Caddy, lego). Point the client at the gate URL and give it the virtual key: it never sees the EuroDNS key.
+Static credentials, declared in the file, for clients that only speak the EuroDNS `X-APP-ID` / `X-API-KEY` scheme, on the EuroDNS-compatible API. Point the client at the gate URL and give it the virtual key: it never sees the EuroDNS key. ACME clients have better options on every provider: see [ACME.md](ACME.md).
 
 | Field | Description |
 |---|---|
@@ -300,7 +330,7 @@ A map of named roles. Deny by default: an action is allowed only if a rule of on
 | `rules[].records.hosts` | Host patterns relative to the zone, `@` is the apex. `*` matches one label, `**` one or more labels (a bare `**` matches every host, apex included). |
 | `rules[].records.types` | Record types, `*` for any. Omit `records` to cover the whole zone. |
 | `rebase_on_save` | On a full-zone PUT, ignore differences outside the role's scope instead of refusing them (stale zones sent by ACME clients). Granted if any role of the subject enables it. |
-| `ephemeral_ttl` | RRsets created by the role expire and are garbage-collected after this duration (ACME challenges). Applies only if every write role of the subject is ephemeral. |
+| `ephemeral_ttl` | RRsets created by the role expire and are garbage-collected after this duration (ACME challenges); each write of the subject pushes the expiry back. Applies only if every write role of the subject is ephemeral. Required by the [ACME endpoints](ACME.md). |
 | `max_changes_per_request` | `0` = global default, `-1` = unlimited, otherwise a limit. The most permissive role of the subject wins. |
 
 `dns.record.write` and `dns.record.adopt` are further limited by ownership: the gate only modifies or deletes RRsets it created or adopted, owned by one of the subject's teams.
@@ -392,7 +422,7 @@ Rules of the managed layer:
 - a managed role or group cannot reuse a base name;
 - managed rules cannot grant `policy.*` actions and must stay within `policy.bounds` (zone globs, actions); a managed binding may reuse a base role only if that role also stays within the bounds;
 - protected records still win over everything;
-- managed `zones` are brought under management in addition to the base `zones`: each must match `policy.bounds.zones` and, when it is not managed yet, exist in the EuroDNS account ([zone discovery](#zone-discovery) must be enabled); a zone already managed by the active revision is not checked again, so a domain removed from the account does not block unrelated changes;
+- managed `zones` are brought under management in addition to the base `zones`: each must match `policy.bounds.zones` and, when it is not managed yet, exist in a provider account ([zone discovery](#zone-discovery) must be enabled); a zone already managed by the active revision is not checked again, so a domain removed from the account does not block unrelated changes;
 - managed virtual keys must have `expires_at`, and only their SHA-256 is stored (`POST /api/v1/policy/virtual-keys/generate` returns a random key once);
 - `max_changes_per_request: -1` (unlimited) is reserved to the base.
 
@@ -416,7 +446,7 @@ Security of UI mutations: every `POST`, `PUT` and `DELETE` authenticated by the 
 
 ## Policy delegations
 
-A delegation lets a trusted identity, typically the CI pipeline whose Terraform stack creates other pipelines, manage **its own** roles and bindings in the managed layer, within limits written in the base file, without approval. The pattern it serves: one stack creates, for each pipeline, its CI service connection and, in the same apply, the gate role and binding that let that service connection write only its own DNS names, the way it creates each pipeline's cloud role and scoped policy. The Terraform provider exposes the API below as `eurodns_gate_role` and `eurodns_gate_binding`.
+A delegation lets a trusted identity, typically the CI pipeline whose Terraform stack creates other pipelines, manage **its own** roles and bindings in the managed layer, within limits written in the base file, without approval. The pattern it serves: one stack creates, for each pipeline, its CI service connection and, in the same apply, the gate role and binding that let that service connection write only its own DNS names, the way it creates each pipeline's cloud role and scoped policy. The Terraform provider `KamorionLabs/dnsgate` exposes the API below as `dnsgate_role` and `dnsgate_binding`.
 
 ```yaml
 policy:
@@ -703,8 +733,8 @@ Validation of the response posted to `/auth/saml/acs`: XML signature of the resp
 | Path | Description |
 |---|---|
 | EuroDNS API paths | Opened operations, for zones of a `eurodns` provider only (`404 zone_not_eurodns` otherwise): `getDnsZone`, `saveDnsZone`, `checkDnsZone`, `addDnsRecords`, `deleteDnsRecord` (zone engine), `listDnsZoneSnapshots`, `getSnapShot`, `getDnssecStatus`, `getDomain` (proxied to the account of the zone). Every other operation returns `403 operation_denied`. Query strings, encoded separators and dot segments are refused. |
-| `GET /.well-known/dns-gate` | Version and features (`if-match`, `ownership`, `adopt`, `policy-delegation`), unauthenticated. |
-| `POST /.well-known/dns-gate/zones/{zone}/adopt` | Adopt RRsets of a EuroDNS zone (used by the eurodns Terraform provider on import). Foreign RRsets need `dns.record.adopt`; RRsets already owned by one of the caller's teams are a no-op and only need `dns.record.write` on the zone. |
+| `GET /.well-known/dns-gate` | Version and features (`if-match`, `ownership`, `adopt`, `policy-delegation`, `plans`, `rrset-api`, `acme-httpreq`, and when enabled `api-keys`, `acme-dns`, `token-exchange`), unauthenticated. |
+| `POST /.well-known/dns-gate/zones/{zone}/adopt` | Adopt RRsets of a EuroDNS zone (used by the `eurodns` Terraform provider on import; other providers adopt through `/api/v1/zones/{zone}/adopt`). Foreign RRsets need `dns.record.adopt`; RRsets already owned by one of the caller's teams are a no-op and only need `dns.record.write` on the zone. |
 | `/api/v1/me`, `/api/v1/connect`, `/api/v1/zones`, `/api/v1/zones/{zone}/rrsets`, `/api/v1/audit` | UI API (`ui.read`; `/zones` lists managed zones then unmanaged ones (`"unmanaged": true`), whose `rrsets` need `dns.read`; `/me` for any bound subject, with its groups and effective permissions; `/connect` returns the public URL, the MCP state, the login issuer and `ui.cli_scope` for the Connect page). |
 | `GET /api/v1/connect/claude-desktop.mcpb` | Claude Desktop extension of the gate (`ui.read`), when MCP and the UI login are enabled, see [Claude Desktop extension](#claude-desktop-extension). |
 | `/api/v1/policy`, `/api/v1/policy/revisions[/{id}[/approve\|reject\|activate\|rollback\|export]]`, `/api/v1/policy/explain`, `/api/v1/policy/who-can`, `/api/v1/policy/virtual-keys/generate` | Policy API, see `internal/uiapi/policy.go`. |
@@ -712,6 +742,7 @@ Validation of the response posted to `/auth/saml/acs`: XML signature of the resp
 | `/auth/login`, `/auth/callback`, `/auth/logout` | UI login (`/auth/callback` with OIDC only). |
 | `POST /auth/saml/acs`, `GET /auth/saml/metadata` | SAML assertion consumer service and SP metadata, with `ui.saml`. |
 | `POST /api/v1/tokens` | Gate token for the UI session, see [Gate-issued tokens](#gate-issued-tokens). |
+| `POST /api/v1/token-exchange` | Gate token for a token of an opted-in issuer, see [Token exchange](#token-exchange). |
 | `GET /.well-known/jwks.json` | Public key of the gate issuer. |
 | `GET /.well-known/openid-configuration`, `/.well-known/oauth-authorization-server`, `/oauth/authorize`, `POST /oauth/token` | Gate authorization server for native clients (Claude Desktop extension), with a gate issuer and the UI login. |
 | `/api/v1/api-keys[/{id}[/rotate]]` | [API keys](API.md#api-keys) (`gate.apikey.manage`). |
