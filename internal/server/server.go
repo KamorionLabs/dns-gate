@@ -212,6 +212,8 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		s.handleExtension(w, r)
 	case strings.HasPrefix(p, "/acme/"):
 		s.handleACME(w, r)
+	case p == TokenExchangePath:
+		s.handleTokenExchange(w, r)
 	case p == "/" && s.ui != nil:
 		http.Redirect(w, r, "/ui/", http.StatusFound)
 	case p == "/ui" && s.ui != nil:
@@ -390,6 +392,9 @@ func (s *Server) handleGateInfo(w http.ResponseWriter, r *http.Request) {
 		features = append(features, FeaturePlans, FeatureRRsetAPI)
 	}
 	features = append(features, FeatureACMEHTTPReq)
+	if s.tokenExchange() {
+		features = append(features, FeatureTokenExchange)
+	}
 	if s.cfg.APIKeys != nil {
 		features = append(features, FeatureAPIKeys, FeatureACMEDNS)
 	}

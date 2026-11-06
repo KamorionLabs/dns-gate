@@ -289,9 +289,13 @@ type Issuer struct {
 	// origin of the gate; the tokens are bound as the issuer of the session
 	// they come from, so this issuer is never named in bindings.
 	Self bool `yaml:"self"`
-	// TokenTTL is the lifetime of gate-issued tokens (default 1h).
-	TokenTTL   Duration `yaml:"token_ttl"`
-	SigningKey []byte   `yaml:"-"`
+	// TokenTTL is the lifetime of gate-issued tokens (default 1h). It also
+	// caps the tokens of the token exchange.
+	TokenTTL Duration `yaml:"token_ttl"`
+	// TokenExchange lets the tokens of this issuer be exchanged for gate
+	// tokens (POST /api/v1/token-exchange, RFC 8693); needs a gate issuer.
+	TokenExchange bool   `yaml:"token_exchange"`
+	SigningKey    []byte `yaml:"-"`
 	// SAML marks the subject issuer of the SAML login (AllIssuers).
 	SAML bool `yaml:"-"`
 }
@@ -728,6 +732,9 @@ func (c *Config) Validate() error {
 		} else if is.TokenTTL != 0 {
 			add("%s.token_ttl: only for the gate issuer (self: true)", at)
 		}
+		if is.TokenExchange && is.Self {
+			add("%s.token_exchange: gate tokens are never exchanged", at)
+		}
 		if is.SubjectClaim != "" && is.SubjectTemplate != "" {
 			add("%s: subject_claim and subject_template are exclusive", at)
 		}
@@ -749,6 +756,11 @@ func (c *Config) Validate() error {
 		}
 		if is.ClockSkew.D() < 0 || is.ClockSkew.D() > 5*time.Minute {
 			add("%s.clock_skew: must be between 0 and 5m", at)
+		}
+	}
+	for i, is := range c.Issuers {
+		if is.TokenExchange && !is.Self && selfName == "" {
+			add("issuers[%d].token_exchange: needs a gate issuer (an issuer with self: true) to sign the exchanged tokens", i)
 		}
 	}
 	if c.UI.SAML != nil {

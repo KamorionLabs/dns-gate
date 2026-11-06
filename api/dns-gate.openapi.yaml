@@ -40,6 +40,11 @@ info:
     `/.well-known/openid-configuration`, `/oauth/authorize`, `/oauth/token`),
     standard OAuth 2.0 with PKCE not described here.
 
+    **Token exchange.** `POST /api/v1/token-exchange` (RFC 8693) turns a
+    token of an opted-in issuer (`token_exchange: true`) into a short-lived
+    gate token with the same identity, for tools that need a credential
+    longer than the CI or workload token lives.
+
     **ACME DNS-01.** `/acme/httpreq/present` and `/cleanup` serve the lego
     `httpreq` DNS provider, `/acme/acme-dns/update` and `/register` the
     acme-dns API (acme.sh `dns_acmedns`, the certbot acme-dns hook,
@@ -146,6 +151,61 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/token-exchange:
+    post:
+      tags: [identity]
+      operationId: exchangeToken
+      summary: Exchange an OIDC token for a short-lived gate token (RFC 8693)
+      description: |
+        OAuth 2.0 token exchange. The subject token is validated exactly as a
+        bearer token of its issuer (signature, audiences, `bound_claims`,
+        bindings), and its issuer must have `token_exchange: true`. The
+        answer is a token signed by the gate issuer (`self: true`) with the
+        same identity (issuer, subject, name, category, teams and claims),
+        plus the claim `gate_xchg` (the `jti` of the exchanged token).
+        Gate tokens and API keys are never exchanged. The lifetime is 15
+        minutes, or `expires_in` (a gate extension, seconds), capped by the
+        `token_ttl` of the gate issuer. Every exchange is audited
+        (`gate.token.exchange`). `404 token_exchange_disabled` without a gate
+        issuer or an opted-in issuer. Errors follow RFC 6749
+        (`{"error", "error_description"}`).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [grant_type, subject_token, subject_token_type]
+              properties:
+                grant_type: { type: string, enum: ["urn:ietf:params:oauth:grant-type:token-exchange"] }
+                subject_token: { type: string, description: A JWT of an issuer with token_exchange. }
+                subject_token_type:
+                  type: string
+                  enum:
+                    - urn:ietf:params:oauth:token-type:jwt
+                    - urn:ietf:params:oauth:token-type:id_token
+                    - urn:ietf:params:oauth:token-type:access_token
+                requested_token_type:
+                  type: string
+                  enum: [urn:ietf:params:oauth:token-type:access_token, urn:ietf:params:oauth:token-type:jwt]
+                expires_in: { type: integer, minimum: 60, description: "Requested lifetime in seconds (default 900)." }
+      responses:
+        "200":
+          description: Gate token.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [access_token, issued_token_type, token_type, expires_in]
+                properties:
+                  access_token: { type: string }
+                  issued_token_type: { type: string }
+                  token_type: { type: string, enum: [Bearer] }
+                  expires_in: { type: integer }
+        "400": { $ref: "#/components/responses/OAuthError" }
+        "404": { $ref: "#/components/responses/OAuthError" }
 
   /api/v1/me:
     get:
@@ -990,18 +1050,23 @@ paths:
       summary: Set a DNS-01 challenge value (acme-dns)
       description: |
         acme-dns `/update` with base URL `https://<gate>/acme/acme-dns`.
-        `X-Api-User` is the key id, `X-Api-Key` the key (they win over basic
-        authentication taken from the URL). `subdomain` is a registration of
-        the key (from `acme_dns_accounts` or `/register`) or a domain name
-        (`www.example.com`): the value is written to
+        `X-Api-User` is the key id and `X-Api-Key` the key; or `X-Api-Key` is
+        a token (a gate token from the token exchange, or an OIDC token) and
+        `X-Api-User` any non-empty value. These headers win over basic
+        authentication taken from the URL; `Authorization: Bearer` also
+        works. `subdomain` is a registration of the key (from
+        `acme_dns_accounts` or `/register`) or a domain name
+        (`www.example.com`, the only form with a token): the value is written to
         `_acme-challenge.<domain>` in its managed zone, no CNAME needed. As
         acme-dns, the two most recent values of a registration are kept;
         there is no cleanup call, the ephemeral TTL of the role removes the
-        RRset. Errors are `{"error", "message"}`.
+        RRset. With a token, the two values are tracked per subject and
+        domain. Errors are `{"error", "message"}`.
       security:
         - acmeDNSUser: []
           acmeDNSKey: []
         - apiKeyBasic: []
+        - bearer: []
       requestBody:
         required: true
         content:
@@ -1095,7 +1160,7 @@ components:
       type: apiKey
       in: header
       name: X-Api-Key
-      description: Gate API key (acme-dns password).
+      description: Gate API key (acme-dns password), or a token on /update.
     session:
       type: apiKey
       in: cookie
@@ -1171,6 +1236,16 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/Error" }
+    OAuthError:
+      description: OAuth 2.0 error (RFC 6749).
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [error]
+            properties:
+              error: { type: string, examples: [invalid_grant, invalid_request, unsupported_grant_type, token_exchange_disabled] }
+              error_description: { type: string }
     ACMEDNSError:
       description: acme-dns error.
       content:
@@ -1293,7 +1368,7 @@ components:
             (/api/v1/zones/{zone}/plan and apply), rrset-api
             (/api/v1/zones/{zone}/rrsets/{host}/{type}), api-keys
             (/api/v1/api-keys), acme-httpreq (/acme/httpreq), acme-dns
-            (/acme/acme-dns).
+            (/acme/acme-dns), token-exchange (/api/v1/token-exchange).
           items: { type: string }
 
     Actor:
