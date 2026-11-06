@@ -388,7 +388,7 @@ func reasonStatus(r zonewrite.Reason) int {
 	switch r {
 	case zonewrite.ReasonForbidden, zonewrite.ReasonNotOwner, zonewrite.ReasonTooMany:
 		return http.StatusForbidden
-	case zonewrite.ReasonForeignRRset, zonewrite.ReasonTainted, "adopt_conflict":
+	case zonewrite.ReasonForeignRRset, zonewrite.ReasonTainted, "adopt_conflict", zonewrite.ReasonHTTPS:
 		return http.StatusConflict
 	case zonewrite.ReasonPrecondition:
 		return http.StatusPreconditionFailed
@@ -414,7 +414,7 @@ func (s *Server) handleGateInfo(w http.ResponseWriter, r *http.Request) {
 	}
 	features := []string{FeatureIfMatch, FeatureOwnership, FeatureAdopt, FeaturePolicyDelegation}
 	if s.cfg.Ops != nil {
-		features = append(features, FeaturePlans, FeatureRRsetAPI)
+		features = append(features, FeaturePlans, FeatureRRsetAPI, FeatureForwards)
 	}
 	if s.tokenExchange() {
 		features = append(features, FeatureTokenExchange)

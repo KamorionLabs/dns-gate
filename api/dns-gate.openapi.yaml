@@ -88,6 +88,8 @@ tags:
     description: Zones and their RRsets.
   - name: rrsets
     description: Single RRset reads and writes, with content-hash preconditions.
+  - name: forwards
+    description: URL forwards (HTTP redirects), owned like RRsets, for providers with forwards (EuroDNS).
   - name: plans
     description: Dry runs persisted as single-use plans, then applied.
   - name: adoption
@@ -379,6 +381,109 @@ paths:
       operationId: deleteRRset
       summary: Delete an RRset
       description: Deleting an RRset that does not exist succeeds. `If-Match` deletes only the RRset with that content hash.
+      parameters:
+        - $ref: "#/components/parameters/IfMatch"
+      responses:
+        "204":
+          description: Deleted.
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "412": { $ref: "#/components/responses/Error" }
+        "423": { $ref: "#/components/responses/Locked" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/zones/{zone}/forwards:
+    parameters:
+      - $ref: "#/components/parameters/Zone"
+    get:
+      tags: [forwards]
+      operationId: listForwards
+      summary: URL forwards of a zone with their ownership
+      description: |
+        Requires ui.read or dns.read on the zone. Served from the inventory
+        cache, like the RRsets of the zone (a forward is the RRset of type
+        URLFWD of its host). `https` tells whether the forwards answer HTTPS.
+      responses:
+        "200":
+          description: Forwards.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ForwardList" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/zones/{zone}/forwards/{host}:
+    parameters:
+      - $ref: "#/components/parameters/Zone"
+      - $ref: "#/components/parameters/Host"
+      - $ref: "#/components/parameters/Team"
+    get:
+      tags: [forwards]
+      operationId: getForward
+      summary: One URL forward
+      description: Requires ui.read or dns.read on the zone.
+      responses:
+        "200":
+          description: The forward; the ETag is its content hash.
+          headers:
+            ETag: { $ref: "#/components/headers/RRsetETag" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ForwardView" }
+        default: { $ref: "#/components/responses/Error" }
+    put:
+      tags: [forwards]
+      operationId: putForward
+      summary: Create or replace a URL forward
+      description: |
+        Sets the forward of the host: a 301 or 302 redirect to `url`, or a
+        frame showing it. The engine checks RBAC (dns.forward.write on the zone
+        and host; records.types does not apply), ownership (the forward must be
+        new or owned by the caller's team, tombstones and transfers as for
+        RRsets) and the preconditions under the zone lock, against a fresh read
+        of the provider; `If-None-Match` and `If-Match` behave as on RRsets.
+        `400 invalid` for a provider without forwards (Route53).
+
+        `require_https: true` refuses the write with `409 https_unavailable`
+        unless the forwards of the zone answer HTTPS (`https.status` active,
+        pending or no_forward). At EuroDNS that takes an HTTPS redirect
+        subscription on the domain, a paid product ordered outside the gate;
+        without it a forward answers plain HTTP only. The URL target may be
+        https:// either way.
+      parameters:
+        - $ref: "#/components/parameters/IfMatch"
+        - $ref: "#/components/parameters/IfNoneMatch"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ForwardPut" }
+            examples:
+              redirect:
+                value: { type: "301", url: "https://www.example.com/" }
+              frame:
+                value: { type: frame, url: "https://shop.example.net/", title: "Shop" }
+      responses:
+        "200":
+          description: The forward as written; the ETag is its new content hash.
+          headers:
+            ETag: { $ref: "#/components/headers/RRsetETag" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ForwardView" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "412": { $ref: "#/components/responses/Error" }
+        "423": { $ref: "#/components/responses/Locked" }
+        "502": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [forwards]
+      operationId: deleteForward
+      summary: Delete a URL forward
+      description: Deleting a forward that does not exist succeeds. `If-Match` deletes only the forward with that content hash.
       parameters:
         - $ref: "#/components/parameters/IfMatch"
       responses:
@@ -1704,7 +1809,7 @@ components:
             self_approval, delegated_object, session_required, not_team_member;
             404 not_found, plan_not_found, zone_not_eurodns;
             405 method_not_allowed;
-            409 foreign_rrset, tainted, adopt_conflict, not_owner (delegated
+            409 foreign_rrset, tainted, adopt_conflict, https_unavailable, not_owner (delegated
             object of another delegation), policy_busy, conflict, name_taken,
             stale_revision, approval_required, invalid_status, already_decided;
             410 plan_expired, expired; 412 precondition; 413 too_large; 415 bad_request;
@@ -1743,6 +1848,7 @@ components:
             - foreign_rrset
             - tainted
             - adopt_conflict
+            - https_unavailable
             - policy_busy
             - conflict
             - name_taken
@@ -1798,7 +1904,8 @@ components:
             if-match, ownership, adopt (EuroDNS-compatible API extensions),
             policy-delegation (/api/v1/policy/delegated), plans
             (/api/v1/zones/{zone}/plan and apply), rrset-api
-            (/api/v1/zones/{zone}/rrsets/{host}/{type}), api-keys
+            (/api/v1/zones/{zone}/rrsets/{host}/{type}), forwards
+            (/api/v1/zones/{zone}/forwards), api-keys
             (/api/v1/api-keys), acme-httpreq (/acme/httpreq), acme-dns
             (/acme/acme-dns), token-exchange (/api/v1/token-exchange).
           items: { type: string }
@@ -1889,6 +1996,62 @@ components:
         hosted_zone_id: { type: string, examples: ["Z2FDTNDATAQYW2"] }
         evaluate_target_health: { type: boolean, default: false }
 
+    Forward:
+      type: object
+      description: |
+        URL forward of a host (RRset type URLFWD, TTL 0, no values). Its
+        content hash is the RRset hash of TTL 0 and the single value
+        `forward <type> <n>:<url> <n>:<title> <n>:<keywords> <n>:<description>`,
+        n being the length in bytes of the field that follows.
+      required: [type, url]
+      properties:
+        type: { type: string, enum: ["301", "302", frame], description: "301 or 302 redirect, or a frame showing the URL." }
+        url: { type: string, examples: ["https://www.example.com/"], description: "Absolute http:// or https:// URL." }
+        title: { type: string, description: "Frame forwards only." }
+        keywords: { type: string, description: "Frame forwards only." }
+        description: { type: string, description: "Frame forwards only." }
+
+    HTTPSRedirect:
+      type: object
+      description: |
+        Whether the forwards of a zone answer HTTPS requests. EuroDNS needs an
+        HTTPS redirect subscription on the domain (read from
+        /subscriptions and /https-redirect-subscriptions, cached 10 minutes);
+        the gate never orders one.
+      required: [status]
+      properties:
+        status: { type: string, enum: [active, pending, no_forward, inactive, unsupported, unknown] }
+        subscription: { type: string, description: "Provider subscription id." }
+        expires_at: { type: string }
+        message: { type: string }
+
+    ForwardView:
+      allOf:
+        - $ref: "#/components/schemas/RRset"
+        - type: object
+          properties:
+            https: { $ref: "#/components/schemas/HTTPSRedirect" }
+
+    ForwardList:
+      type: object
+      required: [zone, forwards]
+      properties:
+        zone: { type: string }
+        https: { $ref: "#/components/schemas/HTTPSRedirect" }
+        forwards: { type: array, items: { $ref: "#/components/schemas/RRset" } }
+
+    ForwardPut:
+      type: object
+      additionalProperties: false
+      required: [type, url]
+      properties:
+        type: { type: string, enum: ["301", "302", frame] }
+        url: { type: string }
+        title: { type: string }
+        keywords: { type: string }
+        description: { type: string }
+        require_https: { type: boolean, description: "Refuse unless the forwards of the zone answer HTTPS (not stored)." }
+
     RRset:
       type: object
       required: [host, type, ttl, values, hash, status, protected, adopted]
@@ -1898,8 +2061,9 @@ components:
         ttl: { type: integer }
         values: { type: array, items: { type: string } }
         alias: { $ref: "#/components/schemas/Alias" }
-        read_only: { type: string, description: "Why the gate never writes this RRset (server_managed, routing_policy, relative_target...)." }
-        hash: { type: string, description: "Content hash (TTL and values or alias), the ETag of the RRset." }
+        forward: { $ref: "#/components/schemas/Forward" }
+        read_only: { type: string, description: "Why the gate never writes this RRset (server_managed, routing_policy, relative_target, unsupported_forward, duplicate_forward, forward_record...)." }
+        hash: { type: string, description: "Content hash (TTL and values, alias or forward), the ETag of the RRset." }
         status: { type: string, enum: [managed, tainted, pending, foreign, missing] }
         protected: { type: boolean }
         owner: { type: string, description: "Owner team." }
@@ -1957,6 +2121,8 @@ components:
         ttl: { type: integer }
         values: { type: array, items: { type: string } }
         alias: { $ref: "#/components/schemas/Alias" }
+        forward: { $ref: "#/components/schemas/Forward" }
+        require_https: { type: boolean, description: "Forwards only: refuse unless the forwards of the zone answer HTTPS (409 https_unavailable)." }
         delete: { type: boolean }
         expected_hash: { type: string, description: "The RRset must have this content hash." }
         must_not_exist: { type: boolean, description: "The RRset must not exist." }
@@ -1970,9 +2136,11 @@ components:
         old_ttl: { type: integer }
         old_values: { type: array, items: { type: string } }
         old_alias: { $ref: "#/components/schemas/Alias" }
+        old_forward: { $ref: "#/components/schemas/Forward" }
         new_ttl: { type: integer }
         new_values: { type: array, items: { type: string } }
         new_alias: { $ref: "#/components/schemas/Alias" }
+        new_forward: { $ref: "#/components/schemas/Forward" }
 
     PlanRequest:
       type: object
@@ -2036,9 +2204,10 @@ components:
               type: { type: string }
               ttl: { type: integer }
               values: { type: array, items: { type: string } }
+              forward: { $ref: "#/components/schemas/Forward" }
               status: { type: string }
               adoptable: { type: boolean }
-              reason: { type: string, enum: [protected, server_managed, owned_by_other_team, reserved_for_other_team, already_owned, forbidden, relative_target, not_found] }
+              reason: { type: string, enum: [protected, server_managed, owned_by_other_team, reserved_for_other_team, already_owned, forbidden, relative_target, unsupported_forward, duplicate_forward, forward_record, invalid, invalid_forward, not_found] }
         preview_token: { type: string }
 
     AdoptApply:

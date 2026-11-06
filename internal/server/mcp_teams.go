@@ -110,8 +110,8 @@ func (m *mcpServer) ownershipNote(subj *identity.Subject, zone string, unmanaged
 			mine = strings.Join(subj.Teams, ", ")
 		}
 		return fmt.Sprintf("owned by team %s: you are not a member (your teams: %s); ask for a transfer (transfer_propose), approved by someone who may write it through team %s or holds dns.ownership.approve on it", rs.Owner, mine, rs.Owner)
-	case !m.s.cfg.Authz.AllowRRset(subj, policy.ActionRecordWrite, zone, dns.Key{Host: rs.Host, Type: rs.Type}):
-		return fmt.Sprintf("owned by team %s, one of your teams, but your roles do not grant dns.record.write on it", rs.Owner)
+	case !m.s.cfg.Authz.AllowRRset(subj, policy.WriteAction(dns.Key{Host: rs.Host, Type: rs.Type}), zone, dns.Key{Host: rs.Host, Type: rs.Type}):
+		return fmt.Sprintf("owned by team %s, one of your teams, but your roles do not grant %s on it", rs.Owner, policy.WriteAction(dns.Key{Host: rs.Host, Type: rs.Type}))
 	}
 	return fmt.Sprintf("owned by team %s, one of your teams: you may change it", rs.Owner)
 }

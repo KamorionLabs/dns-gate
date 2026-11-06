@@ -95,6 +95,10 @@ func (f *fakeEngine) RRset(ctx context.Context, s *identity.Subject, zone string
 	return nil, &zonewrite.Error{Reason: zonewrite.ReasonNotFound, Message: "no RRset " + key.String() + " in " + zone}
 }
 
+func (f *fakeEngine) HTTPSRedirect(context.Context, *identity.Subject, string) (provider.HTTPSRedirect, error) {
+	return provider.HTTPSRedirect{Status: provider.HTTPSInactive}, nil
+}
+
 type memAudit struct {
 	mu     sync.Mutex
 	events []audit.Event

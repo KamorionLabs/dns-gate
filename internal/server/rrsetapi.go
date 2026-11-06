@@ -114,6 +114,10 @@ func (s *Server) handleRRset(w http.ResponseWriter, r *http.Request, subj *ident
 		writeError(w, http.StatusNotImplemented, "not_implemented", "RRset writes are not available")
 		return
 	}
+	if key.IsForward() {
+		writeError(w, http.StatusBadRequest, "invalid", "URL forwards are written at /api/v1/zones/{zone}/forwards/{host}")
+		return
+	}
 	action := "api.rrset.put"
 	if r.Method == http.MethodDelete {
 		action = "api.rrset.delete"
@@ -194,7 +198,7 @@ func (s *Server) writtenRRset(ctx context.Context, subj *identity.Subject, zone 
 	if rs, err := s.cfg.Engine.RRset(ctx, subj, zone, key); err == nil {
 		return withHash(*rs)
 	}
-	rs := uiapi.RRset{Host: key.Host, Type: key.Type, TTL: c.TTL, Values: c.Values, Alias: c.Alias, Status: uiapi.StatusManaged}
+	rs := uiapi.RRset{Host: key.Host, Type: key.Type, TTL: c.TTL, Values: c.Values, Alias: c.Alias, Forward: c.Forward, Status: uiapi.StatusManaged}
 	if rs.Values == nil {
 		rs.Values = []string{}
 	}
@@ -250,7 +254,7 @@ func withHash(rs uiapi.RRset) uiapi.RRset {
 }
 
 func rrsetHash(rs uiapi.RRset) string {
-	return dns.ContentHash(dns.RRset{Key: dns.Key{Host: rs.Host, Type: rs.Type}, TTL: rs.TTL, Values: rs.Values, Alias: rs.Alias})
+	return dns.ContentHash(dns.RRset{Key: dns.Key{Host: rs.Host, Type: rs.Type}, TTL: rs.TTL, Values: rs.Values, Alias: rs.Alias, Forward: rs.Forward})
 }
 
 // fillHashes sets the content hash the engine left empty.
