@@ -695,6 +695,63 @@ Both are mutations for CSRF (cookie sessions) and the apply requires the same re
 
 `GET /api/v1/zones/{zone}/terraform?team=&hosts=&types=&provider=` (`ui.read`) downloads the **managed** RRsets of a zone as Terraform/OpenTofu configuration: one resource per RRset plus `import` blocks (id `<zone>/<host>/<type>`), so a team can move what it adopted into its own stack. By default the resources are `dnsgate_record_set` of the `KamorionLabs/dnsgate` provider, which talks to the gate REST API and works for every DNS provider behind the gate (attributes `zone`, `name`, `type`, `ttl`, `values`, or an `alias` block `{name, zone_id, evaluate_target_health}`); `provider=eurodns` exports `eurodns_record_set` of the `kamorionlabs/eurodns` provider instead (EuroDNS-compatible API, alias RRsets skipped). `hosts` (host globs) and `types` accept comma-separated values or repeated parameters; `rrsets=www/A,@/MX` exports exactly that selection (for example what was just adopted) and takes precedence over `hosts` and `types`.
 
+## Propagation check
+
+`GET /api/v1/zones/{zone}/rrsets/{host}/{type}/propagation` ([API.md](API.md#dns-propagation)), the `check_propagation` MCP tool and the *Propagation* panel of the UI (RRset drawer, and right after an apply) ask the authoritative name servers of a managed zone and a list of public resolvers for one RRset, and compare their answers with the RRset as read from the provider.
+
+| Field | Default | Description |
+|---|---|---|
+| `propagation.enabled` | `true` | Serves the check (`501 not_implemented` and no MCP tool when `false`). |
+| `propagation.resolvers` | the list below | Public resolvers asked, replacing the default list: `name`, `address` (an IP address with an optional port, never a host name), and for display `location`, `country` (ISO code) and `region` (the UI groups by region: `anycast`, `europe`, `north-america`, `south-america`, `asia`, `oceania`, `africa`, or free text). At most 64. |
+| `propagation.query_timeout` | `2s` | Timeout of one query (100ms to 10s). |
+| `propagation.timeout` | `6s` | Deadline of a whole check (`query_timeout` to 30s): servers that did not answer by then are reported as `error` (`timeout`). |
+| `propagation.concurrency` | `16` | Servers one check asks at once (1 to 64). |
+| `propagation.cache_ttl` | `10s` | A result is reused for the same RRset content during this time (1s to 5m), whoever asks. |
+| `propagation.requests_per_minute` | `30` | Checks of one subject that are not served from the cache (1 to 600, `429` beyond). The UI asks every 5 seconds while a panel is open, for at most 2 minutes. |
+
+```yaml
+propagation:
+  resolvers:
+    - {name: Cloudflare, address: 1.1.1.1, location: Anycast, country: US, region: anycast}
+    - {name: Corporate resolver, address: 10.0.0.2, location: Paris, country: FR, region: europe}
+```
+
+Network: the gate needs outbound **UDP and TCP port 53** to the resolvers and to the name servers of its zones (TCP when an answer is truncated or UDP fails). AWS Lambda functions outside a VPC have it; in a VPC, the security group and the network ACLs must allow it through a NAT gateway. The name servers of a zone are its apex NS as read from the provider (looked up with the system resolver when the gate has none), resolved with the system resolver; those at private, loopback, link-local or shared (100.64.0.0/10) addresses are skipped. The default resolvers are IPv4, as Lambda functions outside a VPC have no IPv6 egress.
+
+Default resolvers, all documented open resolvers needing no account, unfiltered services where the operator offers one:
+
+| Resolver | Address | Location |
+|---|---|---|
+| Cloudflare | `1.1.1.1` | Anycast (US) |
+| Google Public DNS | `8.8.8.8` | Anycast (US) |
+| Quad9 | `9.9.9.9` | Anycast (CH) |
+| OpenDNS (Cisco) | `208.67.222.222` | Anycast (US) |
+| AdGuard DNS, unfiltered | `94.140.14.140` | Anycast (CY) |
+| Control D, unfiltered | `76.76.2.0` | Anycast (CA) |
+| CleanBrowsing, security filter | `185.228.168.9` | Anycast (US) |
+| UltraDNS Public | `64.6.64.6` | Anycast (US) |
+| NextDNS | `45.90.28.0` | Anycast (US) |
+| DNS.SB | `185.222.222.222` | Anycast (DE) |
+| Hurricane Electric | `74.82.42.42` | Anycast (US) |
+| DNS4EU, unfiltered | `86.54.11.100` | European Union |
+| FDN | `80.67.169.12` | Paris, FR |
+| Yandex DNS | `77.88.8.8` | Moscow, RU |
+| CIRA Canadian Shield, private | `149.112.121.10` | Canada |
+| AliDNS (Alibaba) | `223.5.5.5` | Hangzhou, CN |
+| DNSPod (Tencent) | `119.29.29.29` | Shenzhen, CN |
+| 114DNS | `114.114.114.114` | Nanjing, CN |
+| Quad101 (TWNIC) | `101.101.101.101` | Taipei, TW |
+
+Keep in mind when reading a check:
+
+- **Anycast resolvers answer from their site nearest to the gate**: they show the caches near the gate, not those of another continent. The resolvers with a fixed location give the regional view.
+- **Resolvers answer from their cache**: one keeps the previous answer (`stale`) or a negative answer (`missing`, for the SOA minimum) until its TTL runs out; `ttl_left` and `max_ttl_left` tell how long at most. Asking again does not refresh their cache.
+- Some resolvers refuse some clients: OpenDNS refuses queries from France (court order, `refused (censored)`), and a resolver may be unreachable from a given network. Errors do not count against convergence.
+
+Each answer is compared after normalization: values sorted, names absolute and lowercase (a EuroDNS target stored relative to the zone is completed with it), TXT compared on their content whatever the splitting in strings or the quoting, hexadecimal and base64 fields as a server prints them. The CNAME chain of an answer is followed and shown; a name answering a CNAME where another type is expected is `stale`. Alias RRsets (Route53) and EuroDNS `APEX` RRsets are compared on addresses: the authoritative answers, and the target asked from the same resolver (a CDN answers per location, a load balancer rotates its addresses); sharing one address is a match.
+
+A check is a read: no audit event, a debug log line (`propagation`).
+
 ## MCP
 
 `/mcp` exposes the gate to AI assistants with the Model Context Protocol (Streamable HTTP transport, stateless).
@@ -707,7 +764,7 @@ Both are mutations for CSRF (cookie sessions) and the apply requires the same re
 | `mcp.requests_per_minute` | `120` | Rate limit per subject (`429` beyond). |
 | `mcp.public_url` | UI origin, else the request host | Public base URL of the gate, advertised in the protected resource metadata and shown on the Connect page. |
 
-Authentication is the same as the API: an OIDC bearer token of a configured issuer, or a virtual key (`X-APP-ID` / `X-API-KEY`); cookies are ignored. Without credentials the answer is `401` with `WWW-Authenticate: Bearer resource_metadata="<base>/.well-known/oauth-protected-resource"`, and that document (RFC 9728) names the UI issuer as authorization server. Every tool runs with the RBAC and ownership rules of the caller and is audited (`mcp.<tool>`, with `via: mcp` and the client name).
+Authentication is the same as the API: an OIDC bearer token of a configured issuer, or a virtual key (`X-APP-ID` / `X-API-KEY`); cookies are ignored. Without credentials the answer is `401` with `WWW-Authenticate: Bearer resource_metadata="<base>/.well-known/oauth-protected-resource"`, and that document (RFC 9728) names the UI issuer as authorization server. Every tool runs with the RBAC and ownership rules of the caller and is audited (`mcp.<tool>`, with `via: mcp` and the client name), except `check_propagation`.
 
 Tools:
 
@@ -716,6 +773,7 @@ Tools:
 | `list_zones` | read | Readable zones with their counts and [EuroDNS folder](#eurodns-folders) (optional `folder` glob filter); zones discovered in the account but not managed are flagged `unmanaged`. |
 | `list_rrsets` | read | RRsets of a zone (managed, or unmanaged with `dns.read`) with their owner team, and the tombstones (deleted RRsets still reserved for their team); filters on status, host glob, type, owner. |
 | `get_rrset` | read | One RRset, its tombstone, why the caller may or may not change it (`ownership`), and its recent audit history. |
+| `check_propagation` | read | [Propagation check](#propagation-check) of an RRset (`dns.read` on it, managed zones only), with an optional `expect` hash; not audited, like the REST endpoint. Absent when `propagation.enabled` is `false`. |
 | `search_audit` | read | Audit search, same visibility as the UI. |
 | `explain`, `who_can` | read | Policy simulation (`policy.read`); `explain` adds the teams and default team of the simulated subject and, for an RRset, its owner team or reservation; both tell when a rule applied through the folder of the zone (`folder`, `by_folder`). |
 | `list_teams`, `get_team` | read | Teams as `GET /api/v1/teams[/{team}]`, plus the caller's teams (`my_teams`). |
@@ -875,6 +933,7 @@ Validation of the response posted to `/auth/saml/acs`: XML signature of the resp
 | EuroDNS API paths | Opened operations, for zones of a `eurodns` provider only (`404 zone_not_eurodns` otherwise): `getDnsZone`, `saveDnsZone`, `checkDnsZone`, `addDnsRecords`, `deleteDnsRecord` (zone engine), `listDnsZoneSnapshots`, `getSnapShot`, `getDnssecStatus`, `getDomain` (proxied to the account of the zone), and the [zone profiles](#zone-profiles) of the account (`listZoneProfiles`, `createZoneProfile`, `checkZoneProfile`, `getProfile`, `updateUserAPiZoneProfile`, `deleteZoneProfile`: the only EuroDNS provider, or the one named by the `X-DNS-Gate-Provider` header). Every other operation returns `403 operation_denied`. Query strings, encoded separators and dot segments are refused. |
 | `GET /.well-known/dns-gate` | Version and features (`if-match`, `ownership`, `adopt`, `policy-delegation`, `plans`, `rrset-api`, `acme-httpreq`, and when enabled `api-keys`, `acme-dns`, `token-exchange`), unauthenticated. |
 | `POST /.well-known/dns-gate/zones/{zone}/adopt` | Adopt RRsets of a EuroDNS zone (used by the `eurodns` Terraform provider on import; other providers adopt through `/api/v1/zones/{zone}/adopt`). Foreign RRsets need `dns.record.adopt`; RRsets already owned by one of the caller's teams are a no-op and only need `dns.record.write` on the zone. |
+| `GET /api/v1/zones/{zone}/rrsets/{host}/{type}/propagation` | [Propagation check](#propagation-check) of an RRset of a managed zone (`dns.read` on that RRset). |
 | `/api/v1/me`, `/api/v1/connect`, `/api/v1/zones`, `/api/v1/zones/{zone}/rrsets`, `/api/v1/audit` | UI API (`ui.read`; `/zones` lists managed zones then unmanaged ones (`"unmanaged": true`), whose `rrsets` need `dns.read`; `/me` for any bound subject, with its groups and effective permissions; `/connect` returns the public URL, the MCP state, the login issuer and `ui.cli_scope` for the Connect page). |
 | `GET /api/v1/connect/claude-desktop.mcpb` | Claude Desktop extension of the gate (`ui.read`), when MCP and the UI login are enabled, see [Claude Desktop extension](#claude-desktop-extension). |
 | `/api/v1/policy`, `/api/v1/policy/revisions[/{id}[/approve\|reject\|activate\|rollback\|export]]`, `/api/v1/policy/explain`, `/api/v1/policy/who-can`, `/api/v1/policy/virtual-keys/generate` | Policy API, see `internal/uiapi/policy.go`. |

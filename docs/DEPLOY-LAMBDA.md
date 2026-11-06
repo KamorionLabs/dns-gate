@@ -38,7 +38,10 @@ front of EuroDNS** (see [below](#why-not-in-front-of-eurodns)).
   shares ownership, zone locks and versions, the managed policy, the RRset plans and
   the API keys.
 - **No VPC, no NAT**: DynamoDB, Route 53, Secrets Manager, S3 and SSM are reached over
-  their public endpoints with the function role.
+  their public endpoints with the function role. The [propagation check](CONFIG.md#propagation-check)
+  sends DNS queries (UDP and TCP port 53, IPv4) to public resolvers and to the name
+  servers of the zones, which a function outside a VPC may do; in a VPC, allow them
+  through a NAT gateway.
 
 ### What happens where
 

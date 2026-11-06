@@ -293,6 +293,12 @@ mcp:
   requests_per_minute: 120
   public_url: https://dns-gate.example.com
 
+# DNS propagation check (UI panel, GET .../propagation, check_propagation): needs
+# outbound UDP and TCP 53. Without resolvers, a default worldwide list is used.
+propagation:
+  enabled: true
+  requests_per_minute: 30
+
 ui:
   enabled: true
   issuer: entra

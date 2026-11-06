@@ -57,6 +57,11 @@ Also included:
 - **EuroDNS folders**: role rules select zones by EuroDNS folder (`folders: ["/ES/**"]`)
   as well as by name, with the folder shown in the UI, the API and MCP and every move
   audited — see [docs/CONFIG.md](docs/CONFIG.md#eurodns-folders);
+- a **DNS propagation check**: after a change, the answers of the zone's name servers
+  and of public resolvers around the world compared with the expected content (up to
+  date, old answer still cached, no record), with the TTL left, from the UI right
+  after an apply, the API and the MCP server — see
+  [docs/CONFIG.md](docs/CONFIG.md#propagation-check);
 - **one binding for many pipelines**: the owner team derived from a claim
   (`team_from`), so each pipeline matched by a glob owns its own records — see
   [docs/CONFIG.md](docs/CONFIG.md#team-derived-from-a-claim);
