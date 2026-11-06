@@ -506,7 +506,6 @@ func (e *engine) Write(ctx context.Context, s *identity.Subject, zoneIn, ifMatch
 		e.log.Info("rebase ignored out-of-scope differences", "zone", zone, "subject", s.String(), "ignored", plan.Ignored)
 	}
 	if len(plan.Changes) == 0 && !plan.Settings {
-		e.committed(ctx, zone, plan)
 		return cur, version, nil
 	}
 	claims, err := e.validate(ctx, s, p, zone, sets, owns, plan, false)

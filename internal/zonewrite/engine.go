@@ -59,9 +59,9 @@ type Plan struct {
 	// Base, when set, replaces the current zone as the zone the changes are
 	// applied onto (checked and written): it carries the new settings.
 	Base *dns.Zone
-	// Committed, when set, runs after the write succeeded (or when there was
-	// nothing to write), still under the zone lock: state that must follow
-	// the zone is persisted there, never for a refused or failed write. Its
+	// Committed, when set, runs after the write succeeded, still under the
+	// zone lock: state that must follow the zone is persisted there, never
+	// for a refused or failed write nor when there was nothing to write. Its
 	// error is logged, the write having happened.
 	Committed func(context.Context) error
 }

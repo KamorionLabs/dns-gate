@@ -50,6 +50,10 @@ var acmeRoutes = []string{
 	ACMEDNSPath + "/update",
 }
 
+// errValueTaken refuses to take over a value another caller wrote: its
+// author alone may remove it.
+var errValueTaken = &acmeError{http.StatusConflict, "value_taken", "this value is already in the RRset, written by another caller"}
+
 type acmeError struct {
 	status  int
 	reason  string
@@ -180,6 +184,9 @@ func (s *Server) handleHTTPReq(w http.ResponseWriter, r *http.Request, present b
 			return nil, nil, err
 		}
 		own := slices.Contains(led.Values, value)
+		if present && !own && slices.Contains(vals, value) {
+			return nil, nil, errValueTaken
+		}
 		switch {
 		case present && !own:
 			led.Values = append(led.Values, value)
@@ -491,6 +498,9 @@ func (s *Server) handleACMEDNSUpdate(w http.ResponseWriter, r *http.Request) {
 			return nil, nil, err
 		case reg.Version > 0:
 			return nil, nil, &acmeError{http.StatusConflict, "conflict", "the registration was removed meanwhile"}
+		}
+		if slices.Contains(vals, req.TXT) && !slices.Contains(cur.Values, req.TXT) {
+			return nil, nil, errValueTaken
 		}
 		recent := append(slices.DeleteFunc(slices.Clone(cur.Values), func(v string) bool { return v == req.TXT }), req.TXT)
 		var evicted []string

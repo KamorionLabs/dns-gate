@@ -463,7 +463,7 @@ func TestAPIKeyLifecycle(t *testing.T) {
 	if len(list) != 2 {
 		t.Fatalf("list with revoked %s", b)
 	}
-	if status, _ := e.do("POST", "/acme/httpreq/present", basic(other.ID, other.Key), `{"fqdn": "_acme-challenge.example.com.", "value": "v"}`); status != 200 {
+	if status, _ := e.do("POST", "/acme/httpreq/present", basic(other.ID, other.Key), `{"fqdn": "_acme-challenge.example.com.", "value": "w"}`); status != 200 {
 		t.Fatal("other key")
 	}
 	time.Sleep(10 * time.Millisecond)
@@ -974,5 +974,30 @@ func TestAPIKeyRevocationByTeam(t *testing.T) {
 	}
 	if status, _ := e.do("POST", "/acme/httpreq/present", basic(k.ID, k.Key), `{"fqdn": "_acme-challenge.example.com.", "value": "v"}`); status != 401 {
 		t.Fatalf("revoked key accepted: %d", status)
+	}
+}
+
+// A value already in the RRset cannot be claimed by another author, who
+// then could clean it up.
+func TestHTTPReqNoClaimOfOthersValue(t *testing.T) {
+	e := newACMEEnv(t)
+	k1 := e.createKey(`{"name": "one", "team": "web", "role": "acme"}`)
+	k2 := e.createKey(`{"name": "two", "team": "web", "role": "acme"}`)
+	body := `{"fqdn": "_acme-challenge.example.com.", "value": "v1"}`
+	if status, b := e.do("POST", "/acme/httpreq/present", basic(k1.ID, k1.Key), body); status != 200 {
+		t.Fatalf("present: %d %s", status, b)
+	}
+	if status, b := e.do("POST", "/acme/httpreq/present", basic(k2.ID, k2.Key), body); status != 409 || !strings.Contains(string(b), "value_taken") {
+		t.Errorf("claim of another's value: %d %s", status, b)
+	}
+	e.do("POST", "/acme/httpreq/cleanup", basic(k2.ID, k2.Key), body)
+	if got := e.txt("_acme-challenge"); !slices.Equal(got, []string{"v1"}) {
+		t.Fatalf("value of another key removed: %v", got)
+	}
+	hdr := map[string]string{"X-Api-User": k2.ID, "X-Api-Key": k2.Key}
+	v := challenge("shared")
+	e.do("POST", "/acme/httpreq/present", basic(k1.ID, k1.Key), `{"fqdn": "_acme-challenge.www.example.com.", "value": "`+v+`"}`)
+	if status, b := e.do("POST", "/acme/acme-dns/update", hdr, `{"subdomain":"www.example.com", "txt": "`+v+`"}`); status != 409 {
+		t.Errorf("acme-dns claim of another's value: %d %s", status, b)
 	}
 }

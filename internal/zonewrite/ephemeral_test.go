@@ -80,3 +80,29 @@ func TestEphemeralExpiryBounded(t *testing.T) {
 		t.Fatalf("expiry beyond 4 TTLs after creation: %v (created %v)", o.ExpiresAt, created)
 	}
 }
+
+// Committed runs after a write, never for an empty plan nor a refused one.
+func TestCommittedOnlyAfterWrite(t *testing.T) {
+	e := newEnv(t, eurodnstest.Options{})
+	ctx := context.Background()
+	called := 0
+	hook := func(context.Context) error { called++; return nil }
+	if _, _, err := e.eng.Write(ctx, alice, zoneName, "", "noop", func(*dns.Zone) (*Plan, error) {
+		return &Plan{Committed: hook}, nil
+	}); err != nil || called != 0 {
+		t.Fatalf("empty plan: %v, hook called %d", err, called)
+	}
+	acme := &identity.Subject{Issuer: "api-key", ID: "k", Roles: []string{"acme"}, Teams: []string{"team-a"}}
+	if _, _, err := e.eng.Write(ctx, acme, zoneName, "", "refused", func(*dns.Zone) (*Plan, error) {
+		n := dns.RRset{Key: dns.Key{Host: "www", Type: "TXT"}, TTL: 3600, Values: []string{"x"}}
+		return &Plan{Changes: []dns.Change{{Key: n.Key, New: &n}}, Committed: hook}, nil
+	}); err == nil || called != 0 {
+		t.Fatalf("refused write: %v, hook called %d", err, called)
+	}
+	if _, _, err := e.eng.Write(ctx, acme, zoneName, "", "ok", func(*dns.Zone) (*Plan, error) {
+		n := dns.RRset{Key: dns.Key{Host: "_acme-challenge", Type: "TXT"}, TTL: 3600, Values: []string{"x"}}
+		return &Plan{Changes: []dns.Change{{Key: n.Key, New: &n}}, Committed: hook}, nil
+	}); err != nil || called != 1 {
+		t.Fatalf("write: %v, hook called %d", err, called)
+	}
+}
