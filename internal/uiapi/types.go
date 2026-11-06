@@ -155,17 +155,22 @@ type Tombstone struct {
 
 // AuditEntry is one audit event as shown in the UI.
 type AuditEntry struct {
-	Time       time.Time  `json:"time"`
-	RequestID  string     `json:"request_id"`
-	Actor      Actor      `json:"actor"`
-	Teams      []string   `json:"teams,omitempty"`
-	Action     string     `json:"action"`
-	Zone       string     `json:"zone,omitempty"`
-	Decision   string     `json:"decision"` // allow | deny | error
-	Reason     string     `json:"reason,omitempty"`
-	Changes    []Change   `json:"changes,omitempty"`
-	Provider   string     `json:"provider,omitempty"` // id of the provider of the zone
-	SnapshotID SnapshotID `json:"snapshot_id,omitempty"`
+	EventID    string         `json:"event_id,omitempty"`
+	Time       time.Time      `json:"time"`
+	RequestID  string         `json:"request_id"`
+	Actor      Actor          `json:"actor"`
+	AuthMethod string         `json:"auth_method,omitempty"`
+	SourceIP   string         `json:"source_ip,omitempty"`
+	UserAgent  string         `json:"user_agent,omitempty"`
+	Teams      []string       `json:"teams,omitempty"`
+	Action     string         `json:"action"`
+	Zone       string         `json:"zone,omitempty"`
+	Decision   string         `json:"decision"` // allow | deny | error
+	Reason     string         `json:"reason,omitempty"`
+	Changes    []Change       `json:"changes,omitempty"`
+	Provider   string         `json:"provider,omitempty"` // id of the provider of the zone
+	SnapshotID SnapshotID     `json:"snapshot_id,omitempty"`
+	Extra      map[string]any `json:"extra,omitempty"`
 }
 
 // SnapshotID is the provider snapshot taken before a write (EuroDNS). It

@@ -414,10 +414,14 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request, readable ma
 }
 
 func toAuditEntry(e audit.Event) uiapi.AuditEntry {
-	return uiapi.AuditEntry{
+	ae := uiapi.AuditEntry{
+		EventID:    e.EventID,
 		Time:       e.Time,
 		RequestID:  e.RequestID,
 		Actor:      uiapi.Actor{Subject: e.Subject, Name: e.SubjectName, Category: e.SubjectCategory},
+		AuthMethod: e.AuthMethod,
+		SourceIP:   e.SourceIP,
+		UserAgent:  e.UserAgent,
 		Teams:      e.Teams,
 		Action:     e.Action,
 		Zone:       e.Zone,
@@ -427,6 +431,10 @@ func toAuditEntry(e audit.Event) uiapi.AuditEntry {
 		Provider:   e.Provider,
 		SnapshotID: e.SnapshotID,
 	}
+	if len(e.Extra) > 0 {
+		ae.Extra = e.Extra
+	}
+	return ae
 }
 
 func nonNil(s []string) []string {

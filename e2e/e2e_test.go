@@ -77,6 +77,7 @@ func TestEndToEnd(t *testing.T) {
 	t.Run("12_zone_discovery_and_team_from", e.scenarioDiscoveryTeamFrom)
 	t.Run("13_policy_delegation", e.scenarioDelegation)
 	t.Run("14_dnsgate_provider", e.scenarioDNSGateProvider)
+	t.Run("15_audit_hash_chain", e.scenarioAuditChain)
 }
 
 func setup(t *testing.T) *env {
@@ -106,7 +107,7 @@ func setup(t *testing.T) *env {
 	e.idp = oidctest.New()
 	t.Cleanup(e.idp.Close)
 
-	cfg := e.config("mcp: {enabled: true, allow_writes: true}")
+	cfg := e.config("mcp: {enabled: true, allow_writes: true}\naudit: {hash_chain: true}")
 	f, err := os.CreateTemp(t.TempDir(), "audit-*.jsonl")
 	if err != nil {
 		t.Fatal(err)

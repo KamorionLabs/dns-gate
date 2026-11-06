@@ -522,3 +522,18 @@ func TestTeamFamilyFromOneIssuer(t *testing.T) {
 		t.Fatalf("one family, one issuer: %v", err)
 	}
 }
+
+func TestAuditConfig(t *testing.T) {
+	e := env(map[string]string{"EURODNS_API_KEY": "x"})
+	c, err := Parse([]byte(base), e)
+	if err != nil || c.Audit.Format != AuditNative || c.Audit.HashChain {
+		t.Fatalf("default: %+v %v", c.Audit, err)
+	}
+	c, err = Parse([]byte(base+"\naudit: {format: ocsf, hash_chain: true}\n"), e)
+	if err != nil || c.Audit.Format != AuditOCSF || !c.Audit.HashChain {
+		t.Fatalf("ocsf: %+v %v", c.Audit, err)
+	}
+	if _, err := Parse([]byte(base+"\naudit: {format: cef}\n"), e); err == nil || !strings.Contains(err.Error(), "audit.format") {
+		t.Fatalf("unknown format: %v", err)
+	}
+}

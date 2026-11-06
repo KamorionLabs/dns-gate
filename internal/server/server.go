@@ -247,6 +247,11 @@ func (s *Server) withRequestID(next http.Handler) http.Handler {
 		id := requestid.FromHeader(r.Header.Get(requestid.Header))
 		w.Header().Set(requestid.Header, id)
 		ctx := zonewrite.WithRequestID(requestid.With(r.Context(), id), id)
+		var src string
+		if ip := s.cfg.Authn.ClientIP(r); ip.IsValid() {
+			src = ip.String()
+		}
+		ctx = audit.WithRequest(ctx, audit.Request{SourceIP: src, UserAgent: r.UserAgent()})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

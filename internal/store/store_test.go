@@ -152,6 +152,43 @@ func conformance(t *testing.T, s Store, clock *fakeClock) {
 		if _, _, err := s.ListAudit(ctx, AuditQuery{Cursor: "%%%"}); err == nil {
 			t.Fatal("bad cursor accepted")
 		}
+
+		// Event ids: kept as written, and two events of the same request at
+		// the same instant are both kept.
+		same := base.Add(time.Hour)
+		ids := map[string]bool{}
+		for i := 0; i < 5; i++ {
+			e := audit.Event{EventID: audit.NewID(same), Time: same, RequestID: "pull", Subject: "idp:bob", Action: "applyRRsets",
+				Zone: "pull.example.com", Decision: "allow", SourceIP: "192.0.2.1", AuthMethod: audit.AuthOIDC}
+			ids[e.EventID] = true
+			if err := s.AppendAudit(ctx, e); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := s.AppendAudit(ctx, audit.Event{Time: same.Add(-time.Minute), RequestID: "old", Zone: "pull.example.com", Decision: "allow"}); err != nil {
+			t.Fatal(err)
+		}
+		// Pull: everything since a high-water mark, two per page.
+		got := map[string]bool{}
+		cursor := ""
+		for range 10 {
+			page, next, err := s.ListAudit(ctx, AuditQuery{Zone: "pull.example.com", Since: same, Limit: 2, Cursor: cursor})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range page {
+				if got[e.EventID] || !ids[e.EventID] || e.SourceIP != "192.0.2.1" || e.AuthMethod != audit.AuthOIDC {
+					t.Fatalf("pulled %+v", e)
+				}
+				got[e.EventID] = true
+			}
+			if cursor = next; cursor == "" {
+				break
+			}
+		}
+		if len(got) != len(ids) {
+			t.Fatalf("pulled %d events, want %d", len(got), len(ids))
+		}
 	})
 
 	t.Run("policy", func(t *testing.T) { policyConformance(t, s) })

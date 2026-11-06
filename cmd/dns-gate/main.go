@@ -28,6 +28,9 @@ func main() {
 }
 
 func run() error {
+	if len(os.Args) > 1 && os.Args[1] == "audit" {
+		return runAudit(os.Args[2:], os.Stdin, os.Stdout, os.Stderr)
+	}
 	defaultURI := os.Getenv(config.EnvConfigURI)
 	if defaultURI == "" {
 		defaultURI = os.Getenv("DNS_GATE_CONFIG")

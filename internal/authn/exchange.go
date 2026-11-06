@@ -9,6 +9,7 @@ import (
 	"github.com/go-jose/go-jose/v4/jwt"
 
 	"github.com/KamorionLabs/dns-gate/internal/apikey"
+	"github.com/KamorionLabs/dns-gate/internal/audit"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 )
 
@@ -34,6 +35,7 @@ type Exchange struct {
 // bindings). The issuer must have token_exchange; gate tokens and API keys
 // are never exchanged.
 func (a *Authenticator) ExchangeToken(ctx context.Context, raw string) (*Exchange, error) {
+	audit.SetAuthMethod(ctx, audit.AuthTokenExchange)
 	raw = strings.TrimSpace(raw)
 	if apikey.Looks(raw) {
 		return nil, unauthorized("API keys cannot be exchanged")
@@ -93,6 +95,7 @@ func (t *TokenIssuer) IssueExchanged(x *Exchange, ttl time.Duration, now time.Ti
 func (a *Authenticator) AuthenticateBearer(r *http.Request, raw string) (*identity.Subject, error) {
 	raw = strings.TrimSpace(raw)
 	if apikey.Looks(raw) {
+		audit.SetAuthMethod(r.Context(), audit.AuthAPIKey)
 		return a.authenticateAPIKey(r.Context(), "", raw, a.ClientIP(r))
 	}
 	return a.authenticateToken(r.Context(), raw)
