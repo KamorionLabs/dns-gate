@@ -2090,7 +2090,7 @@ components:
         rrsets: { type: array, minItems: 1, maxItems: 100, items: { $ref: "#/components/schemas/RRsetRef" } }
         to_team: { type: string }
         comment: { type: string, maxLength: 2000 }
-        apply: { type: boolean, description: "Approve at once, by the requester (ownership.require_second_approver false only)." }
+        apply: { type: boolean, description: "Approve at once, by the requester (ownership.require_second_approver false only); nothing is stored when the requester could not approve it." }
 
     TeamRenameRequest:
       type: object
@@ -2099,7 +2099,7 @@ components:
       properties:
         to: { type: string }
         comment: { type: string, maxLength: 2000 }
-        apply: { type: boolean, description: "Approve at once, by the requester (ownership.require_second_approver false only)." }
+        apply: { type: boolean, description: "Approve at once, by the requester (ownership.require_second_approver false only); nothing is stored when the requester could not approve it." }
 
     Transfer:
       type: object
