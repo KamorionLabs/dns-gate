@@ -120,6 +120,9 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		LockWait:                cfg.Lock.Wait.D(),
 		CheckOnWrite:            *cfg.CheckOnWrite,
 		EphemeralLifetimeFactor: cfg.Limits.EphemeralLifetimeFactor,
+		TombstoneTTL:            cfg.TombstoneTTL(),
+		TransferTTL:             cfg.Ownership.TransferTTL.D(),
+		Teams:                   authz,
 		Now:                     time.Now,
 		Logger:                  log,
 	})
@@ -149,9 +152,13 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		Plans:       st,
 		Versions:    st,
 		APIKeys:     keys,
+		Tombstones:  st,
 		UIFiles:     web.FS(),
 		Discovery:   disc,
 		Log:         log,
+	}
+	if tr, ok := eng.(zonewrite.Transfers); ok {
+		scfg.Transfers = tr
 	}
 	if hasEuroDNS {
 		scfg.EuroDNS = eurodnsapi.New(eurodnsapi.Config{Engine: eng, Authz: authz, Providers: disc, Log: log})
@@ -165,21 +172,31 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 	return a, nil
 }
 
-// GCPlans purges the expired RRset plans of the store, and the idle ACME
-// registrations.
+// GCPlans purges the expired RRset plans, the idle ACME registrations, the
+// expired tombstones and the transfer requests expired for longer than
+// store.TransferRetention.
 func (a *App) GCPlans(ctx context.Context) error {
-	n, err := a.Store.GCPlans(ctx, a.now())
+	now := a.now()
+	n, err := a.Store.GCPlans(ctx, now)
 	if n > 0 {
 		a.log.Info("plan gc", "removed", n)
 	}
 	if keys, ok := a.Store.(store.APIKeyStore); ok {
-		m, perr := keys.PurgeACMERegistrations(ctx, a.now())
+		m, perr := keys.PurgeACMERegistrations(ctx, now)
 		if m > 0 {
 			a.log.Info("acme registration gc", "removed", m)
 		}
 		err = errors.Join(err, perr)
 	}
-	return err
+	nt, terr := a.Store.GCTombstones(ctx, now)
+	if nt > 0 {
+		a.log.Info("tombstone gc", "removed", nt)
+	}
+	nr, rerr := a.Store.GCTransfers(ctx, now.Add(-store.TransferRetention))
+	if nr > 0 {
+		a.log.Info("transfer gc", "removed", nr)
+	}
+	return errors.Join(err, terr, rerr)
 }
 
 // Handler is the HTTP handler of the gate.

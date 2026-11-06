@@ -6,8 +6,9 @@ info:
   description: |
     The gate's own API: zone inventory with ownership, RRset reads and writes
     with content-hash preconditions, plan/apply, audit log, adoption of records
-    created outside the gate, Terraform export and the policy API (delegations
-    used by Terraform pipelines, and the policy editor of the web UI).
+    created outside the gate, Terraform export, teams and ownership transfers
+    between them, and the policy API (delegations used by Terraform pipelines,
+    and the policy editor of the web UI).
 
     Every write goes through the gate engine: RBAC (zone, host pattern, record
     type), ownership by team, per-zone lock, protected records, blast-radius
@@ -22,6 +23,13 @@ info:
     carry the `X-Gate-CSRF` header (equal to the `gate_csrf` cookie) and a
     same-origin `Origin` header; humans need a recent login for writes
     (`403 reauth_required` otherwise).
+
+    **Teams.** RRsets are owned by teams. A caller acting for several teams
+    writes for its default team (the first one, `default_team` of
+    `/api/v1/me`) and may change the RRsets of any of them; the
+    `X-DNS-Gate-Team` header (or the `team` field of plan and apply) makes it
+    act for one of its teams only (`403 not_team_member` otherwise). The
+    EuroDNS-compatible API always uses the default team.
 
     **Errors** are `{"reason", "message", "details"}`; `reason` is stable and
     meant for programs.
@@ -82,6 +90,8 @@ tags:
     description: Dry runs persisted as single-use plans, then applied.
   - name: adoption
     description: Take over RRsets created outside the gate, and export them to Terraform.
+  - name: teams
+    description: Teams, and ownership transfers between them with a second approver.
   - name: audit
     description: Audit log.
   - name: delegation
@@ -291,6 +301,7 @@ paths:
       - $ref: "#/components/parameters/Zone"
       - $ref: "#/components/parameters/Host"
       - $ref: "#/components/parameters/Type"
+      - $ref: "#/components/parameters/Team"
     get:
       tags: [rrsets]
       operationId: getRRset
@@ -373,6 +384,7 @@ paths:
   /api/v1/zones/{zone}/plan:
     parameters:
       - $ref: "#/components/parameters/Zone"
+      - $ref: "#/components/parameters/Team"
     post:
       tags: [plans]
       operationId: planRRsets
@@ -381,8 +393,9 @@ paths:
         Checks RBAC, ownership, preconditions and provider validation without
         writing. A refusal is `200` with `allowed: false`, `reason` and
         `message`. An allowed plan gets a `plan_id`, bound to the caller, the
-        zone and the zone version, valid for `mcp.plan_ttl` (10 minutes by
-        default) and usable once, on any gate instance.
+        zone, the zone version and the team selected (`team` field or
+        `X-DNS-Gate-Team`), valid for `mcp.plan_ttl` (10 minutes by default)
+        and usable once, on any gate instance.
       requestBody:
         required: true
         content:
@@ -399,6 +412,7 @@ paths:
   /api/v1/zones/{zone}/apply:
     parameters:
       - $ref: "#/components/parameters/Zone"
+      - $ref: "#/components/parameters/Team"
     post:
       tags: [plans]
       operationId: applyPlan
@@ -407,8 +421,10 @@ paths:
         Fails with `412 precondition` when the zone changed since the plan,
         `410 plan_expired` when the plan expired, `404 plan_not_found` for an
         unknown or already applied plan or the plan of another zone (plan
-        again in these three cases), and `403 forbidden` for the plan of
-        another caller.
+        again in these three cases), `403 forbidden` for the plan of
+        another caller, and `400 team_mismatch` when the `team` field or
+        `X-DNS-Gate-Team` names another team than the plan's. The plan is
+        applied for its team.
       requestBody:
         required: true
         content:
@@ -430,11 +446,18 @@ paths:
   /api/v1/zones/{zone}/adopt/preview:
     parameters:
       - $ref: "#/components/parameters/Zone"
+      - $ref: "#/components/parameters/Team"
     post:
       tags: [adoption]
       operationId: previewAdopt
       summary: Preview the adoption of foreign RRsets
-      description: Requires dns.record.adopt.
+      description: |
+        Requires dns.record.adopt. The RRsets go to `owner`, the caller's
+        team by default; another team than the caller's requires
+        dns.ownership.approve on the zone (`403 forbidden` otherwise). An
+        RRset deleted recently by another team (tombstone) is not adoptable
+        (`reserved_for_other_team`) unless the caller holds
+        dns.ownership.approve.
       requestBody:
         required: true
         content:
@@ -451,6 +474,7 @@ paths:
   /api/v1/zones/{zone}/adopt:
     parameters:
       - $ref: "#/components/parameters/Zone"
+      - $ref: "#/components/parameters/Team"
     post:
       tags: [adoption]
       operationId: adopt
@@ -515,6 +539,200 @@ paths:
           content:
             text/plain:
               schema: { type: string }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/zones/{zone}/transfers:
+    parameters:
+      - $ref: "#/components/parameters/Zone"
+      - $ref: "#/components/parameters/Team"
+    post:
+      tags: [teams]
+      operationId: proposeTransfer
+      summary: Request the transfer of RRsets to another team
+      description: |
+        The RRsets must be owned by one team (or reserved for it by a
+        tombstone after a recent delete). The caller needs dns.record.write
+        or dns.ownership.approve on the zone and must be a member of the
+        owner team or of the target team, unless it holds
+        dns.ownership.approve. The request waits for a second person
+        (`ownership.transfer_ttl`, 7 days by default).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TransferProposal" }
+      responses:
+        "201":
+          description: Proposed transfer.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Transfer" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/transfers:
+    get:
+      tags: [teams]
+      operationId: listTransfers
+      summary: Transfer requests the caller can see, newest first
+      description: |
+        Requests of the zones the caller can read and of its teams; team
+        renames for policy.read holders and the members of both teams.
+        `can_decide` tells which ones the caller may approve (the inbox:
+        `status=proposed`).
+      parameters:
+        - { name: zone, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { type: string, enum: [proposed, approved, applied, rejected, expired, failed] } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 50 } }
+        - { name: cursor, in: query, schema: { type: string } }
+      responses:
+        "200":
+          description: Page of transfers.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TransferPage" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/transfers/{id}:
+    parameters:
+      - $ref: "#/components/parameters/TransferID"
+    get:
+      tags: [teams]
+      operationId: getTransfer
+      summary: One transfer request
+      responses:
+        "200":
+          description: Transfer.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Transfer" }
+        "404": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/transfers/{id}/approve:
+    parameters:
+      - $ref: "#/components/parameters/TransferID"
+    post:
+      tags: [teams]
+      operationId: approveTransfer
+      summary: Approve a transfer request, which applies it
+      description: |
+        By a member of the owner team or a holder of dns.ownership.approve on
+        the zone (another policy.approve holder for a team rename), never by
+        the requester (`403 forbidden`). The ownership entries change team
+        in one store transaction, after checking under the zone lock that
+        they still belong to the team with the content hash of the request,
+        in the store and upstream; otherwise the transfer is `failed` and the
+        answer is `412 precondition` with the transfer in `transfer`.
+        `410 expired` when the request expired, `412 precondition` when it
+        was already decided.
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DecisionRequest" }
+      responses:
+        "200":
+          description: Applied transfer.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Transfer" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "412": { $ref: "#/components/responses/Error" }
+        "423": { $ref: "#/components/responses/Locked" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/transfers/{id}/reject:
+    parameters:
+      - $ref: "#/components/parameters/TransferID"
+    post:
+      tags: [teams]
+      operationId: rejectTransfer
+      summary: Reject a transfer request, or withdraw one's own
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DecisionRequest" }
+      responses:
+        "200":
+          description: Rejected transfer.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Transfer" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "410": { $ref: "#/components/responses/Error" }
+        "412": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/teams:
+    get:
+      tags: [teams]
+      operationId: listTeams
+      summary: Teams of the policy
+      description: |
+        Declared teams (base file and managed layer), teams referenced
+        without a declaration (`auto`, during the migration to the teams
+        block), team_from families and team_claim issuers, and the teams
+        owning RRsets in the zones the caller can read that nothing else
+        covers (`store`). Members are shown to policy.read holders only.
+        Requires ui.read on a zone.
+      responses:
+        "200":
+          description: Teams.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TeamList" }
+        "403": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/teams/{team}:
+    parameters:
+      - $ref: "#/components/parameters/TeamName"
+    get:
+      tags: [teams]
+      operationId: getTeam
+      summary: A team, what it owns and its pending transfers
+      responses:
+        "200":
+          description: Team.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TeamDetail" }
+        "404": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/teams/{team}/rename:
+    parameters:
+      - $ref: "#/components/parameters/TeamName"
+    post:
+      tags: [teams]
+      operationId: renameTeam
+      summary: Request moving every RRset of a team to another team
+      description: |
+        Bulk transfer for migrations, in every managed zone, store only:
+        proposed by a policy.propose holder, applied when another
+        policy.approve holder approves it (`/api/v1/transfers/{id}/approve`).
+        The policy still names the old team: change the bindings in a policy
+        revision too. Applied zone by zone; a failure leaves the RRsets
+        already moved with the new team and a new rename moves the rest.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TeamRenameRequest" }
+      responses:
+        "201":
+          description: Proposed rename.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Transfer" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
 
   /api/v1/audit:
@@ -1231,6 +1449,25 @@ components:
       in: path
       required: true
       schema: { type: string, pattern: "^[a-z0-9-]{8,64}$" }
+    TransferID:
+      name: id
+      in: path
+      required: true
+      schema: { type: string, examples: ["tr-1780000000000-0a1b2c3d4e"] }
+    TeamName:
+      name: team
+      in: path
+      required: true
+      schema: { type: string, pattern: "^[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?$" }
+    Team:
+      name: X-DNS-Gate-Team
+      in: header
+      description: |
+        One of the caller's teams to act for: created and adopted RRsets go
+        to it and only its RRsets may be changed (`403 not_team_member` when
+        the caller is not a member). Default: the caller's first team, with
+        write access to the RRsets of all its teams.
+      schema: { type: string }
 
   headers:
     RRsetETag:
@@ -1292,17 +1529,17 @@ components:
             Stable machine-readable reason; clients should treat an unknown
             value by its HTTP status. Status by reason:
             400 invalid, relative_target, bad_request, invalid_policy,
-            delegation_required;
+            delegation_required, team_mismatch;
             401 unauthenticated;
             403 forbidden, not_owner, too_many_changes, reauth_required, csrf,
             no_binding, bound_claims, source_ip, policy_not_editable,
-            self_approval, delegated_object, session_required;
+            self_approval, delegated_object, session_required, not_team_member;
             404 not_found, plan_not_found, zone_not_eurodns;
             405 method_not_allowed;
             409 foreign_rrset, tainted, adopt_conflict, not_owner (delegated
             object of another delegation), policy_busy, conflict, name_taken,
             stale_revision, approval_required, invalid_status, already_decided;
-            410 plan_expired; 412 precondition; 413 too_large; 415 bad_request;
+            410 plan_expired, expired; 412 precondition; 413 too_large; 415 bad_request;
             423 zone_locked; 429 rate_limited; 500 internal;
             501 not_implemented; 502 upstream; 503 store_unavailable,
             unavailable; 504 timeout. API keys and ACME add 403
@@ -1314,6 +1551,7 @@ components:
             - bad_request
             - invalid_policy
             - delegation_required
+            - team_mismatch
             - unauthenticated
             - forbidden
             - not_owner
@@ -1327,6 +1565,7 @@ components:
             - self_approval
             - delegated_object
             - session_required
+            - not_team_member
             - not_found
             - plan_not_found
             - zone_not_eurodns
@@ -1342,6 +1581,7 @@ components:
             - invalid_status
             - already_decided
             - plan_expired
+            - expired
             - precondition
             - too_large
             - zone_locked
@@ -1361,6 +1601,9 @@ components:
             - too_many_registrations
         message: { type: string }
         details: {}
+        transfer:
+          $ref: "#/components/schemas/Transfer"
+          description: The failed transfer, when its approval could not apply it.
         errors:
           type: array
           description: Validation errors of a policy document (reason invalid_policy).
@@ -1412,6 +1655,7 @@ components:
         teams: { type: array, items: { type: string } }
         groups: { type: array, items: { type: string } }
         permissions: { type: array, items: { $ref: "#/components/schemas/Permission" } }
+        default_team: { type: string, description: "Team the caller writes for unless it selects another of its teams." }
 
     Connect:
       type: object
@@ -1526,7 +1770,7 @@ components:
     Change:
       type: object
       properties:
-        op: { type: string, enum: [create, update, delete, adopt, taint, expire] }
+        op: { type: string, enum: [create, update, delete, adopt, taint, expire, transfer] }
         host: { type: string }
         type: { type: string }
         old_ttl: { type: integer }
@@ -1546,6 +1790,7 @@ components:
           minItems: 1
           maxItems: 100
           items: { $ref: "#/components/schemas/RRsetChange" }
+        team: { type: string, description: "One of the caller's teams to act for (overrides X-DNS-Gate-Team)." }
 
     ApplyRequest:
       type: object
@@ -1553,6 +1798,7 @@ components:
       additionalProperties: false
       properties:
         plan_id: { type: string }
+        team: { type: string, description: "Must be the team of the plan, if the plan has one." }
 
     PlanResult:
       type: object
@@ -1565,6 +1811,7 @@ components:
         changes: { type: array, items: { $ref: "#/components/schemas/Change" } }
         zone_version: { type: integer }
         plan_id: { type: string }
+        team: { type: string, description: "Team selected for the plan or apply, empty for the default team." }
 
     RRsetRef:
       type: object
@@ -1579,7 +1826,7 @@ components:
         rrsets: { type: array, items: { $ref: "#/components/schemas/RRsetRef" } }
         hosts: { type: array, items: { type: string }, description: "Host globs, combined with types." }
         types: { type: array, items: { type: string } }
-        owner: { type: string, description: "Team; defaults to the caller's team." }
+        owner: { type: string, description: "Team; defaults to the caller's team. Another team requires dns.ownership.approve." }
 
     AdoptPreview:
       type: object
@@ -1597,7 +1844,7 @@ components:
               values: { type: array, items: { type: string } }
               status: { type: string }
               adoptable: { type: boolean }
-              reason: { type: string, enum: [protected, server_managed, owned_by_other_team, already_owned, forbidden, relative_target, not_found] }
+              reason: { type: string, enum: [protected, server_managed, owned_by_other_team, reserved_for_other_team, already_owned, forbidden, relative_target, not_found] }
         preview_token: { type: string }
 
     AdoptApply:
@@ -1766,6 +2013,105 @@ components:
       type: object
       properties:
         comment: { type: string }
+
+    TeamMembers:
+      type: object
+      properties:
+        groups: { type: array, items: { type: string } }
+        subjects: { type: array, items: { $ref: "#/components/schemas/SubjectMatcher" } }
+
+    TeamInfo:
+      type: object
+      required: [name, kind, roles]
+      properties:
+        name: { type: string, description: 'Team name; "<prefix>*" for a team_from family, "*" for a team_claim issuer.' }
+        kind: { type: string, enum: [declared, auto, family, claim, store] }
+        layer: { type: string, enum: [base, managed], description: "Layer declaring the team." }
+        description: { type: string }
+        members: { $ref: "#/components/schemas/TeamMembers" }
+        roles: { type: array, items: { type: string }, description: "Roles of the bindings and virtual keys naming the team." }
+        virtual_keys: { type: array, items: { type: string } }
+        family: { $ref: "#/components/schemas/TeamFrom" }
+        issuer: { type: string, description: "Issuer of a claim kind." }
+        warning: { type: string }
+
+    TeamList:
+      type: object
+      required: [strict, teams]
+      properties:
+        strict: { type: boolean, description: "Team references must be declared (the base file has a teams block)." }
+        teams: { type: array, items: { $ref: "#/components/schemas/TeamInfo" } }
+
+    TeamDetail:
+      allOf:
+        - $ref: "#/components/schemas/TeamInfo"
+        - type: object
+          required: [owned, transfers]
+          properties:
+            owned:
+              type: array
+              description: RRsets and tombstones of the team per zone the caller can read.
+              items:
+                type: object
+                properties:
+                  zone: { type: string }
+                  rrsets: { type: integer }
+                  tombstones: { type: integer }
+            transfers: { type: array, items: { $ref: "#/components/schemas/Transfer" }, description: "Pending transfers from or to the team." }
+
+    TransferProposal:
+      type: object
+      required: [rrsets, to_team, comment]
+      additionalProperties: false
+      properties:
+        rrsets: { type: array, minItems: 1, maxItems: 100, items: { $ref: "#/components/schemas/RRsetRef" } }
+        to_team: { type: string }
+        comment: { type: string, maxLength: 2000 }
+
+    TeamRenameRequest:
+      type: object
+      required: [to, comment]
+      additionalProperties: false
+      properties:
+        to: { type: string }
+        comment: { type: string, maxLength: 2000 }
+
+    Transfer:
+      type: object
+      required: [id, kind, from_team, to_team, rrsets, status, requester, created_at, expires_at, can_decide]
+      properties:
+        id: { type: string }
+        kind: { type: string, enum: [rrsets, rename] }
+        zone: { type: string, description: "Empty for a rename." }
+        from_team: { type: string }
+        to_team: { type: string }
+        rrsets:
+          type: array
+          items:
+            type: object
+            properties:
+              host: { type: string }
+              type: { type: string }
+              hash: { type: string, description: "Content hash when the request was made." }
+              tombstone: { type: boolean, description: "A recently deleted RRset still reserved for its team." }
+        status: { type: string, enum: [proposed, approved, applied, rejected, expired, failed] }
+        comment: { type: string }
+        requester: { $ref: "#/components/schemas/Actor" }
+        created_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time }
+        decided_by: { $ref: "#/components/schemas/Actor" }
+        decided_at: { type: string, format: date-time }
+        decision_comment: { type: string }
+        moved: { type: integer, description: "RRsets and tombstones moved." }
+        error: { type: string, description: "Why a failed transfer was not applied." }
+        can_decide: { type: boolean, description: "The caller may approve or reject it." }
+
+    TransferPage:
+      type: object
+      required: [transfers]
+      properties:
+        transfers: { type: array, items: { $ref: "#/components/schemas/Transfer" } }
+        next_cursor: { type: string }
 
     PolicyObject:
       type: object

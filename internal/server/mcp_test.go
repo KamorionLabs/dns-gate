@@ -30,6 +30,8 @@ type fakeOps struct {
 	// applyErrs are returned by the next ApplyRRsets calls, in order.
 	applyErrs []error
 	calls     []int64
+	// teams are the teams of the subject of each plan and apply.
+	teams [][]string
 }
 
 func (f *fakeOps) ZoneVersion(ctx context.Context, zone string) (int64, error) {
@@ -58,6 +60,7 @@ func (f *fakeOps) AdoptMany(ctx context.Context, s *identity.Subject, zone strin
 func (f *fakeOps) PlanRRsets(ctx context.Context, s *identity.Subject, zone string, changes []uiapi.RRsetChange) (*uiapi.PlanResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.teams = append(f.teams, s.Teams)
 	return &uiapi.PlanResult{Zone: zone, Allowed: true, ZoneVersion: f.version, Changes: []uiapi.Change{{Op: "create", Host: changes[0].Host, Type: changes[0].Type, NewValues: changes[0].Values}}}, nil
 }
 
@@ -65,6 +68,7 @@ func (f *fakeOps) ApplyRRsets(ctx context.Context, s *identity.Subject, zone str
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls = append(f.calls, v)
+	f.teams = append(f.teams, s.Teams)
 	if len(f.applyErrs) > 0 {
 		err := f.applyErrs[0]
 		f.applyErrs = f.applyErrs[1:]

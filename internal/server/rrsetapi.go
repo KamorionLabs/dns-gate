@@ -63,10 +63,12 @@ type rrsetBody struct {
 
 type planRequest struct {
 	Changes []uiapi.RRsetChange `json:"changes"`
+	Team    string              `json:"team,omitempty"`
 }
 
 type applyRequest struct {
 	PlanID string `json:"plan_id"`
+	Team   string `json:"team,omitempty"`
 }
 
 // rrsetKey validates and normalizes the zone, host and type of a path.
@@ -286,13 +288,20 @@ func (s *Server) handlePlan(w http.ResponseWriter, r *http.Request, subj *identi
 		writeError(w, http.StatusBadRequest, "invalid", "between 1 and 100 changes are required")
 		return
 	}
+	subj, e := forTeam(subj, req.Team)
+	if e != nil {
+		s.writePolicyError(w, e)
+		return
+	}
+	team := selectedTeam(r, req.Team)
 	plan, err := s.cfg.Ops.PlanRRsets(r.Context(), subj, zone, req.Changes)
 	if err != nil {
 		s.apiError(w, r, "api.plan", zone, err)
 		return
 	}
+	plan.Team = team
 	if plan.Allowed {
-		if plan.PlanID, err = s.savePlan(r.Context(), subj, zone, req.Changes, plan.ZoneVersion); err != nil {
+		if plan.PlanID, err = s.savePlan(r.Context(), subj, zone, team, req.Changes, plan.ZoneVersion); err != nil {
 			s.log.Error("save plan", "zone", zone, "err", err)
 			writeError(w, http.StatusServiceUnavailable, "store_unavailable", "plan storage unavailable")
 			return
@@ -346,6 +355,19 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request, subj *ident
 		writeError(w, status, reason, err.Error())
 		return
 	}
+	team := p.Team
+	if want := selectedTeam(r, req.Team); want != "" && team != "" && want != team {
+		s.apiAudit(r, subj, "api.apply", zone, "deny", "team_mismatch", extra)
+		writeError(w, http.StatusBadRequest, "team_mismatch", "the plan was made for team "+team+", not "+want)
+		return
+	} else if team == "" {
+		team = want
+	}
+	subj, e := forTeam(subj, team)
+	if e != nil {
+		s.writePolicyError(w, e)
+		return
+	}
 	res, err := s.cfg.Ops.ApplyRRsets(r.Context(), subj, p.Zone, p.Changes, p.ZoneVersion)
 	if err != nil {
 		s.apiAudit(r, subj, "api.apply", zone, "error", reasonOf(err), extra)
@@ -353,7 +375,7 @@ func (s *Server) handleApply(w http.ResponseWriter, r *http.Request, subj *ident
 		return
 	}
 	s.apiAudit(r, subj, "api.apply", zone, "allow", "", extra)
-	res.PlanID = req.PlanID
+	res.PlanID, res.Team = req.PlanID, team
 	if res.Changes == nil {
 		res.Changes = []uiapi.Change{}
 	}
@@ -388,12 +410,12 @@ func (s *Server) planTTL() time.Duration {
 }
 
 // savePlan persists a plan of subj and returns its id.
-func (s *Server) savePlan(ctx context.Context, subj *identity.Subject, zone string, changes []uiapi.RRsetChange, version int64) (string, error) {
+func (s *Server) savePlan(ctx context.Context, subj *identity.Subject, zone, team string, changes []uiapi.RRsetChange, version int64) (string, error) {
 	var b [16]byte
 	_, _ = rand.Read(b[:])
 	now := s.now().UTC()
 	p := store.Plan{
-		ID: "plan-" + hex.EncodeToString(b[:]), Subject: subj.String(), Zone: zone,
+		ID: "plan-" + hex.EncodeToString(b[:]), Subject: subj.String(), Zone: zone, Team: team,
 		Changes: changes, ZoneVersion: version, CreatedAt: now, ExpiresAt: now.Add(s.planTTL()),
 	}
 	if err := s.cfg.Plans.PutPlan(ctx, p); err != nil {
@@ -419,28 +441,43 @@ func (s *Server) takePlan(ctx context.Context, id string, subj *identity.Subject
 	return nil, errors.New("plan storage unavailable")
 }
 
+// selectedTeam is the team a request names: the team field of its body,
+// else the X-DNS-Gate-Team header.
+func selectedTeam(r *http.Request, field string) string {
+	if field != "" {
+		return field
+	}
+	return strings.TrimSpace(r.Header.Get(TeamHeader))
+}
+
 // apiError maps engine errors of the REST API to HTTP: 423 when the zone
 // is locked, "invalid" for 400.
 func (s *Server) apiError(w http.ResponseWriter, r *http.Request, action, zone string, err error) {
 	if ze, ok := zonewrite.AsError(err); ok {
-		status, reason := reasonStatus(ze.Reason), string(ze.Reason)
-		switch ze.Reason {
-		case zonewrite.ReasonLocked:
-			status = http.StatusLocked
-			w.Header().Set("Retry-After", "5")
-		case zonewrite.ReasonNotFound:
-			status = http.StatusNotFound
-		case zonewrite.ReasonInvalid:
-			reason = "invalid"
-			var ie *provider.InvalidError
-			if errors.As(err, &ie) && ie.Code != "" {
-				reason = ie.Code
-			}
-		}
+		status, reason := apiStatus(w, err, ze)
 		writeJSON(w, status, errorBody{Reason: reason, Message: ze.Message, Details: ze.Details})
 		return
 	}
 	s.opsError(w, r, nil, action, zone, err)
+}
+
+// apiStatus is the status and reason of an engine error on the REST API.
+func apiStatus(w http.ResponseWriter, err error, ze *zonewrite.Error) (int, string) {
+	status, reason := reasonStatus(ze.Reason), string(ze.Reason)
+	switch ze.Reason {
+	case zonewrite.ReasonLocked:
+		status = http.StatusLocked
+		w.Header().Set("Retry-After", "5")
+	case zonewrite.ReasonNotFound:
+		status = http.StatusNotFound
+	case zonewrite.ReasonInvalid:
+		reason = "invalid"
+		var ie *provider.InvalidError
+		if errors.As(err, &ie) && ie.Code != "" {
+			reason = ie.Code
+		}
+	}
+	return status, reason
 }
 
 // apiAudit records a decision of the REST API itself (the engine audits the

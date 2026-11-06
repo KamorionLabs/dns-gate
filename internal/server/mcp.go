@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -484,7 +485,7 @@ func (m *mcpServer) addWriteTools(srv *mcp.Server) {
 			return nil, uiapi.PlanResult{}, toolError(err)
 		}
 		if plan.Allowed {
-			if plan.PlanID, err = m.s.savePlan(ctx, subj, zone, in.Changes, plan.ZoneVersion); err != nil {
+			if plan.PlanID, err = m.s.savePlan(ctx, subj, zone, "", in.Changes, plan.ZoneVersion); err != nil {
 				m.s.log.Error("save plan", "zone", zone, "err", err)
 				return nil, uiapi.PlanResult{}, errors.New("plan storage unavailable")
 			}
@@ -507,6 +508,13 @@ func (m *mcpServer) addWriteTools(srv *mcp.Server) {
 			_, reason := planErrorStatus(err)
 			m.audit(ctx, req, subj, "apply_rrset_change", "", "deny", reason, map[string]any{"plan_id": in.PlanID})
 			return nil, uiapi.PlanResult{}, fmt.Errorf("%s: %w", reason, err)
+		}
+		if p.Team != "" {
+			if !slices.Contains(subj.Teams, p.Team) {
+				m.audit(ctx, req, subj, "apply_rrset_change", p.Zone, "deny", "not_team_member", map[string]any{"plan_id": in.PlanID})
+				return nil, uiapi.PlanResult{}, fmt.Errorf("not_team_member: the plan was made for team %s", p.Team)
+			}
+			subj = subj.ForTeam(p.Team)
 		}
 		res, err := m.s.cfg.Ops.ApplyRRsets(ctx, subj, p.Zone, p.Changes, p.ZoneVersion)
 		if err != nil {

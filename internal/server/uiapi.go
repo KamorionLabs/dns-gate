@@ -77,10 +77,21 @@ func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	authn.StripCredentials(r.Header)
+	me := subj
+	if team := strings.TrimSpace(r.Header.Get(TeamHeader)); team != "" && pattern != "/api/v1/me" {
+		var e *policyError
+		if subj, e = forTeam(subj, team); e != nil {
+			s.writePolicyError(w, e)
+			return
+		}
+	}
 	ctx := identity.With(r.Context(), subj)
 	r = r.WithContext(ctx)
 	rest := strings.TrimPrefix(r.URL.Path, "/api/v1")
 	switch {
+	case pattern == routeZoneTransfers || pattern == routeTeamRename || strings.HasPrefix(pattern, routeTransfers):
+		s.handleTransfers(w, r, subj, sess, pattern, params)
+		return
 	case pattern == routePolicy || strings.HasPrefix(pattern, routePolicy+"/"):
 		s.handlePolicyAPI(w, r, subj, sess, strings.TrimPrefix(rest, "/policy"))
 		return
@@ -113,15 +124,21 @@ func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.Trim(rest, "/"), "/")
 	switch {
 	case rest == "/me":
-		writeJSON(w, http.StatusOK, uiapi.Me{
-			Subject:     subj.String(),
-			Name:        subj.Name,
-			Category:    subj.Category,
-			Roles:       nonNil(subj.Roles),
-			Teams:       nonNil(subj.Teams),
-			Groups:      nonNil(subj.Groups),
-			Permissions: s.cfg.Policy.Current().Permissions(subj.Roles),
-		})
+		out := uiapi.Me{
+			Subject:     me.String(),
+			Name:        me.Name,
+			Category:    me.Category,
+			Roles:       nonNil(me.Roles),
+			Teams:       nonNil(me.Teams),
+			Groups:      nonNil(me.Groups),
+			Permissions: s.cfg.Policy.Current().Permissions(me.Roles),
+		}
+		if len(me.Teams) > 0 {
+			out.DefaultTeam = me.Teams[0]
+		}
+		writeJSON(w, http.StatusOK, out)
+	case pattern == routeTeams || pattern == routeTeam:
+		s.handleTeams(w, r, subj, readable, strings.ToLower(params["team"]))
 	case rest == "/connect":
 		writeJSON(w, http.StatusOK, s.connectInfo(r))
 	case rest == claudeDesktopExtensionPath:

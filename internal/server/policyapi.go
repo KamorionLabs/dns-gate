@@ -482,6 +482,9 @@ func (s *Server) policyPropose(w http.ResponseWriter, r *http.Request, subj *ide
 	if req.ParentID != activeID {
 		return perr(http.StatusConflict, "stale_revision", "the policy changed since the edit started: reload and reapply")
 	}
+	if req.Document.Teams == nil {
+		req.Document.Teams = activeDoc.Teams
+	}
 	if e := s.carryDelegated(subj, &req.Document, activeDoc, req.TakeOver); e != nil {
 		s.policyAudit(r, subj, "policy.propose", "", "deny", e.reason, map[string]any{"take_over": req.TakeOver})
 		return e

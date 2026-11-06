@@ -69,6 +69,12 @@ type Config struct {
 	// Versions reads zone versions: ETag of the REST inventory, disabled
 	// when nil.
 	Versions ZoneVersions
+	// Transfers serves the ownership transfer requests and team renames;
+	// their routes answer 501 when nil.
+	Transfers zonewrite.Transfers
+	// Tombstones feeds the team views with the RRsets reserved for each
+	// team; optional.
+	Tombstones TombstoneLister
 	// HTTPClient is used for the UI OIDC login (discovery, token exchange)
 	// and the SAML IdP metadata.
 	HTTPClient *http.Client
@@ -121,6 +127,7 @@ type Server struct {
 	log     *slog.Logger
 	now     func() time.Time
 	delegMu sync.Mutex // serializes delegated policy writes in this replica
+	owners  ownerCounts
 }
 
 // New builds the server.
@@ -379,6 +386,8 @@ func reasonStatus(r zonewrite.Reason) int {
 		return http.StatusNotFound
 	case zonewrite.ReasonUpstream:
 		return http.StatusBadGateway
+	case zonewrite.ReasonExpired:
+		return http.StatusGone
 	default:
 		return http.StatusInternalServerError
 	}

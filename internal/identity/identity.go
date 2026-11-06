@@ -43,6 +43,13 @@ const (
 	CategorySystem   = "system" // gate:* actors (reconciler, garbage collector)
 )
 
+// ForTeam returns a copy of the subject acting for one of its teams only.
+func (s *Subject) ForTeam(team string) *Subject {
+	c := *s
+	c.Teams = []string{team}
+	return &c
+}
+
 // String returns "issuer:id".
 func (s *Subject) String() string {
 	if s == nil {
