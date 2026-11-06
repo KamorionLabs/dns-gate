@@ -52,6 +52,7 @@ test('target URLs must be absolute http or https URLs', () => {
   assert.match(urlError('https://example.com/' + 'a'.repeat(MAX_URL))!, /at most/);
   assert.equal(textError('The title', 'Shop & co.', MAX_TITLE), null);
   assert.match(textError('The title', '<b>x</b>', MAX_TITLE)!, /plain text/);
+  assert.match(textError('The title', 'Shop\u202egnp', MAX_TITLE)!, /plain text/);
   assert.match(textError('The title', 'x'.repeat(MAX_TITLE + 1), MAX_TITLE)!, /at most/);
   assert.match(urlError('https://')!, /valid URL|host/);
 });

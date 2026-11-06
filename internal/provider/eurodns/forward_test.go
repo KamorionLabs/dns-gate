@@ -309,3 +309,15 @@ func TestHTTPSRedirectErrorsExpireAndRequestsDoNotCancel(t *testing.T) {
 		t.Fatalf("failure cached too long or expiry ignored: %+v", st)
 	}
 }
+
+func TestForwardRefusesFormatCharactersAndUnicodeHosts(t *testing.T) {
+	if msg := TextProblem("Shop‮gnp.exe", MaxTitle); msg == "" {
+		t.Fatal("bidirectional override accepted in a frame field")
+	}
+	if msg := URLProblem("https://example.net/a​b"); msg == "" {
+		t.Fatal("zero-width space accepted in a URL")
+	}
+	if msg := URLProblem("https://exämple.net/"); !strings.Contains(msg, "xn--exmple-cua.net") {
+		t.Fatalf("IDN host: %q", msg)
+	}
+}

@@ -65,7 +65,7 @@ export const MAX_KEYWORDS = 500;
 export const MAX_DESCRIPTION = 1000;
 export const MAX_URL = 2048;
 
-const CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
+const CONTROL = /[\u0000-\u001f\u007f-\u009f]|\p{Cf}/u;
 
 /** Why a target URL is refused, null when the gate accepts it: an absolute http:// or https:// URL, without user information nor characters to percent-encode. */
 export function urlError(raw: string): string | null {

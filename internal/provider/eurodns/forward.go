@@ -11,6 +11,7 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/provider"
 	api "github.com/KamorionLabs/eurodns-go"
+	"golang.org/x/net/idna"
 )
 
 // Read-only reasons of URL forwards and forward pseudo records.
@@ -99,8 +100,8 @@ func URLProblem(raw string) string {
 	if len(raw) > MaxURL {
 		return fmt.Sprintf("is longer than %d bytes", MaxURL)
 	}
-	if strings.IndexFunc(raw, func(r rune) bool { return unicode.IsControl(r) || unicode.IsSpace(r) }) >= 0 {
-		return "has spaces or control characters"
+	if strings.IndexFunc(raw, func(r rune) bool { return unicode.IsControl(r) || unicode.IsSpace(r) || unicode.Is(unicode.Cf, r) }) >= 0 {
+		return "has spaces, control or format characters"
 	}
 	if strings.ContainsAny(raw, "<>\"'`\\{}|^") {
 		return "has characters to percent-encode (< > \" ' ` \\ { } | ^)"
@@ -111,6 +112,11 @@ func URLProblem(raw string) string {
 		return "must be an absolute http:// or https:// URL"
 	case u.User != nil:
 		return "must not hold user information"
+	case strings.IndexFunc(u.Host, func(r rune) bool { return r > unicode.MaxASCII }) >= 0:
+		if ascii, err := idna.Lookup.ToASCII(u.Hostname()); err == nil {
+			return fmt.Sprintf("has a non-ASCII host: write it in punycode (%s)", ascii)
+		}
+		return "has a non-ASCII host: write it in punycode (xn--...)"
 	case u.String() != raw:
 		return fmt.Sprintf("is not in canonical form (%q)", u.String())
 	}
@@ -118,13 +124,43 @@ func URLProblem(raw string) string {
 }
 
 // TextProblem tells why a frame field is refused ("" when accepted): more
-// than max characters, control characters, or one of < > " ' `.
+// than max characters, control or format characters (bidirectional
+// overrides...), or one of < > " ' `.
 func TextProblem(v string, max int) string {
 	if utf8.RuneCountInString(v) > max {
 		return fmt.Sprintf("is longer than %d characters", max)
 	}
-	if strings.IndexFunc(v, unicode.IsControl) >= 0 || strings.ContainsAny(v, "<>\"'`") {
-		return "must be plain text, without control characters nor < > \" ' `"
+	if strings.IndexFunc(v, func(r rune) bool { return unicode.IsControl(r) || unicode.Is(unicode.Cf, r) }) >= 0 || strings.ContainsAny(v, "<>\"'`") {
+		return "must be plain text, without control or format characters nor < > \" ' `"
+	}
+	return ""
+}
+
+// ForwardEntryProblem tells why the gate would refuse to write a raw EuroDNS
+// URL forward entry ("" when it would accept it): the checks of Normalize,
+// for entries written outside the RRset model (zone profiles).
+func ForwardEntryProblem(raw json.RawMessage) string {
+	var nf nativeForward
+	if err := json.Unmarshal(raw, &nf); err != nil {
+		return "unreadable URL forward"
+	}
+	mode, ok := modeOf[strings.ToUpper(nf.ForwardType)]
+	if !ok {
+		return fmt.Sprintf("forwardType %q is not one of HTTP301, HTTP302, FRAME", nf.ForwardType)
+	}
+	if msg := URLProblem(str(nf.URL)); msg != "" {
+		return fmt.Sprintf("url %q %s", str(nf.URL), msg)
+	}
+	if mode != dns.ForwardFrame && (str(nf.Title) != "" || str(nf.Keywords) != "" || str(nf.Description) != "") {
+		return "title, keywords and description only apply to frame forwards"
+	}
+	for _, fld := range []struct {
+		name, v string
+		max     int
+	}{{"title", str(nf.Title), MaxTitle}, {"keywords", str(nf.Keywords), MaxKeywords}, {"description", str(nf.Description), MaxDescription}} {
+		if msg := TextProblem(fld.v, fld.max); msg != "" {
+			return fld.name + " " + msg
+		}
 	}
 	return ""
 }
