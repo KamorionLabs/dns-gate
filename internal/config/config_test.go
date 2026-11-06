@@ -481,3 +481,44 @@ func TestPersonIssuers(t *testing.T) {
 		}
 	}
 }
+
+func TestSecondApproverNeedsPersonIssuers(t *testing.T) {
+	e := env(map[string]string{"EURODNS_API_KEY": "k"})
+	human := strings.Replace(base, "    audiences: [dns-gate]\n", "    audiences: [dns-gate]\n    category: human\n", 1)
+	second := "  - name: other\n    issuer: https://idp.example.org\n    audiences: [dns-gate]\n    category_claim: idtyp\n    category_map: {user: human}\nroles:"
+	two := strings.Replace(human, "roles:", second, 1) + "ownership: {require_second_approver: true}\n"
+	if _, err := Parse([]byte(two), e); err == nil || !strings.Contains(err.Error(), "person_issuers") {
+		t.Fatalf("two human issuers without person_issuers: %v", err)
+	}
+	if _, err := Parse([]byte(strings.Replace(two, "require_second_approver: true", "require_second_approver: true, person_issuers: [other]", 1)), e); err != nil {
+		t.Fatalf("explicit person issuer: %v", err)
+	}
+	one, err := Parse([]byte(human+"ownership: {require_second_approver: true}\n"), e)
+	if err != nil || len(one.Ownership.PersonIssuers) != 1 || one.Ownership.PersonIssuers[0] != "ci" {
+		t.Fatalf("the only human issuer becomes the person issuer: %v %+v", err, one)
+	}
+	if !strings.Contains(strings.Join(one.Warnings, "\n"), "person_issuers") {
+		t.Fatalf("the implicit person issuer is not explained: %q", one.Warnings)
+	}
+	if _, err := Parse([]byte(base+"ownership: {require_second_approver: true}\n"), e); err == nil || !strings.Contains(err.Error(), "human") {
+		t.Fatalf("no issuer yields humans: %v", err)
+	}
+}
+
+func TestTeamFamilyFromOneIssuer(t *testing.T) {
+	e := env(map[string]string{"EURODNS_API_KEY": "k"})
+	issuer := "  - name: other\n    issuer: https://idp.example.org\n    audiences: [dns-gate]\nroles:"
+	fam := func(issuer string) string {
+		return "  - role: writer\n    team_from: {claim: sub, regex: \"^repo:acme/([a-z0-9-]+):.*$\", prefix: gh-}\n    subjects:\n      - issuer: " + issuer + "\n        claims: {sub: \"repo:acme/*\"}\n"
+	}
+	doc := strings.Replace(base, "roles:", issuer, 1) + fam("ci") + fam("other")
+	if _, err := Parse([]byte(doc), e); err != nil {
+		t.Fatalf("migration mode: %v", err)
+	}
+	if _, err := Parse([]byte(doc+"teams:\n  web: {}\n"), e); err == nil || !strings.Contains(err.Error(), "several issuers") {
+		t.Fatalf("one family fed by two issuers: %v", err)
+	}
+	if _, err := Parse([]byte(strings.Replace(base, "roles:", issuer, 1)+fam("ci")+fam("ci")+"teams:\n  web: {}\n"), e); err != nil {
+		t.Fatalf("one family, one issuer: %v", err)
+	}
+}

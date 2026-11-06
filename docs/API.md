@@ -290,7 +290,8 @@ The RRsets of a request belong to one team. The approver is a human (unless
 `ownership.require_second_approver: true` it must be another person than the
 requester, under any identity (`ownership.person_issuers`, `ownership.person_claims`);
 with the default `false` the requester may approve its own request, or propose and
-apply it at once with `"apply": true` (`self_approved` in the answer, `approval:
+apply it at once with `"apply": true` (refused before anything is stored when the
+requester could not approve it) (`self_approved` in the answer, `approval:
 self` in the audit). The requester can always withdraw it (`/reject`).
 
 Approval applies it at once, under the zone lock, if every RRset still belongs to the

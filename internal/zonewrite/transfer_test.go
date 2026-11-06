@@ -768,3 +768,51 @@ func TestTransferSelfApprovalWithoutSecondApprover(t *testing.T) {
 		t.Fatalf("apply on propose with a second approver required: %v", err)
 	}
 }
+
+func TestRefusedSelfApprovalLeavesNoRequest(t *testing.T) {
+	e := newEnvConfig(t, eurodnstest.Options{}, nil, func(c *Config) {
+		c.Teams = teamList{"team-a": true, "team-b": true}
+	})
+	ctx := context.Background()
+	if _, err := e.eng.ApplyRRsets(ctx, alice, zoneName, put("x1", "192.0.2.1"), 0); err != nil {
+		t.Fatal(err)
+	}
+	tr := e.eng.(Transfers)
+	pipeline := bound(&identity.Subject{Issuer: "ci", ID: "deploy", Category: identity.CategoryPipeline, Roles: []string{"writer", "admin"}, Teams: []string{"team-a"}})
+	_, err := tr.ProposeTransfer(ctx, pipeline, zoneName, uiapi.TransferProposal{RRsets: adoptRefs("x1 A"), ToTeam: "team-b", Comment: "x", Apply: true})
+	e.wantReason(err, ReasonForbidden)
+	_, err = tr.ProposeRename(ctx, pipeline, "team-a", uiapi.TeamRenameRequest{To: "team-b", Comment: "x", Apply: true})
+	e.wantReason(err, ReasonForbidden)
+	if list, _, _ := e.st.ListTransfers(ctx, store.TransferQuery{}); len(list) != 0 {
+		t.Fatalf("a refused self approval left requests behind: %+v", list)
+	}
+}
+
+func TestTransferedTombstoneConsumedBeforeRetry(t *testing.T) {
+	e, fs := newRaceEnv(t, nil)
+	ctx := context.Background()
+	if _, err := e.eng.ApplyRRsets(ctx, alice, zoneName, put("old", "192.0.2.1"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.eng.ApplyRRsets(ctx, alice, zoneName, del("old"), 0); err != nil {
+		t.Fatal(err)
+	}
+	tr := e.eng.(Transfers)
+	v, err := tr.ProposeTransfer(ctx, alice, zoneName, uiapi.TransferProposal{RRsets: adoptRefs("old A"), ToTeam: "team-b", Comment: "move"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fs.failApplied = true
+	_, _ = tr.DecideTransfer(ctx, teamMate, v.ID, true, "")
+	fs.failApplied = false
+	if _, err := e.eng.ApplyRRsets(ctx, bob, zoneName, put("old", "192.0.2.5"), 0); err != nil {
+		t.Fatalf("the new team re-creates the RRset: %v", err)
+	}
+	e.clock.Add(10 * time.Minute)
+	if _, err := e.eng.(TransferRetrier).RetryTransfers(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := e.st.GetTransfer(ctx, v.ID); got.Status != uiapi.TransferApplied {
+		t.Fatalf("an applied transfer whose tombstone was consumed by its new team failed: %+v", got)
+	}
+}

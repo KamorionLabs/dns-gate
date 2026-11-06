@@ -144,6 +144,9 @@ Other changes of the same version:
   (`ownership.require_second_approver: false`) the requester may approve its own
   request; set it to `true`, with `ownership.person_issuers` naming the UI login
   issuer, as soon as two people administer the gate.
+  With `require_second_approver: true`, `ownership.person_issuers` is required when
+  several issuers yield human subjects (the gate refuses to start otherwise; `dns-gate
+  --check` names them) and defaults to the only human issuer otherwise.
 - With a `teams` block, an issuer `team_claim` needs a `team_claim_prefix`: its values
   become `<prefix><value>` teams. Values that named declared teams no longer do: move
   those people into `teams.<name>.members`.

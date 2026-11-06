@@ -150,6 +150,11 @@ func (e *engine) ProposeTransfer(ctx context.Context, s *identity.Subject, zoneI
 				keyString(k), t.FromTeam, t.ToTeam, policy.ActionOwnershipApprove))
 		}
 	}
+	if req.Apply {
+		if err := e.selfDecision(s, t); err != nil {
+			return nil, e.deny(ctx, s, actionTransferApprove, zone, err)
+		}
+	}
 	if err := e.cfg.Store.CreateTransfer(ctx, t); err != nil {
 		return nil, &Error{Reason: ReasonUpstream, Message: "store transfer failed", Err: err}
 	}
@@ -185,6 +190,11 @@ func (e *engine) ProposeRename(ctx context.Context, s *identity.Subject, from st
 		ID: newTransferID(e), Kind: uiapi.TransferKindRename, FromTeam: from, ToTeam: req.To, Comment: req.Comment,
 		Status: uiapi.TransferProposed, Requester: s.String(), RequesterName: s.Name, RequesterCategory: s.Category,
 		RequesterPersons: e.personKeys(s), CreatedAt: now, ExpiresAt: now.Add(e.cfg.TransferTTL),
+	}
+	if req.Apply {
+		if err := e.selfDecision(s, t); err != nil {
+			return nil, e.deny(ctx, s, actionTransferApprove, "", err)
+		}
 	}
 	if err := e.cfg.Store.CreateTransfer(ctx, t); err != nil {
 		return nil, &Error{Reason: ReasonUpstream, Message: "store transfer failed", Err: err}
@@ -295,6 +305,18 @@ func (e *engine) DecideTransfer(ctx context.Context, s *identity.Subject, id str
 	}
 	err = e.runApply(ctx, s, t)
 	return e.transferView(s, *t), err
+}
+
+// selfDecision checks, before a request proposed with apply is stored, that
+// its requester may approve it, so that a refusal leaves nothing behind.
+func (e *engine) selfDecision(s *identity.Subject, t store.Transfer) error {
+	if err := e.checkApprover(s, t); err != nil {
+		return err
+	}
+	if !e.mayDecide(s, t) {
+		return fail(ReasonForbidden, "%s", e.decideRule(t))
+	}
+	return nil
 }
 
 // TransferRetrier applies the approved transfers in the background: team
@@ -534,6 +556,7 @@ func (e *engine) applyTransfer(ctx context.Context, s *identity.Subject, t store
 			case ok && tb.Team == t.FromTeam:
 				tb.Team = t.ToTeam
 				moveTombs = append(moveTombs, tb)
+			case !ok && owns[k].Owner == t.ToTeam:
 			default:
 				return 0, fail(ReasonPrecondition, "%s is no longer reserved for team %s", keyString(k), t.FromTeam)
 			}
@@ -580,7 +603,10 @@ func (e *engine) transferDone(ctx context.Context, zone string, t store.Transfer
 	for _, it := range t.Items {
 		if it.Tombstone {
 			tb, err := e.cfg.Store.GetTombstone(ctx, zone, it.Host, it.Type)
-			if err != nil || tb.Team != t.ToTeam {
+			if err == nil && tb.Team == t.ToTeam {
+				continue
+			}
+			if o, oerr := e.cfg.Store.Get(ctx, zone, it.Host, it.Type); err == nil || oerr != nil || o.Owner != t.ToTeam {
 				return false
 			}
 			continue
