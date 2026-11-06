@@ -112,6 +112,16 @@ func (s *Snapshot) KeyRoleProblem(holder []string, role string) string {
 	if cr == nil {
 		return fmt.Sprintf("unknown role %q", role)
 	}
+	if ttl := s.EphemeralTTL(holder); ttl > 0 && s.writes(role) {
+		if k := s.EphemeralTTL([]string{role}); k <= 0 || k > ttl {
+			return fmt.Sprintf("role %s must be ephemeral with an ephemeral_ttl of at most %s, as the caller's write rights", role, ttl)
+		}
+	}
+	if max := s.MaxChanges(holder); max > 0 {
+		if k := s.MaxChanges([]string{role}); k <= 0 || k > max {
+			return fmt.Sprintf("role %s allows more changes per request than the caller (max_changes_per_request %d)", role, max)
+		}
+	}
 	for i, r := range cr.role.Rules {
 		for _, z := range r.Zones {
 			if !s.GrantsPattern(holder, ActionAPIKeyManage, z) {
@@ -144,6 +154,20 @@ func (s *Snapshot) RoleReserved(name string) bool {
 			if IsMeta(a) || IsGate(a) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// writes reports whether a role grants dns.record.write.
+func (s *Snapshot) writes(role string) bool {
+	cr := s.roles[role]
+	if cr == nil {
+		return false
+	}
+	for _, r := range cr.role.Rules {
+		if contains(r.Actions, ActionRecordWrite) {
+			return true
 		}
 	}
 	return false
