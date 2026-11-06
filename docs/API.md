@@ -166,9 +166,10 @@ curl -sS -i "${auth[@]}" -X DELETE "$GATE/api/v1/zones/example.com/forwards/go"
 
 `type` is `301`, `302` or `frame`; `url` an absolute `http://` or `https://` URL of
 at most 2048 bytes, without user information, spaces, control characters nor
-unencoded `< > " ' \` \ { } | ^`, written in canonical form (as Go's `net/url`
-prints it back); `title` (200 characters), `keywords` (500) and `description`
-(1000) apply to frames only and are plain text, without control characters nor
+unencoded `< > " ' \` \ { } | ^`, with a host in punycode (`xn--…`), written in
+canonical form (as Go's `net/url` prints it back); `title` (200 characters),
+`keywords` (500) and `description` (1000) apply to frames only and are plain text,
+without control or format characters (bidirectional overrides) nor
 `< > " ' \``: EuroDNS serves them in the page it shows on the forward host. A
 forward cannot be created over `A`, `AAAA`, `CNAME` or `APEX` records of its host
 owned by another team or by nobody, nor those records over the forward of another
@@ -191,7 +192,8 @@ seconds), or `unsupported` (provider without forwards). The gate never
 orders, renews nor cancels a subscription. `"require_https": true` in the body
 (or in a plan change) refuses the write with `409 https_unavailable` unless the
 status is `active` or `no_forward` (`pending` is refused: the certificate is not
-issued yet); it is checked before the zone lock, and is a check only, nothing is
+issued yet); it is checked after the authorization (a forbidden write is
+`403`) and before the zone lock, and is a check only, nothing is
 stored.
 
 ## Plan, then apply
