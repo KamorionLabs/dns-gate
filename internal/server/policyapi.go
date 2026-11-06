@@ -337,25 +337,24 @@ func (s *Server) ownedCounter(ctx context.Context) policy.OwnedCounter {
 	if s.cfg.Ownership == nil {
 		return nil
 	}
-	cache := map[string]map[string]int{}
-	return func(team, zone string) int {
+	cache := map[string]map[[2]string]int{}
+	return func(team, zone, typ string) int {
 		counts, ok := cache[zone]
 		if !ok {
-			counts = map[string]int{}
+			counts = map[[2]string]int{}
 			if list, err := s.cfg.Ownership.List(ctx, zone); err == nil {
 				for _, o := range list {
 					if o.State != store.StatePending {
-						counts[o.Owner]++
-						counts["\x00all"]++
+						for _, t := range []string{"", strings.ToUpper(o.Type)} {
+							counts[[2]string{o.Owner, t}]++
+							counts[[2]string{"", t}]++
+						}
 					}
 				}
 			}
 			cache[zone] = counts
 		}
-		if team == "" {
-			return counts["\x00all"]
-		}
-		return counts[team]
+		return counts[[2]string{team, strings.ToUpper(typ)}]
 	}
 }
 

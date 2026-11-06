@@ -2,7 +2,9 @@ package policy
 
 import (
 	"fmt"
+	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 
@@ -10,8 +12,9 @@ import (
 )
 
 // OwnedCounter returns the number of RRsets a team owns in a zone; an empty
-// team counts the RRsets of every team.
-type OwnedCounter func(team, zone string) int
+// team counts the RRsets of every team, an empty type every type, the type
+// dns.TypeURLForward only the URL forwards.
+type OwnedCounter func(team, zone, typ string) int
 
 type grantKey struct {
 	who, role, zone, action string
@@ -83,8 +86,14 @@ func MatcherString(m uiapi.SubjectMatcher) string {
 	return m.Issuer + "{" + strings.Join(parts, ",") + "}"
 }
 
-// teamWrites returns team -> zones where the team can write records.
+// teamWrites returns team -> zones where the team can write records or URL
+// forwards.
 func (s *Snapshot) teamWrites() map[string]map[string]bool {
+	return s.teamWritesOf(ActionRecordWrite, ActionForwardWrite)
+}
+
+// teamWritesOf returns team -> zones where the team holds one of actions.
+func (s *Snapshot) teamWritesOf(actions ...string) map[string]map[string]bool {
 	out := map[string]map[string]bool{}
 	add := func(team, role string) {
 		cr := s.roles[role]
@@ -92,8 +101,7 @@ func (s *Snapshot) teamWrites() map[string]map[string]bool {
 			return
 		}
 		for _, r := range cr.role.Rules {
-			if !(contains(r.Actions, ActionRecordWrite) && s.ruleEffective(cr, r, ActionRecordWrite)) &&
-				!(contains(r.Actions, ActionForwardWrite) && s.ruleEffective(cr, r, ActionForwardWrite)) {
+			if !slices.ContainsFunc(actions, func(a string) bool { return contains(r.Actions, a) && s.ruleEffective(cr, r, a) }) {
 				continue
 			}
 			for z := range s.zones {
@@ -208,7 +216,7 @@ func Impact(old, new *Snapshot, owned OwnedCounter) []uiapi.ImpactItem {
 				Message: fmt.Sprintf("zone %s is no longer managed: it becomes read-only through the gate", zone)})
 			n := 0
 			if owned != nil {
-				n = owned("", zone)
+				n = owned("", zone, "")
 			}
 			if n > 0 {
 				items = append(items, uiapi.ImpactItem{Kind: "warning", Who: "zone " + zone, Zones: []string{zone}, Actions: []string{ActionRecordWrite},
@@ -219,7 +227,8 @@ func Impact(old, new *Snapshot, owned OwnedCounter) []uiapi.ImpactItem {
 
 	items = append(items, folderItems(old, new)...)
 
-	// Teams losing write where they own RRsets.
+	// Teams losing write where they own RRsets, or dns.forward.write where
+	// they own URL forwards.
 	ow, nw := old.teamWrites(), new.teamWrites()
 	for _, team := range keysOf(ow) {
 		for _, zone := range keys(ow[team]) {
@@ -228,7 +237,7 @@ func Impact(old, new *Snapshot, owned OwnedCounter) []uiapi.ImpactItem {
 			}
 			n := 0
 			if owned != nil {
-				n = owned(team, zone)
+				n = owned(team, zone, "")
 			}
 			if n == 0 {
 				continue
@@ -236,6 +245,25 @@ func Impact(old, new *Snapshot, owned OwnedCounter) []uiapi.ImpactItem {
 			items = append(items, uiapi.ImpactItem{
 				Kind: "warning", Who: "team " + team, Zones: []string{zone}, Actions: []string{ActionRecordWrite},
 				Message: fmt.Sprintf("team %s loses write on %s where it owns %d RRset(s): they become unmanageable through the gate", team, zone, n),
+			})
+		}
+	}
+	of, nf := old.teamWritesOf(ActionForwardWrite), new.teamWritesOf(ActionForwardWrite)
+	for _, team := range keysOf(of) {
+		for _, zone := range keys(of[team]) {
+			if nf[team][zone] || !nw[team][zone] {
+				continue
+			}
+			n := 0
+			if owned != nil {
+				n = owned(team, zone, dns.TypeURLForward)
+			}
+			if n == 0 {
+				continue
+			}
+			items = append(items, uiapi.ImpactItem{
+				Kind: "warning", Who: "team " + team, Zones: []string{zone}, Actions: []string{ActionForwardWrite},
+				Message: fmt.Sprintf("team %s loses %s on %s where it owns %d URL forward(s): they become unmanageable through the gate", team, ActionForwardWrite, zone, n),
 			})
 		}
 	}
@@ -253,10 +281,10 @@ func Impact(old, new *Snapshot, owned OwnedCounter) []uiapi.ImpactItem {
 	}
 
 	oldUnscoped := map[string]bool{}
-	for _, w := range old.ForwardWithoutHosts(LayerManaged) {
+	for _, w := range old.ForwardWithoutHosts("") {
 		oldUnscoped[w] = true
 	}
-	for _, w := range new.ForwardWithoutHosts(LayerManaged) {
+	for _, w := range new.ForwardWithoutHosts("") {
 		if !oldUnscoped[w] {
 			role, _, _ := strings.Cut(w, ".rules[")
 			items = append(items, uiapi.ImpactItem{Kind: "warning", Who: "role " + role, Role: role, Actions: []string{ActionForwardWrite},
