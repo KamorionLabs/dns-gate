@@ -810,18 +810,18 @@ func (e *acmeEnv) denials() int {
 // the endpoint.
 func TestAPIKeyRefusalAuditedOnce(t *testing.T) {
 	e := newACMEEnv(t)
-	k := e.createKey(`{"name": "k", "team": "web", "role": "acme"}`)
 	for _, tc := range []struct {
 		path string
-		hdr  map[string]string
+		hdr  func(id, key string) map[string]string
 		body string
 	}{
-		{"/acme/httpreq/present", basic(k.ID, tamper(k.Key)), `{"fqdn": "_acme-challenge.example.com.", "value": "v"}`},
-		{"/acme/acme-dns/update", map[string]string{"X-Api-User": k.ID, "X-Api-Key": tamper(k.Key)}, `{"subdomain":"example.com", "txt": "` + challenge("x") + `"}`},
-		{"/acme/acme-dns/register", basic(k.ID, tamper(k.Key)), `{"domain": "example.com"}`},
+		{"/acme/httpreq/present", func(id, key string) map[string]string { return basic(id, key) }, `{"fqdn": "_acme-challenge.example.com.", "value": "v"}`},
+		{"/acme/acme-dns/update", func(id, key string) map[string]string { return map[string]string{"X-Api-User": id, "X-Api-Key": key} }, `{"subdomain":"example.com", "txt": "` + challenge("x") + `"}`},
+		{"/acme/acme-dns/register", func(id, key string) map[string]string { return basic(id, key) }, `{"domain": "example.com"}`},
 	} {
+		k := e.createKey(`{"name": "k", "team": "web", "role": "acme"}`)
 		before := e.denials()
-		if status, _ := e.do("POST", tc.path, tc.hdr, tc.body); status != 401 {
+		if status, _ := e.do("POST", tc.path, tc.hdr(k.ID, tamper(k.Key)), tc.body); status != 401 {
 			t.Fatalf("%s: %d", tc.path, status)
 		}
 		if n := e.denials() - before; n != 1 {

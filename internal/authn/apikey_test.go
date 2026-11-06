@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"sync"
 	"testing"
@@ -200,8 +201,46 @@ func TestAPIKeyFailureAuditAggregated(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		try("192.0.2.1:1", tampered(key))
 	}
-	if len(log.events) != 6 || log.events[5].Subject != "api-key:"+id {
-		t.Fatalf("refusals of an existing key: %+v", log.events)
+	if len(log.events) != 4 || log.events[3].Subject != "api-key:"+id {
+		t.Fatalf("refusals of an existing key not aggregated per key and address: %+v", log.events)
+	}
+	try("192.0.2.9:1", tampered(key))
+	if len(log.events) != 5 {
+		t.Fatalf("refusal of an existing key from another address: %+v", log.events)
+	}
+}
+
+// IPv6 sources are aggregated per /64, and the aggregation state is
+// bounded: an evicted source reports its pending count.
+func TestAPIKeyFailureAggregationBounded(t *testing.T) {
+	a, _ := setup(t)
+	now := time.Now()
+	a.SetClock(func() time.Time { return now })
+	log := &auditLog{}
+	a.SetAPIKeys(store.NewMemory().(store.APIKeyStore), log)
+	a.noise.max = 4
+	try := func(remote string) {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.RemoteAddr = remote
+		r.Header.Set("Authorization", "Bearer dgk_garbage")
+		_, _ = a.Authenticate(r)
+	}
+	try("[2001:db8:1:1::1]:1")
+	try("[2001:db8:1:1::2]:1")
+	try("[2001:db8:1:2::1]:1")
+	if len(log.events) != 2 {
+		t.Fatalf("IPv6 not aggregated per /64: %+v", log.events)
+	}
+	for i := 1; i <= 2; i++ {
+		try(fmt.Sprintf("192.0.2.%d:1", i))
+	}
+	if len(log.events) != 4 || a.noise.len() != 4 {
+		t.Fatalf("events %d, entries %d", len(log.events), a.noise.len())
+	}
+	try("192.0.2.3:1")
+	ev := log.events[len(log.events)-2]
+	if a.noise.len() != 4 || ev.Extra["count"] != 1 || ev.Extra["remote_addr"] != "2001:db8:1:1::/64" {
+		t.Fatalf("eviction: entries %d, events %+v", a.noise.len(), log.events)
 	}
 }
 
