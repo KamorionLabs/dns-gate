@@ -208,7 +208,7 @@ SAML, with `ui.existingSecret` holding the session key.
 
     Register `https://dns-gate.example.com/auth/callback` as a web redirect URI, and
     bind people through app roles (`roles` claim) assigned to Entra groups:
-    [configuration](../CONFIG.md#entra-id).
+    [configuration](../config/authentication.md#entra-id).
 
 === "SAML (IAM Identity Center)"
 
@@ -247,12 +247,20 @@ networkPolicy:
   egressCIDRs: ["0.0.0.0/0"]   # HTTPS: EuroDNS API, OIDC issuers' keys, AWS endpoints
 ```
 
-Ingress is limited to port 8080 from the listed sources; egress to DNS, HTTPS to
+Ingress is limited to port 8080 from the listed sources; egress to DNS on any address (also the [propagation check](../features/propagation.md): public resolvers and the zones' name servers), HTTPS to
 `egressCIDRs`, and 5432 with the `postgres` store. Plain NetworkPolicy has no
 host-name rules: use your CNI (Cilium, Calico) to allow `rest-api.eurodns.com` and
 your issuers only.
 
-## 7. Upgrade
+## 7. Ship the audit trail
+
+Audit events are JSON lines with `"type": "audit"` on the gate's stdout, next to its
+logs: route them from your log collector (Fluent Bit, Vector, the OpenTelemetry
+Collector) to the SIEM or an archive. `audit.format: ecs` or `ocsf`, and
+`audit.hash_chain: true` with `DNS_GATE_AUDIT_CHAIN_KEY` through `extraEnv`, are
+described in [SIEM and audit export](../integrations/siem.md#kubernetes).
+
+## 8. Upgrade
 
 1. Read the release notes: configuration changes are listed there, and an unknown
    field stops the gate at startup.

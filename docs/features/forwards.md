@@ -93,4 +93,4 @@ frames only. In a plan, a forward change is
 - A role granting `dns.forward.write` with `records.types` but no `records.hosts`
   grants the forwards of every host: the gate warns at load.
 
-Details: [API guide](../API.md#url-forwards), [configuration](../CONFIG.md#url-forwards).
+Details: [API guide](../API.md#url-forwards), [configuration](../config/policy.md#url-forwards).

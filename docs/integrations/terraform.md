@@ -80,7 +80,7 @@ Whole zones: [onboarding guide](../ONBOARDING.md).
 ## Pipelines that create pipelines
 
 A stack that creates CI pipelines can also give each of them its DNS rights, in the
-same apply, through a [policy delegation](../CONFIG.md#policy-delegations): the base
+same apply, through a [policy delegation](../config/managed-policy.md#policy-delegations): the base
 file says how far the stack may go, and `dnsgate_role` / `dnsgate_binding` create the
 role and binding of each pipeline without human approval.
 

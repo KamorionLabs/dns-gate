@@ -25,7 +25,7 @@ bindings:
 - A binding names the team that will own what its subjects create.
 - `team_from` derives the team from a claim, so one binding covers many pipelines,
   each owning its own records (team `gh-<repository>` from the GitHub `sub`). See
-  [team derived from a claim](../CONFIG.md#team-derived-from-a-claim) and its
+  [team derived from a claim](../config/policy.md#team-derived-from-a-claim) and its
   trade-off: any identity matching the glob may **create** what the role allows.
 - Once a `teams` block exists, a binding to an undeclared team is refused: a typo
   never silently creates a team.
@@ -73,7 +73,7 @@ approved by someone allowed to write them through the owner team (or holding
 | `ownership.machine_approvers` | `false` | let pipelines approve (weakens the two-person rule) |
 
 A team **rename** moves every record and tombstone of a team, for reorganizations.
-Details: [ownership configuration](../CONFIG.md#ownership).
+Details: [ownership configuration](../config/policy.md#ownership).
 
 ## Safe writes
 
@@ -97,4 +97,4 @@ sequenceDiagram
   G-->>C: the RRset and its new ETag
 ```
 
-More in the [design](../DESIGN.md#6-ownership-model).
+More in the [design](../design/ownership.md#6-ownership-model).

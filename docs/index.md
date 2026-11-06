@@ -100,7 +100,10 @@ With dns-gate:
 - a team can only change or delete what it created or adopted, so pipelines and
   teams cannot overwrite each other;
 - apex NS, MX, CAA and other **protected** records are refused to everyone;
-- every change is audited with who, what, the diff and the provider snapshot.
+- every change is audited with who, what, the diff and the provider snapshot, in
+  ECS or OCSF for your SIEM, with a tamper-evident hash chain;
+- after a change, the propagation check shows which name servers and resolvers
+  around the world already answer it.
 
 !!! note "Status"
     Beta, versions 0.x: configuration and API may still change before 1.0, always

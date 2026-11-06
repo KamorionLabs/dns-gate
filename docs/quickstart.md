@@ -27,7 +27,7 @@ then start the gate with [`examples/quickstart/config.yaml`](../examples/quickst
 export EURODNS_API_KEY=quickstart
 export DNS_GATE_SESSION_KEY_FILE=...
 export DNS_GATE_TOKEN_SIGNING_KEY_FILE=...
-go run ./cmd/dns-gate -config examples/quickstart/config.yaml
+go run ./cmd/dns-gate -config examples/quickstart/config.yaml | tee gate.log
 ```
 
 The configuration declares three people, each with a role and a team:
@@ -165,7 +165,26 @@ Now try the same `PUT` as `bob` (`sub=bob`): `403 not_owner`, the record belongs
 `web`. Try `@ MX` as anyone: `403`, protected. EuroDNS only accepts some TTLs (600,
 900, 1800, 3600...): `ttl: 300` is refused before anything is written.
 
-## 4. Connect Claude
+## 4. Check propagation and the audit trail
+
+Ask where the new record is visible (in the sandbox, `example.com` is not on the
+public DNS, so every answer is `missing` or `error`; on a real zone you watch the
+resolvers catch up):
+
+```sh
+curl -fsS -H "Authorization: Bearer $TOKEN" \
+  "$GATE/api/v1/zones/example.com/rrsets/app/CNAME/propagation" | jq .summary
+```
+
+Every decision is an audit event, in the journal (`GET /api/v1/audit`) and as a JSON
+line on the gate's stdout. The Quickstart configuration chains those lines
+(`audit.hash_chain: true`); check the log you kept with `tee`:
+
+```sh
+go run ./cmd/dns-gate audit verify gate.log
+```
+
+## 5. Connect Claude
 
 The gate serves an [MCP](integrations/mcp.md) endpoint at `/mcp`. With Claude Code:
 
@@ -183,7 +202,7 @@ Claude plans the change, shows it, and applies it only when you confirm.
 ## Next
 
 - [API by example](api/index.md): every operation (preconditions, plan and apply,
-  adoption, transfers, URL forwards, API keys, audit) in your language, all runnable
-  against this gate.
+  adoption, transfers, URL forwards, API keys, propagation, audit) in your language,
+  all runnable against this gate.
 - [Concepts](concepts/identities.md): how identities, roles and ownership fit together.
 - Deploy for real: [Kubernetes with Helm](deploy/helm.md) or [AWS Lambda](deploy/lambda.md).

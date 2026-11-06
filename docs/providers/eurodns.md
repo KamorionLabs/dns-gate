@@ -54,7 +54,7 @@ gate:
 Zone discovery lists the account's domains (one request per 100 domains per
 `refresh`), shows the unmanaged ones read-only and lets policy administrators bring
 them under management from the UI. The listing key must be allowed to search
-domains. Every field: [providers configuration](../CONFIG.md#providers).
+domains. Every field: [providers configuration](../config/providers.md#providers).
 
 Run the gate as a container for EuroDNS, not on AWS Lambda:
 [why](../DEPLOY-LAMBDA.md#why-not-in-front-of-eurodns).

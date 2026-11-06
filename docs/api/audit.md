@@ -56,5 +56,7 @@ Filters: `zone`, `host`, `type`, `subject` (substring of the subject or its name
 `since` and `until` (RFC 3339), `limit` (up to 500). Pass `next_cursor` back as
 `cursor` for the next page, newest first.
 
+Shipping the events to a SIEM (ECS or OCSF format, tamper-evident hash chain): [SIEM and audit export](../integrations/siem.md).
+
 The web UI shows the same journal with filters and diffs. Events are kept
 `store.audit_retention` (400 days by default).

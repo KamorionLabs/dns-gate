@@ -11,6 +11,7 @@ follows you from page to page.
 | List zones, read, create, update and delete record sets, plan and apply | [Zones and records](records.md) |
 | Adopt existing records, move records to another team | [Adopt and transfer](ownership.md) |
 | Redirect a host to a URL | [URL forwards](../features/forwards.md) |
+| See whether a change is visible on the DNS | [Propagation check](../features/propagation.md) |
 | Search the audit journal | [Audit journal](audit.md) |
 
 Every example runs as is against the [Quickstart](../quickstart.md) gate. For your own

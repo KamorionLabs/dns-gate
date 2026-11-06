@@ -98,6 +98,13 @@ issuers:
 - `store.type` must be `dynamodb`; `listen` is ignored and `listen.trusted_proxies`
   stays empty (the client address comes from API Gateway).
 - `ui.redirect_url`, `ui.saml.acs_url` and `mcp.public_url` use the custom domain.
+- The [propagation check](../features/propagation.md) is off on Lambda: set
+  `propagation.enabled: true` to serve it (outbound DNS works outside a VPC; a check
+  holds an execution environment for up to 4 seconds).
+- Audit events land in the function's log group: `audit_export` (module 0.3.0 or
+  later) forwards them to Firehose, Kinesis or a Lambda function, see
+  [SIEM and audit export](../integrations/siem.md#aws-lambda-cloudwatch-logs). Put
+  `DNS_GATE_AUDIT_CHAIN_KEY` in the secret for a keyed hash chain.
 
 ## 4. Set the secrets
 

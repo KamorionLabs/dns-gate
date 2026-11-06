@@ -62,7 +62,7 @@ issuer stands in for GitHub Actions, GitLab, Entra ID, AWS or Kubernetes
 `POST /api/v1/token-exchange` (RFC 8693) trades a token of an issuer with
 `token_exchange: true` for a gate token with the same identity, valid 15 minutes
 (`expires_in` asks for another lifetime, within the limits of the
-[configuration](../CONFIG.md#token-exchange)). No other authentication.
+[configuration](../config/authentication.md#token-exchange)). No other authentication.
 
 === "Shell"
 

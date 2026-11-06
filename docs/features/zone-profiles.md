@@ -43,4 +43,4 @@ curl -sS "${auth[@]}" "$P"                                                      
   zone is managed, teams [adopt](../api/ownership.md) them.
 
 Claude can do the same with the `*_zone_profile` MCP tools. Details:
-[API guide](../API.md#zone-profiles), [configuration](../CONFIG.md#zone-profiles).
+[API guide](../API.md#zone-profiles), [configuration](../config/providers.md#zone-profiles).

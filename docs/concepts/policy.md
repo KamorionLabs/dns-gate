@@ -93,7 +93,7 @@ file) and never grants `policy.*`.
 A **delegation** lets a trusted pipeline (the Terraform stack creating other
 pipelines) manage its own roles and bindings within limits, without approval: the
 `dnsgate_role` and `dnsgate_binding` resources. Details:
-[managed policy](../CONFIG.md#managed-policy-editing-from-the-ui) and
-[delegations](../CONFIG.md#policy-delegations).
+[managed policy](../config/managed-policy.md#managed-policy-editing-from-the-ui) and
+[delegations](../config/managed-policy.md#policy-delegations).
 
 Next: [Teams and ownership](ownership.md).

@@ -37,7 +37,7 @@ issuers:
   Claude Desktop extension, the token exchange).
 
 Platform recipes: [CI pipelines](../integrations/ci.md). Every field:
-[configuration](../CONFIG.md#issuers).
+[configuration](../config/authentication.md#issuers).
 
 ## From identity to rights
 

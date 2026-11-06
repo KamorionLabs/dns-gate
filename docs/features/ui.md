@@ -8,6 +8,7 @@ client, recomputed on every request.
 |---|---|
 | **Zones** | managed zones with their provider, EuroDNS folder and counters (managed, foreign, needing attention), last sync and last write; zones of the accounts not managed yet, with *Manage this zone* for policy proposers |
 | **Zone** | every record set with its status, owner team, protected flag, who created and changed it and when; tombstones; staged changes reviewed as a plan, then applied |
+| **Propagation** | in a record set, and right after an apply: which name servers and public resolvers already answer the new content, [details](propagation.md) |
 | **Journal** | the audit journal, filtered by zone, host, type, subject, category, decision and time, with diffs and refusal reasons |
 | **Teams** | teams, their members and what they own; the transfer inbox |
 | **Policy** | who may do what, per group, pipeline and API key (simple view), or every layer, binding, role and bound (expert view); revisions with diff, impact analysis, approval and rollback |
@@ -36,7 +37,7 @@ ui:
 
 The session cookie is encrypted with `DNS_GATE_SESSION_KEY` (32 bytes). SAML instead
 of OIDC: `ui.saml`, see [SAML with IAM Identity Center](../IDENTITY-CENTER.md). Every
-field: [UI configuration](../CONFIG.md#ui).
+field: [UI configuration](../config/ui-mcp.md#ui).
 
 Browsing never calls the DNS provider: views are served from the gate's inventory,
 refreshed by every write and every reconcile, so the UI cannot exhaust the provider's

@@ -17,6 +17,7 @@ mcp:
 |---|---|
 | "Which zones can I read? What does team web own in example.com?" | `list_zones`, `list_rrsets`, `list_teams`, `get_team` |
 | "Who owns www CNAME, and could I change it? What happened to it last week?" | `get_rrset`, `search_audit` |
+| "Has my change of app CNAME propagated?" | `check_propagation` |
 | "Who may write `_acme-challenge` TXT records in example.com?" | `explain`, `who_can` (`policy.read`) |
 | "Add api A 192.0.2.20, show me the plan first." | `plan_rrset_change`, then `apply_rrset_change` |
 | "Adopt the existing records of shop.example.com for team shop." | `adopt_preview`, `adopt_apply` |
@@ -40,7 +41,7 @@ filled in for your gate.
     conversation after the first sign-in.
 
     The identity provider must accept the UI client as a public client with a
-    loopback redirect: see [Claude Desktop extension](../CONFIG.md#claude-desktop-extension).
+    loopback redirect: see [Claude Desktop extension](../config/ui-mcp.md#claude-desktop-extension).
 
 === "Claude Code"
 
@@ -51,8 +52,9 @@ filled in for your gate.
     claude mcp add-json dns-gate '{"type":"http","url":"https://dns-gate.example.com/mcp","headersHelper":"az account get-access-token --scope api://<client-id>/.default --query accessToken -o tsv | jq -Rc \"{Authorization: (\\\"Bearer \\\" + .)}\""}' --scope user
     ```
 
-    The helper must print `{"Authorization":"Bearer <token>"}`; any command printing
-    a token for the gate works.
+    It needs the Azure CLI signed in to the gate's tenant (`az login --tenant <tenant-id>`)
+    and `jq`. The helper must print `{"Authorization":"Bearer <token>"}`; any command
+    printing a token for the gate works.
 
 === "Other MCP clients"
 
@@ -74,4 +76,4 @@ filled in for your gate.
 
 Every tool call is audited as `mcp.<tool>` with the client name. Rate limit:
 `mcp.requests_per_minute` (120) per subject. Reference:
-[MCP configuration](../CONFIG.md#mcp).
+[MCP configuration](../config/ui-mcp.md#mcp).

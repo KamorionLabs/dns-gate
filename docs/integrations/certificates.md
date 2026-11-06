@@ -80,4 +80,4 @@ revoked by the members of its team holding `gate.apikey.manage`.
 
 Legacy EuroDNS clients that only send `X-APP-ID` / `X-API-KEY` can keep a static
 **virtual key** from the configuration instead: the weakest credential, restrict it
-to a narrow role with an expiry and CIDRs ([virtual keys](../CONFIG.md#virtual-keys)).
+to a narrow role with an expiry and CIDRs ([virtual keys](../config/authentication.md#virtual-keys)).

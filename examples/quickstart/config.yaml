@@ -77,3 +77,6 @@ ui:
   issuer: local
   client_id: gate-ui
   redirect_url: http://127.0.0.1:8080/auth/callback
+
+audit:
+  hash_chain: true                      # check the stdout with: dns-gate audit verify

@@ -94,7 +94,7 @@ For each platform: the issuer to declare, a binding, and how the job gets its to
     Without any cloud login, the provider's `azure_devops {}` method uses the OIDC
     token Azure DevOps issues for a service connection. Its audience is shared by the
     whole organization: trust it only for **dedicated** service connections, as
-    explained in [Azure DevOps OIDC](../CONFIG.md#azure-devops-oidc).
+    explained in [Azure DevOps OIDC](../config/authentication.md#azure-devops-oidc).
 
 === "AWS"
 
@@ -167,7 +167,7 @@ bindings:
 
 Each pipeline can only change what its team created, but any identity matching the
 glob can **create** what the role allows: keep the role narrow. Details and the
-trade-off: [team derived from a claim](../CONFIG.md#team-derived-from-a-claim).
+trade-off: [team derived from a claim](../config/policy.md#team-derived-from-a-claim).
 
 ## Long runs
 
