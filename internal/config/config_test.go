@@ -411,3 +411,27 @@ func TestTeamsBlock(t *testing.T) {
 		t.Fatalf("an empty teams block must make references strict: %v", err)
 	}
 }
+
+func TestTeamFamiliesStrict(t *testing.T) {
+	e := env(map[string]string{"EURODNS_API_KEY": "k"})
+	family := strings.Replace(base, "    team: web\n", "    team_from: {claim: sub, regex: \"^repo:acme/([a-z0-9-]+):.*$\", prefix: gh-}\n", 1) +
+		"teams:\n  corporate: {description: Corporate}\n"
+	if _, err := Parse([]byte(family), e); err != nil {
+		t.Fatal(err)
+	}
+	vk := "virtual_keys:\n  - {id: k, app_id: vk-k, key_sha256: " + strings.Repeat("0", 64) + ", roles: [writer], teams: [gh-site]}\n"
+	for name, doc := range map[string]string{
+		"family without prefix":      strings.Replace(family, ", prefix: gh-}", "}", 1),
+		"declared team in family":    family + "  gh-corporate: {description: x}\n",
+		"virtual key team in family": strings.Replace(family, "teams:\n  corporate:", "teams:\n  gh-site: {}\n  corporate:", 1) + vk,
+	} {
+		if _, err := Parse([]byte(doc), e); err == nil {
+			t.Errorf("%s: expected an error", name)
+		}
+	}
+	mig := strings.Replace(family, ", prefix: gh-}", "}", 1)
+	mig = mig[:strings.Index(mig, "teams:")]
+	if _, err := Parse([]byte(mig), e); err != nil {
+		t.Fatalf("an empty prefix stays accepted without a teams block: %v", err)
+	}
+}

@@ -272,6 +272,11 @@ type Resolution struct {
 	Bindings []string // "role@team" (team may be empty)
 	// Delegations the subject may act for (policy.delegations), file order.
 	Delegations []string
+	// TeamRoles are the roles granted through the bindings of each team.
+	TeamRoles map[string][]string
+	// Ignored lists the team_from derivations refused because they produced
+	// the name of a declared team ("role@team").
+	Ignored []string
 }
 
 // Resolve computes the groups, roles and teams of an OIDC subject.
@@ -300,6 +305,16 @@ func (s *Snapshot) Resolve(issuer string, claims map[string]any) Resolution {
 				// for the team of another binding of the subject.
 				continue
 			}
+			if s.strict && s.teams[team] != nil {
+				r.Ignored = append(r.Ignored, b.binding.Role+"@"+team)
+				continue
+			}
+		}
+		if r.TeamRoles == nil {
+			r.TeamRoles = map[string][]string{}
+		}
+		if !contains(r.TeamRoles[team], b.binding.Role) {
+			r.TeamRoles[team] = append(r.TeamRoles[team], b.binding.Role)
 		}
 		if !roles[b.binding.Role] {
 			roles[b.binding.Role] = true

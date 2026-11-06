@@ -453,6 +453,8 @@ func validateDelegatedTeam(v *verrs, dl *config.Delegation, at string, b uiapi.B
 			}
 			if t, ok := DeriveTeamFromValue(fs, vals[0]); !ok || t != b.Team {
 				v.add(at+".team", "team %q is not the team derived from %s %q (%s)", b.Team, fs.Claim, vals[0], derivedOrNone(t, ok))
+			} else if _, declared := teams.declared(t); declared && teams.strict {
+				v.add(at+".team", "team %q derived from the subject is the name of a declared team", t)
 			}
 		}
 	default:

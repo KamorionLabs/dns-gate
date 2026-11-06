@@ -148,3 +148,46 @@ func TestValidateManagedTeams(t *testing.T) {
 		t.Fatalf("impact warns about the undeclared team: %+v", items)
 	}
 }
+
+func TestDerivedTeamCannotJoinDeclaredTeam(t *testing.T) {
+	c := teamsConfig(true)
+	c.Teams["corporate"] = config.Team{Description: "Corporate"}
+	c.Bindings = append(c.Bindings, config.Binding{Role: "web-records", TeamFrom: &config.TeamFrom{Claim: "sc", Regex: "^dns-gate-(.+)$"},
+		Subjects: []config.Subject{{Issuer: "entra", Claims: map[string]config.StringList{"sc": {"dns-gate-*"}}}}})
+	snap := FromConfig(c).Holder().Current()
+	res := snap.Resolve("entra", map[string]any{"sc": "dns-gate-corporate"})
+	if contains(res.Teams, "corporate") || contains(res.Roles, "web-records") {
+		t.Fatalf("a derived team took the name of a declared team: %+v", res)
+	}
+	if len(res.Ignored) != 1 || !strings.Contains(res.Ignored[0], "corporate") {
+		t.Fatalf("ignored derivation not reported: %+v", res.Ignored)
+	}
+	if res := snap.Resolve("entra", map[string]any{"sc": "dns-gate-shop"}); !contains(res.Teams, "shop") {
+		t.Fatalf("an undeclared derived team still binds: %+v", res)
+	}
+}
+
+func TestValidateManagedTeamFamilies(t *testing.T) {
+	c := teamsConfig(true)
+	base := BaseDocument(c)
+	cases := map[string]struct {
+		mut  func(*uiapi.PolicyDocument)
+		path string
+	}{
+		"managed family without prefix": {func(d *uiapi.PolicyDocument) {
+			d.Bindings = append(d.Bindings, uiapi.Binding{Role: "web-writer", TeamFrom: &uiapi.TeamFrom{Claim: "sub", Regex: "^(.+)$"}, Groups: []string{"operators"}})
+		}, "bindings[2].team_from"},
+		"managed team in a family": {func(d *uiapi.PolicyDocument) {
+			d.Teams = map[string]uiapi.Team{"gh-ops": {Members: uiapi.TeamMembers{Groups: []string{"operators"}}}}
+		}, "teams.gh-ops"},
+	}
+	for name, tc := range cases {
+		d := goodDoc()
+		d.Bindings[0].Team = "web"
+		tc.mut(&d)
+		errs := ValidateManaged(c, base, d)
+		if !strings.Contains(paths(errs), tc.path+":") {
+			t.Errorf("%s: want an error at %s, got:\n%s", name, tc.path, paths(errs))
+		}
+	}
+}

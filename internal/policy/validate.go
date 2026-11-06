@@ -131,6 +131,7 @@ func ValidateManaged(c *config.Config, base uiapi.PolicyDocument, d uiapi.Policy
 		}
 	}
 	teams := teamRefs{strict: c.TeamsDeclared(), base: base.Teams, doc: d.Teams}
+	validateManagedFamilies(&v, c, d, &teams)
 
 	for _, name := range sortedKeys(d.Roles) {
 		r := d.Roles[name]
@@ -252,6 +253,64 @@ func (t *teamRefs) declared(team string) (uiapi.Team, bool) {
 func (t *teamRefs) check(v *verrs, path, team string) {
 	if _, ok := t.declared(team); !ok && t.strict {
 		v.add(path, "team %q is not declared under teams", team)
+	}
+}
+
+// validateManagedFamilies applies the family rules of the base file to a
+// managed document once team references are strict: managed team_from
+// bindings need a prefix that no declared team carries, and no managed
+// team, binding team or virtual key team may carry the prefix of a family.
+func validateManagedFamilies(v *verrs, c *config.Config, d uiapi.PolicyDocument, teams *teamRefs) {
+	if !teams.strict {
+		return
+	}
+	fams := c.TeamFamilies()
+	for _, b := range d.Bindings {
+		if b.TeamFrom != nil && b.TeamFrom.Prefix != "" {
+			fams = append(fams, b.TeamFrom.Prefix)
+		}
+	}
+	if d.Delegated != nil {
+		for _, b := range d.Delegated.Bindings {
+			if b.TeamFrom != nil && b.TeamFrom.Prefix != "" {
+				fams = append(fams, b.TeamFrom.Prefix)
+			}
+		}
+	}
+	for i, b := range d.Bindings {
+		if b.TeamFrom == nil {
+			continue
+		}
+		at := fmt.Sprintf("bindings[%d].team_from", i)
+		if b.TeamFrom.Prefix == "" {
+			v.add(at, "a prefix is required once a teams block exists (a derived team must not take the name of a declared team)")
+			continue
+		}
+		for _, declared := range [](map[string]uiapi.Team){teams.base, teams.doc} {
+			for name := range declared {
+				if config.InTeamFamily([]string{b.TeamFrom.Prefix}, name) {
+					v.add(at, "prefix %q is carried by the declared team %q", b.TeamFrom.Prefix, name)
+				}
+			}
+		}
+	}
+	inFamily := func(path, team string) {
+		if config.InTeamFamily(fams, team) {
+			v.add(path, "team %q carries the prefix of a team derived from claims", team)
+		}
+	}
+	for _, name := range sortedKeys(d.Teams) {
+		inFamily("teams."+name, name)
+	}
+	for i, b := range d.Bindings {
+		if b.Team != "" {
+			inFamily(fmt.Sprintf("bindings[%d].team", i), b.Team)
+		}
+	}
+	for i, k := range d.VirtualKeys {
+		for j, t := range k.Teams {
+			inFamily(fmt.Sprintf("virtual_keys[%d].teams[%d]", i, j), t)
+		}
 	}
 }
 

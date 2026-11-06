@@ -9,11 +9,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/netip"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
@@ -63,6 +65,24 @@ type Authenticator struct {
 	audit   audit.Logger
 	noise   noiseCounter
 	now     func() time.Time
+	log     *slog.Logger
+	warned  sync.Map
+}
+
+// SetLogger sets the logger of the warnings about refused team names
+// (slog.Default by default).
+func (a *Authenticator) SetLogger(l *slog.Logger) { a.log = l }
+
+// warnOnce logs a warning once per key and process.
+func (a *Authenticator) warnOnce(key, msg string, args ...any) {
+	if _, seen := a.warned.LoadOrStore(key, true); seen {
+		return
+	}
+	l := a.log
+	if l == nil {
+		l = slog.Default()
+	}
+	l.Warn(msg, args...)
 }
 
 // New builds an Authenticator. client is used for discovery and JWKS.
@@ -318,6 +338,9 @@ func (a *Authenticator) bind(is *issuer, claims map[string]any) (*identity.Subje
 func (a *Authenticator) resolve(snap *policy.Snapshot, is *issuer, s *identity.Subject, claims map[string]any) (*identity.Subject, error) {
 	res := snap.Resolve(is.cfg.Name, claims)
 	s.Roles, s.Teams, s.Groups, s.Delegations = res.Roles, res.Teams, res.Groups, res.Delegations
+	for _, ig := range res.Ignored {
+		a.warnOnce("derived:"+is.cfg.Name+":"+ig, "binding ignored: its team derived from a claim is the name of a declared team", "issuer", is.cfg.Name, "binding", ig, "subject", s.ID)
+	}
 	teams := map[string]bool{}
 	for _, t := range s.Teams {
 		teams[t] = true
@@ -325,7 +348,11 @@ func (a *Authenticator) resolve(snap *policy.Snapshot, is *issuer, s *identity.S
 	if is.cfg.TeamClaim != "" {
 		for _, t := range policy.ClaimStrings(claims[is.cfg.TeamClaim]) {
 			t = strings.ToLower(t)
-			if t != "" && !teams[t] && (!snap.StrictTeams() || snap.KnownTeam(t)) {
+			if t != "" && !teams[t] && !snap.ClaimTeamAllowed(t) {
+				a.warnOnce("claim:"+is.cfg.Name+":"+t, "team claim value ignored: not a member of a team_from family, or the name of a declared team", "issuer", is.cfg.Name, "team", t)
+				continue
+			}
+			if t != "" && !teams[t] {
 				teams[t] = true
 				s.Teams = append(s.Teams, t)
 			}

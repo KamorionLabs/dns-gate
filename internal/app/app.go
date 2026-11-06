@@ -137,6 +137,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 	if keys != nil {
 		an.SetAPIKeys(keys, auditLog)
 	}
+	an.SetLogger(log)
 	scfg := server.Config{
 		Config:      cfg,
 		Authn:       an,

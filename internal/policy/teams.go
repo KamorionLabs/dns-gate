@@ -57,19 +57,36 @@ func (s *Snapshot) KnownTeam(name string) bool {
 	return !s.strict || s.teams[name] != nil || s.familyOf(name) != nil
 }
 
-// familyOf returns the team_from derivation whose prefix name carries.
+// familyOf returns the derivation (team_from of a binding, from_subject of
+// a delegation) whose prefix name carries.
 func (s *Snapshot) familyOf(name string) *uiapi.TeamFrom {
 	var best *uiapi.TeamFrom
-	for _, b := range s.bindings {
-		tf := b.binding.TeamFrom
+	consider := func(tf *uiapi.TeamFrom) {
 		if tf == nil || len(name) <= len(tf.Prefix) || !strings.HasPrefix(name, tf.Prefix) {
-			continue
+			return
 		}
 		if best == nil || len(tf.Prefix) > len(best.Prefix) {
 			best = tf
 		}
 	}
+	for _, b := range s.bindings {
+		consider(b.binding.TeamFrom)
+	}
+	for _, name := range s.delegationNames {
+		consider(uiTeamFrom(s.delegations[name].Allow.Teams.FromSubject))
+	}
 	return best
+}
+
+// ClaimTeamAllowed reports whether a team taken from the team_claim of an
+// issuer is kept: always before the teams block exists; afterwards only a
+// member of a family that is not a declared team, so that a claim never
+// makes its holder a member of a declared team.
+func (s *Snapshot) ClaimTeamAllowed(name string) bool {
+	if !s.strict {
+		return true
+	}
+	return nameRe.MatchString(name) && s.teams[name] == nil && s.familyOf(name) != nil
 }
 
 // referencedTeams returns the fixed teams named by bindings and virtual
@@ -169,7 +186,7 @@ func (s *Snapshot) TeamInfos(storeOwners []string, withMembers bool) []uiapi.Tea
 			ti := uiapi.TeamInfo{Name: "*", Kind: uiapi.TeamKindClaim, Issuer: name, Roles: []string{},
 				Description: "teams of claim " + is.TeamClaim + " of issuer " + name}
 			if s.strict {
-				ti.Warning = "only declared teams and family members are kept"
+				ti.Warning = "only members of a team_from family are kept, never a declared team"
 			}
 			out = append(out, ti)
 		}

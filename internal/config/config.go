@@ -1029,6 +1029,7 @@ func (c *Config) Validate() error {
 			}
 		}
 	}
+	c.validateTeamFamilies(add)
 	if t := c.Ownership.TombstoneTTL; t != nil && (t.D() < 0 || t.D() > 365*24*time.Hour) {
 		add("ownership.tombstone_ttl: must be between 0s (disabled) and 8760h")
 	}
@@ -1179,6 +1180,80 @@ func (c *Config) teamRefChecker(add func(string, ...any)) func(at, team string) 
 		if !warned[team] {
 			warned[team] = true
 			c.Warnings = append(c.Warnings, fmt.Sprintf("%s: team %q is not declared under teams; it is declared automatically for now, declare it (validation becomes strict once a teams block exists)", at, team))
+		}
+	}
+}
+
+// TeamFamilies returns the prefixes of the teams derived from claims:
+// bindings[].team_from and policy.delegations[].allow.teams.from_subject.
+func (c *Config) TeamFamilies() []string {
+	var out []string
+	for _, b := range c.Bindings {
+		if b.TeamFrom != nil {
+			out = append(out, b.TeamFrom.Prefix)
+		}
+	}
+	for _, d := range c.Policy.Delegations {
+		if fs := d.Allow.Teams.FromSubject; fs != nil {
+			out = append(out, fs.Prefix)
+		}
+	}
+	return out
+}
+
+// InTeamFamily reports whether a team name could be derived by a family
+// with one of the prefixes.
+func InTeamFamily(prefixes []string, team string) bool {
+	for _, p := range prefixes {
+		if len(team) > len(p) && strings.HasPrefix(team, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// validateTeamFamilies keeps derived teams apart from the fixed ones once
+// the teams block exists: every family needs a prefix, and no declared or
+// fixed team may carry the prefix of a family, so that a claim value can
+// never produce the name of a declared team.
+func (c *Config) validateTeamFamilies(add func(string, ...any)) {
+	if !c.TeamsDeclared() {
+		return
+	}
+	for i, b := range c.Bindings {
+		if b.TeamFrom != nil && b.TeamFrom.Prefix == "" {
+			add("bindings[%d].team_from.prefix: required once a teams block exists (a derived team must not take the name of a declared team)", i)
+		}
+	}
+	for i, d := range c.Policy.Delegations {
+		if fs := d.Allow.Teams.FromSubject; fs != nil && fs.Prefix == "" {
+			add("policy.delegations[%d].allow.teams.from_subject.prefix: required once a teams block exists (a derived team must not take the name of a declared team)", i)
+		}
+	}
+	fams := c.TeamFamilies()
+	check := func(at, team string) {
+		if InTeamFamily(fams, team) {
+			add("%s: team %q carries the prefix of a team derived from claims (team_from or from_subject): choose another name or prefix", at, team)
+		}
+	}
+	for _, name := range sortedNames(c.Teams) {
+		check("teams."+name, name)
+	}
+	for i, b := range c.Bindings {
+		if b.Team != "" {
+			check(fmt.Sprintf("bindings[%d].team", i), b.Team)
+		}
+	}
+	for i, vk := range c.VirtualKeys {
+		for _, t := range vk.Teams {
+			check(fmt.Sprintf("virtual_keys[%d].teams", i), t)
+		}
+	}
+	for i, d := range c.Policy.Delegations {
+		for _, n := range d.Allow.Teams.Names {
+			if !strings.Contains(n, "*") {
+				check(fmt.Sprintf("policy.delegations[%d].allow.teams.names", i), n)
+			}
 		}
 	}
 }
