@@ -150,6 +150,11 @@ func (e *engine) ProposeTransfer(ctx context.Context, s *identity.Subject, zoneI
 				keyString(k), t.FromTeam, t.ToTeam, policy.ActionOwnershipApprove))
 		}
 	}
+	if req.Apply {
+		if err := e.selfDecision(s, t); err != nil {
+			return nil, e.deny(ctx, s, actionTransferApprove, zone, err)
+		}
+	}
 	if err := e.cfg.Store.CreateTransfer(ctx, t); err != nil {
 		return nil, &Error{Reason: ReasonUpstream, Message: "store transfer failed", Err: err}
 	}
@@ -185,6 +190,11 @@ func (e *engine) ProposeRename(ctx context.Context, s *identity.Subject, from st
 		ID: newTransferID(e), Kind: uiapi.TransferKindRename, FromTeam: from, ToTeam: req.To, Comment: req.Comment,
 		Status: uiapi.TransferProposed, Requester: s.String(), RequesterName: s.Name, RequesterCategory: s.Category,
 		RequesterPersons: e.personKeys(s), CreatedAt: now, ExpiresAt: now.Add(e.cfg.TransferTTL),
+	}
+	if req.Apply {
+		if err := e.selfDecision(s, t); err != nil {
+			return nil, e.deny(ctx, s, actionTransferApprove, "", err)
+		}
 	}
 	if err := e.cfg.Store.CreateTransfer(ctx, t); err != nil {
 		return nil, &Error{Reason: ReasonUpstream, Message: "store transfer failed", Err: err}
@@ -295,6 +305,18 @@ func (e *engine) DecideTransfer(ctx context.Context, s *identity.Subject, id str
 	}
 	err = e.runApply(ctx, s, t)
 	return e.transferView(s, *t), err
+}
+
+// selfDecision checks, before a request proposed with apply is stored, that
+// its requester may approve it, so that a refusal leaves nothing behind.
+func (e *engine) selfDecision(s *identity.Subject, t store.Transfer) error {
+	if err := e.checkApprover(s, t); err != nil {
+		return err
+	}
+	if !e.mayDecide(s, t) {
+		return fail(ReasonForbidden, "%s", e.decideRule(t))
+	}
+	return nil
 }
 
 // TransferRetrier applies the approved transfers in the background: team
