@@ -12,10 +12,11 @@ of the gate is the EuroDNS-compatible API, documented by
 `GET /.well-known/dns-gate` (no authentication) is the only detection path:
 
 ```json
-{"version": "<gate version>", "features": ["if-match", "ownership", "adopt", "policy-delegation", "plans", "rrset-api"]}
+{"version": "<gate version>", "features": ["if-match", "ownership", "adopt", "policy-delegation", "plans", "rrset-api", "forwards"]}
 ```
 
-`rrset-api` means the single RRset endpoints below are served, `plans` the REST
+`rrset-api` means the single RRset endpoints below are served, `forwards` the
+[URL forward](#url-forwards) endpoints, `plans` the REST
 plan/apply, `policy-delegation` the delegated policy API, `api-keys` the API key
 endpoints, `acme-httpreq` and `acme-dns` the [ACME endpoints](ACME.md),
 `token-exchange` the token exchange.
@@ -30,8 +31,9 @@ endpoints, `acme-httpreq` and `acme-dns` the [ACME endpoints](ACME.md),
 | Tools without OIDC, static | virtual key from the configuration: `X-App-Id` + `X-Api-Key` |
 | Web UI | session cookie; every request other than GET also sends `X-Gate-CSRF` (the `gate_csrf` cookie) and a same-origin `Origin`, and humans need a recent login for writes (`403 reauth_required`) |
 
-Permissions are the policy actions: `ui.read` or `dns.read` to read, and
-`dns.record.write` on the zone, host and type to write. Writes also require
+Permissions are the policy actions: `ui.read` or `dns.read` to read,
+`dns.record.write` on the zone, host and type to write records, and
+`dns.forward.write` on the zone and host to write URL forwards. Writes also require
 ownership: a team only changes RRsets it created through the gate or adopted, and
 creates new ones in its scope.
 
@@ -121,6 +123,78 @@ unquoted, at any length (`"v=spf1 include:_spf.example.net -all"` in JSON): the 
 or the provider splits them in 255-byte strings, and they read back as sent.
 Targets without a trailing dot are absolute (`site.example.net` is
 `site.example.net.`); a single-label target is refused with `400 relative_target`.
+
+## URL forwards
+
+A URL forward (HTTP redirect) makes the DNS provider answer HTTP requests for a
+host with a 301 or 302 redirect to a URL, or with a page framing it. Only zones
+whose provider has forwards (EuroDNS) have them; elsewhere a write is
+`400 invalid`. A forward is an owned object like an RRset, with the same
+ownership, tombstones, transfers, adoption, audit and preconditions: in the
+inventory, plans, adoption and transfers it is the RRset of type `URLFWD` of its
+host, with no TTL nor values and a `forward` object. Writing one requires
+`dns.forward.write` on the zone and host (`records.hosts` of the rule;
+`records.types` does not apply), adopting one `dns.record.adopt` on the host and
+type `URLFWD`.
+
+```sh
+curl -sS "${auth[@]}" "$GATE/api/v1/zones/example.com/forwards"
+curl -sS -i "${auth[@]}" "$GATE/api/v1/zones/example.com/forwards/go"
+
+# create a permanent redirect, refused if a forward exists on the host
+curl -sS -i "${auth[@]}" -X PUT "$GATE/api/v1/zones/example.com/forwards/go" \
+  -H "Content-Type: application/json" -H "If-None-Match: *" \
+  -d '{"type": "301", "url": "https://www.example.com/landing"}'
+
+# a frame, only if unchanged since it was read
+curl -sS -i "${auth[@]}" -X PUT "$GATE/api/v1/zones/example.com/forwards/shop" \
+  -H "Content-Type: application/json" -H 'If-Match: "a5df…"' \
+  -d '{"type": "frame", "url": "https://shop.example.net/", "title": "Shop"}'
+
+# delete (204, also when there is no forward)
+curl -sS -i "${auth[@]}" -X DELETE "$GATE/api/v1/zones/example.com/forwards/go"
+```
+
+```json
+{
+  "host": "go", "type": "URLFWD", "ttl": 0, "values": [],
+  "forward": {"type": "301", "url": "https://www.example.com/landing"},
+  "hash": "a5df…", "status": "managed", "owner": "web", "protected": false, "adopted": false,
+  "https": {"status": "inactive", "message": "no HTTPS redirect subscription on example.com: forwards answer plain HTTP only"}
+}
+```
+
+`type` is `301`, `302` or `frame`; `url` an absolute `http://` or `https://` URL of
+at most 2048 bytes, without user information, spaces, control characters nor
+unencoded `< > " ' \` \ { } | ^`, with a host in punycode (`xn--…`), written in
+canonical form (as Go's `net/url` prints it back); `title` (200 characters),
+`keywords` (500) and `description` (1000) apply to frames only and are plain text,
+without control or format characters (bidirectional overrides) nor
+`< > " ' \``: EuroDNS serves them in the page it shows on the forward host. A
+forward cannot be created over `A`, `AAAA`, `CNAME` or `APEX` records of its host
+owned by another team or by nobody, nor those records over the forward of another
+team (see [CONFIG.md](CONFIG.md#url-forwards)). The `ETag` is the
+content hash of the forward (see the `Forward` schema of the OpenAPI document).
+In a plan, a forward change is `{"host": "go", "type": "URLFWD", "forward":
+{"type": "302", "url": "https://…"}}` (or `"delete": true`), and the planned and
+audited changes carry `old_forward` and `new_forward`.
+
+**HTTPS.** A forward entry has no HTTPS setting: the URL target may be `https://`
+in any case, but the forward host answers HTTPS requests (`https://go.example.com`)
+only when the domain has an EuroDNS *HTTPS redirect* subscription, a paid product
+holding a certificate for the forward hosts. The gate reads its state
+(`GET /subscriptions` and `GET /https-redirect-subscriptions/{id}` at EuroDNS,
+cached 10 minutes; an API key without access to subscriptions gives `unknown`) and
+reports it as `https.status`: `active`, `pending` (certificate being issued),
+`no_forward` (active, issued once the zone has a forward), `inactive` (plain HTTP
+only, or a subscription past its expiration date), `unknown` (read failed, kept 30
+seconds), or `unsupported` (provider without forwards). The gate never
+orders, renews nor cancels a subscription. `"require_https": true` in the body
+(or in a plan change) refuses the write with `409 https_unavailable` unless the
+status is `active` or `no_forward` (`pending` is refused: the certificate is not
+issued yet); it is checked after the authorization (a forbidden write is
+`403`) and before the zone lock, and is a check only, nothing is
+stored.
 
 ## Plan, then apply
 
@@ -391,7 +465,7 @@ Errors are JSON, with a stable `reason` for programs:
 | 401 | `unauthenticated` (also an unknown, revoked, expired or rotated API key) |
 | 403 | `forbidden` (RBAC, protected record, plan of another caller), `protected`, `zone_profiles_disabled` (zone profiles), `not_owner` (another team), `too_many_changes`, `reauth_required`, `csrf`, `session_required`, `source_ip` (key used outside its CIDRs), `role_widened` (API key whose role grew), `ephemeral_required` (ACME endpoints), `not_team_member` |
 | 404 | `not_found` (zone not managed, RRset unknown), `plan_not_found`, `zone_not_eurodns` (EuroDNS-compatible API on a zone of another provider) |
-| 409 | `foreign_rrset` (created outside the gate: adopt it first), `tainted` (changed outside the gate), `adopt_conflict`, `immutable`, `revoked` (API keys), `too_many_values`, `too_many_registrations`, `value_taken` (ACME endpoints) |
+| 409 | `foreign_rrset` (created outside the gate: adopt it first), `tainted` (changed outside the gate), `adopt_conflict`, `https_unavailable` (`require_https` on a zone whose forwards answer plain HTTP only), `immutable`, `revoked` (API keys), `too_many_values`, `too_many_registrations`, `value_taken` (ACME endpoints) |
 | 410 | `plan_expired`, `expired` (transfer request) |
 | 412 | `precondition` (If-Match, If-None-Match, `expected_hash`, `must_not_exist`, zone changed since the plan, transfer already decided or RRsets changed since the request) |
 | 423 | `zone_locked`, with `Retry-After` |
@@ -411,7 +485,8 @@ The full list is in the `Error` schema of the OpenAPI document.
 - `POST /api/v1/zones/{zone}/adopt/preview` and `/adopt` — take over RRsets created
   outside the gate ([ONBOARDING.md](ONBOARDING.md)).
 - `GET /api/v1/zones/{zone}/terraform` — managed RRsets as `dnsgate_record_set`
-  resources with `import` blocks (`provider=eurodns` for `eurodns_record_set`).
+  resources and URL forwards as `dnsgate_url_forward` resources, with `import`
+  blocks (`provider=eurodns` for `eurodns_record_set`, without forwards).
 - `/api/v1/policy/delegated/…` — roles and bindings managed by pipelines within a
   delegation ([CONFIG.md](CONFIG.md)).
 - `/api/v1/policy/…` — the policy editor of the web UI. `explain` returns the

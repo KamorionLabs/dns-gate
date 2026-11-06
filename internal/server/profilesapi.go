@@ -139,6 +139,9 @@ func (s *Server) runProfile(ctx context.Context, subj *identity.Subject, c profi
 		if c.Profile == nil {
 			return deny(pid, &zonewrite.Error{Reason: reasonInvalidProfile, Message: "a zone profile is required"})
 		}
+		if msg := profileForwardProblem(c.Profile); msg != "" {
+			return deny(pid, &zonewrite.Error{Reason: reasonInvalidProfile, Message: msg})
+		}
 		if msg := s.protectedInProfile(c.Profile); msg != "" {
 			return deny(pid, &zonewrite.Error{Reason: reasonProtectedProfile, Message: msg})
 		}
@@ -211,7 +214,21 @@ func (s *Server) runProfile(ctx context.Context, subj *identity.Subject, c profi
 // protected entries are ignored: the profile is applied to domains the gate
 // does not know yet.
 func (s *Server) protectedInProfile(p *eurodnsprov.ZoneProfile) string {
-	snap := s.cfg.Policy.Current()
+	return protectedRecordIn(s.cfg.Policy.Current(), p)
+}
+
+// profileForwardProblem tells why a URL forward of a profile is refused,
+// with the checks of a forward written through the gate.
+func profileForwardProblem(p *eurodnsprov.ZoneProfile) string {
+	for _, raw := range p.URLForwards {
+		if msg := eurodnsprov.ForwardEntryProblem(raw); msg != "" {
+			return "invalid URL forward: " + msg
+		}
+	}
+	return ""
+}
+
+func protectedRecordIn(snap *policy.Snapshot, p *eurodnsprov.ZoneProfile) string {
 	type rec struct{ host, typ, what string }
 	var recs []rec
 	for _, r := range p.Records {
@@ -227,9 +244,7 @@ func (s *Server) protectedInProfile(p *eurodnsprov.ZoneProfile) string {
 		if err := json.Unmarshal(raw, &f); err != nil {
 			return "invalid URL forward"
 		}
-		for _, t := range []string{"A", "AAAA", "CNAME"} {
-			recs = append(recs, rec{f.Host, t, "URL forward"})
-		}
+		recs = append(recs, rec{f.Host, dns.TypeURLForward, "URL forward"})
 	}
 	for _, r := range recs {
 		if pe, ok := snap.ProtectedRecord(r.host, r.typ); ok {

@@ -58,6 +58,8 @@ const reasons: Record<string, string> = {
   upstream: 'The DNS provider returned an error',
   zone_not_managed: 'Zone not managed by the gate',
   operation_denied: 'Operation not allowed through the gate',
+  https_unavailable: 'HTTPS required, but the forwards of the zone answer HTTP only',
+  invalid_forward: 'Invalid URL forward',
   unauthenticated: 'Not signed in',
 };
 
@@ -70,6 +72,8 @@ const actions: Record<string, string> = {
   checkDnsZone: 'Zone check',
   getDnsZone: 'Zone read',
   applyRRsets: 'Apply changes',
+  'api.forward.put': 'Set a URL forward',
+  'api.forward.delete': 'Delete a URL forward',
   adopt: 'Adoption',
   'gate.adopt': 'Adoption',
   'gate.taint': 'Drift check',
@@ -114,6 +118,10 @@ const adoptReasons: Record<string, string> = {
   already_owned: 'Already managed by the gate',
   forbidden: 'Outside your adoption scope',
   relative_target: 'Target is relative to the zone (no trailing dot): fix it at the DNS provider first',
+  unsupported_forward: 'A forward the gate cannot read: fix it at the DNS provider first',
+  duplicate_forward: 'Several forwards at this name: keep only one at the DNS provider first',
+  forward_record: 'Forward entry of the DNS provider: adopt the URL forward itself',
+  invalid_forward: 'Refused by the DNS provider validation of forwards',
 };
 
 export const adoptReasonLabel = (r: string | undefined) => (r ? (adoptReasons[r] ?? r.replaceAll('_', ' ')) : '');
@@ -143,6 +151,8 @@ const writeReasons: Record<string, string> = {
   read_only: 'A record set is read-only for the gate (managed by the provider, routing policy or locked).',
   not_team_member: 'You are not a member of the team the changes are made for: reload the page to see your teams.',
   team_mismatch: 'This review was made for another team. Review the changes again.',
+  https_unavailable: 'A forward requires HTTPS, but the forwards of this zone answer plain HTTP only (no HTTPS redirect subscription on the domain). Untick "Require HTTPS" or order the subscription at the DNS provider.',
+  invalid_forward: 'A URL forward is invalid: the URL must be an absolute http:// or https:// address, and title, keywords and description only apply to a frame.',
 };
 
 /** A write refusal in plain words; the gate message is added when it says more. */

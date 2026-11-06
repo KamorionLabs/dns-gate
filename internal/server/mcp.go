@@ -15,9 +15,11 @@ import (
 
 	"github.com/KamorionLabs/dns-gate/internal/audit"
 	"github.com/KamorionLabs/dns-gate/internal/authn"
+	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/glob"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/provider"
 	"github.com/KamorionLabs/dns-gate/internal/requestid"
 	"github.com/KamorionLabs/dns-gate/internal/store"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
@@ -34,7 +36,7 @@ const (
 	subjectRefHeader = "X-Gate-Internal-Subject-Ref"
 )
 
-const recordRules = "Hosts are relative to the zone, \"@\" is the apex. Targets of CNAME, MX, NS, SRV and PTR records must be fully qualified with a trailing dot (\"target.example.net.\"), otherwise EuroDNS appends the zone. TXT values are raw text, without surrounding quotes. Accepted TTLs depend on the provider of the zone (list_zones gives it): EuroDNS only accepts 600, 900, 1800, 3600, 7200, 14400, 21600, 43200, 86400, 172800, 432000, 604800."
+const recordRules = "Hosts are relative to the zone, \"@\" is the apex. Targets of CNAME, MX, NS, SRV and PTR records must be fully qualified with a trailing dot (\"target.example.net.\"), otherwise EuroDNS appends the zone. TXT values are raw text, without surrounding quotes. Accepted TTLs depend on the provider of the zone (list_zones gives it): EuroDNS only accepts 600, 900, 1800, 3600, 7200, 14400, 21600, 43200, 86400, 172800, 432000, 604800. URL forwards (HTTP redirects, EuroDNS only) are the type URLFWD with a forward {type: 301, 302 or frame, url: absolute http(s) URL; title, keywords, description for frames} and no ttl nor values; they need dns.forward.write, and answer HTTPS only with an HTTPS redirect subscription on the domain (get_rrset gives its status; require_https=true refuses the change without one)."
 
 type mcpServer struct {
 	s       *Server
@@ -236,10 +238,13 @@ type getRRsetIn struct {
 }
 
 type getRRsetOut struct {
-	RRset     *uiapi.RRset       `json:"rrset,omitempty"`
-	Tombstone *uiapi.Tombstone   `json:"tombstone,omitempty"`
-	Ownership string             `json:"ownership,omitempty"`
-	History   []uiapi.AuditEntry `json:"history"`
+	RRset     *uiapi.RRset     `json:"rrset,omitempty"`
+	Tombstone *uiapi.Tombstone `json:"tombstone,omitempty"`
+	// HTTPS is, for a URL forward, whether the forwards of the zone answer
+	// HTTPS requests.
+	HTTPS     *provider.HTTPSRedirect `json:"https,omitempty"`
+	Ownership string                  `json:"ownership,omitempty"`
+	History   []uiapi.AuditEntry      `json:"history"`
 }
 
 type searchAuditIn struct {
@@ -323,7 +328,7 @@ func (m *mcpServer) addReadTools(srv *mcp.Server) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_rrsets",
-		Description: "List the RRsets of a zone with their owner team and ownership status (managed: owned by a team through the gate; foreign: created outside the gate, read-only; tainted: changed outside the gate, writes blocked; pending; missing), and the tombstones: RRsets deleted recently, reserved for their team until they expire. Optional filters on status, host glob, type and owner team.",
+		Description: "List the RRsets of a zone, URL forwards included (type URLFWD), with their owner team and ownership status (managed: owned by a team through the gate; foreign: created outside the gate, read-only; tainted: changed outside the gate, writes blocked; pending; missing), and the tombstones: RRsets deleted recently, reserved for their team until they expire. Optional filters on status, host glob, type and owner team.",
 		Annotations: readOnly("List RRsets"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in listRRsetsIn) (*mcp.CallToolResult, listRRsetsOut, error) {
 		subj, err := m.subject(ctx, req)
@@ -361,7 +366,7 @@ func (m *mcpServer) addReadTools(srv *mcp.Server) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "get_rrset",
-		Description: "Get one RRset (values, TTL, owner team, status), its tombstone when it was deleted recently, whether and why you may change it (ownership), and its recent audit history.",
+		Description: "Get one RRset (values, TTL, owner team, status; for type URLFWD the URL forward of the host and whether forwards answer HTTPS), its tombstone when it was deleted recently, whether and why you may change it (ownership), and its recent audit history.",
 		Annotations: readOnly("Get RRset"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in getRRsetIn) (*mcp.CallToolResult, getRRsetOut, error) {
 		subj, err := m.subject(ctx, req)
@@ -392,6 +397,11 @@ func (m *mcpServer) addReadTools(srv *mcp.Server) {
 			}
 		}
 		out.Ownership = m.ownershipNote(subj, zone, inv.Unmanaged, out.RRset, out.Tombstone)
+		if strings.EqualFold(in.Type, dns.TypeURLForward) && !inv.Unmanaged {
+			if st, err := m.s.cfg.Engine.HTTPSRedirect(ctx, subj, zone); err == nil {
+				out.HTTPS = &st
+			}
+		}
 		if m.s.cfg.AuditReader != nil {
 			events, _, err := m.s.cfg.AuditReader.ListAudit(ctx, store.AuditQuery{Zone: zone, Host: host, Type: strings.ToUpper(in.Type), Limit: 20})
 			if err == nil {
@@ -516,9 +526,9 @@ func (m *mcpServer) addWriteTools(srv *mcp.Server) {
 		if subj, err = m.forTeam(ctx, req, subj, "plan_rrset_change", zone, in.Team); err != nil {
 			return nil, uiapi.PlanResult{}, err
 		}
-		if !m.s.cfg.Authz.Allow(subj, policy.ActionRecordWrite, zone) {
+		if !m.s.cfg.Authz.Allow(subj, policy.ActionRecordWrite, zone) && !m.s.cfg.Authz.Allow(subj, policy.ActionForwardWrite, zone) {
 			m.audit(ctx, req, subj, "plan_rrset_change", zone, "deny", "forbidden", nil)
-			return nil, uiapi.PlanResult{}, fmt.Errorf("dns.record.write not granted on %q", zone)
+			return nil, uiapi.PlanResult{}, fmt.Errorf("dns.record.write or dns.forward.write not granted on %q", zone)
 		}
 		plan, err := m.s.cfg.Ops.PlanRRsets(ctx, subj, zone, in.Changes)
 		if err != nil {

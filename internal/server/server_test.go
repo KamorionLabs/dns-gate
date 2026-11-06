@@ -95,6 +95,10 @@ func (f *fakeEngine) RRset(ctx context.Context, s *identity.Subject, zone string
 	return nil, &zonewrite.Error{Reason: zonewrite.ReasonNotFound, Message: "no RRset " + key.String() + " in " + zone}
 }
 
+func (f *fakeEngine) HTTPSRedirect(context.Context, *identity.Subject, string) (provider.HTTPSRedirect, error) {
+	return provider.HTTPSRedirect{Status: provider.HTTPSInactive}, nil
+}
+
 type memAudit struct {
 	mu     sync.Mutex
 	events []audit.Event
@@ -166,10 +170,13 @@ func newEnvDisc(t *testing.T, tweak func(*config.Config), disc ZoneDiscovery) *e
 		Roles: map[string]config.Role{
 			"writer": {Rules: []config.Rule{{Zones: []string{"example.com"}, Actions: []string{policy.ActionDNSRead, policy.ActionRecordWrite, policy.ActionUIRead}}}},
 			"admin":  {Rules: []config.Rule{{Zones: []string{"*"}, Actions: []string{policy.ActionRecordAdopt, policy.ActionUIRead}}}},
+			"redirects": {Rules: []config.Rule{{Zones: []string{"example.com"}, Actions: []string{policy.ActionDNSRead, policy.ActionForwardWrite},
+				Records: &config.RecordScope{Hosts: []string{"go"}}}}},
 		},
 		Bindings: []config.Binding{
 			{Role: "writer", Team: "web", Subjects: []config.Subject{{Issuer: "idp", Claims: map[string]config.StringList{"sub": {"writer"}}}}},
 			{Role: "admin", Team: "ops", Subjects: []config.Subject{{Issuer: "idp", Claims: map[string]config.StringList{"sub": {"admin"}}}}},
+			{Role: "redirects", Team: "marketing", Subjects: []config.Subject{{Issuer: "idp", Claims: map[string]config.StringList{"sub": {"redirects"}}}}},
 		},
 	}
 	e.srv = httptest.NewUnstartedServer(nil)

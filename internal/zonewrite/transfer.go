@@ -85,8 +85,8 @@ func (e *engine) ProposeTransfer(ctx context.Context, s *identity.Subject, zoneI
 	if req.Apply && e.cfg.RequireSecondApprover {
 		return nil, fail(ReasonInvalid, "apply: a second approver is required (ownership.require_second_approver)")
 	}
-	if !e.cfg.Authz.Allow(s, policy.ActionOwnershipApprove, zone) && !e.cfg.Authz.Allow(s, policy.ActionRecordWrite, zone) {
-		return nil, e.deny(ctx, s, actionTransferPropose, zone, fail(ReasonForbidden, "%s or %s is required on %s", policy.ActionRecordWrite, policy.ActionOwnershipApprove, zone))
+	if !e.cfg.Authz.Allow(s, policy.ActionOwnershipApprove, zone) && !e.writesIn(s, zone) {
+		return nil, e.deny(ctx, s, actionTransferPropose, zone, fail(ReasonForbidden, "%s, %s or %s is required on %s", policy.ActionRecordWrite, policy.ActionForwardWrite, policy.ActionOwnershipApprove, zone))
 	}
 	if err := checkComment(req.Comment); err != nil {
 		return nil, err
@@ -889,7 +889,7 @@ func (e *engine) teamWrites(g *grants, s *identity.Subject, team, zone string, k
 	}
 	c := *s
 	c.Roles = roles
-	return e.allowRRset(g, &c, policy.ActionRecordWrite, zone, k)
+	return e.allowRRset(g, &c, policy.WriteAction(k), zone, k)
 }
 
 // approves reports whether s holds dns.ownership.approve on an RRset.

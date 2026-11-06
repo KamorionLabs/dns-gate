@@ -263,6 +263,34 @@ func TestMCPPlanApply(t *testing.T) {
 	}
 }
 
+func TestMCPForwards(t *testing.T) {
+	e := mcpEnv(t, true)
+	cs := connect(t, e, e.token("redirects"))
+	tools := toolNames(t, cs)
+	if !strings.Contains(tools["plan_rrset_change"].Description, "URLFWD") || !strings.Contains(tools["list_rrsets"].Description, "URLFWD") {
+		t.Fatal("tools must document URL forwards")
+	}
+	changes := map[string]any{"zone": "example.com", "changes": []map[string]any{{"host": "go", "type": "URLFWD",
+		"forward": map[string]any{"type": "301", "url": "https://example.net/"}, "require_https": true}}}
+	var plan uiapi.PlanResult
+	if res := call(t, cs, "plan_rrset_change", changes, &plan); res.IsError || plan.PlanID == "" {
+		t.Fatalf("forward writer cannot plan: %s %+v", errText(res), plan)
+	}
+	if res := call(t, cs, "apply_rrset_change", map[string]any{"plan_id": plan.PlanID}, nil); res.IsError {
+		t.Fatalf("apply: %s", errText(res))
+	}
+	c := e.lastApplied(t)
+	if c.Forward == nil || c.Forward.URL != "https://example.net/" || !c.RequireHTTPS || c.Type != "URLFWD" {
+		t.Fatalf("applied %+v", c)
+	}
+	var got struct {
+		HTTPS *struct{ Status string } `json:"https"`
+	}
+	if res := call(t, cs, "get_rrset", map[string]any{"zone": "example.com", "host": "go", "type": "urlfwd"}, &got); res.IsError || got.HTTPS == nil || got.HTTPS.Status != "inactive" {
+		t.Fatalf("get_rrset: %s %+v", errText(res), got)
+	}
+}
+
 func TestMCPRateLimit(t *testing.T) {
 	e := newEnvWith(t, func(c *config.Config) {
 		c.MCP = config.MCP{Enabled: true, PlanTTL: config.Duration(10 * time.Minute), RequestsPerMinute: 1}

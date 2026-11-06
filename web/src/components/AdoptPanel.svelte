@@ -6,6 +6,7 @@
   import { saveAdopt } from '../lib/adoptDraft';
   import { ttl as fmtTTL } from '../lib/format';
   import { journalHref } from '../lib/router.svelte';
+  import { forwardText, isForward } from '../lib/forwards';
   import SidePanel from './SidePanel.svelte';
   import Seal from './Seal.svelte';
   import Host from './Host.svelte';
@@ -60,6 +61,11 @@
   let hclError = $state<string | null>(null);
 
   const key = (c: { host: string; type: string }) => `${c.host}/${c.type}`;
+  /** Short type for the narrow column: a URL forward reads "Forward". */
+  const shortType = (t: string) => (isForward({ type: t }) ? 'Forward' : t);
+  /** What a candidate holds: its values, the target of an alias, or the redirect of a forward. */
+  const content = (c: AdoptCandidate) =>
+    c.forward ? forwardText(c.forward) : c.alias ? `alias → ${c.alias.target}` : (c.values ?? []).join('  ');
   const selection = (): AdoptSelection =>
     mode === 'selection'
       ? { rrsets: selected, owner }
@@ -172,7 +178,7 @@
         </div>
       </div>
       <ul class="cands">
-        {#each result.adopted as a (key(a))}<li><Seal status="managed" size={13} /><Host host={a.host} {zone} showZone={false} /><span class="type mono">{a.type}</span></li>{/each}
+        {#each result.adopted as a (key(a))}<li><Seal status="managed" size={13} /><Host host={a.host} {zone} showZone={false} /><span class="type mono">{shortType(a.type)}</span></li>{/each}
       </ul>
     </section>
     <section class="tf">
@@ -227,9 +233,9 @@
               <li class="ok" class:off={excluded.includes(key(c))}>
                 <input type="checkbox" checked={!excluded.includes(key(c))} onchange={() => toggle(c)} aria-label="Adopt {c.host} {c.type}" />
                 <Host host={c.host} {zone} showZone={false} />
-                <span class="type mono">{c.type}</span>
-                <span class="vals mono">{c.values.join('  ')}</span>
-                <span class="ttl mono">{fmtTTL(c.ttl)}</span>
+                <span class="type mono">{shortType(c.type)}</span>
+                <span class="vals mono" title={c.forward?.title ? `${content(c)} (${c.forward.title})` : content(c)}>{content(c)}</span>
+                <span class="ttl mono">{c.forward ? '' : fmtTTL(c.ttl)}</span>
               </li>
             {/each}
           </ul>
@@ -243,7 +249,7 @@
               <li class="no">
                 <Seal status={c.status} size={13} />
                 <Host host={c.host} {zone} showZone={false} />
-                <span class="type mono">{c.type}</span>
+                <span class="type mono">{shortType(c.type)}</span>
                 <span class="why" class:neutral={c.reason === 'already_owned'}>{adoptReasonLabel(c.reason)}</span>
               </li>
             {/each}

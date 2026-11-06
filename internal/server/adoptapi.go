@@ -208,7 +208,7 @@ func InventoryTerraform(e Engine) TerraformRenderer {
 					continue
 				}
 			}
-			sets = append(sets, dns.RRset{Key: dns.Key{Host: r.Host, Type: r.Type}, TTL: r.TTL, Values: r.Values, Alias: r.Alias, ReadOnly: r.ReadOnly})
+			sets = append(sets, dns.RRset{Key: dns.Key{Host: r.Host, Type: r.Type}, TTL: r.TTL, Values: r.Values, Alias: r.Alias, Forward: r.Forward, ReadOnly: r.ReadOnly})
 		}
 		header := []string{"Managed RRsets exported by dns-gate " + version.Version + "."}
 		if f.Team != "" {

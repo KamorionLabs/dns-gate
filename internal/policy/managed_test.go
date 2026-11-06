@@ -216,7 +216,7 @@ func TestImpactAndDiff(t *testing.T) {
 	if len(errs) > 0 {
 		t.Fatal(paths(errs))
 	}
-	items := Impact(oldSnap, newSnap, func(team, zone string) int {
+	items := Impact(oldSnap, newSnap, func(team, zone, _ string) int {
 		if team == "web" && zone == "example.com" {
 			return 12
 		}

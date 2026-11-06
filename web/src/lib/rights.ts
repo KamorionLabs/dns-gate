@@ -1,11 +1,27 @@
 // Whether the signed-in user may change a record set, computed from /me and
 // the inventory so the console only offers what the gate would accept. The
 // gate stays the authority: it checks everything again at plan and apply.
-import type { Me, RRset } from './types';
+import type { Me, Permission, RRset } from './types';
 import { hostMatch } from './glob';
 import { ruleCovers } from './folders';
+import { isForward, URLFWD } from './forwards';
 
 export const WRITE = 'dns.record.write';
+/** Writes URL forwards; a rule scopes it by hosts only, its types do not apply. */
+export const FORWARD_WRITE = 'dns.forward.write';
+
+/** The action writing a record set of this type. */
+export const writeAction = (type: string) => (type.toUpperCase() === URLFWD ? FORWARD_WRITE : WRITE);
+
+/** Whether a rule grants the write of this type in the zone, any host. */
+function grantsType(p: Permission, zone: string, type: string): boolean {
+  const forward = type.toUpperCase() === URLFWD;
+  return (
+    p.actions.includes(writeAction(type)) &&
+    ruleCovers(p, zone) &&
+    (forward || p.types.length === 0 || p.types.includes('*') || p.types.includes(type))
+  );
+}
 
 export type Blocker =
   | 'zone_unmanaged'
@@ -31,13 +47,7 @@ export const EDITABLE_TYPES = ['A', 'AAAA', 'CNAME', 'TXT', 'MX', 'SRV', 'CAA'];
 /** Whether a rule of the user grants writes on this name and type (unknown permissions: assume yes, the gate decides). */
 export function rbacAllows(me: Me | null, zone: string, host: string, type: string): boolean {
   if (!me?.permissions) return true;
-  return me.permissions.some(
-    (p) =>
-      p.actions.includes(WRITE) &&
-      ruleCovers(p, zone) &&
-      (p.hosts.length === 0 || p.hosts.some((h) => hostMatch(h, host))) &&
-      (p.types.length === 0 || p.types.includes('*') || p.types.includes(type)),
-  );
+  return me.permissions.some((p) => grantsType(p, zone, type) && (p.hosts.length === 0 || p.hosts.some((h) => hostMatch(h, host))));
 }
 
 /** Whether the user may write anything in the zone: decides whether "Add record" is offered. */
@@ -45,6 +55,13 @@ export function canWriteZone(me: Me | null, zone: string): boolean {
   if (!me) return false;
   if (!me.permissions) return true;
   return me.permissions.some((p) => p.actions.includes(WRITE) && ruleCovers(p, zone));
+}
+
+/** Whether the user may write URL forwards in the zone: decides whether "Add forward" is offered. */
+export function canWriteForwards(me: Me | null, zone: string): boolean {
+  if (!me) return false;
+  if (!me.permissions) return true;
+  return me.permissions.some((p) => grantsType(p, zone, URLFWD));
 }
 
 /** Record types the user may create in the zone (some rule may restrict hosts further). */
@@ -57,9 +74,7 @@ export function writableTypes(me: Me | null, zone: string): string[] {
 /** Host patterns the user may write in the zone for a type; empty list: any host. */
 export function writableHosts(me: Me | null, zone: string, type: string): string[] {
   if (!me?.permissions) return [];
-  const rules = me.permissions.filter(
-    (p) => p.actions.includes(WRITE) && ruleCovers(p, zone) && (p.types.length === 0 || p.types.includes('*') || p.types.includes(type)),
-  );
+  const rules = me.permissions.filter((p) => grantsType(p, zone, type));
   if (rules.some((p) => p.hosts.length === 0)) return [];
   return [...new Set(rules.flatMap((p) => p.hosts))];
 }
@@ -68,6 +83,9 @@ const readOnlyText: Record<string, string> = {
   server_managed: 'Managed by the DNS provider itself (SOA, name servers or a locked record): nobody changes it through the gate.',
   routing_policy: 'Uses a routing policy (weighted, latency, failover or geolocation): the gate does not edit these, change it at the provider.',
   locked: 'Locked at the DNS provider: unlock it there first.',
+  unsupported_forward: 'A forward the gate cannot read (unknown kind or no URL): change it at the DNS provider.',
+  duplicate_forward: 'Several forwards exist at this name at the DNS provider: the gate writes none of them until only one is left there.',
+  forward_record: 'A forward entry the DNS provider lists with the records: URL forwards are changed in the URL forwards section, mail forwards at the provider.',
 };
 
 export const blockerText: Record<Blocker, string> = {
@@ -94,7 +112,8 @@ export function canChange(me: Me | null, zone: string, rr: RRset, unmanaged = fa
   if (unmanaged) return no('zone_unmanaged');
   if (rr.read_only) {
     const known = rr.read_only === 'server_managed' || rr.read_only === 'routing_policy' || rr.read_only === 'locked';
-    return known ? no(rr.read_only as Blocker) : no('read_only', `The gate does not write this record set (${rr.read_only.replaceAll('_', ' ')}).`);
+    if (known) return no(rr.read_only as Blocker);
+    return no('read_only', readOnlyText[rr.read_only] ?? `The gate does not write this record set (${rr.read_only.replaceAll('_', ' ')}).`);
   }
   if (rr.protected) return no('protected');
   if (rr.status === 'foreign') return no('foreign');
@@ -102,10 +121,12 @@ export function canChange(me: Me | null, zone: string, rr: RRset, unmanaged = fa
   if (rr.status === 'missing') return no('missing');
   if (rr.status === 'pending') return no('pending');
   if (rr.alias) return no('alias');
-  if (!EDITABLE_TYPES.includes(rr.type)) return no('unsupported_type');
+  const forward = isForward(rr);
+  if (!forward && !EDITABLE_TYPES.includes(rr.type)) return no('unsupported_type');
+  if (forward && !rr.forward) return no('read_only', readOnlyText.unsupported_forward);
   if (!me) return no('forbidden');
   if (rr.owner && !me.teams.includes(rr.owner)) return no('not_owner', `Owned by team ${rr.owner}: only that team can change it.`);
-  if (!rbacAllows(me, zone, rr.host, rr.type)) return no('forbidden');
+  if (!rbacAllows(me, zone, rr.host, rr.type)) return forward ? no('forbidden', 'Your roles do not allow changing this URL forward (dns.forward.write).') : no('forbidden');
   return { ok: true };
 }
 
@@ -114,6 +135,9 @@ export function readOnlyLabel(rr: RRset): string | null {
   if (rr.read_only === 'server_managed') return 'Provider';
   if (rr.read_only === 'routing_policy') return 'Routing policy';
   if (rr.read_only === 'locked') return 'Locked';
+  if (rr.read_only === 'unsupported_forward') return 'Unsupported';
+  if (rr.read_only === 'duplicate_forward') return 'Duplicate';
+  if (rr.read_only === 'forward_record') return 'Forward entry';
   if (rr.read_only) return 'Read-only';
   return null;
 }

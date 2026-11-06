@@ -73,7 +73,7 @@ func (e *engine) inventory(ctx context.Context, zone string, maxAge time.Duratio
 	for _, set := range c.zone.RRsets {
 		key := set.Key
 		r := uiapi.RRset{Host: key.Host, Type: key.Type, TTL: set.TTL, Values: append([]string{}, set.Values...),
-			Alias: set.Alias, ReadOnly: readOnly(key, &set), Hash: dns.ContentHash(set),
+			Alias: set.Alias, Forward: set.Forward, ReadOnly: readOnly(key, &set), Hash: dns.ContentHash(set),
 			Status: uiapi.StatusForeign, Protected: e.cfg.Authz.IsProtected(zone, key)}
 		o, owned := owns[key]
 		if !owned {
@@ -284,7 +284,7 @@ func (e *engine) RRset(ctx context.Context, s *identity.Subject, zoneIn string, 
 	}
 	r := &uiapi.RRset{Host: key.Host, Type: key.Type, Values: []string{}, Status: uiapi.StatusForeign, Protected: e.cfg.Authz.IsProtected(zone, key)}
 	if set != nil {
-		r.TTL, r.Values, r.Alias = set.TTL, append([]string{}, set.Values...), set.Alias
+		r.TTL, r.Values, r.Alias, r.Forward = set.TTL, append([]string{}, set.Values...), set.Alias, set.Forward
 		r.ReadOnly, r.Hash = readOnly(set.Key, set), dns.ContentHash(*set)
 	}
 	if owned {

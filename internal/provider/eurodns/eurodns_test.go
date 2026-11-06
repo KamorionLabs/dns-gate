@@ -28,7 +28,7 @@ func sample() *api.Zone {
 			{ID: id(6), Type: "MX", Host: "@", TTL: 3600, RData: "10 mx.example.net."},
 			{ID: id(7), Type: "CNAME", Host: "rel", TTL: 3600, RData: "internal"},
 		},
-		URLForwards: []json.RawMessage{json.RawMessage(`{"host":"go"}`)},
+		URLForwards: []json.RawMessage{json.RawMessage(`{"id":9,"host":"go","forwardType":"HTTP302","url":"https://example.net/x"}`)},
 	}
 }
 
@@ -47,7 +47,7 @@ func TestContentHashMatchesLegacyEngine(t *testing.T) {
 	legacy := rrset.Group("example.com", user)
 	n := 0
 	for _, s := range z.RRsets {
-		if s.ReadOnly == ReadOnlyServerManaged {
+		if s.ReadOnly == ReadOnlyServerManaged || s.Key.IsForward() {
 			continue
 		}
 		n++

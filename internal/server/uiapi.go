@@ -108,6 +108,12 @@ func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
 	case pattern == routeRRset:
 		s.handleRRset(w, r, subj, sess, params["zone"], params["host"], params["type"])
 		return
+	case pattern == routeForwards:
+		s.handleForwards(w, r, subj, params["zone"])
+		return
+	case pattern == routeForward:
+		s.handleForward(w, r, subj, sess, params["zone"], params["host"])
+		return
 	case pattern == routePlan:
 		s.handlePlan(w, r, subj, params["zone"])
 		return

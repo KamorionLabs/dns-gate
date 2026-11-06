@@ -17,6 +17,8 @@ type apiRoute struct {
 const (
 	routeZoneRRsets = "/api/v1/zones/{zone}/rrsets"
 	routeRRset      = "/api/v1/zones/{zone}/rrsets/{host}/{type}"
+	routeForwards   = "/api/v1/zones/{zone}/forwards"
+	routeForward    = "/api/v1/zones/{zone}/forwards/{host}"
 	routePlan       = "/api/v1/zones/{zone}/plan"
 	routeApply      = "/api/v1/zones/{zone}/apply"
 	routeZoneOps    = "/api/v1/zones/{zone}/"
@@ -34,6 +36,10 @@ var apiRoutes = []apiRoute{
 	{http.MethodGet, routeRRset},
 	{http.MethodPut, routeRRset},
 	{http.MethodDelete, routeRRset},
+	{http.MethodGet, routeForwards},
+	{http.MethodGet, routeForward},
+	{http.MethodPut, routeForward},
+	{http.MethodDelete, routeForward},
 	{http.MethodPost, routePlan},
 	{http.MethodPost, routeApply},
 	{http.MethodPost, "/api/v1/zones/{zone}/adopt/preview"},

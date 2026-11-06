@@ -19,6 +19,17 @@
 //     Stored values and their content hashes are never rewritten.
 //   - EuroDNS keeps only the last 5 zone snapshots: the snapshot id recorded
 //     in the audit soon disappears.
+//   - URL forwards are part of the zone document (urlForwards). Each one is
+//     the RRset of key {host, URLFWD} carrying a dns.Forward; a write
+//     changes only the entries of the forwards it targets, every other
+//     entry is saved back byte for byte. URL and MAIL pseudo records, if
+//     EuroDNS lists any (not verified against the live API), are read-only
+//     ("forward_record"), and the URL ones of a host are left out of the
+//     save that deletes its forward. Mail forwards are kept as read and are
+//     not modelled.
+//   - A forward answers HTTPS requests only with an HTTPS redirect
+//     subscription on the domain (a paid EuroDNS product, see
+//     HTTPSRedirect); the forward entry itself has no HTTPS setting.
 package eurodns
 
 import (
@@ -70,6 +81,7 @@ type Provider struct {
 	baseURL   string
 	client    *api.Client
 	transport http.RoundTripper
+	https     httpsCache
 }
 
 var (
@@ -113,7 +125,7 @@ func (p *Provider) BaseURL() string { return p.baseURL }
 func (p *Provider) Transport() http.RoundTripper { return p.transport }
 
 func (p *Provider) Capabilities() provider.Capabilities {
-	return provider.Capabilities{FullZoneWrite: true, AtomicBatch: true, Types: slices.Clone(Types), TTLs: slices.Clone(api.AllowedTTLs)}
+	return provider.Capabilities{FullZoneWrite: true, AtomicBatch: true, Forwards: true, Types: slices.Clone(Types), TTLs: slices.Clone(api.AllowedTTLs)}
 }
 
 func (p *Provider) ListZones(ctx context.Context) ([]string, error) {
@@ -158,11 +170,15 @@ func FromNative(id, zone string, z *api.Zone) *dns.Zone {
 		switch {
 		case managed[k] || k.Type == "SOA":
 			s.ReadOnly = ReadOnlyServerManaged
+		case k.Type == "URL" || k.Type == "MAIL":
+			s.ReadOnly = ReadOnlyForwardRecord
 		case hasRelativeTarget(k.Type, s.Values):
 			s.ReadOnly = CodeRelativeTarget
 		}
 		out.RRsets = append(out.RRsets, s)
 	}
+	out.RRsets = append(out.RRsets, forwardRRsets(zone, z.URLForwards)...)
+	sort.SliceStable(out.RRsets, func(i, j int) bool { return out.RRsets[i].Key.Less(out.RRsets[j].Key) })
 	return out
 }
 
@@ -192,6 +208,13 @@ func (p *Provider) Normalize(zone string, s dns.RRset) (dns.RRset, error) {
 	s.Key = dns.Key{Host: dns.NormalizeHost(s.Key.Host, zone), Type: strings.ToUpper(strings.TrimSpace(s.Key.Type))}
 	invalid := func(code, format string, a ...any) (dns.RRset, error) {
 		return dns.RRset{}, &provider.InvalidError{Key: s.Key, Code: code, Message: fmt.Sprintf(format, a...)}
+	}
+	if s.Key.IsForward() {
+		s.Key.Type = dns.TypeURLForward
+		return normalizeForward(s)
+	}
+	if s.Forward != nil {
+		return invalid("", "a forward is only valid on type %s", dns.TypeURLForward)
 	}
 	if s.Alias != nil {
 		return invalid("", "alias records are not supported by EuroDNS")
@@ -266,11 +289,22 @@ func Desired(zone string, cur *dns.Zone, changes []dns.Change) (*api.Zone, error
 	if err != nil {
 		return nil, err
 	}
+	zone = dns.NormalizeZone(zone)
 	diff := make([]zonediff.Change, 0, len(changes))
+	var forwards []dns.Change
 	for _, c := range changes {
+		if c.Key.IsForward() {
+			forwards = append(forwards, c)
+			continue
+		}
 		diff = append(diff, zonediff.Change{Op: zonediff.Op(c.Op), Key: rrset.Key{Host: c.Key.Host, Type: c.Key.Type}, Old: toSet(c.Old), New: toSet(c.New)})
 	}
-	return zonediff.Apply(dns.NormalizeZone(zone), n, diff), nil
+	out := zonediff.Apply(zone, n, diff)
+	if len(forwards) > 0 {
+		out.URLForwards = applyForwards(zone, n.URLForwards, forwards)
+		out.Records = dropForwardRecords(zone, out.Records, forwards)
+	}
+	return out, nil
 }
 
 func toSet(s *dns.RRset) *rrset.Set {
@@ -315,9 +349,11 @@ func Problems(zone string, rep *api.ValidationReport, changed map[dns.Key]bool) 
 	if rep == nil {
 		return nil
 	}
-	var out []provider.Problem
-	blocking := false
-	for _, pb := range rep.Problems() {
+	out := forwardProblems(zone, rep.URLForwardErrors, changed)
+	blocking := slices.ContainsFunc(out, func(p provider.Problem) bool { return p.Blocking })
+	others := *rep
+	others.URLForwardErrors = nil
+	for _, pb := range others.Problems() {
 		p := provider.Problem{Message: pb.String(), Blocking: pb.Severity != api.SeverityWarning}
 		if pb.Host != "" || pb.Type != "" {
 			k := dns.Key{Host: dns.NormalizeHost(pb.Host, zone), Type: strings.ToUpper(strings.TrimSpace(pb.Type))}

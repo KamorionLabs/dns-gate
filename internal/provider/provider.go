@@ -22,6 +22,9 @@ type Capabilities struct {
 	ConditionalWrite bool
 	// Alias: alias RRsets (dns.Alias) can be written.
 	Alias bool
+	// Forwards: URL forwards (dns.Forward, key type dns.TypeURLForward) are
+	// read and written. Without it the core refuses every forward.
+	Forwards bool
 	// Types are the writable record types, uppercase.
 	Types []string
 	// TTLs, when not empty, is the closed list of accepted TTLs; otherwise
@@ -70,6 +73,34 @@ type FolderLister interface {
 // (EuroDNS). The id is recorded in the audit event of each write.
 type Snapshotter interface {
 	LatestSnapshot(ctx context.Context, zone string) (string, error)
+}
+
+// HTTPSRedirecter is implemented by providers whose forwards answer HTTPS
+// requests only with a separate per-domain subscription (EuroDNS HTTPS
+// redirect). Forwards are written either way; without the subscription the
+// forward host answers plain HTTP only.
+type HTTPSRedirecter interface {
+	HTTPSRedirect(ctx context.Context, zone string) (HTTPSRedirect, error)
+}
+
+// HTTPS redirect states.
+const (
+	HTTPSActive      = "active"      // HTTPS requests to forward hosts are redirected
+	HTTPSPending     = "pending"     // subscription ordered, certificate not issued yet
+	HTTPSNoForward   = "no_forward"  // subscription active, no forward in the zone yet
+	HTTPSInactive    = "inactive"    // no active subscription: plain HTTP only
+	HTTPSUnsupported = "unsupported" // the provider has no forwards
+	HTTPSUnknown     = "unknown"     // the status could not be read
+)
+
+// HTTPSRedirect is the HTTPS status of the forwards of a zone.
+type HTTPSRedirect struct {
+	Status string `json:"status"`
+	// Subscription is the provider subscription id, when there is one.
+	Subscription string `json:"subscription,omitempty"`
+	// ExpiresAt is the subscription expiration date as given by the provider.
+	ExpiresAt string `json:"expires_at,omitempty"`
+	Message   string `json:"message,omitempty"`
 }
 
 // Problem is one validation problem reported by a Checker.

@@ -9,8 +9,8 @@
   import Seal from '../components/Seal.svelte';
   import Icon from '../components/Icon.svelte';
 
-  const ACTIONS = ['dns.record.write', 'dns.read', 'dns.record.adopt', 'ui.read', 'policy.read', 'policy.propose', 'policy.approve'];
-  const TYPES = ['', 'A', 'AAAA', 'CNAME', 'APEX', 'TXT', 'MX', 'NS', 'SRV', 'CAA'];
+  const ACTIONS = ['dns.record.write', 'dns.forward.write', 'dns.read', 'dns.record.adopt', 'ui.read', 'policy.read', 'policy.propose', 'policy.approve'];
+  const TYPES = ['', 'A', 'AAAA', 'CNAME', 'APEX', 'TXT', 'MX', 'NS', 'SRV', 'CAA', 'URLFWD'];
   const presets: { label: string; issuer: string; claims: EClaim[] }[] = [
     { label: 'AWS role', issuer: 'aws', claims: [{ key: 'sub', values: ['arn:aws:iam::111111111111:role/ci-app'] }] },
     { label: 'GitHub workflow', issuer: 'github', claims: [{ key: 'repository', values: ['acme/web'] }, { key: 'ref', values: ['refs/heads/main'] }] },

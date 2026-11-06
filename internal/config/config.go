@@ -533,6 +533,7 @@ var knownActions = map[string]bool{
 	"dns.read":              true,
 	"dns.record.write":      true,
 	"dns.record.adopt":      true,
+	"dns.forward.write":     true,
 	"dns.zone.admin":        true,
 	"dns.zone.profile":      true,
 	"ui.read":               true,
@@ -1137,6 +1138,7 @@ func (c *Config) Validate() error {
 		}
 	}
 	c.Warnings = append(c.Warnings, c.zoneProfileWarnings()...)
+	c.Warnings = append(c.Warnings, c.forwardWarnings()...)
 	if c.Ownership.RequireSecondApprover && len(c.Ownership.PersonIssuers) == 0 && !c.Ownership.MachineApprovers {
 		switch humans := c.HumanIssuers(); len(humans) {
 		case 0:
@@ -1314,6 +1316,22 @@ func (c *Config) zoneProfileWarnings() []string {
 	if granted && !enabled {
 		out = append(out, "roles: dns.zone.profile is granted but no eurodns provider sets zone_profiles: true")
 	}
+	return out
+}
+
+// forwardWarnings flags the dns.forward.write grants scoped by
+// records.types without records.hosts: types do not apply to URL forwards,
+// so such a rule grants the forwards of every host.
+func (c *Config) forwardWarnings() []string {
+	var out []string
+	for name, r := range c.Roles {
+		for j, rule := range r.Rules {
+			if containsString(rule.Actions, "dns.forward.write") && rule.Records != nil && len(rule.Records.Types) > 0 && len(rule.Records.Hosts) == 0 {
+				out = append(out, fmt.Sprintf("roles.%s.rules[%d]: dns.forward.write with records.types and no records.hosts grants the URL forwards of every host: records.types does not apply to forwards", name, j))
+			}
+		}
+	}
+	sort.Strings(out)
 	return out
 }
 

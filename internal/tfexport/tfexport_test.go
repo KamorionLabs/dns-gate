@@ -53,6 +53,9 @@ func zoneSets() []dns.RRset {
 		{Key: dns.Key{Host: "cdn", Type: "AAAA"}, Alias: &dns.Alias{Target: "d1.cloudfront.net.", HostedZoneID: "Z2FDTNDATAQYW2"}},
 		{Key: dns.Key{Host: "lb", Type: "A"}, TTL: 60, Alias: &dns.Alias{Target: "lb-1.eu-west-3.elb.amazonaws.com.", HostedZoneID: "Z3Q77PNBQS71R4", EvaluateTargetHealth: true}},
 		set("TXT", "empty", 3600),
+		{Key: dns.ForwardKey("go"), Forward: &dns.Forward{Mode: "301", URL: "https://example.net/"}},
+		{Key: dns.ForwardKey("@"), Forward: &dns.Forward{Mode: "frame", URL: "https://shop.example.net/", Title: "Shop \"x\""}},
+		{Key: dns.ForwardKey("odd"), Forward: &dns.Forward{Mode: "magic", URL: "x"}, ReadOnly: "unsupported_forward"},
 	}
 }
 

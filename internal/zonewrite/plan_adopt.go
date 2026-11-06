@@ -65,7 +65,7 @@ func rrsetPlan(zone string, p provider.Provider, sets map[dns.Key]dns.RRset, own
 		if c.ExpectedHash != "" && (!exists || dns.ContentHash(old) != c.ExpectedHash) {
 			return nil, fail(ReasonPrecondition, "%s changed: its content hash is no longer %s", keyString(key), c.ExpectedHash)
 		}
-		if c.Delete || (len(c.Values) == 0 && c.Alias == nil) {
+		if c.Delete || (len(c.Values) == 0 && c.Alias == nil && c.Forward == nil) {
 			if exists {
 				o := old
 				plan.Changes = append(plan.Changes, dns.Change{Op: dns.OpDelete, Key: key, Old: &o})
@@ -75,15 +75,25 @@ func rrsetPlan(zone string, p provider.Provider, sets map[dns.Key]dns.RRset, own
 		if c.Alias != nil && !caps.Alias {
 			return nil, fail(ReasonInvalid, "%s: provider %s does not support alias records", keyString(key), p.ID())
 		}
+		if key.IsForward() != (c.Forward != nil) {
+			return nil, fail(ReasonInvalid, "%s: a forward is written as type %s with a forward and nothing else", keyString(key), dns.TypeURLForward)
+		}
+		if key.IsForward() && !caps.Forwards {
+			return nil, fail(ReasonInvalid, "%s: provider %s has no URL forwards", keyString(key), p.ID())
+		}
 		ttl := c.TTL
-		if ttl == 0 && c.Alias == nil {
+		if ttl == 0 && c.Alias == nil && c.Forward == nil {
 			ttl = defaultTTL
 			if exists {
 				ttl = old.TTL
 			}
 		}
-		n := dns.RRset{Key: key, TTL: ttl, Alias: c.Alias}
-		if c.Alias == nil {
+		n := dns.RRset{Key: key, TTL: ttl, Alias: c.Alias, Forward: c.Forward}
+		if c.Forward != nil {
+			f := *c.Forward
+			n.Forward, n.TTL = &f, 0
+		}
+		if c.Alias == nil && c.Forward == nil {
 			n.Values = slices.Clone(c.Values)
 			sort.Strings(n.Values)
 			n.Values = slices.Compact(n.Values)
@@ -124,7 +134,7 @@ func (e *engine) PlanRRsets(ctx context.Context, s *identity.Subject, zoneIn str
 		res.Allowed, res.Reason, res.Message = false, string(ze.Reason), ze.Message
 		return res, nil
 	}
-	if !e.cfg.Authz.Allow(s, policy.ActionRecordWrite, zone) {
+	if !e.writesIn(s, zone) {
 		return refuse(fail(ReasonForbidden, "not allowed to write in zone %s", zone))
 	}
 	p, err := e.provider(zone)
@@ -145,12 +155,17 @@ func (e *engine) PlanRRsets(ctx context.Context, s *identity.Subject, zoneIn str
 		return refuse(err)
 	}
 	res.Changes = uiChanges(plan.Changes)
+	if len(plan.Changes) > 0 {
+		if _, err := e.validate(ctx, s, p, zone, sets, owns, plan, true); err != nil {
+			return refuse(err)
+		}
+	}
+	if err := e.requireHTTPS(ctx, p, zone, changes); err != nil {
+		return refuse(err)
+	}
 	if len(plan.Changes) == 0 {
 		res.Allowed = true
 		return res, nil
-	}
-	if _, err := e.validate(ctx, s, p, zone, sets, owns, plan, true); err != nil {
-		return refuse(err)
 	}
 	res.Changes = uiChanges(plan.Changes)
 	if err := e.check(ctx, p, zone, cur, plan.Changes); err != nil {
@@ -167,6 +182,11 @@ func (e *engine) ApplyRRsets(ctx context.Context, s *identity.Subject, zoneIn st
 		ifMatch = etag(expectedZoneVersion)
 	}
 	zone := normZone(zoneIn)
+	if p, err := e.provider(zone); err == nil && e.zones.Managed(zone) && e.mayWriteForwards(s, zone, changes) {
+		if err := e.requireHTTPS(ctx, p, zone, changes); err != nil {
+			return nil, e.deny(WithRequestID(ctx, requestID(ctx)), s, "applyRRsets", zone, err)
+		}
+	}
 	_, version, err := e.Write(ctx, s, zone, ifMatch, "applyRRsets", func(cur *dns.Zone) (*Plan, error) {
 		p, err := e.provider(zone)
 		if err != nil {
@@ -187,6 +207,83 @@ func (e *engine) ApplyRRsets(ctx context.Context, s *identity.Subject, zoneIn st
 		applied = plan.Changes
 	}
 	return &uiapi.PlanResult{Zone: zone, Allowed: true, Changes: uiChanges(applied), ZoneVersion: version}, nil
+}
+
+// httpsStatus is the HTTPS status of the forwards of a zone at p.
+func httpsStatus(ctx context.Context, p provider.Provider, zone string) provider.HTTPSRedirect {
+	if !p.Capabilities().Forwards {
+		return provider.HTTPSRedirect{Status: provider.HTTPSUnsupported, Message: "provider " + p.ID() + " has no URL forwards"}
+	}
+	h, ok := p.(provider.HTTPSRedirecter)
+	if !ok {
+		return provider.HTTPSRedirect{Status: provider.HTTPSActive}
+	}
+	st, err := h.HTTPSRedirect(ctx, zone)
+	if err != nil {
+		return provider.HTTPSRedirect{Status: provider.HTTPSUnknown, Message: err.Error()}
+	}
+	return st
+}
+
+// requireHTTPS refuses forward changes asking for HTTPS unless the forwards
+// of the zone answer HTTPS: an active subscription, or one waiting for the
+// first forward of the zone to issue its certificate (no_forward). A
+// certificate being issued (pending), no subscription, or a status that
+// cannot be read refuse it.
+func (e *engine) requireHTTPS(ctx context.Context, p provider.Provider, zone string, changes []uiapi.RRsetChange) error {
+	var host string
+	for _, c := range changes {
+		if c.RequireHTTPS && !c.Delete && c.Forward != nil {
+			host = dns.NormalizeHost(c.Host, zone)
+			break
+		}
+	}
+	if host == "" {
+		return nil
+	}
+	switch st := httpsStatus(ctx, p, zone); st.Status {
+	case provider.HTTPSActive, provider.HTTPSNoForward:
+		return nil
+	default:
+		msg := "the forwards of " + zone + " do not answer HTTPS (" + st.Status + ")"
+		if st.Message != "" {
+			msg += ": " + st.Message
+		}
+		return &Error{Reason: ReasonHTTPS, Message: keyString(dns.ForwardKey(host)) + ": require_https: " + msg +
+			"; an HTTPS redirect subscription is ordered at the provider, not through the gate", Details: st}
+	}
+}
+
+// mayWriteForwards reports whether s may write every forward a change set
+// asks HTTPS for: the HTTPS check runs before the zone lock, but only once
+// the request is authorized, so that a forbidden write is refused as such.
+func (e *engine) mayWriteForwards(s *identity.Subject, zone string, changes []uiapi.RRsetChange) bool {
+	if !e.writesIn(s, zone) {
+		return false
+	}
+	for _, c := range changes {
+		if c.RequireHTTPS && !c.Delete && c.Forward != nil {
+			if k := dns.ForwardKey(dns.NormalizeHost(c.Host, zone)); !e.cfg.Authz.AllowRRset(s, policy.ActionForwardWrite, zone, k) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func (e *engine) HTTPSRedirect(ctx context.Context, s *identity.Subject, zoneIn string) (provider.HTTPSRedirect, error) {
+	zone, err := e.managed(zoneIn)
+	if err != nil {
+		return provider.HTTPSRedirect{}, err
+	}
+	if !e.cfg.Authz.Allow(s, policy.ActionDNSRead, zone) && !e.cfg.Authz.Allow(s, policy.ActionUIRead, zone) {
+		return provider.HTTPSRedirect{}, fail(ReasonForbidden, "dns.read or ui.read is required on %s", zone)
+	}
+	p, err := e.provider(zone)
+	if err != nil {
+		return provider.HTTPSRedirect{}, err
+	}
+	return httpsStatus(ctx, p, zone), nil
 }
 
 type adoptCandidate struct {
@@ -239,7 +336,7 @@ func (e *engine) adoptCandidates(g *grants, s *identity.Subject, p provider.Prov
 			out = append(out, c)
 			continue
 		}
-		c.TTL, c.Values, c.Alias, c.hash = set.TTL, slices.Clone(set.Values), set.Alias, dns.ContentHash(set)
+		c.TTL, c.Values, c.Alias, c.Forward, c.hash = set.TTL, append([]string{}, set.Values...), set.Alias, set.Forward, dns.ContentHash(set)
 		o, owned := owns[k]
 		c.Status = statusOf(o, owned, set, true)
 		ro := readOnly(k, &set)

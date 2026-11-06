@@ -1,6 +1,7 @@
 // Shapes journal entries for display: type changes read as one change, and
 // reads can be told apart from writes.
 import type { AuditEntry, Change } from './types';
+import { isForward } from './forwards';
 
 /** A change as shown: a delete and a create of the same host in one request become one change of type. */
 export interface ShownChange extends Change {
@@ -11,17 +12,18 @@ export interface ShownChange extends Change {
 /**
  * Merges, per host, a delete and a create of different types in the same
  * request (a zone save turning an A into a CNAME) into one update carrying
- * old_type. Other changes keep their order.
+ * old_type. A URL forward is never merged with a record set. Other changes
+ * keep their order.
  */
 export function mergeTypeChanges(changes: Change[]): ShownChange[] {
   const out: ShownChange[] = [];
   const used = new Set<number>();
   changes.forEach((c, i) => {
     if (used.has(i)) return;
-    if (c.op === 'delete' || c.op === 'create') {
+    if ((c.op === 'delete' || c.op === 'create') && !isForward(c)) {
       const want = c.op === 'delete' ? 'create' : 'delete';
       const j = changes.findIndex(
-        (d, k) => k !== i && !used.has(k) && d.op === want && d.host === c.host && d.type.toUpperCase() !== c.type.toUpperCase(),
+        (d, k) => k !== i && !used.has(k) && d.op === want && d.host === c.host && !isForward(d) && d.type.toUpperCase() !== c.type.toUpperCase(),
       );
       if (j >= 0) {
         const del = c.op === 'delete' ? c : changes[j]!;

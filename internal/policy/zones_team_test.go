@@ -179,7 +179,7 @@ func TestImpactZones(t *testing.T) {
 		!strings.Contains(text, "gains dns.read, ui.read on a.example.org") {
 		t.Fatalf("impact of adding a zone:\n%s", text)
 	}
-	owned := func(team, zone string) int {
+	owned := func(team, zone, _ string) int {
 		if team == "" && zone == "a.example.org" {
 			return 3
 		}

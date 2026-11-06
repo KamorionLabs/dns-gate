@@ -112,23 +112,25 @@ const (
 
 // RRset is one RRset with its ownership.
 type RRset struct {
-	Host          string     `json:"host"`
-	Type          string     `json:"type"`
-	TTL           int        `json:"ttl"`
-	Values        []string   `json:"values"`
-	Alias         *dns.Alias `json:"alias,omitempty"`
-	ReadOnly      string     `json:"read_only,omitempty"`
-	Hash          string     `json:"hash"`
-	Status        string     `json:"status"`
-	Protected     bool       `json:"protected"`
-	Owner         string     `json:"owner,omitempty"` // team
-	CreatedBy     *Actor     `json:"created_by,omitempty"`
-	CreatedAt     *time.Time `json:"created_at,omitempty"`
-	UpdatedBy     *Actor     `json:"updated_by,omitempty"`
-	UpdatedAt     *time.Time `json:"updated_at,omitempty"`
-	Adopted       bool       `json:"adopted"`
-	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
-	LastRequestID string     `json:"last_request_id,omitempty"`
+	Host   string     `json:"host"`
+	Type   string     `json:"type"`
+	TTL    int        `json:"ttl"`
+	Values []string   `json:"values"`
+	Alias  *dns.Alias `json:"alias,omitempty"`
+	// Forward is the URL forward of the host (type URLFWD), with no values.
+	Forward       *dns.Forward `json:"forward,omitempty"`
+	ReadOnly      string       `json:"read_only,omitempty"`
+	Hash          string       `json:"hash"`
+	Status        string       `json:"status"`
+	Protected     bool         `json:"protected"`
+	Owner         string       `json:"owner,omitempty"` // team
+	CreatedBy     *Actor       `json:"created_by,omitempty"`
+	CreatedAt     *time.Time   `json:"created_at,omitempty"`
+	UpdatedBy     *Actor       `json:"updated_by,omitempty"`
+	UpdatedAt     *time.Time   `json:"updated_at,omitempty"`
+	Adopted       bool         `json:"adopted"`
+	ExpiresAt     *time.Time   `json:"expires_at,omitempty"`
+	LastRequestID string       `json:"last_request_id,omitempty"`
 }
 
 // Actor is who did something.
@@ -204,15 +206,17 @@ func (s *SnapshotID) UnmarshalJSON(b []byte) error {
 
 // Change is one RRset change in an audit entry.
 type Change struct {
-	Op        string     `json:"op"` // create | update | delete | adopt | taint | expire | transfer
-	Host      string     `json:"host"`
-	Type      string     `json:"type"`
-	OldTTL    int        `json:"old_ttl,omitempty"`
-	OldValues []string   `json:"old_values,omitempty"`
-	OldAlias  *dns.Alias `json:"old_alias,omitempty"`
-	NewTTL    int        `json:"new_ttl,omitempty"`
-	NewValues []string   `json:"new_values,omitempty"`
-	NewAlias  *dns.Alias `json:"new_alias,omitempty"`
+	Op         string       `json:"op"` // create | update | delete | adopt | taint | expire | transfer
+	Host       string       `json:"host"`
+	Type       string       `json:"type"`
+	OldTTL     int          `json:"old_ttl,omitempty"`
+	OldValues  []string     `json:"old_values,omitempty"`
+	OldAlias   *dns.Alias   `json:"old_alias,omitempty"`
+	OldForward *dns.Forward `json:"old_forward,omitempty"`
+	NewTTL     int          `json:"new_ttl,omitempty"`
+	NewValues  []string     `json:"new_values,omitempty"`
+	NewAlias   *dns.Alias   `json:"new_alias,omitempty"`
+	NewForward *dns.Forward `json:"new_forward,omitempty"`
 }
 
 // AuditPage is a page of audit entries, newest first.

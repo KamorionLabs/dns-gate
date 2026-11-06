@@ -13,7 +13,11 @@ const (
 	ActionDNSRead     = "dns.read"
 	ActionRecordWrite = "dns.record.write"
 	ActionRecordAdopt = "dns.record.adopt"
-	ActionZoneAdmin   = "dns.zone.admin" // DNSSEC sign/unsign, zone settings (EuroDNS forwards)
+	// ActionForwardWrite creates, changes and deletes URL forwards, under
+	// the ownership rules of RRsets. A rule scopes it by records.hosts only:
+	// records.types does not apply to it.
+	ActionForwardWrite = "dns.forward.write"
+	ActionZoneAdmin    = "dns.zone.admin" // DNSSEC sign/unsign, zone settings (EuroDNS mail forwards)
 	// ActionZoneProfile manages the zone profiles of a EuroDNS account
 	// (templates applied to domains on arrival). Profiles are account-wide
 	// objects: the action counts only when granted on every zone ("*").
@@ -21,6 +25,15 @@ const (
 	ActionDomainRead  = "domain.read"
 	ActionUIRead      = "ui.read" // read-only UI and /api/v1
 )
+
+// WriteAction is the action writing an RRset: ActionForwardWrite for a URL
+// forward, ActionRecordWrite otherwise.
+func WriteAction(k dns.Key) string {
+	if k.IsForward() {
+		return ActionForwardWrite
+	}
+	return ActionRecordWrite
+}
 
 // Authorizer is implemented by the policy engine and consumed by the HTTP
 // layer and the zone write engine.
