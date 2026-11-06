@@ -31,6 +31,7 @@ func (d *dynamo) PutPlan(ctx context.Context, p Plan) error {
 			"sk":           strAttr(planSK),
 			"subject":      strAttr(p.Subject),
 			"zone":         strAttr(p.Zone),
+			"team":         strAttr(p.Team),
 			"changes":      strAttr(changes),
 			"zone_version": numAttr(p.ZoneVersion),
 			"created_at":   numAttr(p.CreatedAt.UnixMilli()),
@@ -93,7 +94,7 @@ func planFromItem(id string, it map[string]types.AttributeValue, now time.Time) 
 		}
 		return strconv.ParseInt(v.Value, 10, 64)
 	}
-	p := &Plan{ID: id, Subject: str("subject"), Zone: str("zone")}
+	p := &Plan{ID: id, Subject: str("subject"), Zone: str("zone"), Team: str("team")}
 	var err error
 	if p.ZoneVersion, err = num("zone_version"); err != nil {
 		return nil, err

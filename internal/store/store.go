@@ -53,6 +53,8 @@ var (
 type Store interface {
 	PolicyStore
 	PlanStore
+	TombstoneStore
+	TransferStore
 
 	Get(ctx context.Context, zone, host, typ string) (*Ownership, error)
 	List(ctx context.Context, zone string) ([]Ownership, error)

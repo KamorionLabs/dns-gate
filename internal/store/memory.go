@@ -28,17 +28,21 @@ type memory struct {
 	plans          map[string]Plan
 	apiKeys        map[string]APIKey
 	acmeRegs       map[memRegKey]ACMERegistration
+	tombstones     map[memKey]Tombstone
+	transfers      map[string]Transfer
 	now            func() time.Time
 }
 
 func newMemory(now func() time.Time) *memory {
 	return &memory{
-		entries:   map[memKey]Ownership{},
-		versions:  map[string]int64{},
-		locks:     map[string]memLock{},
-		revisions: map[string]PolicyRevision{},
-		plans:     map[string]Plan{},
-		now:       now,
+		entries:    map[memKey]Ownership{},
+		versions:   map[string]int64{},
+		locks:      map[string]memLock{},
+		revisions:  map[string]PolicyRevision{},
+		plans:      map[string]Plan{},
+		tombstones: map[memKey]Tombstone{},
+		transfers:  map[string]Transfer{},
+		now:        now,
 	}
 }
 
