@@ -1,0 +1,127 @@
+site_name: dns-gate
+site_description: A security gateway in front of DNS provider APIs, with OIDC identities, RBAC, record ownership and audit.
+site_url: https://kamorionlabs.github.io/dns-gate/docs/
+repo_url: https://github.com/KamorionLabs/dns-gate
+repo_name: KamorionLabs/dns-gate
+edit_uri: edit/main/docs/
+copyright: MIT licensed · made by <a href="https://kamorion.com">Kamorion</a>
+
+docs_dir: docs
+exclude_docs: |
+  requirements.txt
+  hooks.py
+  __pycache__/
+
+hooks:
+  - docs/hooks.py
+
+theme:
+  name: material
+  logo: assets/logo.svg
+  favicon: assets/logo.svg
+  font: false
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Light mode
+  features:
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
+    - navigation.tracking
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - content.action.edit
+
+extra:
+  homepage: https://kamorionlabs.github.io/dns-gate/
+  generator: false
+
+extra_css:
+  - assets/stylesheets/extra.css
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn
+
+nav:
+  - Home: index.md
+  - Quickstart: quickstart.md
+  - Deploy:
+      - Kubernetes with Helm: deploy/helm.md
+      - AWS Lambda: deploy/lambda.md
+      - "Lambda: architecture and costs": DEPLOY-LAMBDA.md
+      - "SAML login with IAM Identity Center": IDENTITY-CENTER.md
+  - Concepts:
+      - Identities: concepts/identities.md
+      - Roles and rules: concepts/policy.md
+      - Teams and ownership: concepts/ownership.md
+      - Onboarding existing zones: ONBOARDING.md
+  - API:
+      - API by example: api/index.md
+      - Authenticate: api/authenticate.md
+      - Zones and records: api/records.md
+      - Adopt and transfer: api/ownership.md
+      - Audit journal: api/audit.md
+      - API reference: https://kamorionlabs.github.io/dns-gate/api.html
+      - API guide: API.md
+  - Integrations:
+      - Terraform: integrations/terraform.md
+      - CI pipelines: integrations/ci.md
+      - "MCP and Claude": integrations/mcp.md
+      - "Certificates and third parties": integrations/certificates.md
+      - "ACME clients: full guide": ACME.md
+  - Features:
+      - Web UI: features/ui.md
+      - URL forwards: features/forwards.md
+      - Zone profiles: features/zone-profiles.md
+  - Providers:
+      - Route 53: providers/route53.md
+      - EuroDNS: providers/eurodns.md
+  - Reference:
+      - Configuration: CONFIG.md
+      - Design: DESIGN.md
+      - Threat model: THREAT-MODEL.md
+      - "Migrating from 0.x": MIGRATION-0.x.md
