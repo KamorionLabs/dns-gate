@@ -1208,7 +1208,7 @@
   .tray .sp {
     flex: 1;
   }
-  .pending {
+  .tray .pending {
     display: flex;
     flex-wrap: wrap;
     gap: 4px;
@@ -1217,7 +1217,7 @@
     list-style: none;
     min-width: 0;
   }
-  .pending li {
+  .tray .pending li {
     display: inline-flex;
     align-items: center;
     height: 24px;
@@ -1263,7 +1263,7 @@
   .delete .sign {
     color: var(--wax);
   }
-  .pending .x {
+  .tray .pending .x {
     display: grid;
     place-items: center;
     width: 20px;
@@ -1274,7 +1274,7 @@
     color: var(--ink-4);
     cursor: pointer;
   }
-  .pending .x:hover {
+  .tray .pending .x:hover {
     color: var(--ink);
   }
   @media (max-width: 900px) {
