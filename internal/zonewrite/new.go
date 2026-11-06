@@ -39,9 +39,23 @@ type Config struct {
 	EphemeralLifetimeFactor int
 	// Guard, when set, may refuse a change of one RRset by a subject, after
 	// RBAC and before ownership; a non-*Error refusal is forbidden.
-	Guard  func(ctx context.Context, s *identity.Subject, zone string, key dns.Key) error
+	Guard func(ctx context.Context, s *identity.Subject, zone string, key dns.Key) error
+	// TombstoneTTL is how long a deleted RRset stays reserved for its team
+	// (0 disables tombstones). Ephemeral RRsets leave no tombstone.
+	TombstoneTTL time.Duration
+	// TransferTTL is how long a transfer request waits for approval
+	// (default 7 days).
+	TransferTTL time.Duration
+	// Teams tells which teams may own RRsets; any valid team name when nil.
+	Teams  TeamDirectory
 	Now    func() time.Time
 	Logger *slog.Logger
+}
+
+// TeamDirectory knows the teams of the policy (policy.Engine implements it).
+type TeamDirectory interface {
+	// KnownTeam reports whether a team may own RRsets.
+	KnownTeam(name string) bool
 }
 
 // ZoneSet tells which zones the engine serves (policy.Engine implements it).

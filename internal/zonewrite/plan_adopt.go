@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -22,6 +23,7 @@ const (
 	adoptProtected     = "protected"
 	adoptServerManaged = "server_managed"
 	adoptOtherTeam     = "owned_by_other_team"
+	adoptReserved      = "reserved_for_other_team" // tombstone of another team
 	adoptAlreadyOwned  = "already_owned"
 	adoptForbidden     = "forbidden"
 	adoptInvalid       = "invalid"
@@ -29,6 +31,8 @@ const (
 )
 
 const defaultTTL = 3600
+
+var teamNameRe = regexp.MustCompile(`^[a-z0-9]([a-z0-9._-]{0,62}[a-z0-9])?$`)
 
 func refKey(zone string, r uiapi.RRsetRef) dns.Key {
 	return dns.Key{Host: dns.NormalizeHost(r.Host, zone), Type: strings.ToUpper(strings.TrimSpace(r.Type))}
@@ -195,8 +199,8 @@ type adoptCandidate struct {
 // filter matches over the RRsets that are not server-managed (everything
 // when nothing is selected); other read-only RRsets are listed with their
 // reason.
-func (e *engine) adoptCandidates(s *identity.Subject, p provider.Provider, zone string, cur *dns.Zone, owns map[dns.Key]store.Ownership,
-	refs []uiapi.RRsetRef, hosts, types []string) []adoptCandidate {
+func (e *engine) adoptCandidates(s *identity.Subject, p provider.Provider, zone, owner string, cur *dns.Zone, owns map[dns.Key]store.Ownership,
+	tombs map[dns.Key]store.Tombstone, refs []uiapi.RRsetRef, hosts, types []string) []adoptCandidate {
 	all := index(cur)
 	var keys []dns.Key
 	picked := map[dns.Key]bool{}
@@ -248,6 +252,8 @@ func (e *engine) adoptCandidates(s *identity.Subject, p provider.Provider, zone 
 			c.Reason = adoptOtherTeam
 		case owned && o.State != store.StateTainted:
 			c.Reason = adoptAlreadyOwned
+		case !owned && e.reserved(s, zone, owner, tombs, k):
+			c.Reason = adoptReserved
 		case !e.cfg.Authz.AllowRRset(s, policy.ActionRecordAdopt, zone, k):
 			c.Reason = adoptForbidden
 		case invalidReason(p, zone, set) != "":
@@ -309,15 +315,43 @@ func parsePreviewToken(tok string) (zone, owner string, hashes map[dns.Key]strin
 	return parts[0], parts[1], hashes, true
 }
 
+// adoptOwner returns the team adopted RRsets go to: the caller's team by
+// default, another of its teams, or any known team when the caller holds
+// dns.ownership.approve on the zone.
 func (e *engine) adoptOwner(s *identity.Subject, zone, owner string) (string, error) {
-	if owner != "" {
+	if owner == "" {
+		team, ok := e.cfg.Authz.OwnerTeam(s, zone)
+		if !ok {
+			return "", fail(ReasonForbidden, "no owner team for %s in %s", s.String(), zone)
+		}
+		return team, nil
+	}
+	if slices.Contains(s.Teams, owner) {
 		return owner, nil
 	}
-	team, ok := e.cfg.Authz.OwnerTeam(s, zone)
-	if !ok {
-		return "", fail(ReasonForbidden, "no owner team for %s in %s", s.String(), zone)
+	if !e.cfg.Authz.Allow(s, policy.ActionOwnershipApprove, zone) {
+		return "", fail(ReasonForbidden, "team %s is not one of your teams: adopting for another team requires %s on %s", owner, policy.ActionOwnershipApprove, zone)
 	}
-	return team, nil
+	if !e.knownTeam(owner) {
+		return "", fail(ReasonInvalid, "unknown team %q", owner)
+	}
+	return owner, nil
+}
+
+// knownTeam reports whether a team may own RRsets.
+func (e *engine) knownTeam(team string) bool {
+	if e.cfg.Teams != nil {
+		return e.cfg.Teams.KnownTeam(team)
+	}
+	return teamNameRe.MatchString(team)
+}
+
+// reservedFor tells whether a tombstone keeps an unowned RRset from going
+// to owner: it belongs to another team and the caller cannot approve
+// ownership changes on the zone.
+func (e *engine) reserved(s *identity.Subject, zone, owner string, tombs map[dns.Key]store.Tombstone, k dns.Key) bool {
+	t, ok := tombs[k]
+	return ok && t.Team != owner && !e.cfg.Authz.Allow(s, policy.ActionOwnershipApprove, zone)
 }
 
 func (e *engine) PreviewAdopt(ctx context.Context, s *identity.Subject, zoneIn string, sel uiapi.AdoptSelection) (*uiapi.AdoptPreview, error) {
@@ -344,7 +378,11 @@ func (e *engine) PreviewAdopt(ctx context.Context, s *identity.Subject, zoneIn s
 	if err != nil {
 		return nil, err
 	}
-	cands := e.adoptCandidates(s, p, zone, cur, owns, sel.RRsets, sel.Hosts, sel.Types)
+	tombs, err := e.liveTombstones(ctx, zone)
+	if err != nil {
+		return nil, err
+	}
+	cands := e.adoptCandidates(s, p, zone, owner, cur, owns, tombs, sel.RRsets, sel.Hosts, sel.Types)
 	out := &uiapi.AdoptPreview{Zone: zone, Owner: owner, Candidates: make([]uiapi.AdoptCandidate, 0, len(cands)),
 		PreviewToken: previewToken(zone, owner, cands)}
 	for _, c := range cands {
@@ -397,7 +435,11 @@ func (e *engine) AdoptMany(ctx context.Context, s *identity.Subject, zoneIn stri
 	if !ok || tokZone != zone || tokOwner != owner {
 		return nil, e.deny(ctx, s, action, zone, fail(ReasonAdoptConflict, "the preview token does not match this zone and owner; preview again"))
 	}
-	cands := e.adoptCandidates(s, p, zone, cur, owns, req.RRsets, nil, nil)
+	tombs, err := e.liveTombstones(ctx, zone)
+	if err != nil {
+		return nil, e.deny(ctx, s, action, zone, err)
+	}
+	cands := e.adoptCandidates(s, p, zone, owner, cur, owns, tombs, req.RRsets, nil, nil)
 	var conflicts []string
 	for _, c := range cands {
 		switch {
@@ -450,6 +492,11 @@ func (e *engine) AdoptMany(ctx context.Context, s *identity.Subject, zoneIn stri
 				}
 			}
 			return nil, e.deny(ctx, s, action, zone, &Error{Reason: ReasonUpstream, Message: "store adopt failed", Err: err})
+		}
+	}
+	for _, c := range cands {
+		if _, ok := tombs[c.key]; ok {
+			e.dropTombstone(ctx, zone, c.key)
 		}
 	}
 	res := &uiapi.AdoptResult{Zone: zone, Owner: owner, Adopted: make([]uiapi.RRsetRef, 0, len(cands)), RequestID: rid}

@@ -49,6 +49,8 @@ func (f *fakeAuthz) Allow(s *identity.Subject, action, _ string) bool {
 		return true
 	case policy.ActionRecordWrite:
 		return has(s, "writer") || has(s, "acme")
+	case policy.ActionRecordAdopt:
+		return has(s, "admin") || has(s, "adopter")
 	default:
 		return has(s, "admin")
 	}
@@ -63,6 +65,9 @@ func (f *fakeAuthz) AllowRRset(s *identity.Subject, action, zone string, k dns.K
 			return true
 		}
 		return has(s, "acme") && k.Type == "TXT" && strings.HasPrefix(k.Host, "_acme-challenge")
+	}
+	if action == policy.ActionRecordAdopt && has(s, "adopter") {
+		return true
 	}
 	return has(s, "admin")
 }
@@ -156,6 +161,11 @@ func newEnv(t *testing.T, opts eurodnstest.Options) *env {
 
 func newEnvWith(t *testing.T, opts eurodnstest.Options, st store.Store) *env {
 	t.Helper()
+	return newEnvConfig(t, opts, st, nil)
+}
+
+func newEnvConfig(t *testing.T, opts eurodnstest.Options, st store.Store, mut func(*Config)) *env {
+	t.Helper()
 	opts.AppID, opts.APIKey = "app", "key"
 	srv := eurodnstest.NewServer(opts)
 	t.Cleanup(srv.Close)
@@ -166,8 +176,12 @@ func newEnvWith(t *testing.T, opts eurodnstest.Options, st store.Store) *env {
 	}
 	e := &env{t: t, srv: srv, prov: newProvider(t, srv.URL), st: st, authz: &fakeAuthz{}, audit: &recorder{}, clock: c}
 	var err error
-	e.eng, err = New(Config{Providers: provider.Single(e.prov), Store: e.st, Authz: e.authz, Audit: e.audit, Zones: []string{zoneName},
-		Holder: "test", LockWait: 2 * time.Second, CheckOnWrite: true, Now: c.Now})
+	cfg := Config{Providers: provider.Single(e.prov), Store: e.st, Authz: e.authz, Audit: e.audit, Zones: []string{zoneName},
+		Holder: "test", LockWait: 2 * time.Second, CheckOnWrite: true, Now: c.Now}
+	if mut != nil {
+		mut(&cfg)
+	}
+	e.eng, err = New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

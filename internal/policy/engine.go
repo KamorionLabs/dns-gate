@@ -92,6 +92,9 @@ func (e *Engine) OwnerTeam(s *identity.Subject, zone string) (string, bool) {
 	return s.Teams[0], true
 }
 
+// KnownTeam reports whether a team may own RRsets (see Snapshot.KnownTeam).
+func (e *Engine) KnownTeam(name string) bool { return e.snap().KnownTeam(name) }
+
 // MaxChangesPerRequest returns the most permissive limit among the
 // subject's roles (0 means unlimited).
 func (e *Engine) MaxChangesPerRequest(s *identity.Subject) int {
