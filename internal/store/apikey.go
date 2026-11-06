@@ -67,11 +67,13 @@ type APIKeyStore interface {
 	DeleteACMERegistration(ctx context.Context, keyID, subdomain string) error
 }
 
-// ACMERegistration maps an acme-dns subdomain of an API key to the domain
-// whose _acme-challenge TXT RRset it writes. Values are the TXT values the
+// ACMERegistration maps an acme-dns subdomain to the domain whose
+// _acme-challenge TXT RRset it writes. Values are the TXT values the
 // registration wrote, oldest first: like acme-dns, only the two most recent
 // are kept in the RRset.
 type ACMERegistration struct {
+	// KeyID is the owner: the id of an API key, or issuer:id of a token
+	// subject, whose registrations are named after their domain.
 	KeyID     string
 	Subdomain string
 	Domain    string

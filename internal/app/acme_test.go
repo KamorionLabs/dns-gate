@@ -2,13 +2,19 @@ package app
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,18 +34,21 @@ import (
 // acmeEnv is a gate wired by New in front of the EuroDNS fake, with an
 // OIDC issuer for key management.
 type acmeEnv struct {
-	t    *testing.T
-	fake *eurodnstest.Server
-	idp  *oidctest.Provider
-	gate *httptest.Server
-	app  *App
+	t     *testing.T
+	fake  *eurodnstest.Server
+	idp   *oidctest.Provider
+	other *oidctest.Provider // issuer without token_exchange
+	gate  *httptest.Server
+	app   *App
+	audit string // JSON audit lines
 }
 
 func newACMEEnv(t *testing.T) *acmeEnv {
 	t.Helper()
-	e := &acmeEnv{t: t, fake: eurodnstest.NewServer(eurodnstest.Options{AppID: "app", APIKey: "k"}), idp: oidctest.New()}
+	e := &acmeEnv{t: t, fake: eurodnstest.NewServer(eurodnstest.Options{AppID: "app", APIKey: "k"}), idp: oidctest.New(), other: oidctest.New()}
 	t.Cleanup(e.fake.Close)
 	t.Cleanup(e.idp.Close)
+	t.Cleanup(e.other.Close)
 	e.fake.Seed(&eurodns.Zone{Name: "example.com", Records: []eurodns.Record{
 		{Type: "A", Host: "www", TTL: 3600, RData: "192.0.2.1"},
 		{Type: "TXT", Host: "_acme-challenge.legacy", TTL: 600, RData: `"foreign"`},
@@ -52,7 +61,9 @@ providers:
 zones: [example.com]
 store: {type: sqlite, sqlite: {path: ` + filepath.Join(t.TempDir(), "g.db") + `}}
 issuers:
-  - {name: ci, issuer: "` + e.idp.URL + `", audiences: [dns-gate], category: pipeline}
+  - {name: ci, issuer: "` + e.idp.URL + `", audiences: [dns-gate], category: pipeline, token_exchange: true}
+  - {name: other, issuer: "` + e.other.URL + `", audiences: [dns-gate], category: pipeline}
+  - {name: gate, self: true, issuer: "http://127.0.0.1:1", token_ttl: 1h}
 roles:
   acme:
     ephemeral_ttl: 1h
@@ -76,10 +87,15 @@ roles:
 bindings:
   - {role: key-admin, team: web, subjects: [{issuer: ci, claims: {sub: [admin]}}]}
   - {role: writer, team: web, subjects: [{issuer: ci, claims: {sub: [writer]}}]}
+  - {role: acme, team: web, subjects: [{issuer: ci, claims: {sub: ["repo:example/certs:*"]}}, {issuer: other, claims: {sub: [acme]}}]}
 `
+	signingKey := signingKeyPEM(t)
 	cfg, err := config.Parse([]byte(yaml), func(k string) string {
-		if k == "EURODNS_API_KEY" {
+		switch k {
+		case "EURODNS_API_KEY":
 			return "k"
+		case "DNS_GATE_TOKEN_SIGNING_KEY":
+			return signingKey
 		}
 		return ""
 	})
@@ -88,7 +104,13 @@ bindings:
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	a, err := New(ctx, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), Options{Holder: "t", AuditOutput: devNull(t)})
+	e.audit = filepath.Join(t.TempDir(), "audit.jsonl")
+	auditOut, err := os.Create(e.audit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { auditOut.Close() })
+	a, err := New(ctx, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), Options{Holder: "t", AuditOutput: auditOut})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,13 +120,13 @@ bindings:
 	return e
 }
 
-func devNull(t *testing.T) *os.File {
-	f, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+func signingKeyPEM(t *testing.T) string {
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { f.Close() })
-	return f
+	der, _ := x509.MarshalPKCS8PrivateKey(k)
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
 }
 
 func (e *acmeEnv) do(method, path string, hdr map[string]string, body string) (int, []byte) {
@@ -559,4 +581,117 @@ func tamper(key string) string {
 		c = 'B'
 	}
 	return key[:i] + string(c) + key[i+1:]
+}
+
+func (e *acmeEnv) exchange(form url.Values) (int, map[string]any) {
+	e.t.Helper()
+	status, b := e.do("POST", "/api/v1/token-exchange", map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, form.Encode())
+	out := map[string]any{}
+	_ = json.Unmarshal(b, &out)
+	return status, out
+}
+
+func exchangeForm(token string) url.Values {
+	return url.Values{
+		"grant_type":         {"urn:ietf:params:oauth:grant-type:token-exchange"},
+		"subject_token":      {token},
+		"subject_token_type": {"urn:ietf:params:oauth:token-type:id_token"},
+	}
+}
+
+// Token exchange (RFC 8693) of a CI token, then acme.sh dns_acmedns with
+// the exchanged token as ACMEDNS_PASSWORD and any ACMEDNS_USERNAME: the
+// exact requests of dnsapi/dns_acmedns.sh, with the domain as subdomain.
+func TestTokenExchangeAcmeSh(t *testing.T) {
+	e := newACMEEnv(t)
+	ci := e.idp.Sign(map[string]any{"sub": "repo:example/certs:ref:refs/heads/main", "aud": "dns-gate", "jti": "ci-run-1"})
+	status, out := e.exchange(exchangeForm(ci))
+	tok, _ := out["access_token"].(string)
+	if status != 200 || tok == "" || out["token_type"] != "Bearer" || out["expires_in"].(float64) != 900 ||
+		out["issued_token_type"] != "urn:ietf:params:oauth:token-type:access_token" {
+		t.Fatalf("exchange: %d %v", status, out)
+	}
+	audit, _ := os.ReadFile(e.audit)
+	if !strings.Contains(string(audit), `"action":"gate.token.exchange","decision":"allow"`) || !strings.Contains(string(audit), `"subject_token_jti":"ci-run-1"`) {
+		t.Fatalf("exchange not audited:\n%s", audit)
+	}
+	var me struct{ Subject, Category string }
+	_, b := e.do("GET", "/api/v1/me", map[string]string{"Authorization": "Bearer " + tok}, "")
+	_ = json.Unmarshal(b, &me)
+	if me.Subject != "ci:repo:example/certs:ref:refs/heads/main" || me.Category != "pipeline" {
+		t.Fatalf("exchanged identity %s", b)
+	}
+
+	values := []string{challenge("x1"), challenge("x2"), challenge("x3")}
+	for _, user := range []string{"oidc", "repo:example/certs"} {
+		for _, v := range values {
+			hdr := map[string]string{"X-Api-User": user, "X-Api-Key": tok, "Content-Type": "application/json"}
+			status, b := e.do("POST", "/acme/acme-dns/update", hdr, `{"subdomain":"example.com", "txt": "`+v+`"}`)
+			if status != 200 || !strings.Contains(string(b), `"`+v+`"`) {
+				t.Fatalf("update as %s: %d %s", user, status, b)
+			}
+		}
+	}
+	if got := e.txt("_acme-challenge"); !slices.Equal(got, sortedOf(values[1], values[2])) {
+		t.Fatalf("two most recent values expected: %v", got)
+	}
+
+	direct := map[string]string{"X-Api-User": "oidc", "X-Api-Key": ci, "Content-Type": "application/json"}
+	if status, b := e.do("POST", "/acme/acme-dns/update", direct, `{"subdomain":"www.example.com", "txt": "`+values[0]+`"}`); status != 200 {
+		t.Fatalf("direct OIDC token: %d %s", status, b)
+	}
+	bearer := map[string]string{"Authorization": "Bearer " + tok, "Content-Type": "application/json"}
+	if status, b := e.do("POST", "/acme/httpreq/present", bearer, `{"fqdn": "_acme-challenge.api.example.com.", "value": "v"}`); status != 200 {
+		t.Fatalf("httpreq with the exchanged token: %d %s", status, b)
+	}
+	hdr := map[string]string{"X-Api-User": "oidc", "X-Api-Key": tok}
+	if status, b := e.do("POST", "/acme/acme-dns/update", hdr, `{"subdomain":"8e5700ea-a4bf-41c7-8a77-e990661dcc6a", "txt": "`+values[0]+`"}`); status != 400 || !strings.Contains(string(b), "bad_subdomain") {
+		t.Errorf("registration subdomain with a token: %d %s", status, b)
+	}
+	if status, b := e.do("POST", "/acme/acme-dns/register", hdr, `{"domain": "example.com"}`); status != 403 {
+		t.Errorf("register with a token: %d %s", status, b)
+	}
+	other := map[string]string{"X-Api-User": "oidc", "X-Api-Key": e.idp.Sign(map[string]any{"sub": "writer", "aud": "dns-gate"})}
+	if status, b := e.do("POST", "/acme/acme-dns/update", other, `{"subdomain":"example.com", "txt": "`+values[0]+`"}`); status != 403 || !strings.Contains(string(b), "ephemeral_required") {
+		t.Errorf("permanent role: %d %s", status, b)
+	}
+}
+
+func TestTokenExchangeRefusals(t *testing.T) {
+	e := newACMEEnv(t)
+	ci := e.idp.Sign(map[string]any{"sub": "repo:example/certs:ref:refs/heads/main", "aud": "dns-gate"})
+	_, out := e.exchange(exchangeForm(ci))
+	gateTok, _ := out["access_token"].(string)
+	k := e.createKey(`{"name": "k", "team": "web", "role": "acme"}`)
+
+	long := exchangeForm(ci)
+	long.Set("expires_in", "7200")
+	long.Set("requested_token_type", "urn:ietf:params:oauth:token-type:jwt")
+	if status, out := e.exchange(long); status != 200 || out["expires_in"].(float64) != 3600 || out["issued_token_type"] != "urn:ietf:params:oauth:token-type:jwt" {
+		t.Fatalf("lifetime not capped by token_ttl: %d %v", status, out)
+	}
+	for name, tc := range map[string]struct {
+		form url.Values
+		want string
+	}{
+		"gate token":       {exchangeForm(gateTok), "invalid_grant"},
+		"api key":          {exchangeForm(k.Key), "invalid_grant"},
+		"issuer not opted": {exchangeForm(e.other.Sign(map[string]any{"sub": "acme", "aud": "dns-gate"})), "invalid_grant"},
+		"unbound":          {exchangeForm(e.idp.Sign(map[string]any{"sub": "nobody", "aud": "dns-gate"})), "invalid_grant"},
+		"wrong audience":   {exchangeForm(e.idp.Sign(map[string]any{"sub": "admin", "aud": "other"})), "invalid_grant"},
+		"grant type":       {func() url.Values { f := exchangeForm(ci); f.Set("grant_type", "client_credentials"); return f }(), "unsupported_grant_type"},
+		"token type":       {func() url.Values { f := exchangeForm(ci); f.Set("subject_token_type", "urn:x"); return f }(), "invalid_request"},
+		"short lifetime":   {func() url.Values { f := exchangeForm(ci); f.Set("expires_in", "10"); return f }(), "invalid_request"},
+		"actor":            {func() url.Values { f := exchangeForm(ci); f.Set("actor_token", ci); return f }(), "invalid_request"},
+	} {
+		if status, out := e.exchange(tc.form); status != 400 || out["error"] != tc.want {
+			t.Errorf("%s: %d %v, want %s", name, status, out, tc.want)
+		}
+	}
+	if status, _ := e.do("GET", "/api/v1/token-exchange", nil, ""); status != 405 {
+		t.Errorf("GET: %d", status)
+	}
+	if status, b := e.do("GET", "/.well-known/dns-gate", nil, ""); status != 200 || !strings.Contains(string(b), "token-exchange") {
+		t.Errorf("feature not advertised: %s", b)
+	}
 }

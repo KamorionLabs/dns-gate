@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/KamorionLabs/dns-gate/internal/apikey"
 	"github.com/KamorionLabs/dns-gate/internal/authn"
 	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
@@ -63,6 +64,10 @@ func (s *Server) handleACME(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "POST only")
+		return
+	}
+	if strings.HasPrefix(p, ACMEDNSPath+"/") && s.cfg.APIKeys == nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not_found", "message": "acme-dns needs a store"})
 		return
 	}
 	switch p {
@@ -273,7 +278,9 @@ func challengeTTL(c provider.Capabilities) int {
 
 // acmeDNSSubject authenticates an acme-dns request: X-Api-User and
 // X-Api-Key first (they win over basic authentication taken from the URL),
-// else the Authorization header. It returns the presented API key.
+// else the Authorization header. X-Api-Key is a gate API key (X-Api-User
+// its id) or a token, OIDC or gate-issued (X-Api-User is then ignored). It
+// returns the presented API key.
 func (s *Server) acmeDNSSubject(r *http.Request) (*identity.Subject, string, *acmeError) {
 	user, key := r.Header.Get("X-Api-User"), r.Header.Get("X-Api-Key")
 	var subj *identity.Subject
@@ -283,7 +290,11 @@ func (s *Server) acmeDNSSubject(r *http.Request) (*identity.Subject, string, *ac
 		if user == "" || key == "" {
 			return nil, "", &acmeError{http.StatusUnauthorized, "forbidden", "X-Api-User and X-Api-Key required"}
 		}
-		subj, err = s.cfg.Authn.AuthenticateAPIKey(r, user, key)
+		if apikey.Looks(key) {
+			subj, err = s.cfg.Authn.AuthenticateAPIKey(r, user, key)
+		} else {
+			subj, err = s.cfg.Authn.AuthenticateBearer(r, key)
+		}
 	case r.Header.Get("Authorization") != "":
 		scheme, v, _ := strings.Cut(r.Header.Get("Authorization"), " ")
 		if strings.EqualFold(scheme, "Bearer") {
@@ -293,16 +304,25 @@ func (s *Server) acmeDNSSubject(r *http.Request) (*identity.Subject, string, *ac
 		}
 		subj, err = s.cfg.Authn.Authenticate(r)
 	default:
-		return nil, "", &acmeError{http.StatusUnauthorized, "forbidden", "a gate API key is required: X-Api-User (key id) and X-Api-Key (key)"}
+		return nil, "", &acmeError{http.StatusUnauthorized, "forbidden", "credentials required: X-Api-User and X-Api-Key (a gate API key, or a token)"}
 	}
 	if err != nil {
 		return nil, "", authFailure(err)
 	}
-	if subj.Kind != identity.KindAPIKey {
-		return nil, "", &acmeError{http.StatusUnauthorized, "forbidden", "acme-dns accounts are gate API keys: OIDC tokens and virtual keys are not accepted here"}
+	if subj.Kind != identity.KindAPIKey && subj.Kind != identity.KindOIDC {
+		return nil, "", &acmeError{http.StatusUnauthorized, "forbidden", "virtual keys are not accepted here: use a gate API key or a token"}
 	}
 	authn.StripCredentials(r.Header)
 	return subj, key, nil
+}
+
+// acmeOwner is the owner of the acme-dns registrations of a subject: the key
+// id of an API key, issuer:id of a token subject.
+func acmeOwner(subj *identity.Subject) string {
+	if subj.Kind == identity.KindAPIKey {
+		return subj.ID
+	}
+	return subj.String()
 }
 
 // acmeDNSRegisterRequest is the acme-dns /register body; domain is a gate
@@ -326,6 +346,11 @@ func (s *Server) handleACMEDNSRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r = r.WithContext(identity.With(r.Context(), subj))
+	if subj.Kind != identity.KindAPIKey {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden",
+			"message": "registrations belong to gate API keys: with a token, send the domain name as subdomain to /update"})
+		return
+	}
 	var req acmeDNSRegisterRequest
 	if r.ContentLength != 0 {
 		if ae := readACMEBody(r, &req); ae != nil {
@@ -442,9 +467,11 @@ func (s *Server) handleACMEDNSUpdate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"txt": req.TXT})
 }
 
-// acmeRegistration finds the registration of a subdomain of the key. A
+// acmeRegistration finds the registration of a subdomain of the subject. A
 // subdomain that is a domain name is its own registration, created on first
-// use: acme.sh and cert-manager configurations can name the domain directly.
+// use: acme.sh and cert-manager configurations can name the domain directly,
+// and it is the only form for token subjects, whose values are tracked per
+// (subject, domain).
 func (s *Server) acmeRegistration(ctx context.Context, subj *identity.Subject, sub string) (*store.ACMERegistration, *acmeError) {
 	sub = strings.TrimSpace(sub)
 	if sub == "" || len(sub) > 253 {
@@ -453,7 +480,13 @@ func (s *Server) acmeRegistration(ctx context.Context, subj *identity.Subject, s
 	if strings.Contains(sub, ".") {
 		sub = strings.TrimSuffix(strings.ToLower(sub), ".")
 	}
-	reg, err := s.cfg.APIKeys.GetACMERegistration(ctx, subj.ID, sub)
+	owner := acmeOwner(subj)
+	t, msg := s.acmeTarget(sub)
+	named := msg == "" && t.domain == sub
+	if subj.Kind != identity.KindAPIKey && !named {
+		return nil, &acmeError{http.StatusBadRequest, "bad_subdomain", "with a token, the subdomain is the domain name (registrations belong to API keys)"}
+	}
+	reg, err := s.cfg.APIKeys.GetACMERegistration(ctx, owner, sub)
 	switch {
 	case err == nil:
 		return reg, nil
@@ -461,12 +494,11 @@ func (s *Server) acmeRegistration(ctx context.Context, subj *identity.Subject, s
 		s.log.Error("acme registration read", "err", err)
 		return nil, &acmeError{http.StatusServiceUnavailable, "unavailable", "registration store unavailable"}
 	}
-	t, msg := s.acmeTarget(sub)
-	if msg != "" || t.domain != sub {
+	if !named {
 		return nil, &acmeError{http.StatusBadRequest, "bad_subdomain", "unknown subdomain: use a registration of this key or the domain name"}
 	}
 	now := s.now().UTC()
-	return &store.ACMERegistration{KeyID: subj.ID, Subdomain: sub, Domain: sub, CreatedAt: now, UpdatedAt: now}, nil
+	return &store.ACMERegistration{KeyID: owner, Subdomain: sub, Domain: sub, CreatedAt: now, UpdatedAt: now}, nil
 }
 
 func cidrsAllow(cidrs []string, ip netip.Addr) bool {
