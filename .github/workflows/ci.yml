@@ -75,6 +75,10 @@ jobs:
         with:
           repository: KamorionLabs/terraform-provider-eurodns
           path: terraform-provider-eurodns
+      - uses: actions/checkout@v4
+        with:
+          repository: KamorionLabs/terraform-provider-dnsgate
+          path: terraform-provider-dnsgate
       - uses: actions/setup-go@v5
         with:
           go-version-file: dns-gate/go.mod
