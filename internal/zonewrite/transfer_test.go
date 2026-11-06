@@ -450,3 +450,63 @@ func TestRenameCoversStoreZonesAndRetries(t *testing.T) {
 		t.Fatalf("managed zone: %+v", o)
 	}
 }
+
+func TestTransferPersonRules(t *testing.T) {
+	ctx := context.Background()
+	person := func(issuer, id string, claims map[string]any) *identity.Subject {
+		return bound(&identity.Subject{Issuer: issuer, ID: id, Category: identity.CategoryHuman, Roles: []string{"writer"}, Teams: []string{"team-a"}, Claims: claims})
+	}
+	run := func(t *testing.T, mut func(*Config), requester, approver *identity.Subject) error {
+		t.Helper()
+		e := newEnvConfig(t, eurodnstest.Options{}, nil, func(c *Config) {
+			c.Teams = teamList{"team-a": true, "team-b": true}
+			if mut != nil {
+				mut(c)
+			}
+		})
+		if _, err := e.eng.ApplyRRsets(ctx, alice, zoneName, put("pk", "192.0.2.1"), 0); err != nil {
+			t.Fatal(err)
+		}
+		tr := e.eng.(Transfers)
+		v, err := tr.ProposeTransfer(ctx, requester, zoneName, uiapi.TransferProposal{RRsets: adoptRefs("pk A"), ToTeam: "team-b", Comment: "move"})
+		if err != nil {
+			return err
+		}
+		_, err = tr.DecideTransfer(ctx, approver, v.ID, true, "")
+		return err
+	}
+	key := &identity.Subject{Issuer: "virtual-key", ID: "deploy", Category: identity.CategoryKey, Roles: []string{"writer"}, Teams: []string{"team-a"}}
+	bound(key)
+	other := person("idp", "carol", map[string]any{"email": "carol@example.com"})
+	cases := map[string]struct {
+		mut                 func(*Config)
+		requester, approver *identity.Subject
+		allowed             bool
+	}{
+		"requester without person claims": {nil, key, other, false},
+		"approver without person claims":  {nil, person("idp", "alice", map[string]any{"email": "alice@example.com"}), person("idp2", "x", map[string]any{"sub": "x"}), false},
+		"same person on another claim": {nil, person("idp", "alice", map[string]any{"preferred_username": "alice@example.com"}),
+			person("idp2", "a-2", map[string]any{"upn": "Alice@Example.com"}), false},
+		"same immutable id": {nil, person("idp", "alice", map[string]any{"tid": "t1", "oid": "o1", "email": "alice@example.com"}),
+			person("idp2", "a-3", map[string]any{"tid": "t1", "oid": "o1", "email": "alias@example.com"}), false},
+		"unverified email ignored": {nil, person("idp", "alice", map[string]any{"tid": "t1", "oid": "o1", "email": "carol@example.com", "email_verified": false}),
+			other, true},
+		"untrusted issuer email ignored": {func(c *Config) { c.UntrustedEmail = map[string]bool{"idp2": true} },
+			person("idp", "alice", map[string]any{"tid": "t1", "oid": "o1"}), person("idp2", "c-2", map[string]any{"tid": "t2", "oid": "o2", "email": "x@example.com"}), true},
+		"approver outside the person issuers": {func(c *Config) { c.PersonIssuers = []string{"idp"} },
+			person("idp", "alice", map[string]any{"email": "alice@example.com"}), person("idp2", "c-2", map[string]any{"email": "carol@example.com"}), false},
+		"requester outside the person issuers": {func(c *Config) { c.PersonIssuers = []string{"idp2"} },
+			person("idp", "alice", map[string]any{"email": "alice@example.com"}), person("idp2", "c-2", map[string]any{"email": "carol@example.com"}), false},
+		"two people of the person issuer": {func(c *Config) { c.PersonIssuers = []string{"idp"} },
+			person("idp", "alice", map[string]any{"email": "alice@example.com"}), other, true},
+		"machines with machine_approvers": {func(c *Config) { c.MachineApprovers = true }, key, other, true},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			err := run(t, tc.mut, tc.requester, tc.approver)
+			if tc.allowed != (err == nil) {
+				t.Fatalf("allowed=%v, got %v", tc.allowed, err)
+			}
+		})
+	}
+}

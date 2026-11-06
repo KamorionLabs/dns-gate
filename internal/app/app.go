@@ -126,6 +126,8 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		Teams:                   authz,
 		PersonClaims:            cfg.Ownership.PersonClaims,
 		MachineApprovers:        cfg.Ownership.MachineApprovers,
+		PersonIssuers:           cfg.Ownership.PersonIssuers,
+		UntrustedEmail:          untrustedEmail(cfg),
 		Now:                     time.Now,
 		Logger:                  log,
 	})
@@ -174,6 +176,18 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 	a := &App{Config: cfg, Store: st, Engine: eng, Policy: holder, Discovery: disc, authz: authz, handler: srv.Handler(), opts: opts, log: log, now: time.Now}
 	a.PlanGC = a.GCPlans
 	return a, nil
+}
+
+// untrustedEmail lists the issuers whose email claim must not identify a
+// person (issuers[].email_trusted: false).
+func untrustedEmail(cfg *config.Config) map[string]bool {
+	out := map[string]bool{}
+	for _, is := range cfg.AllIssuers() {
+		if is.EmailTrusted != nil && !*is.EmailTrusted {
+			out[is.Name] = true
+		}
+	}
+	return out
 }
 
 // CheckManagedPolicy validates the active managed revision of the store of

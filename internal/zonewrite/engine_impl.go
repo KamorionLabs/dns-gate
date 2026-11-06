@@ -88,7 +88,7 @@ func newEngine(cfg Config) (*engine, error) {
 		cfg.TransferTTL = 7 * 24 * time.Hour
 	}
 	if cfg.PersonClaims == nil {
-		cfg.PersonClaims = []string{"email", "preferred_username", "oid"}
+		cfg.PersonClaims = []string{"tid+oid", "email", "preferred_username", "upn"}
 	}
 	e := &engine{
 		cfg: cfg, zones: cfg.ZoneSet, now: cfg.Now, log: cfg.Logger,

@@ -144,17 +144,24 @@ type Ownership struct {
 	// (default 7 days).
 	TransferTTL Duration `yaml:"transfer_ttl"`
 	// MachineApprovers lets pipelines and virtual keys approve transfers
-	// and renames; by default only humans may, after a recent login.
+	// and renames, and lets transfers requested by identities the person
+	// claims do not identify be approved: it weakens the two-person rule.
+	// By default only humans approve, after a recent login.
 	MachineApprovers bool `yaml:"machine_approvers"`
 	// PersonClaims identify the person behind a token across issuers: the
-	// first non-empty one, compared case-insensitively, must differ between
-	// the requester and the approver of a transfer (default email,
-	// preferred_username, oid).
+	// requester and the approver of a transfer must share none of their
+	// values, compared case-insensitively whatever the claim ("tid+oid"
+	// joins claims). Default tid+oid, email, preferred_username, upn.
 	PersonClaims []string `yaml:"person_claims"`
+	// PersonIssuers, when set (recommended), are the issuers whose human
+	// subjects alone may request and approve transfers and renames, e.g.
+	// the SAML or OIDC issuer of the UI login; the subject id then also
+	// identifies the person.
+	PersonIssuers []string `yaml:"person_issuers"`
 }
 
 // DefaultPersonClaims are the default ownership.person_claims.
-var DefaultPersonClaims = []string{"email", "preferred_username", "oid"}
+var DefaultPersonClaims = []string{"tid+oid", "email", "preferred_username", "upn"}
 
 // Default ownership durations.
 const (
@@ -355,7 +362,11 @@ type Issuer struct {
 	// teams block exists.
 	TeamClaimPrefix string `yaml:"team_claim_prefix"`
 	NameClaim       string `yaml:"name_claim"` // display name claim (default: the subject)
-	Category        string `yaml:"category"`   // human | pipeline (default pipeline)
+	// EmailTrusted tells whether the email claim of this issuer identifies
+	// a person for the two-person rule of transfers (default true; an
+	// email_verified claim set to false always excludes it).
+	EmailTrusted *bool  `yaml:"email_trusted"`
+	Category     string `yaml:"category"` // human | pipeline (default pipeline)
 
 	// SubjectClaim is the claim used as subject id (default "sub").
 	// SubjectTemplate builds a composite id instead, e.g. "{{tid}}/{{oid}}".
@@ -1055,8 +1066,20 @@ func (c *Config) Validate() error {
 		add("ownership.tombstone_ttl: must be between 0s (disabled) and 8760h")
 	}
 	for i, pc := range c.Ownership.PersonClaims {
-		if strings.TrimSpace(pc) == "" {
-			add("ownership.person_claims[%d]: empty claim name", i)
+		if strings.TrimSpace(pc) == "" || strings.Contains(pc, "++") || strings.HasPrefix(pc, "+") || strings.HasSuffix(pc, "+") {
+			add("ownership.person_claims[%d]: %q is not a claim name or a + composite of claim names", i, pc)
+		}
+	}
+	if len(c.Ownership.PersonIssuers) > 0 && c.Ownership.MachineApprovers {
+		add("ownership: person_issuers and machine_approvers are exclusive (person issuers only admit humans)")
+	}
+	known := map[string]bool{}
+	for _, is := range c.AllIssuers() {
+		known[is.Name] = !is.Self
+	}
+	for i, n := range c.Ownership.PersonIssuers {
+		if !known[n] {
+			add("ownership.person_issuers[%d]: unknown issuer %q (the gate issuer binds as the issuer of the session: name that one)", i, n)
 		}
 	}
 	if d := c.Ownership.TransferTTL.D(); d < time.Hour || d > 90*24*time.Hour {

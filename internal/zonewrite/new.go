@@ -50,9 +50,17 @@ type Config struct {
 	// by default only humans may.
 	MachineApprovers bool
 	// PersonClaims identify the person behind a token: requester and
-	// approver of a transfer must differ on the first non-empty one
-	// (default email, preferred_username, oid).
+	// approver of a transfer must share none of their values ("tid+oid"
+	// joins several claims; default tid+oid, email, preferred_username,
+	// upn).
 	PersonClaims []string
+	// PersonIssuers, when set, are the issuers whose human subjects may
+	// request and approve transfers; the subject itself then identifies the
+	// person too.
+	PersonIssuers []string
+	// UntrustedEmail lists the issuers whose email claim does not identify
+	// a person.
+	UntrustedEmail map[string]bool
 	// Teams tells which teams may own RRsets; any valid team name when nil.
 	Teams  TeamDirectory
 	Now    func() time.Time

@@ -71,7 +71,7 @@ type Transfer struct {
 	Requester         string         `json:"requester"`
 	RequesterName     string         `json:"requester_name,omitempty"`
 	RequesterCategory string         `json:"requester_category,omitempty"`
-	RequesterPerson   string         `json:"requester_person,omitempty"` // person key of the requester (ownership.person_claims)
+	RequesterPersons  []string       `json:"requester_persons,omitempty"` // person keys of the requester (ownership.person_claims and person_issuers)
 	CreatedAt         time.Time      `json:"created_at"`
 	ExpiresAt         time.Time      `json:"expires_at"`
 	DecidedBy         string         `json:"decided_by,omitempty"`
@@ -133,6 +133,7 @@ func validateTransfer(t Transfer) error {
 
 func cloneTransfer(t Transfer) Transfer {
 	t.Items = append([]TransferItem(nil), t.Items...)
+	t.RequesterPersons = append([]string(nil), t.RequesterPersons...)
 	t.CreatedAt, t.ExpiresAt = t.CreatedAt.UTC(), t.ExpiresAt.UTC()
 	t.DecidedAt = utcPtr(t.DecidedAt)
 	return t

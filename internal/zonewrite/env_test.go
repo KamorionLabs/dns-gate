@@ -39,6 +39,9 @@ type fakeAuthz struct{ max int }
 
 // bound grants every role of a test subject through each of its teams.
 func bound(s *identity.Subject) *identity.Subject {
+	if s.Claims == nil && s.Name != "" && s.Category == identity.CategoryHuman {
+		s.Claims = map[string]any{"email": s.Name}
+	}
 	s.TeamRoles = map[string][]string{}
 	for _, t := range s.Teams {
 		s.TeamRoles[t] = s.Roles

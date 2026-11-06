@@ -78,6 +78,9 @@ func (e *engine) ProposeTransfer(ctx context.Context, s *identity.Subject, zoneI
 	if err != nil {
 		return nil, err
 	}
+	if err := e.checkRequester(s); err != nil {
+		return nil, e.deny(ctx, s, actionTransferPropose, zone, err)
+	}
 	if !e.cfg.Authz.Allow(s, policy.ActionOwnershipApprove, zone) && !e.cfg.Authz.Allow(s, policy.ActionRecordWrite, zone) {
 		return nil, e.deny(ctx, s, actionTransferPropose, zone, fail(ReasonForbidden, "%s or %s is required on %s", policy.ActionRecordWrite, policy.ActionOwnershipApprove, zone))
 	}
@@ -100,7 +103,7 @@ func (e *engine) ProposeTransfer(ctx context.Context, s *identity.Subject, zoneI
 	}
 	t := store.Transfer{
 		ID: newTransferID(e), Kind: uiapi.TransferKindRRsets, Zone: zone, ToTeam: req.ToTeam, Comment: req.Comment,
-		Status: uiapi.TransferProposed, Requester: s.String(), RequesterName: s.Name, RequesterCategory: s.Category, RequesterPerson: e.personKey(s),
+		Status: uiapi.TransferProposed, Requester: s.String(), RequesterName: s.Name, RequesterCategory: s.Category, RequesterPersons: e.personKeys(s),
 		CreatedAt: e.now().UTC(), ExpiresAt: e.now().UTC().Add(e.cfg.TransferTTL),
 	}
 	seen := map[dns.Key]bool{}
@@ -155,6 +158,9 @@ func (e *engine) ProposeRename(ctx context.Context, s *identity.Subject, from st
 	if !e.cfg.Authz.Allow(s, uiapi.ActionPolicyPropose, "") {
 		return nil, e.deny(ctx, s, actionTransferPropose, "", fail(ReasonForbidden, "%s is required to rename a team", uiapi.ActionPolicyPropose))
 	}
+	if err := e.checkRequester(s); err != nil {
+		return nil, e.deny(ctx, s, actionTransferPropose, "", err)
+	}
 	if err := checkComment(req.Comment); err != nil {
 		return nil, err
 	}
@@ -168,7 +174,7 @@ func (e *engine) ProposeRename(ctx context.Context, s *identity.Subject, from st
 	t := store.Transfer{
 		ID: newTransferID(e), Kind: uiapi.TransferKindRename, FromTeam: from, ToTeam: req.To, Comment: req.Comment,
 		Status: uiapi.TransferProposed, Requester: s.String(), RequesterName: s.Name, RequesterCategory: s.Category,
-		CreatedAt: now, ExpiresAt: now.Add(e.cfg.TransferTTL),
+		RequesterPersons: e.personKeys(s), CreatedAt: now, ExpiresAt: now.Add(e.cfg.TransferTTL),
 	}
 	if err := e.cfg.Store.CreateTransfer(ctx, t); err != nil {
 		return nil, &Error{Reason: ReasonUpstream, Message: "store transfer failed", Err: err}
@@ -241,13 +247,12 @@ func (e *engine) DecideTransfer(ctx context.Context, s *identity.Subject, id str
 		return nil, fail(ReasonExpired, "transfer %s expired at %s", id, t.ExpiresAt.Format(time.RFC3339))
 	}
 	self := s.String() == t.Requester
-	samePerson := t.RequesterPerson != "" && e.personKey(s) == t.RequesterPerson
-	switch {
-	case approve && (self || samePerson):
-		return nil, e.deny(ctx, s, action, t.Zone, fail(ReasonForbidden, "the requester cannot approve its own transfer, with this identity or another one: a second person must"))
-	case approve && !e.cfg.MachineApprovers && s.Category != identity.CategoryHuman:
-		return nil, e.deny(ctx, s, action, t.Zone, fail(ReasonForbidden, "transfers are approved by a person, not by a %s identity (ownership.machine_approvers)", s.Category))
-	case !self && !e.mayDecide(s, *t):
+	if approve {
+		if err := e.checkApprover(s, *t); err != nil {
+			return nil, e.deny(ctx, s, action, t.Zone, err)
+		}
+	}
+	if !self && !e.mayDecide(s, *t) {
 		return nil, e.deny(ctx, s, action, t.Zone, fail(ReasonForbidden, "%s", e.decideRule(*t)))
 	}
 	if approve && t.Kind == uiapi.TransferKindRename {
@@ -651,15 +656,92 @@ func (e *engine) mayDecide(s *identity.Subject, t store.Transfer) bool {
 	return len(t.Items) > 0
 }
 
-// personKey identifies the person behind s: the first non-empty value of
-// the person claims, lowercased; "" when none is present.
-func (e *engine) personKey(s *identity.Subject) string {
-	for _, c := range e.cfg.PersonClaims {
-		if v, ok := s.Claims[c].(string); ok && strings.TrimSpace(v) != "" {
-			return strings.ToLower(strings.TrimSpace(v))
+// personKeys identifies the person behind s: the subject itself when its
+// issuer is one of the person issuers, and the values of the person claims
+// ("tid+oid" joins several claims), lowercased. email is left out when the
+// issuer is not trusted for it or email_verified is false. Two subjects
+// sharing any key are the same person; a subject without keys cannot be
+// told apart from another one.
+func (e *engine) personKeys(s *identity.Subject) []string {
+	var out []string
+	add := func(k string) {
+		if k != "" && !slices.Contains(out, k) {
+			out = append(out, k)
 		}
 	}
-	return ""
+	if e.personIssuer(s) {
+		add("subject " + strings.ToLower(s.String()))
+	}
+	for _, c := range e.cfg.PersonClaims {
+		if c == "email" && (e.cfg.UntrustedEmail[s.Issuer] || unverifiedEmail(s.Claims["email_verified"])) {
+			continue
+		}
+		var parts []string
+		for _, name := range strings.Split(c, "+") {
+			v, ok := s.Claims[name].(string)
+			if !ok || strings.TrimSpace(v) == "" {
+				parts = nil
+				break
+			}
+			parts = append(parts, strings.ToLower(strings.TrimSpace(v)))
+		}
+		add(strings.Join(parts, "/"))
+	}
+	return out
+}
+
+func unverifiedEmail(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return !x
+	case string:
+		return strings.EqualFold(x, "false")
+	}
+	return false
+}
+
+// personIssuer reports whether s is a human of one of the person issuers.
+func (e *engine) personIssuer(s *identity.Subject) bool {
+	return s.Category == identity.CategoryHuman && slices.Contains(e.cfg.PersonIssuers, s.Issuer)
+}
+
+// checkRequester applies ownership.person_issuers to the requester of a
+// transfer or rename.
+func (e *engine) checkRequester(s *identity.Subject) error {
+	if len(e.cfg.PersonIssuers) > 0 && !e.personIssuer(s) {
+		return fail(ReasonForbidden, "transfers are requested by people signed in with %s (ownership.person_issuers)", strings.Join(e.cfg.PersonIssuers, ", "))
+	}
+	return nil
+}
+
+// checkApprover enforces the two-person rule: the approver is not the
+// requester under any identity, is a human of the person issuers when they
+// are set, and, unless ownership.machine_approvers, both are humans that
+// the person keys identify.
+func (e *engine) checkApprover(s *identity.Subject, t store.Transfer) error {
+	if s.String() == t.Requester {
+		return fail(ReasonForbidden, "the requester cannot approve its own transfer: a second person must")
+	}
+	if err := e.checkRequester(s); err != nil {
+		return fail(ReasonForbidden, "transfers are approved by people signed in with %s (ownership.person_issuers)", strings.Join(e.cfg.PersonIssuers, ", "))
+	}
+	keys := e.personKeys(s)
+	if !e.cfg.MachineApprovers {
+		switch {
+		case s.Category != identity.CategoryHuman:
+			return fail(ReasonForbidden, "transfers are approved by a person, not by a %s identity (ownership.machine_approvers)", s.Category)
+		case len(t.RequesterPersons) == 0:
+			return fail(ReasonForbidden, "the requester cannot be identified as a person (no ownership.person_claims, not a person issuer): this transfer cannot get a second approver")
+		case len(keys) == 0:
+			return fail(ReasonForbidden, "your token carries none of ownership.person_claims: the gate cannot tell you apart from the requester")
+		}
+	}
+	for _, k := range keys {
+		if slices.Contains(t.RequesterPersons, k) {
+			return fail(ReasonForbidden, "the requester cannot approve its own transfer, with this identity or another one: a second person must")
+		}
+	}
+	return nil
 }
 
 // teamWrites reports whether s may write an RRset through the roles of its
@@ -703,7 +785,7 @@ func (e *engine) transferView(s *identity.Subject, t store.Transfer) *uiapi.Tran
 		v.Status = uiapi.TransferExpired
 	}
 	v.CanDecide = v.Status == uiapi.TransferProposed && s.String() != t.Requester && e.mayDecide(s, t) &&
-		(t.RequesterPerson == "" || e.personKey(s) != t.RequesterPerson) && (e.cfg.MachineApprovers || s.Category == identity.CategoryHuman)
+		e.checkApprover(s, t) == nil
 	return v
 }
 
