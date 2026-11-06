@@ -55,6 +55,10 @@ type TeamInfo struct {
 type TeamList struct {
 	Strict bool       `json:"strict"`
 	Teams  []TeamInfo `json:"teams"`
+	// RequireSecondApprover tells whether transfers and renames need the
+	// approval of another person (ownership.require_second_approver);
+	// otherwise their requester may approve them.
+	RequireSecondApprover bool `json:"require_second_approver"`
 }
 
 // TeamZone counts what a team owns in a zone.

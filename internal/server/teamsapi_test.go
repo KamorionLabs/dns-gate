@@ -110,8 +110,15 @@ func TestTeamsEndpoints(t *testing.T) {
 	for _, ti := range list.Teams {
 		kinds[ti.Name], counts[ti.Name] = ti.Kind, ti.RRsets
 	}
-	if r.StatusCode != 200 || list.Strict || kinds["web"] != uiapi.TeamKindAuto || kinds["legacy"] != uiapi.TeamKindStore || counts["web"] != 1 || counts["ops"] != 0 {
+	if r.StatusCode != 200 || list.Strict || list.RequireSecondApprover || kinds["web"] != uiapi.TeamKindAuto || kinds["legacy"] != uiapi.TeamKindStore || counts["web"] != 1 || counts["ops"] != 0 {
 		t.Fatalf("teams: %d %+v", r.StatusCode, list)
+	}
+	e.server.cfg.Config.Ownership.RequireSecondApprover = true
+	r = e.do(t, "GET", "/api/v1/teams", tok, "", nil)
+	list = uiapi.TeamList{}
+	_ = json.NewDecoder(r.Body).Decode(&list)
+	if !list.RequireSecondApprover {
+		t.Fatalf("second approver mode not exposed: %+v", list)
 	}
 	r = e.do(t, "GET", "/api/v1/teams/web", tok, "", nil)
 	var d uiapi.TeamDetail

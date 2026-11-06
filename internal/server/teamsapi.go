@@ -142,7 +142,8 @@ func (s *Server) handleTeams(w http.ResponseWriter, r *http.Request, subj *ident
 func (s *Server) teamList(ctx context.Context, subj *identity.Subject, readable map[string]bool) uiapi.TeamList {
 	snap := s.cfg.Policy.Current()
 	owners, counts := s.storeOwners(ctx, readable)
-	list := uiapi.TeamList{Strict: snap.StrictTeams(), Teams: snap.TeamInfos(owners, s.pol.AllowMeta(subj, uiapi.ActionPolicyRead))}
+	list := uiapi.TeamList{Strict: snap.StrictTeams(), Teams: snap.TeamInfos(owners, s.pol.AllowMeta(subj, uiapi.ActionPolicyRead)),
+		RequireSecondApprover: s.cfg.Config.Ownership.RequireSecondApprover}
 	for i := range list.Teams {
 		list.Teams[i].RRsets = counts[list.Teams[i].Name]
 	}

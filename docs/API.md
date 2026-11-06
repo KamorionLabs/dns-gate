@@ -265,7 +265,8 @@ The EuroDNS-compatible API always writes for the default team.
 members for `policy.read` holders), referenced without being declared (migration),
 derived from claims (`team_from` families, issuer `team_claim`), and the owners
 found in the store that nothing declares, with the number of RRsets each owns in the
-zones the caller can read. `GET /api/v1/teams/{team}` adds what the team owns per
+zones the caller can read; `require_second_approver` tells whether transfers and
+renames need another person's approval. `GET /api/v1/teams/{team}` adds what the team owns per
 zone, its pending transfers and, for `policy.read` holders and the team's members,
 the rules of its roles (`permissions`).
 

@@ -2077,9 +2077,10 @@ components:
 
     TeamList:
       type: object
-      required: [strict, teams]
+      required: [strict, teams, require_second_approver]
       properties:
         strict: { type: boolean, description: "Team references must be declared (the base file has a teams block)." }
+        require_second_approver: { type: boolean, description: "Transfers and renames need the approval of another person (ownership.require_second_approver); otherwise their requester may approve them." }
         teams: { type: array, items: { $ref: "#/components/schemas/TeamInfo" } }
 
     TeamDetail:
