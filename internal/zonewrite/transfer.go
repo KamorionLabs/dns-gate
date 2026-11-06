@@ -35,8 +35,9 @@ type Transfers interface {
 	// GetTransfer and ListTransfers return the requests the caller may see.
 	GetTransfer(ctx context.Context, s *identity.Subject, id string) (*uiapi.Transfer, error)
 	ListTransfers(ctx context.Context, s *identity.Subject, q store.TransferQuery) (*uiapi.TransferPage, error)
-	// DecideTransfer approves (and applies) or rejects a proposed request.
-	// The requester may only reject (withdraw) it.
+	// DecideTransfer approves (and applies, in the background for a
+	// rename) or rejects a proposed request. The requester may withdraw it,
+	// and approve it only when no second approver is required.
 	DecideTransfer(ctx context.Context, s *identity.Subject, id string, approve bool, comment string) (*uiapi.Transfer, error)
 }
 
@@ -741,10 +742,9 @@ func (e *engine) canSeeTransfer(s *identity.Subject, t store.Transfer) bool {
 	return e.cfg.Authz.Allow(s, policy.ActionUIRead, t.Zone) || e.cfg.Authz.Allow(s, policy.ActionDNSRead, t.Zone)
 }
 
-// mayDecide tells whether s may approve t (anyone but the requester): for
-// every RRset, a member of the owner team allowed to write it through the
-// bindings of that team, or a holder of dns.ownership.approve on it;
-// another policy.approve holder for a rename.
+// mayDecide tells whether s has the rights to approve t: for every RRset,
+// write through the bindings of the owner team, or dns.ownership.approve on
+// it; policy.approve for a rename. checkApprover adds the rules on persons.
 func (e *engine) mayDecide(s *identity.Subject, t store.Transfer) bool {
 	if t.Kind == uiapi.TransferKindRename {
 		return e.cfg.Authz.Allow(s, uiapi.ActionPolicyApprove, "")
@@ -816,10 +816,10 @@ func (e *engine) checkRequester(s *identity.Subject) error {
 	return nil
 }
 
-// checkApprover enforces the two-person rule: the approver is not the
-// requester under any identity, is a human of the person issuers when they
-// are set, and, unless ownership.machine_approvers, both are humans that
-// the person keys identify.
+// checkApprover enforces the rules on persons: a human unless
+// ownership.machine_approvers and, with ownership.require_second_approver,
+// not the requester under any identity, a human of the person issuers when
+// they are set, both identified by person keys unless machine approvers.
 func (e *engine) checkApprover(s *identity.Subject, t store.Transfer) error {
 	if !e.cfg.RequireSecondApprover {
 		if !e.cfg.MachineApprovers && s.Category != identity.CategoryHuman {
