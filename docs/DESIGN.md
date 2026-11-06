@@ -238,9 +238,44 @@ Guide: [API.md](API.md).
 | `addDnsRecords` | `dns.record.write` | engine |
 | `deleteDnsRecord` | `dns.record.write` | engine |
 | `listDnsZoneSnapshots`, `getSnapShot`, `getDnssecStatus` | `dns.read` | passthrough |
-| `signZone`, `unsignZone`, zone profiles | `dns.zone.admin` | passthrough |
+| `signZone`, `unsignZone` | `dns.zone.admin` | passthrough |
+| `listZoneProfiles`, `createZoneProfile`, `checkZoneProfile`, `getProfile`, `updateUserAPiZoneProfile`, `deleteZoneProfile` | `dns.zone.profile` on `*` | account (5.2) |
 | `getDomain`, `searchDomains` | `domain.read` | passthrough |
 | everything else (contacts, nameserver profiles, subscriptions, SSL, invoices, orders…) | — | denied |
+
+### 5.2 Account-wide operations: zone profiles
+
+Most EuroDNS operations name a domain, which selects the provider and scopes
+RBAC. Zone profiles do not: a profile is a template of the EuroDNS account
+(records, URL and mail forwards) that EuroDNS applies to a domain when it arrives
+on its nameservers (a transfer, a Premium DNS subscription created with its
+`zoneProfileId`). The EuroDNS document gives a profile only an id, a name and its
+content; nothing ties it to a domain, nor names a default profile.
+
+- **Scope.** A narrower grant could not be enforced: the profile is not bound to
+  the domain the caller has in mind, and that domain is not in the account (nor
+  managed) before it arrives. `dns.zone.profile` therefore counts only when a rule
+  grants it on `"*"` without a record scope (`GrantsPattern(roles, action, "*")`,
+  the check of the account-wide API key administrators); a narrower grant has no
+  effect and is flagged at load. Reads need it too: profiles may carry
+  verification tokens.
+- **No ownership.** The gate cannot attribute a profile to the team of the domains
+  it will serve, so it keeps no ownership for profiles and no state: any holder of
+  the action may change any profile of the account. The action is meant for the
+  administrators of the account.
+- **Served by the gate, not proxied.** The routes are mapped with the handler kind
+  `account` (no zone, no managed-zone check). The gate decodes the body as a
+  `ZoneProfilePage` (only known fields reach EuroDNS), checks the name, calls
+  EuroDNS on the shared rate-limited transport (`internal/provider/eurodns`), and
+  re-encodes the answer; EuroDNS refusals (400, 404, 409, 422, 429) are returned
+  as is on the EuroDNS-compatible routes and as `rejected` or `not_found` on
+  `/api/v1`. The provider is the only `eurodns` provider, the one named by
+  `X-DNS-Gate-Provider`, or `{provider}` of
+  `/api/v1/providers/{provider}/zone-profiles`; any other kind is refused.
+- **Audit.** Every operation is audited with the provider and the profile id;
+  writes carry the profile content (a delete reads it first), never credentials.
+- **After the arrival.** The records EuroDNS creates from a profile are foreign to
+  the gate: they are adopted by their teams once the zone is managed (6.3).
 
 ## 6. Ownership model
 

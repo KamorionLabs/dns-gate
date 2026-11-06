@@ -335,7 +335,7 @@ A map of named roles. Deny by default: an action is allowed only if a rule of on
 | Field | Description |
 |---|---|
 | `rules[].zones` | Zone globs (`*` matches any sequence, `*` alone any managed zone, and for `dns.read` and `ui.read` any [discovered](#zone-discovery) zone). |
-| `rules[].actions` | `dns.read`, `dns.record.write`, `dns.record.adopt`, `dns.zone.admin`, `dns.ownership.approve`, `domain.read`, `ui.read`, `gate.apikey.manage` (manage the [API keys](API.md#api-keys) of the subject's teams whose role zones it covers). |
+| `rules[].actions` | `dns.read`, `dns.record.write`, `dns.record.adopt`, `dns.zone.admin`, `dns.zone.profile` ([zone profiles](#zone-profiles), on `*` only), `dns.ownership.approve`, `domain.read`, `ui.read`, `gate.apikey.manage` (manage the [API keys](API.md#api-keys) of the subject's teams whose role zones it covers). |
 | `rules[].records.hosts` | Host patterns relative to the zone, `@` is the apex. `*` matches one label, `**` one or more labels (a bare `**` matches every host, apex included). |
 | `rules[].records.types` | Record types, `*` for any. Omit `records` to cover the whole zone. |
 | `rebase_on_save` | On a full-zone PUT, ignore differences outside the role's scope instead of refusing them (stale zones sent by ACME clients). Granted if any role of the subject enables it. |
@@ -343,6 +343,26 @@ A map of named roles. Deny by default: an action is allowed only if a rule of on
 | `max_changes_per_request` | `0` = global default, `-1` = unlimited, otherwise a limit. The most permissive role of the subject wins. |
 
 `dns.record.write` and `dns.record.adopt` are further limited by ownership: the gate only modifies or deletes RRsets it created or adopted, owned by one of the subject's teams. `dns.ownership.approve` lets a subject adopt RRsets for a team it is not a member of and approve the [ownership transfers](#ownership) of the zone: give it to the people who arbitrate between teams.
+
+### Zone profiles
+
+A EuroDNS zone profile is a template of the account (records, URL and mail forwards) that EuroDNS applies to a domain when it arrives on its nameservers: a domain transferred to EuroDNS, or a Premium DNS subscription ordered with the profile's id. Preparing a transfer means creating the profile and checking it before the domain arrives. The gate serves the zone profile operations of every `eurodns` provider ([API.md](API.md#zone-profiles), MCP tools below, and the EuroDNS-compatible `/zone-profiles` routes) under the action `dns.zone.profile`.
+
+A profile names no domain (its hosts are relative to whatever domain it is applied to) and the domain it prepares is not in the account yet, so zone globs cannot scope it: **`dns.zone.profile` only counts in a rule whose `zones` contain `"*"` and that has no `records` scope**; granted on narrower zones it has no effect and the gate warns at load. Every operation needs it, reads included (a profile may hold verification tokens), and a write applies to any profile of the account: there is no ownership by team. Give it to the administrators of the EuroDNS account only:
+
+```yaml
+roles:
+  dns-account-admin:
+    rules:
+      - zones: ["*"]
+        actions: [dns.zone.profile]
+bindings:
+  - role: dns-account-admin
+    team: platform
+    subjects: [{issuer: entra, claims: {groups: ["<dns admins group id>"]}}]
+```
+
+The records EuroDNS applies from a profile are created outside the gate: the domain then shows them as foreign RRsets, adopted by the teams that will manage them once the zone is managed ([adoption](#adoption-and-terraform-export)). The managed policy can grant `dns.zone.profile` only when `policy.bounds` allow it on `"*"`.
 
 ## Groups
 
@@ -629,7 +649,7 @@ Both are mutations for CSRF (cookie sessions) and the apply requires the same re
 | Field | Default | Description |
 |---|---|---|
 | `mcp.enabled` | `false` | Serves `/mcp` and `/.well-known/oauth-protected-resource`. |
-| `mcp.allow_writes` | `false` | Adds the write tools (plan/apply, adoption, transfer requests and decisions). Without it, the server is read-only. |
+| `mcp.allow_writes` | `false` | Adds the write tools (plan/apply, adoption, transfer requests and decisions, zone profiles). Without it, the server is read-only. |
 | `mcp.plan_ttl` | `10m` | Lifetime of a plan returned by `plan_rrset_change` or `POST /api/v1/zones/{zone}/plan` (1m to 1h). |
 | `mcp.requests_per_minute` | `120` | Rate limit per subject (`429` beyond). |
 | `mcp.public_url` | UI origin, else the request host | Public base URL of the gate, advertised in the protected resource metadata and shown on the Connect page. |
@@ -650,6 +670,8 @@ Tools:
 | `plan_rrset_change` | dry run | Desired state of RRsets, checked without writing; returns a `plan_id` bound to the caller, the zone, the changes, the zone version and the optional `team` (one of the caller's teams). |
 | `apply_rrset_change` | write | Applies a plan exactly as planned, for its team; refused when expired, used, owned by another caller, planned for another team (`team_mismatch`), or when the zone changed since (`precondition`). |
 | `adopt_preview`, `adopt_apply` | dry run, write | Adoption as above, with an optional `team`. |
+| `list_zone_profiles`, `get_zone_profile`, `check_zone_profile` | read | [Zone profiles](#zone-profiles) of a EuroDNS provider (`provider` optional with one EuroDNS provider); `check_zone_profile` validates with EuroDNS without saving. `dns.zone.profile` on `*`. |
+| `create_zone_profile`, `update_zone_profile`, `delete_zone_profile` | write | Zone profile writes, audited with the profile content. |
 | `transfer_propose`, `transfer_approve`, `transfer_reject` | write | Ownership transfers with the REST rules ([transfers](#ownership)): one owner team per request, approved by someone who may write every RRset through the owner team or holds `dns.ownership.approve` on it (humans only unless `ownership.machine_approvers`), another person with `ownership.require_second_approver`, otherwise possibly the requester (`transfer_propose` with `apply: true`); the requester may reject (withdraw) it. An approval the gate cannot complete at once, and every rename, leaves the transfer `applying`, applied in the background. |
 
 There is no policy tool: policy changes stay with humans in the UI, with step-up. Plans are kept in the store, shared by every replica, and taken once: a plan made on one replica can be applied on another. The same plans back `POST /api/v1/zones/{zone}/plan` and `/apply` ([API.md](API.md)). Expired plans are purged every 15 minutes by the gate (SQL stores) or by the DynamoDB TTL.
@@ -797,7 +819,7 @@ Validation of the response posted to `/auth/saml/acs`: XML signature of the resp
 
 | Path | Description |
 |---|---|
-| EuroDNS API paths | Opened operations, for zones of a `eurodns` provider only (`404 zone_not_eurodns` otherwise): `getDnsZone`, `saveDnsZone`, `checkDnsZone`, `addDnsRecords`, `deleteDnsRecord` (zone engine), `listDnsZoneSnapshots`, `getSnapShot`, `getDnssecStatus`, `getDomain` (proxied to the account of the zone). Every other operation returns `403 operation_denied`. Query strings, encoded separators and dot segments are refused. |
+| EuroDNS API paths | Opened operations, for zones of a `eurodns` provider only (`404 zone_not_eurodns` otherwise): `getDnsZone`, `saveDnsZone`, `checkDnsZone`, `addDnsRecords`, `deleteDnsRecord` (zone engine), `listDnsZoneSnapshots`, `getSnapShot`, `getDnssecStatus`, `getDomain` (proxied to the account of the zone), and the [zone profiles](#zone-profiles) of the account (`listZoneProfiles`, `createZoneProfile`, `checkZoneProfile`, `getProfile`, `updateUserAPiZoneProfile`, `deleteZoneProfile`: the only EuroDNS provider, or the one named by the `X-DNS-Gate-Provider` header). Every other operation returns `403 operation_denied`. Query strings, encoded separators and dot segments are refused. |
 | `GET /.well-known/dns-gate` | Version and features (`if-match`, `ownership`, `adopt`, `policy-delegation`, `plans`, `rrset-api`, `acme-httpreq`, and when enabled `api-keys`, `acme-dns`, `token-exchange`), unauthenticated. |
 | `POST /.well-known/dns-gate/zones/{zone}/adopt` | Adopt RRsets of a EuroDNS zone (used by the `eurodns` Terraform provider on import; other providers adopt through `/api/v1/zones/{zone}/adopt`). Foreign RRsets need `dns.record.adopt`; RRsets already owned by one of the caller's teams are a no-op and only need `dns.record.write` on the zone. |
 | `/api/v1/me`, `/api/v1/connect`, `/api/v1/zones`, `/api/v1/zones/{zone}/rrsets`, `/api/v1/audit` | UI API (`ui.read`; `/zones` lists managed zones then unmanaged ones (`"unmanaged": true`), whose `rrsets` need `dns.read`; `/me` for any bound subject, with its groups and effective permissions; `/connect` returns the public URL, the MCP state, the login issuer and `ui.cli_scope` for the Connect page). |
@@ -806,6 +828,7 @@ Validation of the response posted to `/auth/saml/acs`: XML signature of the resp
 | `/api/v1/policy/delegated[/roles\|bindings/{name}]` | [Delegation API](#delegation-api) (`GET`, `PUT`, `DELETE`). |
 | `GET /api/v1/teams[/{team}]`, `POST /api/v1/teams/{team}/rename` | [Teams](#teams) and team renames. |
 | `POST /api/v1/zones/{zone}/transfers`, `GET /api/v1/transfers[/{id}]`, `POST /api/v1/transfers/{id}/approve\|reject` | [Ownership transfers](#ownership). |
+| `/api/v1/providers/{provider}/zone-profiles[/check\|/{id}]` | [Zone profiles](#zone-profiles) of a EuroDNS provider (`dns.zone.profile` on `*`), see [API.md](API.md#zone-profiles). |
 | `/auth/login`, `/auth/callback`, `/auth/logout` | UI login (`/auth/callback` with OIDC only). |
 | `POST /auth/saml/acs`, `GET /auth/saml/metadata` | SAML assertion consumer service and SP metadata, with `ui.saml`. |
 | `POST /api/v1/tokens` | Gate token for the UI session, see [Gate-issued tokens](#gate-issued-tokens). |
