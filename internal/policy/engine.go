@@ -91,9 +91,9 @@ func (e *Engine) IsProtected(zone string, key dns.Key) bool {
 }
 
 // OwnerTeam returns the first team of the subject when one of its roles can
-// write records in the zone.
+// write records or URL forwards in the zone.
 func (e *Engine) OwnerTeam(s *identity.Subject, zone string) (string, bool) {
-	if s == nil || len(s.Teams) == 0 || !e.Allow(s, ActionRecordWrite, zone) {
+	if s == nil || len(s.Teams) == 0 || (!e.Allow(s, ActionRecordWrite, zone) && !e.Allow(s, ActionForwardWrite, zone)) {
 		return "", false
 	}
 	return s.Teams[0], true
@@ -165,7 +165,7 @@ func (s *Snapshot) EphemeralTTL(roles []string) time.Duration {
 		}
 		writes := false
 		for _, r := range cr.role.Rules {
-			writes = writes || contains(r.Actions, ActionRecordWrite)
+			writes = writes || contains(r.Actions, ActionRecordWrite) || contains(r.Actions, ActionForwardWrite)
 		}
 		if !writes {
 			continue

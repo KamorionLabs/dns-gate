@@ -317,18 +317,23 @@ func readOnly(k dns.Key, s *dns.RRset) string {
 	return ""
 }
 
-func setValues(s *dns.RRset) (int, []string, *dns.Alias) {
+func setValues(s *dns.RRset) (int, []string, *dns.Alias, *dns.Forward) {
 	if s == nil {
-		return 0, nil, nil
+		return 0, nil, nil, nil
 	}
-	return s.TTL, slices.Clone(s.Values), s.Alias
+	return s.TTL, slices.Clone(s.Values), s.Alias, s.Forward
 }
 
 func uiChange(op string, key dns.Key, old, new *dns.RRset) uiapi.Change {
 	c := uiapi.Change{Op: op, Host: key.Host, Type: key.Type}
-	c.OldTTL, c.OldValues, c.OldAlias = setValues(old)
-	c.NewTTL, c.NewValues, c.NewAlias = setValues(new)
+	c.OldTTL, c.OldValues, c.OldAlias, c.OldForward = setValues(old)
+	c.NewTTL, c.NewValues, c.NewAlias, c.NewForward = setValues(new)
 	return c
+}
+
+// writesIn reports whether s may write records or URL forwards in zone.
+func (e *engine) writesIn(s *identity.Subject, zone string) bool {
+	return e.cfg.Authz.Allow(s, policy.ActionRecordWrite, zone) || e.cfg.Authz.Allow(s, policy.ActionForwardWrite, zone)
 }
 
 func uiChanges(changes []dns.Change) []uiapi.Change {
@@ -471,7 +476,7 @@ func (e *engine) Write(ctx context.Context, s *identity.Subject, zoneIn, ifMatch
 	if err != nil {
 		return nil, 0, e.deny(ctx, s, action, zone, err)
 	}
-	if !e.cfg.Authz.Allow(s, policy.ActionRecordWrite, zone) {
+	if !e.writesIn(s, zone) {
 		return nil, 0, e.deny(ctx, s, action, zone, fail(ReasonForbidden, "not allowed to write in zone %s", zone))
 	}
 	p, err := e.provider(zone)
@@ -651,7 +656,7 @@ func (e *engine) validate(ctx context.Context, s *identity.Subject, p provider.P
 		return nil, fail(ReasonTooMany, "%d RRset changes exceed the limit of %d", len(plan.Changes), max)
 	}
 	if plan.Settings && !e.cfg.Authz.Allow(s, policy.ActionZoneAdmin, zone) {
-		return nil, fail(ReasonForbidden, "zone settings (EuroDNS URL/mail forwards) require %s", policy.ActionZoneAdmin)
+		return nil, fail(ReasonForbidden, "zone settings (EuroDNS mail forwards, DomainConnect) require %s", policy.ActionZoneAdmin)
 	}
 	caps := p.Capabilities()
 
@@ -660,8 +665,12 @@ func (e *engine) validate(ctx context.Context, s *identity.Subject, p provider.P
 	var tombs map[dns.Key]store.Tombstone
 	for i := range plan.Changes {
 		c := &plan.Changes[i]
-		if !e.allowRRset(&plan.grants, s, policy.ActionRecordWrite, zone, c.Key) {
+		zoneAdmin := c.Key.IsForward() && plan.ForeignForwards && e.allowRRset(&plan.grants, s, policy.ActionZoneAdmin, zone, c.Key)
+		if !e.allowRRset(&plan.grants, s, policy.WriteAction(c.Key), zone, c.Key) && !zoneAdmin {
 			return nil, fail(ReasonForbidden, "not allowed to write %s in %s", keyString(c.Key), zone)
+		}
+		if c.Key.IsForward() && !caps.Forwards {
+			return nil, fail(ReasonInvalid, "%s: provider %s has no URL forwards", keyString(c.Key), p.ID())
 		}
 		if e.cfg.Guard != nil {
 			if err := e.cfg.Guard(ctx, s, zone, c.Key); err != nil {
@@ -731,6 +740,9 @@ func (e *engine) validate(ctx context.Context, s *identity.Subject, p provider.P
 				cl.cur.ExpiresAt = nil
 			}
 			claims = append(claims, cl)
+			continue
+		}
+		if !owned && zoneAdmin {
 			continue
 		}
 		if !owned {
@@ -897,7 +909,7 @@ func (e *engine) Adopt(ctx context.Context, s *identity.Subject, zoneIn string, 
 		set, key, ok := findSet(sets, want)
 		o, owned := owns[key]
 		if ok && owned && o.State == store.StateActive && o.ContentHash == dns.ContentHash(set) && slices.Contains(s.Teams, o.Owner) {
-			if !e.allowRRset(&g, s, policy.ActionRecordWrite, zone, key) && !e.allowRRset(&g, s, policy.ActionRecordAdopt, zone, key) {
+			if !e.allowRRset(&g, s, policy.WriteAction(key), zone, key) && !e.allowRRset(&g, s, policy.ActionRecordAdopt, zone, key) {
 				return e.deny(ctx, s, action, zone, fail(ReasonForbidden, "not allowed to manage %s in %s", keyString(key), zone))
 			}
 			continue

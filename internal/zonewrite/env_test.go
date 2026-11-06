@@ -34,7 +34,8 @@ var (
 )
 
 // fakeAuthz: writer = any RRset; acme = TXT under _acme-challenge (rebase,
-// ephemeral); admin = adopt and zone admin; protected = NS/MX at apex.
+// ephemeral); forwarder = any URL forward; admin = adopt and zone admin;
+// protected = NS/MX at apex.
 type fakeAuthz struct{ max int }
 
 // bound grants every role of a test subject through each of its teams.
@@ -61,6 +62,8 @@ func (f *fakeAuthz) Allow(s *identity.Subject, action, _ string) bool {
 		return true
 	case policy.ActionRecordWrite:
 		return has(s, "writer") || has(s, "acme")
+	case policy.ActionForwardWrite:
+		return has(s, "forwarder")
 	case policy.ActionRecordAdopt:
 		return has(s, "admin") || has(s, "adopter")
 	case "policy.propose", "policy.approve", "policy.read":
@@ -75,6 +78,9 @@ func (f *fakeAuthz) Allow(s *identity.Subject, action, _ string) bool {
 func (f *fakeAuthz) AllowRRset(s *identity.Subject, action, zone string, k dns.Key) bool {
 	if f.IsProtected(zone, k) {
 		return false
+	}
+	if action == policy.ActionForwardWrite {
+		return has(s, "forwarder")
 	}
 	if action == policy.ActionRecordWrite {
 		if has(s, "writer") {
@@ -158,7 +164,7 @@ func baseZone() *eurodns.Zone {
 			{Type: "CNAME", Host: "legacy", TTL: 3600, RData: "old.example.net."},
 			{Type: "TXT", Host: "@", TTL: 3600, RData: "\"v=spf1 -all\""},
 		},
-		URLForwards:  []json.RawMessage{json.RawMessage(`{"host":"go","target":"https://example.net/","type":"PERMANENT"}`)},
+		URLForwards:  []json.RawMessage{json.RawMessage(`{"id":41,"host":"go","forwardType":"HTTP301","url":"https://example.net/","updated":false}`)},
 		MailForwards: []json.RawMessage{},
 	}
 }

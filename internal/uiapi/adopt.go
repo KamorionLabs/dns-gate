@@ -33,13 +33,14 @@ type AdoptSelection struct {
 
 // AdoptCandidate is one RRset in a preview.
 type AdoptCandidate struct {
-	Host      string     `json:"host"`
-	Type      string     `json:"type"`
-	TTL       int        `json:"ttl"`
-	Values    []string   `json:"values"`
-	Alias     *dns.Alias `json:"alias,omitempty"`
-	Status    string     `json:"status"` // current inventory status
-	Adoptable bool       `json:"adoptable"`
+	Host      string       `json:"host"`
+	Type      string       `json:"type"`
+	TTL       int          `json:"ttl"`
+	Values    []string     `json:"values"`
+	Alias     *dns.Alias   `json:"alias,omitempty"`
+	Forward   *dns.Forward `json:"forward,omitempty"`
+	Status    string       `json:"status"` // current inventory status
+	Adoptable bool         `json:"adoptable"`
 	// Reason tells why not: protected, owned_by_other_team, already_owned,
 	// forbidden, not_found, the read-only reason of the RRset
 	// (server_managed...), or the provider refusal of its content
@@ -72,14 +73,20 @@ type AdoptResult struct {
 }
 
 // RRsetChange is a desired state for one RRset (Values nil or empty with
-// Delete=true removes it). Used by MCP plan/apply and the UI.
+// Delete=true removes it). Used by MCP plan/apply and the UI. A URL forward
+// is the type URLFWD with Forward set (no TTL nor values).
 type RRsetChange struct {
-	Host   string     `json:"host"`
-	Type   string     `json:"type"`
-	TTL    int        `json:"ttl,omitempty"`
-	Values []string   `json:"values,omitempty"`
-	Alias  *dns.Alias `json:"alias,omitempty"`
-	Delete bool       `json:"delete,omitempty"`
+	Host    string       `json:"host"`
+	Type    string       `json:"type"`
+	TTL     int          `json:"ttl,omitempty"`
+	Values  []string     `json:"values,omitempty"`
+	Alias   *dns.Alias   `json:"alias,omitempty"`
+	Forward *dns.Forward `json:"forward,omitempty"`
+	Delete  bool         `json:"delete,omitempty"`
+	// RequireHTTPS, on a forward, refuses the change unless the forwards of
+	// the zone answer HTTPS (an active HTTPS redirect subscription at the
+	// provider). It is a check only: nothing is stored.
+	RequireHTTPS bool `json:"require_https,omitempty"`
 	// ExpectedHash, when set, is the content hash (dns.ContentHash) the
 	// RRset must have upstream for the change to apply: precondition
 	// otherwise. MustNotExist refuses the change if the RRset exists.

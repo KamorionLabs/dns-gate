@@ -533,6 +533,7 @@ var knownActions = map[string]bool{
 	"dns.read":              true,
 	"dns.record.write":      true,
 	"dns.record.adopt":      true,
+	"dns.forward.write":     true,
 	"dns.zone.admin":        true,
 	"dns.zone.profile":      true,
 	"ui.read":               true,

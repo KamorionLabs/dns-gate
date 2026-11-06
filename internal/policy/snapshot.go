@@ -600,7 +600,7 @@ func (s *Snapshot) Decide(roles []string, action, zone string, key *dns.Key) Dec
 			if !s.ruleEffective(cr, r, action) {
 				continue
 			}
-			if key != nil && !meta && r.Records != nil && !scopeMatches(*r.Records, *key) {
+			if key != nil && !meta && r.Records != nil && !scopeMatches(*r.Records, *key, action) {
 				continue
 			}
 			return Decision{Allowed: true, Matched: fmt.Sprintf("roles.%s.rules[%d]", name, i), Layer: cr.layer, Folder: via}
@@ -694,11 +694,11 @@ func (s *Snapshot) protectedBy(zone string, key dns.Key) (config.Protected, bool
 
 func (s *Snapshot) role(name string) *compiledRole { return s.roles[name] }
 
-func scopeMatches(sc uiapi.RecordScope, key dns.Key) bool {
+func scopeMatches(sc uiapi.RecordScope, key dns.Key, action string) bool {
 	if len(sc.Hosts) > 0 && !hostMatches(sc.Hosts, key.Host) {
 		return false
 	}
-	if len(sc.Types) > 0 && !typeMatches(sc.Types, key.Type) {
+	if len(sc.Types) > 0 && action != ActionForwardWrite && !typeMatches(sc.Types, key.Type) {
 		return false
 	}
 	return true

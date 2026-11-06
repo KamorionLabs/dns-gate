@@ -22,7 +22,7 @@ var (
 )
 
 var knownActions = map[string]bool{
-	ActionDNSRead: true, ActionRecordWrite: true, ActionRecordAdopt: true,
+	ActionDNSRead: true, ActionRecordWrite: true, ActionRecordAdopt: true, ActionForwardWrite: true,
 	ActionZoneAdmin: true, ActionZoneProfile: true, ActionDomainRead: true, ActionUIRead: true,
 	ActionAPIKeyManage: true, ActionOwnershipApprove: true,
 }

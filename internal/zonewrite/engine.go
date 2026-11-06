@@ -15,17 +15,18 @@ import (
 type Reason string
 
 const (
-	ReasonForbidden     Reason = "forbidden"        // 403 RBAC, protected or read-only record
-	ReasonForeignRRset  Reason = "foreign_rrset"    // 409 RRset exists and is not owned by the gate
-	ReasonNotOwner      Reason = "not_owner"        // 403 owned by another team
-	ReasonTainted       Reason = "tainted"          // 409 changed outside the gate
-	ReasonPrecondition  Reason = "precondition"     // 412 If-Match, expected hash or upstream conflict
-	ReasonTooMany       Reason = "too_many_changes" // 403 blast radius
-	ReasonInvalid       Reason = "invalid_zone"     // 400 refused by the provider or its validation
-	ReasonLocked        Reason = "zone_locked"      // 423/503 lock not acquired in time
-	ReasonUpstream      Reason = "upstream"         // 502
-	ReasonNotFound      Reason = "not_found"        // 404 zone not managed, record id or RRset absent
-	ReasonAdoptConflict Reason = "adopt_conflict"   // 409 adoption preview no longer matches upstream
+	ReasonForbidden     Reason = "forbidden"         // 403 RBAC, protected or read-only record
+	ReasonForeignRRset  Reason = "foreign_rrset"     // 409 RRset exists and is not owned by the gate
+	ReasonNotOwner      Reason = "not_owner"         // 403 owned by another team
+	ReasonTainted       Reason = "tainted"           // 409 changed outside the gate
+	ReasonPrecondition  Reason = "precondition"      // 412 If-Match, expected hash or upstream conflict
+	ReasonTooMany       Reason = "too_many_changes"  // 403 blast radius
+	ReasonInvalid       Reason = "invalid_zone"      // 400 refused by the provider or its validation
+	ReasonLocked        Reason = "zone_locked"       // 423/503 lock not acquired in time
+	ReasonUpstream      Reason = "upstream"          // 502
+	ReasonNotFound      Reason = "not_found"         // 404 zone not managed, record id or RRset absent
+	ReasonAdoptConflict Reason = "adopt_conflict"    // 409 adoption preview no longer matches upstream
+	ReasonHTTPS         Reason = "https_unavailable" // 409 require_https on a zone whose forwards answer plain HTTP only
 )
 
 // Error is returned by Engine methods.
@@ -55,9 +56,15 @@ type Plan struct {
 	Changes []dns.Change
 	// Ignored lists out-of-scope differences skipped by a rebase (audited).
 	Ignored []string
-	// Settings marks a change of provider zone settings besides RRsets
-	// (EuroDNS forwards); it requires dns.zone.admin.
+	// Settings marks a change of provider zone settings besides RRsets and
+	// URL forwards (EuroDNS mail forwards, DomainConnect, unknown fields); it
+	// requires dns.zone.admin.
 	Settings bool
+	// ForeignForwards lets a dns.zone.admin holder change or delete URL
+	// forwards the gate does not own, which stay unowned: the behaviour of
+	// the EuroDNS full-zone PUT from before forwards were owned. Forwards
+	// owned by a team keep the ownership rules.
+	ForeignForwards bool
 	// Base, when set, replaces the current zone as the zone the changes are
 	// applied onto (checked and written): it carries the new settings.
 	Base *dns.Zone
@@ -126,8 +133,17 @@ type Engine interface {
 	// is foreign_rrset (409) when the gate does not own it and precondition
 	// (412) when it does; an ExpectedHash mismatch (or a missing RRset) is
 	// precondition (412).
+	//
+	// A forward change with RequireHTTPS is refused (https_unavailable)
+	// unless HTTPSRedirect is active, pending or no_forward.
 	PlanRRsets(ctx context.Context, s *identity.Subject, zone string, changes []uiapi.RRsetChange) (*uiapi.PlanResult, error)
 	ApplyRRsets(ctx context.Context, s *identity.Subject, zone string, changes []uiapi.RRsetChange, expectedZoneVersion int64) (*uiapi.PlanResult, error)
+
+	// HTTPSRedirect returns whether the URL forwards of a managed zone answer
+	// HTTPS requests (dns.read or ui.read): "unsupported" for a provider
+	// without forwards, "active" for one serving them over HTTPS without a
+	// separate subscription.
+	HTTPSRedirect(ctx context.Context, s *identity.Subject, zone string) (provider.HTTPSRedirect, error)
 }
 
 type requestIDKey struct{}
