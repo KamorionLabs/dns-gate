@@ -33,6 +33,8 @@ import (
 type Options struct {
 	// PolicyReloadInterval overrides policy.ReloadInterval (tests).
 	PolicyReloadInterval time.Duration
+	// TransferRetryInterval overrides TransferRetryInterval (tests).
+	TransferRetryInterval time.Duration
 	// Holder is the lock holder id; defaults to POD_NAME or the hostname.
 	Holder string
 	// AuditOutput receives the JSON audit lines; defaults to stdout.

@@ -95,7 +95,11 @@ func (a *App) RetryTransfers(ctx context.Context) error {
 }
 
 func (a *App) runTransferRetry(ctx context.Context) {
-	t := time.NewTicker(TransferRetryInterval)
+	every := a.opts.TransferRetryInterval
+	if every <= 0 {
+		every = TransferRetryInterval
+	}
+	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
 		select {
