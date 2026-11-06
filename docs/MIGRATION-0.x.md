@@ -99,8 +99,10 @@ version:
   managed layer), otherwise the file or the revision is refused. Families
   (`team_from`, `allow.teams.from_subject`) then need a non-empty `prefix`, and no
   declared or fixed team may carry the prefix of a family. Values of an issuer
-  `team_claim` are kept only for members of a `team_from` family, never for a declared
-  team: move such people and pipelines into `teams.<name>.members`. Declare
+  `team_claim` become teams of the issuer family `<team_claim_prefix><value>` (the
+  prefix is then required), never a declared team: move such people and pipelines
+  into `teams.<name>.members`. Families must not overlap (no prefix starts with
+  another). Declare
   every team the warnings listed, plus the store owners `GET /api/v1/teams` shows as
   `store`, before adding the block; or rename them with
   `POST /api/v1/teams/{team}/rename` (two policy administrators).
@@ -137,12 +139,19 @@ Other changes of the same version:
 - Adopting RRsets for another team than one's own (`owner` of the adopt endpoints and
   of the EuroDNS adopt extension) requires the new action `dns.ownership.approve` on
   each RRset; it was accepted from anyone allowed to adopt.
-- Ownership transfers are approved by a human by default
-  (`ownership.machine_approvers: true` lets pipelines approve).
+- Ownership transfers and renames are approved by a human by default
+  (`ownership.machine_approvers: true` lets pipelines approve). By default
+  (`ownership.require_second_approver: false`) the requester may approve its own
+  request; set it to `true`, with `ownership.person_issuers` naming the UI login
+  issuer, as soon as two people administer the gate.
+- With a `teams` block, an issuer `team_claim` needs a `team_claim_prefix`: its values
+  become `<prefix><value>` teams. Values that named declared teams no longer do: move
+  those people into `teams.<name>.members`.
 - A deleted RRset stays reserved for its team for `ownership.tombstone_ttl` (7 days by
   default): other teams can no longer re-create it at once (`403 not_owner`), they ask
   for a transfer. Set `ownership.tombstone_ttl: 0s` to keep the previous behaviour.
-- SQL stores get migration `0004` (tables `ownership_tombstone` and
-  `ownership_transfer`, column `rrset_plan.team`), applied at startup. The DynamoDB
+- SQL stores get migrations `0004` (tables `ownership_tombstone` and
+  `ownership_transfer`, column `rrset_plan.team`) and `0005` (column
+  `ownership.transfer_id`), applied at startup. The DynamoDB
   table needs no change (new `TOMB#` and `TR#` items, the existing `ttl` attribute);
   the gate role needs `dynamodb:Scan` on it for team renames.

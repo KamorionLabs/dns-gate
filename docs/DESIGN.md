@@ -321,22 +321,28 @@ reconciler retries. Until it expires, only that team may create or adopt the RRs
 again; ephemeral RRsets leave no tombstone.
 
 A transfer request lists RRsets of one team (owned or tombstoned) and a target team,
-with their content hash. The approval comes from another person (a human unless
-`ownership.machine_approvers`, whose `ownership.person_claims` differ from the
-requester's) who, for every RRset, may write it through the bindings of the owner
-team or holds `dns.ownership.approve` on it. The transfer is then `applying`: the
-engine takes the zone lock, reads the zone, checks that every entry still has the
-team, the state and the content hash of the request (store and upstream) or already
-belongs to the target team, then changes them all in one store transaction
-(`Store.Reassign`: SQL transaction, DynamoDB `TransactWriteItems` with a version or
-team condition per item, at most 100 items). The apply is idempotent: after an
-ambiguous store error it reads the entries back to tell whether the transaction
-committed, and a transfer left `applying` (zone locked, store unavailable, crash) is
-retried by the maintenance task for 24 hours, then failed. A team rename does the
-same for every RRset and tombstone of a team, in the managed zones and every zone
-the store still holds (`Store.ListOwnedZones`, a scan on DynamoDB), zone by zone,
-approved by a second policy approver holding `dns.ownership.approve` on every RRset
-of the team.
+with their content hash. The approver may, for every RRset, write it through the
+bindings of the owner team or holds `dns.ownership.approve` on it, and is a human
+unless `ownership.machine_approvers`. With `ownership.require_second_approver` it is
+another person: requester and approver share no person key (the subject for
+`ownership.person_issuers`, and the values of `ownership.person_claims`, `email`
+only when trusted and verified), and either without person keys fails closed;
+without it, the requester may approve its own request (audited `approval: self`).
+The transfer is then `applying`: the engine takes the zone lock, reads the zone,
+checks that every entry still has the team, the state and the content hash of the
+request (store and upstream) or already carries the transfer id, then changes them
+all in one store transaction (`Store.Reassign`: SQL transaction, DynamoDB
+`TransactWriteItems` with a version or team condition per item, at most 100 items)
+and audits the move as soon as it commits. After an ambiguous store error it reads
+the entries back to tell whether the transaction committed. A transfer left
+`applying` (zone locked, store unavailable, crash) is retried in the background no
+earlier than 2 minutes after the approval, by one replica at a time (a lease in the
+transfer, taken with a version check), with the approver bound again (`Rebinder`,
+the current policy) and its rights checked again; after 24 hours it fails. A team
+rename is approved by a `policy.approve` holder and always applied in the
+background: zone by zone, in the managed zones and every zone the store still holds
+(`Store.ListOwnedZones`, a scan on DynamoDB, #68), each entry checked for
+`dns.ownership.approve` of the approver under the zone lock.
 
 ### 6.4 Rebase on full-zone PUT
 
