@@ -182,6 +182,26 @@ func (c *Config) TombstoneTTL() time.Duration {
 	return c.Ownership.TombstoneTTL.D()
 }
 
+// HumanIssuers returns the names of the issuers that can yield human
+// subjects, sorted: category human, a category_map value human, the issuer
+// of the UI login (sessions are human) and the SAML login.
+func (c *Config) HumanIssuers() []string {
+	set := map[string]bool{}
+	for _, is := range c.AllIssuers() {
+		if is.Self {
+			continue
+		}
+		human := is.Category == "human" || is.SAML || (c.UI.Enabled && c.UI.SAML == nil && is.Name == c.UI.Issuer)
+		for _, cat := range is.CategoryMap {
+			human = human || cat == "human"
+		}
+		if human {
+			set[is.Name] = true
+		}
+	}
+	return sortedNames(set)
+}
+
 // TeamsDeclared reports whether the configuration has a teams block. Team
 // references are then strict: every team a binding, virtual key or
 // delegation names must be declared, in the base file or the managed layer.
@@ -1073,6 +1093,17 @@ func (c *Config) Validate() error {
 	for i, pc := range c.Ownership.PersonClaims {
 		if strings.TrimSpace(pc) == "" || strings.Contains(pc, "++") || strings.HasPrefix(pc, "+") || strings.HasSuffix(pc, "+") {
 			add("ownership.person_claims[%d]: %q is not a claim name or a + composite of claim names", i, pc)
+		}
+	}
+	if c.Ownership.RequireSecondApprover && len(c.Ownership.PersonIssuers) == 0 && !c.Ownership.MachineApprovers {
+		switch humans := c.HumanIssuers(); len(humans) {
+		case 0:
+			add("ownership.require_second_approver: no issuer yields human subjects (category human, a category_map to human, the UI login): no transfer could ever be approved")
+		case 1:
+			c.Ownership.PersonIssuers = humans
+			c.Warnings = append(c.Warnings, fmt.Sprintf("ownership.person_issuers: not set, defaults to %s, the only issuer yielding human subjects", humans[0]))
+		default:
+			add("ownership.person_issuers: required with require_second_approver when several issuers yield human subjects (%s): the same person could approve their own request through another issuer; name the issuer(s) people sign in with", strings.Join(humans, ", "))
 		}
 	}
 	if len(c.Ownership.PersonIssuers) > 0 && !c.Ownership.RequireSecondApprover {
