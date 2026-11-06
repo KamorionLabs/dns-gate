@@ -39,7 +39,7 @@ func TestAPIKeys(t *testing.T) {
 	mk := func(team, role string, mod func(*store.APIKey)) (string, string) {
 		id := apikey.NewID()
 		key := apikey.NewSecret(id)
-		k := store.APIKey{ID: id, Name: "lego", Team: team, Role: role, SecretHash: apikey.Hash(key), CreatedAt: now}
+		k := store.APIKey{ID: id, Name: "lego", Team: team, Role: role, RoleGrant: grantOf(a, role), SecretHash: apikey.Hash(key), CreatedAt: now}
 		if mod != nil {
 			mod(&k)
 		}
@@ -173,7 +173,7 @@ func TestAPIKeyFailureAuditAggregated(t *testing.T) {
 	a.SetAPIKeys(st, log)
 	id := apikey.NewID()
 	key := apikey.NewSecret(id)
-	if err := st.CreateAPIKey(context.Background(), store.APIKey{ID: id, Team: "edge", Role: "acme-solver", SecretHash: apikey.Hash(key), CreatedAt: now}); err != nil {
+	if err := st.CreateAPIKey(context.Background(), store.APIKey{ID: id, Team: "edge", Role: "acme-solver", RoleGrant: grantOf(a, "acme-solver"), SecretHash: apikey.Hash(key), CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	try := func(remote, tok string) {
@@ -251,4 +251,14 @@ func TestAPIKeyRoleWidened(t *testing.T) {
 	if err := try("narrow", grant("narrow")); err != nil {
 		t.Fatalf("same role: %v", err)
 	}
+	if err := try("narrow", ""); status(err) != 403 {
+		t.Fatalf("key without a recorded grant: %v", err)
+	}
+}
+
+// grantOf is the grant a key of role records at issuance.
+func grantOf(a *Authenticator, role string) string {
+	g, _ := a.policy.Current().RoleGrant(role)
+	b, _ := json.Marshal(g)
+	return string(b)
 }

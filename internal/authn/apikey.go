@@ -90,13 +90,11 @@ func (a *Authenticator) authenticateAPIKey(ctx context.Context, user, token stri
 	if !snap.HasRole(k.Role) || snap.RoleReserved(k.Role) {
 		return nil, a.keyFailure(ctx, id, ip, &Error{Status: http.StatusForbidden, Reason: "no_binding", Message: "the role of this API key no longer exists or grants policy.* or gate.* actions"})
 	}
-	if k.RoleGrant != "" {
-		var issued policy.RoleGrant
-		cur, _ := snap.RoleGrant(k.Role)
-		if err := json.Unmarshal([]byte(k.RoleGrant), &issued); err != nil || !cur.Within(issued) {
-			return nil, a.keyFailure(ctx, id, ip, &Error{Status: http.StatusForbidden, Reason: "role_widened",
-				Message: "the role of this API key grants more than when the key was issued: issue a new key"})
-		}
+	var issued policy.RoleGrant
+	cur, _ := snap.RoleGrant(k.Role)
+	if err := json.Unmarshal([]byte(k.RoleGrant), &issued); err != nil || !cur.Within(issued) {
+		return nil, a.keyFailure(ctx, id, ip, &Error{Status: http.StatusForbidden, Reason: "role_widened",
+			Message: "the role of this API key grants more than when the key was issued (or no grant was recorded): issue a new key"})
 	}
 	if k.LastUsedAt == nil || now.Sub(*k.LastUsedAt) >= touchEvery {
 		_ = a.keys.TouchAPIKey(ctx, id, now, addrString(ip))
