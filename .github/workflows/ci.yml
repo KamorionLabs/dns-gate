@@ -114,6 +114,8 @@ jobs:
     strategy:
       matrix:
         cli: [terraform, tofu]
+        eurodns_provider: [main, v0.3.0]
+    name: e2e (${{ matrix.cli }}, eurodns provider ${{ matrix.eurodns_provider }})
     steps:
       - uses: actions/checkout@v4
         with:
@@ -121,6 +123,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: KamorionLabs/terraform-provider-eurodns
+          ref: ${{ matrix.eurodns_provider }}
           path: terraform-provider-eurodns
       - uses: actions/checkout@v4
         with:

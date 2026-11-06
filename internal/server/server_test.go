@@ -355,6 +355,28 @@ func TestGateInfoAndAdopt(t *testing.T) {
 	}
 }
 
+func TestLegacyGateInfoPath(t *testing.T) {
+	e := newEnv(t)
+	r := e.do(t, "GET", LegacyGateInfoPath, "", "", nil)
+	var info GateInfo
+	_ = json.NewDecoder(r.Body).Decode(&info)
+	for _, f := range []string{FeatureIfMatch, FeatureOwnership, FeatureAdopt, FeaturePolicyDelegation} {
+		if r.StatusCode != 200 || !slices.Contains(info.Features, f) {
+			t.Fatalf("legacy gate info misses %s: %d %+v", f, r.StatusCode, info)
+		}
+	}
+	body := `{"rrsets":[{"host":"www","type":"A"}]}`
+	if r = e.do(t, "POST", LegacyGateInfoPath+"/zones/example.com/adopt", e.token("admin"), body, nil); r.StatusCode != 204 {
+		t.Fatalf("legacy adopt: %d", r.StatusCode)
+	}
+	if r = e.do(t, "POST", LegacyGateInfoPath+"/zones/example.com/delete", e.token("admin"), body, nil); r.StatusCode != 404 {
+		t.Fatalf("legacy unknown extension: %d", r.StatusCode)
+	}
+	if r = e.do(t, "GET", "/.well-known/eurodns-gatex", "", "", nil); r.StatusCode == 200 {
+		t.Fatal("prefix without separator served")
+	}
+}
+
 func TestUIAPIWithBearer(t *testing.T) {
 	e := newEnv(t)
 	tok := e.token("writer")
