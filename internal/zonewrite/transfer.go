@@ -77,8 +77,7 @@ func (e *engine) ProposeTransfer(ctx context.Context, s *identity.Subject, zoneI
 	if err != nil {
 		return nil, err
 	}
-	approver := e.cfg.Authz.Allow(s, policy.ActionOwnershipApprove, zone)
-	if !approver && !e.cfg.Authz.Allow(s, policy.ActionRecordWrite, zone) {
+	if !e.cfg.Authz.Allow(s, policy.ActionOwnershipApprove, zone) && !e.cfg.Authz.Allow(s, policy.ActionRecordWrite, zone) {
 		return nil, e.deny(ctx, s, actionTransferPropose, zone, fail(ReasonForbidden, "%s or %s is required on %s", policy.ActionRecordWrite, policy.ActionOwnershipApprove, zone))
 	}
 	if err := checkComment(req.Comment); err != nil {
@@ -135,8 +134,13 @@ func (e *engine) ProposeTransfer(ctx context.Context, s *identity.Subject, zoneI
 	if t.FromTeam == t.ToTeam {
 		return nil, fail(ReasonInvalid, "the RRsets already belong to team %s", t.ToTeam)
 	}
-	if !approver && !slices.Contains(s.Teams, t.FromTeam) && !slices.Contains(s.Teams, t.ToTeam) {
-		return nil, e.deny(ctx, s, actionTransferPropose, zone, fail(ReasonNotOwner, "only members of team %s or %s (or %s holders) may request this transfer", t.FromTeam, t.ToTeam, policy.ActionOwnershipApprove))
+	for _, it := range t.Items {
+		k := dns.Key{Host: it.Host, Type: it.Type}
+		if !e.approves(s, zone, k) && !e.teamWrites(s, t.FromTeam, zone, k) && !e.teamWrites(s, t.ToTeam, zone, k) {
+			return nil, e.deny(ctx, s, actionTransferPropose, zone, fail(ReasonNotOwner,
+				"%s: only a member of team %s or %s allowed to write it through that team (or a %s holder on it) may request this transfer",
+				keyString(k), t.FromTeam, t.ToTeam, policy.ActionOwnershipApprove))
+		}
 	}
 	if err := e.cfg.Store.CreateTransfer(ctx, t); err != nil {
 		return nil, &Error{Reason: ReasonUpstream, Message: "store transfer failed", Err: err}
@@ -241,6 +245,11 @@ func (e *engine) DecideTransfer(ctx context.Context, s *identity.Subject, id str
 		return nil, e.deny(ctx, s, action, t.Zone, fail(ReasonForbidden, "the requester cannot approve its own transfer: a second person must"))
 	case !self && !e.mayDecide(s, *t):
 		return nil, e.deny(ctx, s, action, t.Zone, fail(ReasonForbidden, "%s", e.decideRule(*t)))
+	}
+	if approve && t.Kind == uiapi.TransferKindRename {
+		if err := e.renameAllowed(ctx, s, *t); err != nil {
+			return nil, e.deny(ctx, s, action, t.Zone, err)
+		}
 	}
 	now := e.now().UTC()
 	t.DecidedBy, t.DecidedByName, t.DecidedByCategory, t.DecidedAt, t.DecisionComment = s.String(), s.Name, s.Category, &now, comment
@@ -450,6 +459,47 @@ func (e *engine) renameZone(ctx context.Context, s *identity.Subject, t store.Tr
 	return moved, changes, nil
 }
 
+// renameZones returns the zones a rename covers.
+func (e *engine) renameZones(ctx context.Context) ([]string, error) {
+	return e.zones.ManagedZones(), nil
+}
+
+// renameAllowed checks that the approver of a rename holds
+// dns.ownership.approve on every RRset and tombstone of the team.
+func (e *engine) renameAllowed(ctx context.Context, s *identity.Subject, t store.Transfer) error {
+	zones, err := e.renameZones(ctx)
+	if err != nil {
+		return err
+	}
+	for _, zone := range zones {
+		list, err := e.cfg.Store.List(ctx, zone)
+		if err != nil {
+			return &Error{Reason: ReasonUpstream, Message: "store list failed", Err: err}
+		}
+		tlist, err := e.cfg.Store.ListTombstones(ctx, zone)
+		if err != nil {
+			return &Error{Reason: ReasonUpstream, Message: "store tombstones failed", Err: err}
+		}
+		var keys []dns.Key
+		for _, o := range list {
+			if o.Owner == t.FromTeam {
+				keys = append(keys, dns.Key{Host: o.Host, Type: o.Type})
+			}
+		}
+		for _, tb := range tlist {
+			if tb.Team == t.FromTeam {
+				keys = append(keys, dns.Key{Host: tb.Host, Type: tb.Type})
+			}
+		}
+		for _, k := range keys {
+			if !e.approves(s, zone, k) {
+				return fail(ReasonForbidden, "approving this rename requires %s on every RRset of team %s, not on %s in %s", policy.ActionOwnershipApprove, t.FromTeam, keyString(k), zone)
+			}
+		}
+	}
+	return nil
+}
+
 // canSeeTransfer: the readers of its zone (ui.read or dns.read), the
 // members of both teams; for a rename, policy.read holders and the members
 // of both teams.
@@ -463,24 +513,45 @@ func (e *engine) canSeeTransfer(s *identity.Subject, t store.Transfer) bool {
 	return e.cfg.Authz.Allow(s, policy.ActionUIRead, t.Zone) || e.cfg.Authz.Allow(s, policy.ActionDNSRead, t.Zone)
 }
 
-// mayDecide tells whether s may approve t (anyone but the requester): a
-// member of the owner team allowed to write in the zone, or a holder of
-// dns.ownership.approve on it; another policy.approve holder for a rename.
+// mayDecide tells whether s may approve t (anyone but the requester): for
+// every RRset, a member of the owner team allowed to write it through the
+// bindings of that team, or a holder of dns.ownership.approve on it;
+// another policy.approve holder for a rename.
 func (e *engine) mayDecide(s *identity.Subject, t store.Transfer) bool {
 	if t.Kind == uiapi.TransferKindRename {
 		return e.cfg.Authz.Allow(s, uiapi.ActionPolicyApprove, "")
 	}
-	if slices.Contains(s.Teams, t.FromTeam) && e.cfg.Authz.Allow(s, policy.ActionRecordWrite, t.Zone) {
-		return true
+	for _, it := range t.Items {
+		k := dns.Key{Host: it.Host, Type: it.Type}
+		if !e.teamWrites(s, t.FromTeam, t.Zone, k) && !e.approves(s, t.Zone, k) {
+			return false
+		}
 	}
-	return e.cfg.Authz.Allow(s, policy.ActionOwnershipApprove, t.Zone)
+	return len(t.Items) > 0
+}
+
+// teamWrites reports whether s may write an RRset through the roles of its
+// bindings for team (not through the roles it holds for another team).
+func (e *engine) teamWrites(s *identity.Subject, team, zone string, k dns.Key) bool {
+	roles := s.RolesFor(team)
+	if len(roles) == 0 {
+		return false
+	}
+	c := *s
+	c.Roles = roles
+	return e.cfg.Authz.AllowRRset(&c, policy.ActionRecordWrite, zone, k)
+}
+
+// approves reports whether s holds dns.ownership.approve on an RRset.
+func (e *engine) approves(s *identity.Subject, zone string, k dns.Key) bool {
+	return e.cfg.Authz.AllowRRset(s, policy.ActionOwnershipApprove, zone, k)
 }
 
 func (e *engine) decideRule(t store.Transfer) string {
 	if t.Kind == uiapi.TransferKindRename {
 		return "a team rename is approved by another " + uiapi.ActionPolicyApprove + " holder"
 	}
-	return fmt.Sprintf("a member of team %s allowed to write in %s, or a %s holder on it, must approve this transfer", t.FromTeam, t.Zone, policy.ActionOwnershipApprove)
+	return fmt.Sprintf("for every RRset, a member of team %s allowed to write it through that team, or a %s holder on it, must approve this transfer", t.FromTeam, policy.ActionOwnershipApprove)
 }
 
 func (e *engine) transferView(s *identity.Subject, t store.Transfer) *uiapi.Transfer {

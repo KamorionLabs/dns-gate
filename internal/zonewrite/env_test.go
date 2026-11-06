@@ -28,14 +28,23 @@ import (
 const zoneName = "example.com"
 
 var (
-	alice = &identity.Subject{Issuer: "idp", ID: "alice", Name: "alice@example.com", Category: identity.CategoryHuman, Roles: []string{"writer"}, Teams: []string{"team-a"}}
-	bob   = &identity.Subject{Issuer: "idp", ID: "bob", Name: "bob@example.com", Category: identity.CategoryHuman, Roles: []string{"writer"}, Teams: []string{"team-b"}}
-	admin = &identity.Subject{Issuer: "idp", ID: "root", Name: "root@example.com", Category: identity.CategoryHuman, Roles: []string{"writer", "admin"}, Teams: []string{"team-a"}}
+	alice = bound(&identity.Subject{Issuer: "idp", ID: "alice", Name: "alice@example.com", Category: identity.CategoryHuman, Roles: []string{"writer"}, Teams: []string{"team-a"}})
+	bob   = bound(&identity.Subject{Issuer: "idp", ID: "bob", Name: "bob@example.com", Category: identity.CategoryHuman, Roles: []string{"writer"}, Teams: []string{"team-b"}})
+	admin = bound(&identity.Subject{Issuer: "idp", ID: "root", Name: "root@example.com", Category: identity.CategoryHuman, Roles: []string{"writer", "admin"}, Teams: []string{"team-a"}})
 )
 
 // fakeAuthz: writer = any RRset; acme = TXT under _acme-challenge (rebase,
 // ephemeral); admin = adopt and zone admin; protected = NS/MX at apex.
 type fakeAuthz struct{ max int }
+
+// bound grants every role of a test subject through each of its teams.
+func bound(s *identity.Subject) *identity.Subject {
+	s.TeamRoles = map[string][]string{}
+	for _, t := range s.Teams {
+		s.TeamRoles[t] = s.Roles
+	}
+	return s
+}
 
 func has(s *identity.Subject, role string) bool { return slices.Contains(s.Roles, role) }
 
@@ -51,6 +60,8 @@ func (f *fakeAuthz) Allow(s *identity.Subject, action, _ string) bool {
 		return has(s, "writer") || has(s, "acme")
 	case policy.ActionRecordAdopt:
 		return has(s, "admin") || has(s, "adopter")
+	case "policy.propose", "policy.approve", "policy.read":
+		return has(s, "admin") || has(s, "policy-admin")
 	default:
 		return has(s, "admin")
 	}

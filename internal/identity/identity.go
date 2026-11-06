@@ -23,6 +23,10 @@ type Subject struct {
 	Claims map[string]any // raw claims (empty for virtual keys)
 	Roles  []string       // bound roles
 	Teams  []string       // owner teams the subject acts for
+	// TeamRoles are the roles the subject holds through the bindings of
+	// each of its teams (every role for each team of a virtual key; the
+	// roles of bindings without a team for teams of an issuer team_claim).
+	TeamRoles map[string][]string
 
 	Groups []string // groups the subject belongs to (base and managed)
 	// Delegations the subject may act for (policy.delegations), file order.
@@ -42,6 +46,20 @@ const (
 	CategoryKey      = "key"
 	CategorySystem   = "system" // gate:* actors (reconciler, garbage collector)
 )
+
+// RolesFor returns the roles the subject holds through the bindings of a
+// team it acts for.
+func (s *Subject) RolesFor(team string) []string {
+	if s == nil {
+		return nil
+	}
+	for _, t := range s.Teams {
+		if t == team {
+			return s.TeamRoles[team]
+		}
+	}
+	return nil
+}
 
 // ForTeam returns a copy of the subject acting for one of its teams only.
 func (s *Subject) ForTeam(team string) *Subject {

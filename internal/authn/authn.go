@@ -338,6 +338,12 @@ func (a *Authenticator) bind(is *issuer, claims map[string]any) (*identity.Subje
 func (a *Authenticator) resolve(snap *policy.Snapshot, is *issuer, s *identity.Subject, claims map[string]any) (*identity.Subject, error) {
 	res := snap.Resolve(is.cfg.Name, claims)
 	s.Roles, s.Teams, s.Groups, s.Delegations = res.Roles, res.Teams, res.Groups, res.Delegations
+	s.TeamRoles = map[string][]string{}
+	for team, roles := range res.TeamRoles {
+		if team != "" {
+			s.TeamRoles[team] = roles
+		}
+	}
 	for _, ig := range res.Ignored {
 		a.warnOnce("derived:"+is.cfg.Name+":"+ig, "binding ignored: its team derived from a claim is the name of a declared team", "issuer", is.cfg.Name, "binding", ig, "subject", s.ID)
 	}
@@ -355,6 +361,7 @@ func (a *Authenticator) resolve(snap *policy.Snapshot, is *issuer, s *identity.S
 			if t != "" && !teams[t] {
 				teams[t] = true
 				s.Teams = append(s.Teams, t)
+				s.TeamRoles[t] = res.TeamRoles[""]
 			}
 		}
 	}
@@ -444,15 +451,20 @@ func (a *Authenticator) authenticateVirtualKey(appID, apiKey string, ip netip.Ad
 	}
 	roles := append([]string(nil), match.Roles...)
 	sort.Strings(roles)
+	teamRoles := map[string][]string{}
+	for _, t := range match.Teams {
+		teamRoles[t] = roles
+	}
 	return &identity.Subject{
-		Kind:     identity.KindVirtualKey,
-		Issuer:   "virtual-key",
-		ID:       match.ID,
-		Claims:   map[string]any{},
-		Roles:    roles,
-		Teams:    append([]string(nil), match.Teams...),
-		Name:     match.ID,
-		Category: identity.CategoryKey,
+		Kind:      identity.KindVirtualKey,
+		Issuer:    "virtual-key",
+		ID:        match.ID,
+		Claims:    map[string]any{},
+		Roles:     roles,
+		Teams:     append([]string(nil), match.Teams...),
+		TeamRoles: teamRoles,
+		Name:      match.ID,
+		Category:  identity.CategoryKey,
 	}, nil
 }
 

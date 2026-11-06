@@ -19,9 +19,9 @@ func withRecords(z *eurodns.Zone, recs ...eurodns.Record) *eurodns.Zone {
 }
 
 var (
-	teamMate = &identity.Subject{Issuer: "idp", ID: "carol", Name: "carol@example.com", Category: identity.CategoryHuman, Roles: []string{"writer"}, Teams: []string{"team-a"}}
-	adopter  = &identity.Subject{Issuer: "idp", ID: "dave", Name: "dave@example.com", Category: identity.CategoryHuman, Roles: []string{"writer", "adopter"}, Teams: []string{"team-a"}}
-	auditor  = &identity.Subject{Issuer: "idp", ID: "erin", Name: "erin@example.com", Category: identity.CategoryHuman, Roles: []string{"admin"}, Teams: []string{"team-c"}}
+	teamMate = bound(&identity.Subject{Issuer: "idp", ID: "carol", Name: "carol@example.com", Category: identity.CategoryHuman, Roles: []string{"writer"}, Teams: []string{"team-a"}})
+	adopter  = bound(&identity.Subject{Issuer: "idp", ID: "dave", Name: "dave@example.com", Category: identity.CategoryHuman, Roles: []string{"writer", "adopter"}, Teams: []string{"team-a"}})
+	auditor  = bound(&identity.Subject{Issuer: "idp", ID: "erin", Name: "erin@example.com", Category: identity.CategoryHuman, Roles: []string{"admin"}, Teams: []string{"team-c"}})
 )
 
 type teamList map[string]bool
@@ -93,7 +93,7 @@ func TestTombstoneReservesDeletedRRset(t *testing.T) {
 	_, err = e.eng.ApplyRRsets(ctx, bob, zoneName, put("api", "192.0.2.2"), 0)
 	e.wantReason(err, ReasonNotOwner)
 
-	both := &identity.Subject{Issuer: "idp", ID: "both", Roles: []string{"writer"}, Teams: []string{"team-b", "team-a"}}
+	both := bound(&identity.Subject{Issuer: "idp", ID: "both", Roles: []string{"writer"}, Teams: []string{"team-b", "team-a"}})
 	if _, err := e.eng.ApplyRRsets(ctx, both, zoneName, put("api", "192.0.2.3"), 0); err != nil {
 		t.Fatalf("member of the previous team: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestTombstoneReservesDeletedRRset(t *testing.T) {
 func TestEphemeralRRsetsLeaveNoTombstone(t *testing.T) {
 	e := newTeamsEnv(t)
 	ctx := context.Background()
-	acme := &identity.Subject{Issuer: "vk", ID: "acme", Roles: []string{"acme"}, Teams: []string{"team-a"}}
+	acme := bound(&identity.Subject{Issuer: "vk", ID: "acme", Roles: []string{"acme"}, Teams: []string{"team-a"}})
 	ch := []uiapi.RRsetChange{{Host: "_acme-challenge", Type: "TXT", TTL: 600, Values: []string{`"token"`}}}
 	if _, err := e.eng.ApplyRRsets(ctx, acme, zoneName, ch, 0); err != nil {
 		t.Fatal(err)
@@ -142,7 +142,7 @@ func TestTombstoneBlocksAdoptionForAnotherTeam(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.srv.Seed(withRecords(e.srv.Zone(zoneName), rec("A", "svc", "192.0.2.9")))
-	other := &identity.Subject{Issuer: "idp", ID: "frank", Roles: []string{"writer", "adopter"}, Teams: []string{"team-b"}}
+	other := bound(&identity.Subject{Issuer: "idp", ID: "frank", Roles: []string{"writer", "adopter"}, Teams: []string{"team-b"}})
 	p, err := e.eng.PreviewAdopt(ctx, other, zoneName, uiapi.AdoptSelection{RRsets: adoptRefs("svc A")})
 	if err != nil || len(p.Candidates) != 1 || p.Candidates[0].Adoptable || p.Candidates[0].Reason != adoptReserved {
 		t.Fatalf("preview %+v %v", p, err)

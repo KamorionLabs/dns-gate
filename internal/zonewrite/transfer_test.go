@@ -34,7 +34,7 @@ func TestTransferLifecycle(t *testing.T) {
 	if _, err := tr.ProposeTransfer(ctx, alice, zoneName, uiapi.TransferProposal{RRsets: req.RRsets, ToTeam: "team-b"}); reasonOf(err) != ReasonInvalid {
 		t.Fatalf("comment required: %v", err)
 	}
-	outsider := &identity.Subject{Issuer: "idp", ID: "gus", Roles: []string{"writer"}, Teams: []string{"team-c"}}
+	outsider := bound(&identity.Subject{Issuer: "idp", ID: "gus", Roles: []string{"writer"}, Teams: []string{"team-c"}})
 	if _, err := tr.ProposeTransfer(ctx, outsider, zoneName, req); reasonOf(err) != ReasonNotOwner {
 		t.Fatalf("outsider: %v", err)
 	}
@@ -213,5 +213,61 @@ func TestTransferStaysProposedWhenZoneLocked(t *testing.T) {
 	}
 	if done, err := tr.DecideTransfer(ctx, teamMate, v.ID, true, ""); err != nil || done.Status != uiapi.TransferApplied {
 		t.Fatalf("retry: %+v %v", done, err)
+	}
+}
+
+func TestTransferApprovalNeedsTeamWriteOnEachRRset(t *testing.T) {
+	e := newTeamsEnv(t)
+	ctx := context.Background()
+	if _, err := e.eng.ApplyRRsets(ctx, alice, zoneName, put("@", "192.0.2.1"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.eng.ApplyRRsets(ctx, bob, zoneName, put("b9", "192.0.2.1"), 0); err != nil {
+		t.Fatal(err)
+	}
+	tr := e.eng.(Transfers)
+	v, err := tr.ProposeTransfer(ctx, bob, zoneName, uiapi.TransferProposal{RRsets: adoptRefs("@ A"), ToTeam: "team-b", Comment: "take the apex"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	acmeKey := bound(&identity.Subject{Issuer: "idp", ID: "acme-key", Category: identity.CategoryHuman, Roles: []string{"acme"}, Teams: []string{"team-a"}})
+	if got, _ := tr.GetTransfer(ctx, acmeKey, v.ID); got.CanDecide {
+		t.Fatal("an identity of the team limited to ACME challenges may decide on the apex")
+	}
+	_, err = tr.DecideTransfer(ctx, acmeKey, v.ID, true, "")
+	e.wantReason(err, ReasonForbidden)
+
+	mixed := &identity.Subject{Issuer: "idp", ID: "mixed", Category: identity.CategoryHuman, Roles: []string{"writer", "reader"},
+		Teams: []string{"team-a", "team-b"}, TeamRoles: map[string][]string{"team-a": {"writer"}, "team-b": {"reader"}}}
+	w, err := tr.ProposeTransfer(ctx, alice, zoneName, uiapi.TransferProposal{RRsets: adoptRefs("b9 A"), ToTeam: "team-a", Comment: "take b9"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = tr.DecideTransfer(ctx, mixed, w.ID, true, "")
+	e.wantReason(err, ReasonForbidden)
+	if _, err := tr.ProposeTransfer(ctx, mixed, zoneName, uiapi.TransferProposal{RRsets: adoptRefs("b9 A"), ToTeam: "team-c", Comment: "x"}); reasonOf(err) != ReasonNotOwner {
+		t.Fatalf("a member of the owner team without write on the RRset proposes a transfer to a third team: %v", err)
+	}
+	if done, err := tr.DecideTransfer(ctx, teamMate, v.ID, true, ""); err != nil || done.Status != uiapi.TransferApplied {
+		t.Fatalf("a writer of the owner team approves: %+v %v", done, err)
+	}
+}
+
+func TestRenameApprovalNeedsOwnershipApproveOnEveryRRset(t *testing.T) {
+	e := newTeamsEnv(t)
+	ctx := context.Background()
+	if _, err := e.eng.ApplyRRsets(ctx, alice, zoneName, put("@", "192.0.2.1"), 0); err != nil {
+		t.Fatal(err)
+	}
+	tr := e.eng.(Transfers)
+	v, err := tr.ProposeRename(ctx, admin, "team-a", uiapi.TeamRenameRequest{To: "team-b", Comment: "merge"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	padmin := bound(&identity.Subject{Issuer: "idp", ID: "pat", Category: identity.CategoryHuman, Roles: []string{"policy-admin"}, Teams: []string{"team-c"}})
+	_, err = tr.DecideTransfer(ctx, padmin, v.ID, true, "")
+	e.wantReason(err, ReasonForbidden)
+	if o := e.own("@", "A"); o.Owner != "team-a" {
+		t.Fatalf("renamed without the right on the RRset: %+v", o)
 	}
 }
