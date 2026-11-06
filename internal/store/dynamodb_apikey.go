@@ -221,17 +221,24 @@ type acmeRegItem struct {
 	KeyID     string   `dynamodbav:"key_id"`
 	Subdomain string   `dynamodbav:"subdomain"`
 	Domain    string   `dynamodbav:"domain"`
+	Origin    string   `dynamodbav:"origin,omitempty"`
 	AllowFrom []string `dynamodbav:"allow_from,omitempty"`
 	Values    []string `dynamodbav:"txt_values,omitempty"`
 	CreatedAt string   `dynamodbav:"created_at"`
 	UpdatedAt string   `dynamodbav:"updated_at"`
+	ExpiresAt string   `dynamodbav:"expires_at,omitempty"`
+	TTL       int64    `dynamodbav:"ttl,omitempty"`
 	Version   int64    `dynamodbav:"version"`
 }
 
 func fromACMERegItem(it acmeRegItem) ACMERegistration {
 	r := ACMERegistration{
-		KeyID: it.KeyID, Subdomain: it.Subdomain, Domain: it.Domain, Version: it.Version,
+		KeyID: it.KeyID, Subdomain: it.Subdomain, Domain: it.Domain, Origin: it.Origin, Version: it.Version,
 		AllowFrom: append([]string{}, it.AllowFrom...), Values: append([]string{}, it.Values...),
+		ExpiresAt: parseTime(it.ExpiresAt),
+	}
+	if r.Origin == "" {
+		r.Origin = ACMEOriginClient
 	}
 	if t := parseTime(it.CreatedAt); t != nil {
 		r.CreatedAt = *t
@@ -248,8 +255,11 @@ func (d *dynamo) PutACMERegistration(ctx context.Context, r ACMERegistration) er
 	}
 	it := acmeRegItem{
 		PK: acmeRegPK(r.KeyID), SK: acmeRegSK(r.Subdomain), KeyID: r.KeyID, Subdomain: r.Subdomain, Domain: r.Domain,
-		AllowFrom: r.AllowFrom, Values: r.Values, CreatedAt: fmtTime(&r.CreatedAt), UpdatedAt: fmtTime(&r.UpdatedAt),
-		Version: r.Version + 1,
+		Origin: r.Origin, AllowFrom: r.AllowFrom, Values: r.Values, CreatedAt: fmtTime(&r.CreatedAt), UpdatedAt: fmtTime(&r.UpdatedAt),
+		ExpiresAt: fmtTime(r.ExpiresAt), Version: r.Version + 1,
+	}
+	if r.ExpiresAt != nil {
+		it.TTL = r.ExpiresAt.Unix()
 	}
 	item, err := attributevalue.MarshalMap(it)
 	if err != nil {
@@ -333,3 +343,5 @@ func (d *dynamo) DeleteACMERegistration(ctx context.Context, keyID, subdomain st
 	}
 	return nil
 }
+
+func (d *dynamo) PurgeACMERegistrations(context.Context, time.Time) (int, error) { return 0, nil }

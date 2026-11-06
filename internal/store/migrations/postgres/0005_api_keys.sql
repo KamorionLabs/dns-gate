@@ -27,15 +27,21 @@ CREATE INDEX api_key_created ON api_key (created_at, id);
 -- acme-dns registrations: the subdomain sent to /update maps to the domain
 -- whose _acme-challenge TXT RRset is written, txt_values are the values
 -- written, oldest first (two kept, as acme-dns does). key_id is the id of
--- an API key, or issuer:id of a token subject (domain-named only).
+-- an API key, or issuer:id of a token subject (domain-named only). origin:
+-- api (acme_domains of the key), client (acme-dns client) or httpreq (the
+-- values an owner wrote through httpreq). expires_at: purge of idle ones.
 CREATE TABLE acme_registration (
     key_id     TEXT   NOT NULL,
     subdomain  TEXT   NOT NULL,
     domain     TEXT   NOT NULL,
+    origin     TEXT   NOT NULL DEFAULT 'client',
     allow_from TEXT   NOT NULL DEFAULT '[]',
     txt_values TEXT   NOT NULL DEFAULT '[]',
     created_at BIGINT NOT NULL,
     updated_at BIGINT NOT NULL,
+    expires_at BIGINT,
     version    BIGINT NOT NULL,
     PRIMARY KEY (key_id, subdomain)
 );
+
+CREATE INDEX acme_registration_expires ON acme_registration (expires_at);

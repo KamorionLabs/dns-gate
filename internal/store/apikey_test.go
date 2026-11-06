@@ -124,4 +124,26 @@ func apiKeyConformance(t *testing.T, s Store, clock *fakeClock) {
 	if regs, _ := ks.ListACMERegistrations(ctx, other.ID); len(regs) != 0 {
 		t.Fatalf("other key registrations %+v", regs)
 	}
+
+	if r, _ := ks.GetACMERegistration(ctx, k.ID, reg.Subdomain); r.Origin != ACMEOriginClient || r.ExpiresAt != nil {
+		t.Fatalf("default origin %+v", r)
+	}
+	soon, later := now.Add(time.Hour), now.Add(48*time.Hour)
+	owner := "idp:repo:example/certs"
+	for sub, exp := range map[string]*time.Time{"a.example.com": &soon, "b.example.com": &later, "c.example.com": nil} {
+		if err := ks.PutACMERegistration(ctx, ACMERegistration{KeyID: owner, Subdomain: sub, Domain: sub, Origin: ACMEOriginHTTPReq, CreatedAt: now, UpdatedAt: now, ExpiresAt: exp}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if r, _ := ks.GetACMERegistration(ctx, owner, "a.example.com"); r.Origin != ACMEOriginHTTPReq || r.ExpiresAt == nil || !r.ExpiresAt.Equal(soon) {
+		t.Fatalf("origin and expiry %+v", r)
+	}
+	n, err := ks.PurgeACMERegistrations(ctx, now.Add(2*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	regs, _ = ks.ListACMERegistrations(ctx, owner)
+	if _, isDynamo := s.(*dynamo); !isDynamo && (n != 1 || len(regs) != 2) {
+		t.Fatalf("purge removed %d, left %+v", n, regs)
+	}
 }

@@ -65,7 +65,22 @@ type APIKeyStore interface {
 	ListACMERegistrations(ctx context.Context, keyID string) ([]ACMERegistration, error)
 	// DeleteACMERegistration removes a registration; no error if absent.
 	DeleteACMERegistration(ctx context.Context, keyID, subdomain string) error
+	// PurgeACMERegistrations removes the registrations whose ExpiresAt is
+	// before now and returns how many were removed. DynamoDB relies on its
+	// TTL attribute and removes nothing.
+	PurgeACMERegistrations(ctx context.Context, now time.Time) (int, error)
 }
+
+// Origins of ACME registrations.
+const (
+	// ACMEOriginAPI: created with the key (acme_domains), kept in sync with it.
+	ACMEOriginAPI = "api"
+	// ACMEOriginClient: created by an acme-dns client (/register, or the
+	// domain name used as subdomain).
+	ACMEOriginClient = "client"
+	// ACMEOriginHTTPReq: the values an owner wrote through httpreq.
+	ACMEOriginHTTPReq = "httpreq"
+)
 
 // ACMERegistration maps an acme-dns subdomain to the domain whose
 // _acme-challenge TXT RRset it writes. Values are the TXT values the
@@ -77,10 +92,14 @@ type ACMERegistration struct {
 	KeyID     string
 	Subdomain string
 	Domain    string
+	Origin    string // ACMEOrigin*, ACMEOriginClient when empty
 	AllowFrom []string
 	Values    []string
 	CreatedAt time.Time
 	UpdatedAt time.Time
+	// ExpiresAt, when set, is when PurgeACMERegistrations (or the DynamoDB
+	// TTL) removes an idle registration.
+	ExpiresAt *time.Time
 	Version   int64
 }
 
@@ -97,7 +116,10 @@ func validateACMERegistration(r ACMERegistration) error {
 func cloneACMERegistration(r ACMERegistration) ACMERegistration {
 	r.AllowFrom = append([]string{}, r.AllowFrom...)
 	r.Values = append([]string{}, r.Values...)
-	r.CreatedAt, r.UpdatedAt = r.CreatedAt.UTC(), r.UpdatedAt.UTC()
+	r.CreatedAt, r.UpdatedAt, r.ExpiresAt = r.CreatedAt.UTC(), r.UpdatedAt.UTC(), cloneTime(r.ExpiresAt)
+	if r.Origin == "" {
+		r.Origin = ACMEOriginClient
+	}
 	return r
 }
 
@@ -164,6 +186,19 @@ func (m *memory) DeleteACMERegistration(_ context.Context, keyID, subdomain stri
 	defer m.mu.Unlock()
 	delete(m.acmeRegs, memRegKey{keyID, subdomain})
 	return nil
+}
+
+func (m *memory) PurgeACMERegistrations(_ context.Context, now time.Time) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for k, r := range m.acmeRegs {
+		if r.ExpiresAt != nil && r.ExpiresAt.Before(now) {
+			delete(m.acmeRegs, k)
+			n++
+		}
+	}
+	return n, nil
 }
 
 var (
@@ -399,16 +434,21 @@ func (s *sqlStore) TouchAPIKey(ctx context.Context, id string, at time.Time, ip 
 	return nil
 }
 
-const acmeRegColumns = "key_id, subdomain, domain, allow_from, txt_values, created_at, updated_at, version"
+const acmeRegColumns = "key_id, subdomain, domain, origin, allow_from, txt_values, created_at, updated_at, expires_at, version"
 
 func scanACMERegistration(r scanner) (ACMERegistration, error) {
 	var reg ACMERegistration
 	var allow, values string
 	var created, updated int64
-	if err := r.Scan(&reg.KeyID, &reg.Subdomain, &reg.Domain, &allow, &values, &created, &updated, &reg.Version); err != nil {
+	var expires sql.NullInt64
+	if err := r.Scan(&reg.KeyID, &reg.Subdomain, &reg.Domain, &reg.Origin, &allow, &values, &created, &updated, &expires, &reg.Version); err != nil {
 		return reg, err
 	}
 	reg.CreatedAt, reg.UpdatedAt = fromMicros(created), fromMicros(updated)
+	if expires.Valid {
+		t := fromMicros(expires.Int64)
+		reg.ExpiresAt = &t
+	}
 	var err error
 	if reg.AllowFrom, err = decodeStrings(allow); err != nil {
 		return reg, err
@@ -429,13 +469,17 @@ func (s *sqlStore) PutACMERegistration(ctx context.Context, r ACMERegistration) 
 	if err != nil {
 		return err
 	}
+	origin := r.Origin
+	if origin == "" {
+		origin = ACMEOriginClient
+	}
 	var n int64
 	if r.Version == 0 {
-		n, err = s.exec(ctx, "INSERT INTO acme_registration ("+acmeRegColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (key_id, subdomain) DO NOTHING",
-			r.KeyID, r.Subdomain, r.Domain, allow, values, micros(r.CreatedAt), micros(r.UpdatedAt), 1)
+		n, err = s.exec(ctx, "INSERT INTO acme_registration ("+acmeRegColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (key_id, subdomain) DO NOTHING",
+			r.KeyID, r.Subdomain, r.Domain, origin, allow, values, micros(r.CreatedAt), micros(r.UpdatedAt), nullMicros(r.ExpiresAt), 1)
 	} else {
-		n, err = s.exec(ctx, "UPDATE acme_registration SET domain = ?, allow_from = ?, txt_values = ?, updated_at = ?, version = ? WHERE key_id = ? AND subdomain = ? AND version = ?",
-			r.Domain, allow, values, micros(r.UpdatedAt), r.Version+1, r.KeyID, r.Subdomain, r.Version)
+		n, err = s.exec(ctx, "UPDATE acme_registration SET domain = ?, origin = ?, allow_from = ?, txt_values = ?, updated_at = ?, expires_at = ?, version = ? WHERE key_id = ? AND subdomain = ? AND version = ?",
+			r.Domain, origin, allow, values, micros(r.UpdatedAt), nullMicros(r.ExpiresAt), r.Version+1, r.KeyID, r.Subdomain, r.Version)
 	}
 	if err != nil {
 		return fmt.Errorf("store: put acme registration: %w", err)
@@ -479,4 +523,12 @@ func (s *sqlStore) DeleteACMERegistration(ctx context.Context, keyID, subdomain 
 		return fmt.Errorf("store: delete acme registration: %w", err)
 	}
 	return nil
+}
+
+func (s *sqlStore) PurgeACMERegistrations(ctx context.Context, now time.Time) (int, error) {
+	n, err := s.exec(ctx, "DELETE FROM acme_registration WHERE expires_at IS NOT NULL AND expires_at < ?", micros(now))
+	if err != nil {
+		return 0, fmt.Errorf("store: purge acme registrations: %w", err)
+	}
+	return int(n), nil
 }
