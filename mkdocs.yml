@@ -113,15 +113,30 @@ nav:
       - "MCP and Claude": integrations/mcp.md
       - "Certificates and third parties": integrations/certificates.md
       - "ACME clients: full guide": ACME.md
+      - SIEM and audit export: integrations/siem.md
   - Features:
       - Web UI: features/ui.md
+      - Propagation check: features/propagation.md
       - URL forwards: features/forwards.md
       - Zone profiles: features/zone-profiles.md
   - Providers:
       - Route 53: providers/route53.md
       - EuroDNS: providers/eurodns.md
   - Reference:
-      - Configuration: CONFIG.md
-      - Design: DESIGN.md
+      - Configuration:
+          - Overview, store, audit, propagation: CONFIG.md
+          - Providers, discovery, folders: config/providers.md
+          - Issuers and keys: config/authentication.md
+          - Roles, teams, bindings: config/policy.md
+          - Managed policy and delegations: config/managed-policy.md
+          - Web UI and MCP: config/ui-mcp.md
+      - Audit events: AUDIT.md
+      - Design:
+          - Overview and architecture: DESIGN.md
+          - Requests and writes: design/write-path.md
+          - Ownership model: design/ownership.md
+          - Authentication: design/authentication.md
+          - Policy, audit and web UI: design/policy.md
+          - Onboarding, MCP and propagation: design/onboarding-mcp.md
       - Threat model: THREAT-MODEL.md
       - "Migrating from 0.x": MIGRATION-0.x.md

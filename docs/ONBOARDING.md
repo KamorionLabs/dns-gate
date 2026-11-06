@@ -10,7 +10,7 @@ Example used below: zone `example.com`, team `web` taking over `www`, `shop` and
 ## 0. Prerequisites
 
 - `example.com` is listed in the gate's managed zones: in the base config, or, with
-  [zone discovery](CONFIG.md#zone-discovery), in the managed policy (open the
+  [zone discovery](config/providers.md#zone-discovery), in the managed policy (open the
   unmanaged zone in the UI, "Manage this zone", then approve and activate the
   revision; `example.com` must match `policy.bounds.zones`).
 - The provider credentials of the gate reach the zone (EuroDNS user, Route 53 IAM
