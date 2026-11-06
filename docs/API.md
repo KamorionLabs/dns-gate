@@ -194,7 +194,10 @@ never manages keys):
 - the caller must hold `gate.apikey.manage` on every zone and folder pattern of
   the key's role, and every action of the role on the same zones, folders and
   records (a folder pattern is covered by a rule whose `folders` cover it, or by
-  a rule on every zone, `*`): a key never has more rights than its issuer;
+  a rule on every zone, `*`; a managed or delegated rule of the caller covers it
+  only when `policy.bounds.zones`, and the `allow.zones` of its delegation, cover
+  every zone, since they narrow its folders): a key never has more rights than
+  its issuer;
 - the role may not grant `policy.*` or `gate.*` actions, nor be less ephemeral
   (longer `ephemeral_ttl`, or permanent) or less capped (`max_changes_per_request`)
   than the caller's own write rights.

@@ -1008,12 +1008,14 @@ policy.
   matches `folders` (`glob.MatchFolder`: segments as host patterns, `/ES` exact,
   `/ES/**` below, `/` the root, case-sensitive). The decision records the folder when
   the rule applied through it (`Decision.Folder`), shown by `explain` (`folder`) and
-  `who-can` (`by_folder`), and in the audit of the writes and adoptions it granted
-  (`policy.FolderGrants`, `extra.folder`). Zones without a known folder never match
+  `who-can` (`by_folder`), and in the audit of the writes, adoptions and transfer
+  requests and decisions it granted (`policy.FolderGrants.AllowRRsetFolder`: the
+  folder of the authorization itself, recorded for the request, `extra.folder`). Zones without a known folder never match
   a folder selector, so folder rules fail closed: Route53 zones, zones not listed yet,
   a `folderFullPath` absent from the listing (a `null` one is the root), a zone listed
   by two providers, and the zones of a provider whose last successful listing is
-  older than `zones.folder_expiry` refresh periods.
+  older than `zones.folder_expiry` refresh periods (at least 2, counted from the end
+  of that listing).
 - **Management**: a folder selector never makes a zone managed. Managed zones stay
   the base and managed `zones`; a discovered zone in a selected folder is only
   readable, as any unmanaged zone. `zones.folders` of a provider narrows what the
@@ -1025,14 +1027,17 @@ policy.
   applies through a folder also needs the zone to match `policy.bounds.zones`, and a
   delegated one the `allow.zones` of its delegation (`Snapshot.ruleApplies`):
   folders narrow the bounds, never widen them, so moving a base zone kept out of the
-  bounds into a selected folder grants the managed layer nothing. API keys and their
-  recorded grants compare folders statically; a rule on every zone (`*`) covers any
-  folder.
-- **Changes**: each listing calls `discovery.Config.OnFolderChange` for the zones it
-  sees for the first time in this process, finds in another folder, or no longer
-  lists, with a context detached from the listing and one request id per listing;
-  the app records `gate.zone.folder_seen`, `gate.zone.folder_changed` and
-  `gate.zone.folder_gone` (old and new folder). The previous folders are only in
+  bounds into a selected folder grants the managed layer nothing. `Permissions`
+  (`/me`) carries those zones as `folder_zones`. API keys and their recorded grants
+  compare folders statically; a rule on every zone (`*`) covers any folder, and a
+  managed or delegated rule of the issuer covers a folder pattern only when its
+  bounds (and allow.zones) cover every zone (`Snapshot.roleRuleCovers`).
+- **Changes**: each listing calls `discovery.Config.OnFolderChange`, with a context
+  detached from the listing and one request id per listing: once with a summary for
+  the first listing of a provider by the process (count and `FolderDigest`), then
+  for each zone a later listing finds, finds in another folder, or no longer lists;
+  the app records `gate.zone.folders_listed`, `gate.zone.folder_seen`,
+  `gate.zone.folder_changed` and `gate.zone.folder_gone`. The previous folders are only in
   memory: instances do not compare their views, a new one records the folders it
   starts from. Folder-based rights are therefore delegated to whoever can move
   domains in the EuroDNS account ([THREAT-MODEL.md](THREAT-MODEL.md)).
