@@ -412,6 +412,8 @@ export interface EffectivePolicy {
   active?: RevisionSummary;
   managed?: PolicyDocument;
   me: MyPolicyRights;
+  /** Why this replica does not serve the active managed revision (its last policy refresh failed). */
+  load_error?: string;
 }
 
 export interface Approval {
@@ -587,6 +589,8 @@ export interface TeamInfo {
 export interface TeamList {
   strict: boolean;
   teams: TeamInfo[];
+  /** Transfers and renames need another person's approval; otherwise their requester may approve them. */
+  require_second_approver?: boolean;
 }
 
 export interface TeamZone {
@@ -632,12 +636,16 @@ export interface Transfer {
   /** Why a failed transfer was not applied, or the last transient error of an applying one. */
   error?: string;
   can_decide: boolean;
+  /** Approved by its requester (no second approver required). */
+  self_approved?: boolean;
 }
 
 export interface TransferProposal {
   rrsets: RRsetRef[];
   to_team: string;
   comment: string;
+  /** Approve it at once, by its requester (no second approver required). */
+  apply?: boolean;
 }
 
 export interface TransferPage {

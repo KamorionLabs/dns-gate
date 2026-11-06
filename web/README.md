@@ -29,7 +29,8 @@ npm ci
 npm run dev:fixtures   # demo data, no backend needed (?as=reader: read-only user, ?mcp=readonly|off: MCP state,
                        # ?calm=1: nothing needs attention, ?discovery=error: failed zone listing,
                        # ?writeconflict=1: the first apply fails as if the zone changed meanwhile,
-                       # ?tokens=off: no gate issuer, so no "Get an API token" on the Connect page;
+                       # ?tokens=off: no gate issuer, so no "Get an API token" on the Connect page,
+                       # ?second=1: transfers need a second approver (otherwise the requester may apply them);
                        # edge.example.org is a Route53 zone with alias and routing-policy records)
 npm run dev            # proxies /api and /auth to a gate on http://localhost:8080
 ```

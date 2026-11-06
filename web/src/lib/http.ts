@@ -133,7 +133,7 @@ export function teamsApi(request: Request) {
     proposeTransfer: (zone: string, req: TransferProposal) => request<Transfer>('POST', zonePath(zone) + '/transfers', req).then(normT),
     decideTransfer: (id: string, approve: boolean, comment: string) =>
       request<Transfer>('POST', tr + encodeURIComponent(id) + (approve ? '/approve' : '/reject'), { comment }).then(normT),
-    renameTeam: (team: string, to: string, comment: string) =>
-      request<Transfer>('POST', '/api/v1/teams/' + encodeURIComponent(team) + '/rename', { to, comment }).then(normT),
+    renameTeam: (team: string, to: string, comment: string, apply = false) =>
+      request<Transfer>('POST', '/api/v1/teams/' + encodeURIComponent(team) + '/rename', apply ? { to, comment, apply } : { to, comment }).then(normT),
   };
 }

@@ -63,7 +63,7 @@ export interface Backend {
   transfer(id: string): Promise<Transfer>;
   proposeTransfer(zone: string, req: TransferProposal): Promise<Transfer>;
   decideTransfer(id: string, approve: boolean, comment: string): Promise<Transfer>;
-  renameTeam(team: string, to: string, comment: string): Promise<Transfer>;
+  renameTeam(team: string, to: string, comment: string, apply?: boolean): Promise<Transfer>;
 }
 
 export function loginURL(reauth = false): string {

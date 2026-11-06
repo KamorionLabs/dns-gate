@@ -134,35 +134,65 @@ export function planTeam(me: Me | null, staged: StagedChange[], chosen?: string,
 
 export const isRequester = (t: Transfer, me: Me | null) => !!me && t.requester.subject === me.subject;
 
-/** The approval rule of a transfer of record sets of team from. */
-export const transferRule = (from: string) =>
-  `another person than the requester who, for every record set of the request, may write it through the roles of team ${from} or holds ${OWNERSHIP_APPROVE} on it`;
+/**
+ * Whether transfers need a second approver (TeamList.require_second_approver):
+ * true, false, or undefined while unknown, for texts that hold in both modes.
+ */
+export type SecondApprover = boolean | undefined;
+
+const approverWho = (second: SecondApprover) =>
+  second === true
+    ? 'another person than the requester, under any identity,'
+    : second === false
+      ? 'someone, the requester included,'
+      : 'someone (another person than the requester when the gate requires a second approver)';
+
+/** The approval rule of a transfer of record sets of team from ("": the owner team). */
+export const transferRule = (from: string, second?: SecondApprover) =>
+  `${approverWho(second)} who, for every record set of the request, may write it through the roles of ${from ? `team ${from}` : 'the owner team'} or holds ${OWNERSHIP_APPROVE} on it`;
 
 /** The approval rule of a team rename. */
-export const renameRule = 'another person than the requester holding policy.approve, and ' + OWNERSHIP_APPROVE + ' on every record set of the team';
+export const renameRule = (second?: SecondApprover) =>
+  `${approverWho(second)} holding policy.approve, and ${OWNERSHIP_APPROVE} on every record set of the team`;
 
 const humansOnly = 'Pipelines and API keys do not approve unless the gate allows machine approvers.';
 
+/** Whether the requester may approve its own request at once ("Propose and apply"): no second approver, and rights it seems to hold. */
+export function canSelfApply(me: Me | null, zone: string, from: string, second: SecondApprover): boolean {
+  if (second !== false || !me || me.category !== 'human') return false;
+  return me.teams.includes(from) || hasAction(me, OWNERSHIP_APPROVE, zone);
+}
+
 /** Why the user can or cannot approve a transfer. */
-export function decisionRule(t: Transfer, me: Me | null): string {
-  if (t.status === 'applying') return 'Approved: the gate is applying it, and retries on its own while the zone is locked or the provider or store is unavailable.';
+export function decisionRule(t: Transfer, me: Me | null, second?: SecondApprover): string {
+  if (t.status === 'applying') {
+    return t.kind === 'rename'
+      ? 'Approved: the gate renames the team in the background, zone by zone; it takes a few minutes.'
+      : 'Approved: the gate is applying it, and retries on its own while the zone is locked or the provider or store is unavailable.';
+  }
   if (t.status !== 'proposed') return '';
   const machine = !!me && me.category !== 'human';
+  const mine = isRequester(t, me);
+  if (mine && t.can_decide) return 'You requested it and may approve it yourself: the gate does not require a second approver. You can also withdraw it.';
   if (t.kind === 'rename') {
-    if (t.can_decide) return `You can approve it: you hold policy.approve and did not request it. The gate also checks that you hold ${OWNERSHIP_APPROVE} on every record set of team ${t.from_team} when you approve.`;
-    if (isRequester(t, me)) return 'You requested this rename: ' + renameRule + ' must approve it. You can withdraw it.';
-    return `Approval needs ${renameRule}.` + (machine ? ' ' + humansOnly : '');
+    if (t.can_decide) return `You can approve it: you hold policy.approve${second === true ? ' and did not request it' : ''}. The gate also checks that you hold ${OWNERSHIP_APPROVE} on every record set of team ${t.from_team} when you approve.`;
+    if (mine) return `You requested this rename: ${renameRule(second)} must approve it. You can withdraw it.`;
+    return `Approval needs ${renameRule(second)}.` + (machine ? ' ' + humansOnly : '');
   }
   if (t.can_decide) {
     return me?.teams.includes(t.from_team)
       ? `You can approve it: for every record set of the request, you may write it through team ${t.from_team} or hold ${OWNERSHIP_APPROVE} on it.`
       : `You can approve it as a holder of ${OWNERSHIP_APPROVE} on every record set of the request.`;
   }
-  if (isRequester(t, me)) return 'You requested it: ' + transferRule(t.from_team) + ' must approve it. You can withdraw it.';
-  const rule = `Approval needs ${transferRule(t.from_team)}.`;
+  if (mine) return `You requested it: ${transferRule(t.from_team, second)} must approve it. You can withdraw it.`;
+  const rule = `Approval needs ${transferRule(t.from_team, second)}.`;
   if (machine) return `${rule} ${humansOnly}`;
   if (me?.teams.includes(t.from_team) || hasAction(me, OWNERSHIP_APPROVE, t.zone ?? '')) {
-    return `${rule} You cannot approve it: you lack that right on one of its record sets, or you asked for it under another identity.`;
+    const why =
+      second === false
+        ? 'you lack that right on one of its record sets'
+        : 'you lack that right on one of its record sets, asked for it under another identity, or your sign-in does not tell the gate who you are';
+    return `${rule} You cannot approve it: ${why}.`;
   }
   return rule;
 }
@@ -174,6 +204,9 @@ export function decisionRule(t: Transfer, me: Me | null): string {
 export function decisionOutcome(e: { reason: string; message: string }, returned?: Transfer): { retrying: boolean; text: string } {
   if (returned?.status === 'applying') {
     return { retrying: true, text: `Approved, not applied yet: ${e.message}. The gate retries it on its own; nothing more to do.` };
+  }
+  if (e.reason === 'invalid' && /second approver/.test(e.message)) {
+    return { retrying: false, text: 'The gate requires a second approver: the request cannot be applied by the person who makes it. Ask for it without applying it.' };
   }
   if (returned?.status === 'failed') return { retrying: false, text: `Not applied: ${returned.error || e.message}. Nothing moved; ask for a new transfer if it is still needed.` };
   switch (e.reason) {

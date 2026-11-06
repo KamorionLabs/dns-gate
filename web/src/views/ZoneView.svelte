@@ -178,6 +178,7 @@
   function onTransferSent(t: Transfer) {
     sentTransfer = t;
     void inbox.load(true);
+    if (t.status === 'applied') load();
   }
   function closeTransfer() {
     transferOpen = false;
@@ -465,7 +466,14 @@
   {/if}
   {#if sentTransfer}
     <p class="note sent" role="status">
-      <Icon name="transfer" size={12} /> Transfer of {sentTransfer.rrsets.length} record set{sentTransfer.rrsets.length === 1 ? '' : 's'} from team {sentTransfer.from_team} to {sentTransfer.to_team} requested: nothing moves until a second person approves it.
+      <Icon name="transfer" size={12} />
+      {#if sentTransfer.status === 'applied'}
+        {sentTransfer.moved ?? sentTransfer.rrsets.length} record set{(sentTransfer.moved ?? sentTransfer.rrsets.length) === 1 ? '' : 's'} transferred from team {sentTransfer.from_team} to {sentTransfer.to_team}{sentTransfer.self_approved ? ' (self-approved)' : ''}.
+      {:else if sentTransfer.status === 'applying'}
+        Transfer from team {sentTransfer.from_team} to {sentTransfer.to_team} approved: the gate applies it as soon as the zone is free.
+      {:else}
+        Transfer of {sentTransfer.rrsets.length} record set{sentTransfer.rrsets.length === 1 ? '' : 's'} from team {sentTransfer.from_team} to {sentTransfer.to_team} requested: nothing moves until it is approved.
+      {/if}
       <a href={transferHref(sentTransfer.id)}>Open the request</a>
       <button class="btn quiet small" type="button" aria-label="Dismiss" onclick={() => (sentTransfer = null)}><Icon name="x" size={12} /></button>
     </p>

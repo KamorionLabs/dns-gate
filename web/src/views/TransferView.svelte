@@ -28,7 +28,7 @@
   });
 
   const mine = $derived(!!t && isRequester(t, me));
-  const rule = $derived(t ? decisionRule(t, me) : '');
+  const rule = $derived(t ? decisionRule(t, me, inbox.secondApprover) : '');
 
   async function decide(approve: boolean) {
     if (!t) return;
@@ -42,6 +42,10 @@
     try {
       t = await api.decideTransfer(t.id, approve, note.trim());
       note = '';
+      if (t.status === 'applying' && t.kind === 'rename') {
+        retrying = true;
+        actionError = 'Approved: the gate renames the team in the background, zone by zone, within a few minutes. Come back to this page to see the result.';
+      }
     } catch (e) {
       if (e instanceof ApiError && e.reason === 'reauth_required') return;
       if (!(e instanceof ApiError)) {
@@ -83,6 +87,7 @@
           <Icon name="arrow" size={14} />
           <a class="team mono" href={teamHref(t.to_team)}>{t.to_team}</a>
           <TransferBadge status={t.status} />
+          {#if t.self_approved}<span class="self" title="Approved by the person who asked for it: the gate does not require a second approver">Self-approved</span>{/if}
         </div>
         <p class="sub">
           {#if t.kind === 'rename'}Rename: every record set and reservation of team {t.from_team}, in every managed zone, moves to {t.to_team}.
@@ -120,7 +125,7 @@
           <li class={t.status === 'rejected' ? 'reject' : 'done'}>
             <span class="node"></span>
             <div>
-              <ActorChip actor={t.decided_by} quiet /> {t.status === 'rejected' ? (t.decided_by.subject === t.requester.subject ? 'withdrew it' : 'rejected it') : 'approved it'} <RelTime iso={t.decided_at} />
+              <ActorChip actor={t.decided_by} quiet /> {t.status === 'rejected' ? (t.decided_by.subject === t.requester.subject ? 'withdrew it' : 'rejected it') : t.self_approved ? 'approved it (self-approved)' : 'approved it'} <RelTime iso={t.decided_at} />
               {#if t.decision_comment}<p class="say">“{t.decision_comment}”</p>{/if}
             </div>
           </li>
@@ -130,7 +135,7 @@
         {:else if t.status === 'failed'}
           <li class="reject"><span class="node"></span><div>Not applied: {t.error ?? 'the record sets changed since the request'}</div></li>
         {:else if t.status === 'applying'}
-          <li class="wait"><span class="node"></span><div>Being applied to team {t.to_team}{#if t.error}<p class="say retry">Last attempt: {t.error}</p>{/if}<p class="dim small">The gate retries on its own while the zone is locked or the provider or store is unavailable, for a day, then marks it failed.</p></div></li>
+          <li class="wait"><span class="node"></span><div>Being applied to team {t.to_team}{#if t.error}<p class="say retry">Last attempt: {t.error}</p>{/if}<p class="dim small">{t.kind === 'rename' ? 'The gate renames the team in the background, zone by zone, within a few minutes; it retries on its own if a zone is busy.' : 'The gate retries on its own while the zone is locked or the provider or store is unavailable, for a day, then marks it failed.'}</p></div></li>
         {:else if t.status === 'expired'}
           <li class="reject"><span class="node"></span><div>Expired <RelTime iso={t.expires_at} /> without a decision</div></li>
         {:else if t.status === 'proposed'}
@@ -141,14 +146,14 @@
       {#if t.status === 'proposed'}
         <p class="rule" class:you={t.can_decide}>{rule}</p>
         {#if t.can_decide || mine}
-          <label class="lbl" for="note">Comment {#if t.can_decide}<span class="dim">(required to reject)</span>{/if}</label>
+          <label class="lbl" for="note">Comment {#if t.can_decide && !mine}<span class="dim">(required to reject)</span>{/if}</label>
           <textarea id="note" class="in" rows="3" bind:value={note} placeholder={t.can_decide ? 'What you checked, or why not' : 'Why you withdraw it'}></textarea>
           <div class="actions">
             {#if t.can_decide}
-              <button class="btn approve" type="button" disabled={!!busy} onclick={() => decide(true)}><Icon name="check" size={14} />{busy === 'approve' ? 'Approving…' : 'Approve and move'}</button>
+              <button class="btn approve" type="button" disabled={!!busy} onclick={() => decide(true)}><Icon name="check" size={14} />{busy === 'approve' ? 'Approving…' : mine ? 'Approve it yourself' : 'Approve and move'}</button>
             {/if}
             {#if canReject(t, me)}
-              <button class="btn reject" type="button" disabled={!!busy} onclick={() => decide(false)}>{busy === 'reject' ? 'Sending…' : mine && !t.can_decide ? 'Withdraw' : 'Reject'}</button>
+              <button class="btn reject" type="button" disabled={!!busy} onclick={() => decide(false)}>{busy === 'reject' ? 'Sending…' : mine ? 'Withdraw' : 'Reject'}</button>
             {/if}
           </div>
         {/if}
@@ -369,6 +374,13 @@
   .fail {
     color: var(--wax);
     font-size: 13px;
+  }
+  .self {
+    font-size: 12px;
+    padding: 1px 7px;
+    border-radius: 5px;
+    background: var(--pencil-wash);
+    color: var(--ink-2);
   }
   .retrying,
   .retry {

@@ -4,6 +4,8 @@
   import { teamsHref, transferHref, transfersHref, zoneHref } from '../lib/router.svelte';
   import { describePermissions } from '../lib/permissions';
   import { concreteTeams, renameRule, teamOrigin } from '../lib/teams';
+  import { inbox } from '../lib/inbox.svelte';
+  import { transferOf } from '../lib/http';
   import { policyState } from '../lib/policy.svelte';
   import { teamFromText } from '../lib/team';
   import TeamsNav from '../components/teams/TeamsNav.svelte';
@@ -24,6 +26,7 @@
     api.me().then((m) => (me = m)).catch(() => (me = null));
     api.teams().then((l) => (teams = l.teams)).catch(() => (teams = []));
     void policyState.load();
+    void inbox.loadMode();
   });
 
   const mine = $derived(!!me?.teams.includes(team));
@@ -33,8 +36,10 @@
     (d?.roles ?? []).map((r) => ({ role: r, allows: d?.permissions ? describePermissions(d.permissions.filter((p) => p.role === r)) : [] })),
   );
 
-  // Rename, for policy proposers: approved by another policy approver holding dns.ownership.approve on the team's record sets.
+  // Rename, for policy proposers: approved by a policy approver holding dns.ownership.approve on the team's record sets,
+  // another person when the gate requires a second approver.
   const canRename = $derived(!!policyState.data?.me.can_propose);
+  const selfRename = $derived(inbox.secondApprover === false && !!policyState.data?.me.can_approve && me?.category === 'human');
   let renameOpen = $state(false);
   let renameTo = $state('');
   let renameNote = $state('');
@@ -42,18 +47,20 @@
   let renameError = $state<string | null>(null);
   const targets = $derived(concreteTeams(teams).filter((t) => t.kind !== 'store' && t.name !== team).map((t) => t.name).sort());
 
-  async function rename() {
+  async function rename(apply: boolean) {
     renameError = null;
     if (!renameTo.trim() || !renameNote.trim()) {
-      renameError = 'Choose the new team and say why: the approver reads it.';
+      renameError = 'Choose the new team and say why: the journal keeps it.';
       return;
     }
     renaming = true;
     try {
-      const t = await api.renameTeam(team, renameTo.trim().toLowerCase(), renameNote.trim());
+      const t = await api.renameTeam(team, renameTo.trim().toLowerCase(), renameNote.trim(), apply);
       window.location.hash = transferHref(t.id);
     } catch (e) {
-      if (!(e instanceof ApiError && e.reason === 'reauth_required')) renameError = (e as Error).message;
+      const returned = transferOf(e);
+      if (returned) window.location.hash = transferHref(returned.id);
+      else if (!(e instanceof ApiError && e.reason === 'reauth_required')) renameError = (e as Error).message;
     } finally {
       renaming = false;
     }
@@ -162,7 +169,7 @@
         <section class="rename">
           <h2>Rename</h2>
           <p class="dim small">
-            Moves every record set and reservation of team {team}, in every zone, to another team. It must be approved by {renameRule}. The policy
+            Moves every record set and reservation of team {team}, in every zone, to another team. It must be approved by {renameRule(inbox.secondApprover)}{selfRename ? ': you may approve it yourself' : ''}, then the gate applies it in the background within a few minutes. The policy
             still names {team}: change its bindings in a policy revision too.
           </p>
           {#if !renameOpen}
@@ -174,7 +181,12 @@
             <label class="lbl" for="rename-note">Why</label>
             <textarea id="rename-note" class="in" rows="3" bind:value={renameNote} placeholder="Reorganisation, pipeline replaced…"></textarea>
             <div class="actions">
-              <button class="btn primary" type="button" disabled={renaming} onclick={rename}>{renaming ? 'Sending…' : 'Ask for the rename'}</button>
+              {#if selfRename}
+                <button class="btn primary" type="button" disabled={renaming} onclick={() => rename(true)}>{renaming ? 'Sending…' : 'Rename now'}</button>
+                <button class="btn" type="button" disabled={renaming} onclick={() => rename(false)}>Ask for approval</button>
+              {:else}
+                <button class="btn primary" type="button" disabled={renaming} onclick={() => rename(false)}>{renaming ? 'Sending…' : 'Ask for the rename'}</button>
+              {/if}
               <button class="btn quiet" type="button" onclick={() => { renameOpen = false; renameError = null; }}>Cancel</button>
             </div>
             {#if renameError}<p class="fail" role="alert">{renameError}</p>{/if}

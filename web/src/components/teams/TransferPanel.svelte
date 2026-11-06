@@ -1,8 +1,9 @@
 <script lang="ts">
   import { api, ApiError } from '../../lib/api';
   import type { Me, RRsetRef, TeamInfo, Transfer } from '../../lib/types';
-  import { transferHref } from '../../lib/router.svelte';
-  import { transferAllowed, transferRule, transferTargets } from '../../lib/teams';
+  import { transferHref, transfersHref } from '../../lib/router.svelte';
+  import { canSelfApply, decisionOutcome, transferAllowed, transferRule, transferTargets } from '../../lib/teams';
+  import { transferOf } from '../../lib/http';
   import SidePanel from '../SidePanel.svelte';
   import Icon from '../Icon.svelte';
 
@@ -25,6 +26,7 @@
   } = $props();
 
   let teams = $state<TeamInfo[] | null>(null);
+  let second = $state<boolean | undefined>(undefined);
   let to = $state('');
   let comment = $state('');
   let busy = $state(false);
@@ -32,10 +34,17 @@
   let done = $state<Transfer | null>(null);
 
   $effect(() => {
-    api.teams().then((l) => (teams = l.teams)).catch(() => (teams = []));
+    api
+      .teams()
+      .then((l) => {
+        teams = l.teams;
+        second = l.require_second_approver;
+      })
+      .catch(() => (teams = []));
   });
 
   const allowed = $derived(transferAllowed(me, zone, from));
+  const selfApply = $derived(canSelfApply(me, zone, from, second));
   const targets = $derived(teams ? transferTargets(me, zone, from, teams) : []);
   $effect(() => {
     if (!to && targets.length) to = targets[0]!;
@@ -43,18 +52,29 @@
 
   async function submit(e: SubmitEvent) {
     e.preventDefault();
+    const apply = (e.submitter as HTMLButtonElement | null)?.value === 'apply';
     error = null;
     if (!to || !comment.trim()) {
-      error = 'Choose the team and say why: the approver reads it.';
+      error = apply ? 'Choose the team and say why: the journal keeps it.' : 'Choose the team and say why: the approver reads it.';
       return;
     }
     busy = true;
     try {
-      done = await api.proposeTransfer(zone, { rrsets: picked, to_team: to, comment: comment.trim() });
+      done = await api.proposeTransfer(zone, { rrsets: picked, to_team: to, comment: comment.trim(), apply: apply || undefined });
       ondone(done);
     } catch (err) {
       if (err instanceof ApiError && err.reason === 'reauth_required') return;
-      error = err instanceof ApiError && err.reason === 'not_owner' ? `${err.message}.` : (err as Error).message;
+      if (!(err instanceof ApiError)) {
+        error = (err as Error).message;
+        return;
+      }
+      const returned = transferOf(err);
+      if (returned) {
+        done = returned;
+        ondone(returned);
+      }
+      const o = decisionOutcome(err, returned);
+      error = apply && !returned && err.reason === 'forbidden' ? `${err.message}. The request may have been created without being approved: check the transfers of this zone.` : o.text;
     } finally {
       busy = false;
     }
@@ -69,11 +89,21 @@
 
   {#if done}
     <section class="done">
-      <p class="big"><Icon name="check" size={16} /> Request sent</p>
-      <p>
-        Nothing moved yet. It must be approved by {transferRule(from)}: not you, nor you under another identity. It expires if nobody decides in time.
-      </p>
-      <p><a href={transferHref(done.id)}>Open the request</a> to follow it or withdraw it.</p>
+      {#if done.status === 'applied'}
+        <p class="big"><Icon name="check" size={16} /> Transferred</p>
+        <p>{done.moved ?? done.rrsets.length} moved to team <b>{done.to_team}</b>{done.self_approved ? ', approved by you (self-approved)' : ''}. The journal keeps the request and its approval.</p>
+      {:else if done.status === 'applying'}
+        <p class="big wait"><Icon name="clock" size={16} /> Approved, being applied</p>
+        <p>{error ?? 'The gate applies it on its own as soon as the zone is free.'}</p>
+      {:else if done.status === 'failed'}
+        <p class="big fail"><Icon name="alert" size={16} /> Not applied</p>
+        <p>{error}</p>
+      {:else}
+        <p class="big"><Icon name="check" size={16} /> Request sent</p>
+        <p>Nothing moved yet. It must be approved by {transferRule(from, second)}. It expires if nobody decides in time.</p>
+        {#if error}<p class="err" role="alert">{error}</p>{/if}
+      {/if}
+      <p><a href={transferHref(done.id)}>Open the request</a>{done.status === 'proposed' ? ' to follow it or withdraw it.' : '.'}</p>
       <button class="btn" type="button" onclick={onclose}>Close</button>
     </section>
   {:else}
@@ -109,11 +139,17 @@
         <textarea id="tr-why" class="in" rows="3" bind:value={comment} placeholder="The site moves to its own pipeline, records first adopted by the wrong team…"></textarea>
       </div>
       <p class="hint">
-        Approval comes from {transferRule(from)}. On approval the record sets move at once, if none changed since this request.
+        Approval comes from {transferRule(from, second)}. On approval the record sets move at once, if none changed since this request.
+        {#if selfApply}The gate does not require a second approver: you may apply it yourself now.{/if}
       </p>
-      {#if error}<p class="err" role="alert">{error}</p>{/if}
+      {#if error}<p class="err" role="alert">{error}{#if error.includes('check the transfers')} <a href={transfersHref({ zone })}>Transfers of {zone}</a>{/if}</p>{/if}
       <div class="actions">
-        <button class="btn primary" type="submit" disabled={busy || !allowed.ok || targets.length === 0}><Icon name="transfer" size={14} />{busy ? 'Sending…' : 'Ask for the transfer'}</button>
+        {#if selfApply}
+          <button class="btn primary" type="submit" value="apply" disabled={busy || !allowed.ok || targets.length === 0}><Icon name="check" size={14} />{busy ? 'Sending…' : 'Propose and apply'}</button>
+          <button class="btn" type="submit" value="ask" disabled={busy || !allowed.ok || targets.length === 0}>Ask for approval</button>
+        {:else}
+          <button class="btn primary" type="submit" value="ask" disabled={busy || !allowed.ok || targets.length === 0}><Icon name="transfer" size={14} />{busy ? 'Sending…' : 'Ask for the transfer'}</button>
+        {/if}
         <button class="btn quiet" type="button" onclick={onclose}>Cancel</button>
       </div>
     </form>
@@ -199,6 +235,12 @@
   }
   .done .btn {
     justify-self: start;
+  }
+  .big.wait {
+    color: var(--brass);
+  }
+  .big.fail {
+    color: var(--wax);
   }
   .line {
     height: 32px;

@@ -2,6 +2,7 @@
   import type { Me, Transfer } from '../../lib/types';
   import { transferHref } from '../../lib/router.svelte';
   import { decisionRule } from '../../lib/teams';
+  import { inbox } from '../../lib/inbox.svelte';
   import ActorChip from '../ActorChip.svelte';
   import RelTime from '../RelTime.svelte';
   import Icon from '../Icon.svelte';
@@ -18,6 +19,7 @@
   <div class="line">
     <span class="teams mono"><span>{t.from_team}</span><Icon name="arrow" size={12} /><span>{t.to_team}</span></span>
     <TransferBadge status={t.status} />
+    {#if t.self_approved}<span class="self" title="Approved by the person who asked for it: the gate does not require a second approver">Self-approved</span>{/if}
     <span class="what">{what}</span>
   </div>
   {#if t.comment}<p class="comment">{t.comment}</p>{/if}
@@ -28,7 +30,7 @@
     {#if t.status === 'failed' && t.error}· <span class="err">{t.error}</span>{/if}
     {#if t.status === 'applying' && t.error}· <span class="retry">retrying: {t.error}</span>{/if}
   </div>
-  {#if t.status === 'proposed' || t.status === 'applying'}<p class="rule" class:you={t.can_decide}>{decisionRule(t, me)}</p>{/if}
+  {#if t.status === 'proposed' || t.status === 'applying'}<p class="rule" class:you={t.can_decide}>{decisionRule(t, me, inbox.secondApprover)}</p>{/if}
 </li>
 
 <style>
@@ -92,6 +94,13 @@
   }
   .retry {
     color: var(--brass);
+  }
+  .self {
+    font-size: 12px;
+    padding: 1px 7px;
+    border-radius: 5px;
+    background: var(--pencil-wash);
+    color: var(--ink-2);
   }
   .rule {
     color: var(--ink-3);

@@ -1469,6 +1469,9 @@ interface StoredTransfer extends Transfer {
   requesterSubject: string;
 }
 
+// ?second=1 requires a second approver for transfers (ownership.require_second_approver).
+const secondApprover = new URLSearchParams(window.location.search).get('second') === '1';
+
 const transfers: StoredTransfer[] = [];
 const addTransfer = (t: Omit<Transfer, 'can_decide'>) => transfers.push({ ...t, can_decide: false, requesterSubject: t.requester.subject });
 addTransfer({
@@ -1509,7 +1512,11 @@ function view(t: StoredTransfer): Transfer {
   const { requesterSubject, ...rest } = t;
   const mayDecide = t.kind === 'rename' ? policyApprover() : (me.teams.includes(t.from_team) && writes(t.zone)) || ownershipApprover(t.zone);
   const status = t.status === 'proposed' && new Date(t.expires_at).getTime() <= Date.now() ? 'expired' : t.status;
-  return { ...rest, status, can_decide: status === 'proposed' && requesterSubject !== me.subject && me.category === 'human' && mayDecide };
+  const other = !secondApprover || requesterSubject !== me.subject;
+  return {
+    ...rest, status, can_decide: status === 'proposed' && other && me.category === 'human' && mayDecide,
+    self_approved: !!t.decided_by && t.status !== 'rejected' && t.decided_by.subject === requesterSubject,
+  };
 }
 
 function findTransfer(id: string): StoredTransfer {
@@ -1568,21 +1575,14 @@ function proposeTransfer(zone: string, req: TransferProposal): Transfer {
     created_at: new Date().toISOString(), expires_at: ahead(7 * D), can_decide: false,
   };
   transfers.push(t);
+  if (req.apply) {
+    if (secondApprover) throw new ApiError(400, 'invalid', 'apply: a second approver is required (ownership.require_second_approver)');
+    return decideTransfer(t.id, true, req.comment);
+  }
   return view(t);
 }
 
-function decideTransfer(id: string, approve: boolean, comment: string): Transfer {
-  const t = findTransfer(id);
-  const v = view(t);
-  if (v.status !== 'proposed') throw new ApiError(412, 'precondition', `transfer ${id} is ${v.status}`);
-  const self = t.requesterSubject === me.subject;
-  if (approve && self) throw new ApiError(403, 'forbidden', 'the requester cannot approve its own transfer: a second person must');
-  if (!self && !v.can_decide) throw new ApiError(403, 'forbidden', `for every RRset, a member of team ${t.from_team} allowed to write it through that team, or a dns.ownership.approve holder on it, must approve this transfer`);
-  Object.assign(t, { decided_by: { subject: me.subject, name: me.name, category: me.category }, decided_at: new Date().toISOString(), decision_comment: comment || undefined });
-  if (!approve) {
-    t.status = 'rejected';
-    return view(t);
-  }
+function moveOwnership(t: Transfer): number {
   let moved = 0;
   for (const inv of inventories) {
     if (t.kind === 'rrsets' && inv.zone !== t.zone) continue;
@@ -1599,6 +1599,31 @@ function decideTransfer(id: string, approve: boolean, comment: string): Transfer
       }
     }
   }
+  return moved;
+}
+
+function decideTransfer(id: string, approve: boolean, comment: string): Transfer {
+  const t = findTransfer(id);
+  const v = view(t);
+  if (v.status !== 'proposed') throw new ApiError(412, 'precondition', `transfer ${id} is ${v.status}`);
+  const self = t.requesterSubject === me.subject;
+  if (approve && self && secondApprover) throw new ApiError(403, 'forbidden', 'the requester cannot approve its own transfer: a second person must');
+  if (approve && !v.can_decide) throw new ApiError(403, 'forbidden', `for every RRset, a member of team ${t.from_team} allowed to write it through that team, or a dns.ownership.approve holder on it, must approve this transfer`);
+  Object.assign(t, { decided_by: { subject: me.subject, name: me.name, category: me.category }, decided_at: new Date().toISOString(), decision_comment: comment || undefined });
+  if (!approve) {
+    t.status = 'rejected';
+    return view(t);
+  }
+  if (t.kind === 'rename') {
+    // renames run in the background: applied a few seconds later here
+    t.status = 'applying';
+    setTimeout(() => {
+      t.moved = moveOwnership(t);
+      t.status = 'applied';
+    }, 8000);
+    return view(t);
+  }
+  const moved = moveOwnership(t);
   t.status = 'applied';
   t.moved = moved;
   audit.unshift({
@@ -1608,7 +1633,8 @@ function decideTransfer(id: string, approve: boolean, comment: string): Transfer
   return view(t);
 }
 
-function renameTeam(team: string, to: string, comment: string): Transfer {
+function renameTeam(team: string, to: string, comment: string, apply = false): Transfer {
+  if (apply && secondApprover) throw new ApiError(400, 'invalid', 'apply: a second approver is required (ownership.require_second_approver)');
   needRight('propose');
   if (!comment.trim()) throw new ApiError(400, 'invalid', 'a comment is required');
   if (!to || to === team) throw new ApiError(400, 'invalid', `unknown or unchanged target team "${to}"`);
@@ -1618,7 +1644,7 @@ function renameTeam(team: string, to: string, comment: string): Transfer {
     created_at: new Date().toISOString(), expires_at: ahead(7 * D), can_decide: false,
   };
   transfers.push(t);
-  return view(t);
+  return apply ? decideTransfer(t.id, true, comment) : view(t);
 }
 
 export const fixtureBackend = {
@@ -1741,13 +1767,13 @@ export const fixtureBackend = {
   },
   plan: async (zone: string, changes: RRsetChange[], team?: string) => delay(planChanges(zone, changes, team), 600),
   apply: async (zone: string, planId: string, team?: string) => delay(applyPlan(zone, planId, team), 900),
-  teams: async (): Promise<TeamList> => delay({ strict: true, teams: teamInfos() }),
+  teams: async (): Promise<TeamList> => delay({ strict: true, teams: teamInfos(), require_second_approver: secondApprover }),
   team: async (name: string): Promise<TeamDetail> => delay(teamDetail(name)),
   transfers: async (q: TransferQuery): Promise<TransferPage> => delay(listTransfers(q)),
   transfer: async (id: string): Promise<Transfer> => delay(view(findTransfer(id))),
   proposeTransfer: async (zone: string, req: TransferProposal): Promise<Transfer> => delay(proposeTransfer(zone, req), 400),
   decideTransfer: async (id: string, approve: boolean, comment: string): Promise<Transfer> => delay(decideTransfer(id, approve, comment), 500),
-  renameTeam: async (team: string, to: string, comment: string): Promise<Transfer> => delay(renameTeam(team, to, comment), 400),
+  renameTeam: async (team: string, to: string, comment: string, apply?: boolean): Promise<Transfer> => delay(renameTeam(team, to, comment, apply), 400),
   generateKey: async (): Promise<GeneratedKey> => {
     needRight('propose');
     const key = 'egk_' + randomToken(40);

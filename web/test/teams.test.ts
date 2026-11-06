@@ -3,16 +3,19 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   canReject,
+  canSelfApply,
   decisionOutcome,
   decisionRule,
   ownership,
   pickable,
   planTeam,
   reservation,
+  renameRule,
   reservationText,
   selectionTeam,
   teamOrigin,
   transferAllowed,
+  transferRule,
   transferTargets,
 } from '../src/lib/teams.ts';
 import type { StagedChange } from '../src/lib/staging.ts';
@@ -159,30 +162,60 @@ const transfer = (o: Partial<Transfer>): Transfer => ({
   created_at: past, expires_at: later, can_decide: false, ...o,
 });
 
-test('the approval rule is explained to whoever looks at a transfer', () => {
+test('the approval rule is explained to whoever looks at a transfer, with a second approver', () => {
   assert.equal(
-    decisionRule(transfer({ can_decide: true }), me),
+    decisionRule(transfer({ can_decide: true }), me, true),
     'You can approve it: for every record set of the request, you may write it through team web or hold dns.ownership.approve on it.',
   );
-  assert.equal(decisionRule(transfer({ can_decide: true, from_team: 'corporate' }), approver), 'You can approve it as a holder of dns.ownership.approve on every record set of the request.');
+  assert.equal(decisionRule(transfer({ can_decide: true, from_team: 'corporate' }), approver, true), 'You can approve it as a holder of dns.ownership.approve on every record set of the request.');
   const mine = transfer({ requester: { subject: 'entra:alice', name: 'alice', category: 'human' } });
-  assert.match(decisionRule(mine, me), /^You requested it: another person than the requester who, for every record set of the request, may write it through the roles of team web or holds dns.ownership.approve on it must approve it\. You can withdraw it\./);
   assert.equal(
-    decisionRule(transfer({ from_team: 'corporate' }), reader),
-    'Approval needs another person than the requester who, for every record set of the request, may write it through the roles of team corporate or holds dns.ownership.approve on it.',
+    decisionRule(mine, me, true),
+    'You requested it: another person than the requester, under any identity, who, for every record set of the request, may write it through the roles of team web or holds dns.ownership.approve on it must approve it. You can withdraw it.',
+  );
+  assert.equal(
+    decisionRule(transfer({ from_team: 'corporate' }), reader, true),
+    'Approval needs another person than the requester, under any identity, who, for every record set of the request, may write it through the roles of team corporate or holds dns.ownership.approve on it.',
   );
   // a member of the owner team who cannot decide: a record set outside its rights, or its own request under another identity
-  assert.match(decisionRule(transfer({}), me), /You cannot approve it: you lack that right on one of its record sets, or you asked for it under another identity\./);
-  assert.match(decisionRule(transfer({}), { ...me, category: 'pipeline' }), /Pipelines and API keys do not approve unless the gate allows machine approvers\./);
-  assert.match(decisionRule(transfer({ kind: 'rename', zone: undefined, can_decide: true }), me), /policy.approve.*dns.ownership.approve on every record set of team web/);
-  assert.match(decisionRule(transfer({ kind: 'rename', zone: undefined }), reader), /^Approval needs another person than the requester holding policy.approve, and dns.ownership.approve on every record set of the team\.$/);
-  assert.match(decisionRule(transfer({ status: 'applying' }), me), /retries on its own/);
-  assert.equal(decisionRule(transfer({ status: 'applied' }), me), '');
+  assert.match(decisionRule(transfer({}), me, true), /You cannot approve it: you lack that right on one of its record sets, asked for it under another identity, or your sign-in does not tell the gate who you are\./);
+  assert.match(decisionRule(transfer({}), { ...me, category: 'pipeline' }, true), /Pipelines and API keys do not approve unless the gate allows machine approvers\./);
+  assert.match(decisionRule(transfer({ kind: 'rename', zone: undefined, can_decide: true }), me, true), /policy.approve and did not request it.*dns.ownership.approve on every record set of team web/);
+  assert.equal(
+    decisionRule(transfer({ kind: 'rename', zone: undefined }), reader, true),
+    'Approval needs another person than the requester, under any identity, holding policy.approve, and dns.ownership.approve on every record set of the team.',
+  );
+  assert.match(decisionRule(transfer({ status: 'applying' }), me, true), /retries on its own/);
+  assert.match(decisionRule(transfer({ status: 'applying', kind: 'rename', zone: undefined }), me, true), /in the background, zone by zone; it takes a few minutes/);
+  assert.equal(decisionRule(transfer({ status: 'applied' }), me, true), '');
 
   assert.equal(canReject(transfer({ can_decide: true }), me), true);
   assert.equal(canReject(mine, me), true);
   assert.equal(canReject(transfer({}), reader), false);
   assert.equal(canReject(transfer({ status: 'rejected', can_decide: true }), me), false);
+});
+
+test('without a second approver the requester may approve its own request, and texts say so', () => {
+  const mine = transfer({ requester: { subject: 'entra:alice', name: 'alice', category: 'human' }, can_decide: true });
+  assert.equal(decisionRule(mine, me, false), 'You requested it and may approve it yourself: the gate does not require a second approver. You can also withdraw it.');
+  const cannot = transfer({ requester: { subject: 'entra:alice', name: 'alice', category: 'human' } });
+  assert.match(decisionRule(cannot, me, false), /^You requested it: someone, the requester included, who, for every record set/);
+  assert.match(decisionRule(transfer({}), me, false), /You cannot approve it: you lack that right on one of its record sets\.$/);
+  assert.match(decisionRule(transfer({ kind: 'rename', zone: undefined, can_decide: true }), me, false), /^You can approve it: you hold policy.approve\. /);
+  assert.match(transferRule('web', false), /^someone, the requester included, who/);
+  assert.match(renameRule(false), /^someone, the requester included, holding policy.approve/);
+  // mode not known yet: a text true in both modes
+  assert.match(transferRule('web'), /^someone \(another person than the requester when the gate requires a second approver\) who, .* team web /);
+  assert.match(transferRule(''), /through the roles of the owner team or/);
+
+  assert.equal(canSelfApply(me, 'example.com', 'web', false), true);
+  assert.equal(canSelfApply(me, 'example.com', 'corporate', false), false);
+  assert.equal(canSelfApply(approver, 'example.com', 'corporate', false), true);
+  assert.equal(canSelfApply(me, 'example.com', 'web', true), false);
+  assert.equal(canSelfApply(me, 'example.com', 'web', undefined), false);
+  assert.equal(canSelfApply({ ...me, category: 'pipeline' }, 'example.com', 'web', false), false);
+
+  assert.match(decisionOutcome({ reason: 'invalid', message: 'apply: a second approver is required (ownership.require_second_approver)' }).text, /requires a second approver/);
 });
 
 test('team and transfer lookups are reads in the journal, transfer decisions are not', async () => {
@@ -252,7 +285,7 @@ test('teams and transfers go to their endpoints, with the CSRF header on decisio
     { status: 201, body: t },
     { status: 200, body: { ...t, status: 'applied' } },
     { status: 200, body: { ...t, status: 'rejected' } },
-    { status: 201, body: { ...t, kind: 'rename' } },
+    { status: 201, body: { ...t, kind: 'rename', status: 'applying', self_approved: true } },
     { status: 412, body: { reason: 'precondition', message: 'www CNAME changed since the request', transfer: { ...t, status: 'failed' } } },
     { status: 502, body: { reason: 'upstream', message: 'provider unavailable', transfer: { ...t, status: 'applying', error: 'provider unavailable' } } },
     { status: 403, body: { reason: 'forbidden', message: 'no' } },
@@ -267,17 +300,19 @@ test('teams and transfers go to their endpoints, with the CSRF header on decisio
   const page = await a.transfers({ status: 'proposed', zone: 'example.com' });
   assert.deepEqual(page.transfers[0]!.rrsets, []);
   assert.equal(m.calls[2]!.url, '/api/v1/transfers?status=proposed&zone=example.com');
-  await a.proposeTransfer('example.com', { rrsets: [{ host: 'www', type: 'CNAME' }], to_team: 'platform', comment: 'move' });
+  await a.proposeTransfer('example.com', { rrsets: [{ host: 'www', type: 'CNAME' }], to_team: 'platform', comment: 'move', apply: true });
   assert.equal(m.calls[3]!.url, '/api/v1/zones/example.com/transfers');
-  assert.deepEqual(JSON.parse(m.calls[3]!.init.body as string), { rrsets: [{ host: 'www', type: 'CNAME' }], to_team: 'platform', comment: 'move' });
+  assert.deepEqual(JSON.parse(m.calls[3]!.init.body as string), { rrsets: [{ host: 'www', type: 'CNAME' }], to_team: 'platform', comment: 'move', apply: true });
   assert.equal((await a.decideTransfer('tr-1', true, 'ok')).status, 'applied');
   assert.equal(m.calls[4]!.url, '/api/v1/transfers/tr-1/approve');
   assert.equal((m.calls[4]!.init.headers as Record<string, string>)['X-Gate-CSRF'], 'tok');
   await a.decideTransfer('tr-1', false, '');
   assert.equal(m.calls[5]!.url, '/api/v1/transfers/tr-1/reject');
-  await a.renameTeam('data', 'platform', 'merged');
+  const renamed = await a.renameTeam('data', 'platform', 'merged', true);
   assert.equal(m.calls[6]!.url, '/api/v1/teams/data/rename');
-  assert.deepEqual(JSON.parse(m.calls[6]!.init.body as string), { to: 'platform', comment: 'merged' });
+  assert.deepEqual(JSON.parse(m.calls[6]!.init.body as string), { to: 'platform', comment: 'merged', apply: true });
+  assert.equal(renamed.status, 'applying');
+  assert.equal(renamed.self_approved, true);
   await assert.rejects(a.decideTransfer('tr-1', true, ''), (e: unknown) => {
     assert.equal((e as { reason: string }).reason, 'precondition');
     assert.equal(transferOf(e)?.status, 'failed');

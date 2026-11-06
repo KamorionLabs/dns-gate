@@ -6,6 +6,7 @@
 
   $effect(() => {
     void inbox.load();
+    void inbox.loadMode();
   });
 </script>
 

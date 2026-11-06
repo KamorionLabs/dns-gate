@@ -4,7 +4,8 @@
   import { router } from '../lib/router.svelte';
   import TeamsNav from '../components/teams/TeamsNav.svelte';
   import TransferItem from '../components/teams/TransferItem.svelte';
-  import { renameRule } from '../lib/teams';
+  import { renameRule, transferRule } from '../lib/teams';
+  import { inbox } from '../lib/inbox.svelte';
 
   const tabs: { key: TransferStatus | ''; label: string }[] = [
     { key: 'proposed', label: 'Waiting for approval' },
@@ -65,9 +66,17 @@
   <p class="eyebrow">Teams</p>
   <h1>Ownership transfers</h1>
   <p class="meta">
-    Moving record sets to another team takes two people: someone asks, then another person approves who, for every record set of the request, may
-    write it through the roles of the owner team or holds dns.ownership.approve on it. Nobody approves their own request, even under another
-    identity, and only people approve, not pipelines. A team rename needs {renameRule}.
+    {#if inbox.secondApprover === false}
+      Moving record sets to another team is asked for, then approved by someone, the requester included, who for every record set of the request may
+      write it through the roles of the owner team or holds dns.ownership.approve on it. The gate does not require a second approver: whoever asks
+      may apply it at once, and the journal keeps both steps. A team rename needs {renameRule(false)}.
+    {:else if inbox.secondApprover}
+      Moving record sets to another team takes two people: someone asks, then another person approves who, for every record set of the request, may
+      write it through the roles of the owner team or holds dns.ownership.approve on it. Nobody approves their own request, even under another
+      identity, and only people approve, not pipelines. A team rename needs {renameRule(true)}.
+    {:else}
+      Moving record sets to another team is asked for, then approved by {transferRule('')}. A team rename needs {renameRule()}.
+    {/if}
   </p>
 </header>
 
