@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/KamorionLabs/dns-gate/blob/main/api/audit-event.schema.json",
+  "title": "dns-gate audit event (native format)",
+  "description": "One audit line written on stdout with audit.format: native (schema_version 1). The store keeps the same object without type and the hash chain members. See docs/AUDIT.md.",
+  "type": "object",
+  "required": ["type", "schema_version", "event_id", "time", "request_id", "subject", "action", "decision"],
+  "additionalProperties": false,
+  "properties": {
+    "type": { "const": "audit", "description": "Discriminator of audit lines among the application logs." },
+    "schema_version": { "const": "1" },
+    "event_id": {
+      "type": "string",
+      "description": "UUIDv7, unique per event, identical on stdout and in the store.",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "time": { "type": "string", "format": "date-time", "description": "UTC, nanosecond precision." },
+    "request_id": { "type": "string", "description": "X-Request-ID of the HTTP request, or the id of a background run." },
+    "subject": { "type": "string", "description": "issuer:id of the caller; empty when the authentication failed." },
+    "subject_name": { "type": "string" },
+    "subject_category": { "enum": ["human", "pipeline", "key", "system"] },
+    "auth_method": {
+      "enum": ["oidc", "oidc-session", "saml-session", "gate-token", "token-exchange", "api-key", "virtual-key"]
+    },
+    "source_ip": { "type": "string", "description": "Client address (X-Forwarded-For honoured from listen.trusted_proxies only)." },
+    "user_agent": { "type": "string", "maxLength": 256 },
+    "teams": { "type": "array", "items": { "type": "string" } },
+    "action": { "type": "string", "minLength": 1 },
+    "zone": { "type": "string" },
+    "provider": { "type": "string" },
+    "decision": { "enum": ["allow", "deny", "error"] },
+    "reason": { "type": "string" },
+    "changes": { "type": "array", "items": { "$ref": "#/$defs/change" } },
+    "snapshot_id": { "type": "string" },
+    "extra": { "type": "object" },
+    "instance_id": { "type": "string", "minLength": 1, "description": "Hash chain: id of the writing process." },
+    "seq": { "type": "integer", "minimum": 1, "description": "Hash chain: position in the chain, from 1." },
+    "prev_hash": { "$ref": "#/$defs/sha256" },
+    "hash_alg": { "enum": ["sha256", "hmac-sha256"], "description": "Hash chain: sha256, or hmac-sha256 with audit.hash_chain_key." },
+    "hash": { "$ref": "#/$defs/sha256" },
+    "render_error": { "type": "string", "description": "The event could not be rendered as configured: only its identification fields are written." }
+  },
+  "dependentRequired": {
+    "hash": ["instance_id", "seq", "prev_hash", "hash_alg"],
+    "instance_id": ["seq", "prev_hash", "hash_alg", "hash"]
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "alias": {
+      "type": "object",
+      "required": ["target"],
+      "properties": {
+        "target": { "type": "string" },
+        "hosted_zone_id": { "type": "string" },
+        "evaluate_target_health": { "type": "boolean" }
+      }
+    },
+    "forward": {
+      "type": "object",
+      "required": ["type", "url"],
+      "properties": {
+        "type": { "type": "string", "description": "301, 302 or frame." },
+        "url": { "type": "string" },
+        "title": { "type": "string" },
+        "keywords": { "type": "string" },
+        "description": { "type": "string" }
+      }
+    },
+    "change": {
+      "type": "object",
+      "required": ["op", "host", "type"],
+      "additionalProperties": false,
+      "properties": {
+        "op": { "enum": ["create", "update", "delete", "adopt", "taint", "expire", "transfer"] },
+        "host": { "type": "string" },
+        "type": { "type": "string" },
+        "old_ttl": { "type": "integer" },
+        "old_values": { "type": "array", "items": { "type": "string" } },
+        "old_alias": { "$ref": "#/$defs/alias" },
+        "old_forward": { "$ref": "#/$defs/forward" },
+        "new_ttl": { "type": "integer" },
+        "new_values": { "type": "array", "items": { "type": "string" } },
+        "new_alias": { "$ref": "#/$defs/alias" },
+        "new_forward": { "$ref": "#/$defs/forward" }
+      }
+    }
+  }
+}

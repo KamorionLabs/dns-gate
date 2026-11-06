@@ -43,6 +43,7 @@ type Config struct {
 	Policy            Policy           `yaml:"policy"`
 	MCP               MCP              `yaml:"mcp"`
 	ACME              ACME             `yaml:"acme"`
+	Audit             Audit            `yaml:"audit"`
 
 	Hash     string    `yaml:"-"` // sha256 of the file
 	LoadedAt time.Time `yaml:"-"`
@@ -369,6 +370,26 @@ type Lock struct {
 	Wait Duration `yaml:"wait"`
 }
 
+// Audit configures the audit lines written to stdout (the store always
+// keeps the native event).
+type Audit struct {
+	Format    string `yaml:"format"`     // native (default) | ecs | ocsf
+	HashChain bool   `yaml:"hash_chain"` // instance_id, seq, prev_hash, hash_alg and hash on every line
+	// HashChainKey makes the chain an HMAC-SHA256: DNS_GATE_AUDIT_CHAIN_KEY
+	// (or _FILE), 32 bytes, hex or base64. Never in the file.
+	HashChainKey []byte `yaml:"-"`
+}
+
+// EnvAuditChainKey holds audit.hash_chain_key.
+const EnvAuditChainKey = "DNS_GATE_AUDIT_CHAIN_KEY"
+
+// Audit formats.
+const (
+	AuditNative = "native"
+	AuditECS    = "ecs"
+	AuditOCSF   = "ocsf"
+)
+
 // Store selects the ownership and audit backend.
 type Store struct {
 	Type           string   `yaml:"type"` // memory | sqlite | postgres | dynamodb
@@ -650,6 +671,15 @@ func (c *Config) applyEnv(getenv func(string) string) error {
 	if c.UI.ClientSecret, err = read("DNS_GATE_UI_CLIENT_SECRET"); err != nil {
 		return err
 	}
+	ak, err := read(EnvAuditChainKey)
+	if err != nil {
+		return err
+	}
+	if ak != "" {
+		if c.Audit.HashChainKey, err = decodeKey(ak); err != nil {
+			return fmt.Errorf("config: %s: %w", EnvAuditChainKey, err)
+		}
+	}
 	k, err := read("DNS_GATE_SESSION_KEY")
 	if err != nil {
 		return err
@@ -730,6 +760,9 @@ func (c *Config) defaults() {
 	}
 	if c.Store.AuditRetention == 0 {
 		c.Store.AuditRetention = Duration(400 * 24 * time.Hour)
+	}
+	if c.Audit.Format == "" {
+		c.Audit.Format = AuditNative
 	}
 	if c.Store.Postgres.MaxConns == 0 {
 		c.Store.Postgres.MaxConns = 5
@@ -863,6 +896,14 @@ func (c *Config) Validate() error {
 	}
 	if c.Store.AuditRetention.D() < 24*time.Hour {
 		add("store.audit_retention: must be >= 24h")
+	}
+	switch c.Audit.Format {
+	case AuditNative, AuditECS, AuditOCSF:
+	default:
+		add("audit.format: %q (expected native, ecs or ocsf)", c.Audit.Format)
+	}
+	if len(c.Audit.HashChainKey) > 0 && !c.Audit.HashChain {
+		add("%s is set but audit.hash_chain is false", EnvAuditChainKey)
 	}
 	if c.Lock.TTL.D() <= 0 || c.Lock.Wait.D() < 0 {
 		add("lock: ttl must be > 0 and wait >= 0")
@@ -1540,6 +1581,9 @@ func sortedNames[T any](m map[string]T) []string {
 }
 
 // decodeKey accepts a 32-byte key encoded as hex or base64.
+// DecodeKey decodes a 32-byte key given as hex or base64.
+func DecodeKey(s string) ([]byte, error) { return decodeKey(s) }
+
 func decodeKey(s string) ([]byte, error) {
 	if b, err := hex.DecodeString(s); err == nil && len(b) == 32 {
 		return b, nil

@@ -203,6 +203,7 @@ Route 53, DynamoDB store, configuration from S3 or SSM):
 - [ACME / certificates](docs/ACME.md)
 - [Onboarding existing zones](docs/ONBOARDING.md)
 - [Configuration reference](docs/CONFIG.md)
+- [Audit events: schema, ECS/OCSF, hash chain, SIEM export](docs/AUDIT.md)
 - [Route 53 provider](docs/providers/route53.md)
 - [SAML login with AWS IAM Identity Center, gate tokens](docs/IDENTITY-CENTER.md)
 - [Deploying on AWS Lambda](docs/DEPLOY-LAMBDA.md)

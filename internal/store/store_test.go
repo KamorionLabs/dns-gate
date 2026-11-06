@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -151,6 +152,43 @@ func conformance(t *testing.T, s Store, clock *fakeClock) {
 		}
 		if _, _, err := s.ListAudit(ctx, AuditQuery{Cursor: "%%%"}); err == nil {
 			t.Fatal("bad cursor accepted")
+		}
+
+		// Event ids: kept as written, and two events of the same request at
+		// the same instant are both kept.
+		same := base.Add(time.Hour)
+		ids := map[string]bool{}
+		for i := 0; i < 5; i++ {
+			e := audit.Event{EventID: audit.NewID(same), Time: same, RequestID: "pull", Subject: "idp:bob", Action: "applyRRsets",
+				Zone: "pull.example.com", Decision: "allow", SourceIP: "192.0.2.1", AuthMethod: audit.AuthOIDC}
+			ids[e.EventID] = true
+			if err := s.AppendAudit(ctx, e); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := s.AppendAudit(ctx, audit.Event{Time: same.Add(-time.Minute), RequestID: "old", Zone: "pull.example.com", Decision: "allow"}); err != nil {
+			t.Fatal(err)
+		}
+		// Pull: everything since a high-water mark, two per page.
+		got := map[string]bool{}
+		cursor := ""
+		for range 10 {
+			page, next, err := s.ListAudit(ctx, AuditQuery{Zone: "pull.example.com", Since: same, Limit: 2, Cursor: cursor})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, e := range page {
+				if got[e.EventID] || !ids[e.EventID] || e.SourceIP != "192.0.2.1" || e.AuthMethod != audit.AuthOIDC {
+					t.Fatalf("pulled %+v", e)
+				}
+				got[e.EventID] = true
+			}
+			if cursor = next; cursor == "" {
+				break
+			}
+		}
+		if len(got) != len(ids) {
+			t.Fatalf("pulled %d events, want %d", len(got), len(ids))
 		}
 	})
 
@@ -736,5 +774,34 @@ func reassignConformance(t *testing.T, s Store, clock *fakeClock) {
 	}
 	if err := s.Reassign(ctx, "web", make([]Ownership, MaxReassign+1), nil); err == nil {
 		t.Fatal("oversized reassign accepted")
+	}
+}
+
+// The event_id column is added without an index: nothing queries it, and an
+// index build would lock a large audit table during the upgrade.
+func TestAuditEventIDMigrationHasNoIndex(t *testing.T) {
+	for _, d := range []string{"sqlite", "postgres"} {
+		b, err := migrationsFS.ReadFile("migrations/" + d + "/0007_audit_event_id.sql")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(strings.ToUpper(string(b)), "INDEX") || !strings.Contains(string(b), "ADD COLUMN event_id") {
+			t.Fatalf("%s migration:\n%s", d, b)
+		}
+	}
+	ctx := context.Background()
+	st, err := NewSQLite(ctx, SQLiteConfig{Path: t.TempDir() + "/gate.db"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := st.(*sqlStore)
+	defer s.Close()
+	id := audit.NewID(time.Now())
+	if err := s.AppendAudit(ctx, audit.Event{EventID: id, Time: time.Now(), RequestID: "r", Decision: "allow"}); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	if err := s.db.QueryRowContext(ctx, "SELECT event_id FROM audit WHERE request_id = 'r'").Scan(&got); err != nil || got != id {
+		t.Fatalf("event_id column: %q %v", got, err)
 	}
 }

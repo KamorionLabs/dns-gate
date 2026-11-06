@@ -19,6 +19,7 @@ require (
 	github.com/beevik/etree v1.8.1
 	github.com/crewjam/saml v0.5.1
 	github.com/go-jose/go-jose/v4 v4.1.7
+	github.com/google/jsonschema-go v0.4.3
 	github.com/jackc/pgx/v5 v5.12.0
 	github.com/miekg/dns v1.1.73
 	github.com/modelcontextprotocol/go-sdk v1.8.0
@@ -46,7 +47,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.44.3 // indirect
 	github.com/aws/smithy-go v1.28.8 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
-	github.com/google/jsonschema-go v0.4.3 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect

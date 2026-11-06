@@ -173,6 +173,9 @@ func (m *memory) ListAudit(_ context.Context, q AuditQuery) ([]audit.Event, stri
 		if after != "" && a.sk >= after {
 			continue
 		}
+		if !q.Since.IsZero() && a.e.Time.Before(q.Since) {
+			break
+		}
 		if !matchAudit(a.e, q) {
 			continue
 		}

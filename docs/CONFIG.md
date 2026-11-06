@@ -126,6 +126,18 @@ Whoever may move domains between folders in the EuroDNS account therefore contro
 | `store.postgres.max_conns` | `5` | Pool size (1 to 100). The DSN comes from `DNS_GATE_POSTGRES_DSN`. |
 | `store.dynamodb.table`, `region`, `endpoint` | | Single-table backend; credentials from the default AWS chain (EKS Pod Identity, IRSA, environment). |
 
+## Audit
+
+| Field | Default | Description |
+|---|---|---|
+| `audit.format` | `native` | Format of the audit lines on stdout: `native`, `ecs` (Elastic Common Schema 8.x) or `ocsf` (OCSF 1.3). The store, the UI and `GET /api/v1/audit` always keep the native event. Every format keeps `"type": "audit"`. |
+| `audit.hash_chain` | `false` | Adds `instance_id`, `seq`, `prev_hash`, `hash_alg` and `hash` (SHA-256 chain per process) to every stdout line, checked by `dns-gate audit verify`. |
+| `audit.hash_chain_key` | | From `DNS_GATE_AUDIT_CHAIN_KEY` or `DNS_GATE_AUDIT_CHAIN_KEY_FILE` only (32 bytes, hex or base64): the chain becomes an HMAC-SHA256 that cannot be recomputed without the key. Requires `audit.hash_chain: true`. |
+
+Schema, actions, reasons, mappings, the limits of the chain and export recipes
+(CloudWatch subscription filter, Kubernetes collectors, API pull) are in
+[AUDIT.md](AUDIT.md).
+
 `memory` loses ownership on restart: tests only. `memory` and `sqlite` support **one replica** (the chart refuses `replicaCount > 1` with them); use `postgres` or `dynamodb` to run several replicas.
 
 ## Issuers

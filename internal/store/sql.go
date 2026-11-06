@@ -394,9 +394,9 @@ func (s *sqlStore) AppendAudit(ctx context.Context, e audit.Event) error {
 	if err != nil {
 		return fmt.Errorf("store: encode audit: %w", err)
 	}
-	if _, err := s.exec(ctx, `INSERT INTO audit (time, request_id, zone, subject, subject_name, subject_category, decision, event)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, micros(e.Time), e.RequestID, e.Zone, e.Subject, e.SubjectName,
-		e.SubjectCategory, e.Decision, string(body)); err != nil {
+	if _, err := s.exec(ctx, `INSERT INTO audit (time, request_id, zone, subject, subject_name, subject_category, decision, event, event_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, micros(e.Time), e.RequestID, e.Zone, e.Subject, e.SubjectName,
+		e.SubjectCategory, e.Decision, string(body), e.EventID); err != nil {
 		return fmt.Errorf("store: append audit: %w", err)
 	}
 	s.purgeMu.Lock()

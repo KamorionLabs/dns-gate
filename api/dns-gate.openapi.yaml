@@ -877,7 +877,12 @@ paths:
       tags: [audit]
       operationId: listAudit
       summary: Audit events, newest first
-      description: Events of zones the caller cannot read are filtered out.
+      description: >-
+        Events of zones the caller cannot read are filtered out; events without a zone
+        (authentication failures) need read access to every managed zone. Pull-based
+        collectors poll with `since` (a high-water mark minus a margin), follow
+        `next_cursor` until it is absent and deduplicate on `event_id`
+        (see docs/AUDIT.md).
       parameters:
         - { name: zone, in: query, schema: { type: string } }
         - { name: host, in: query, schema: { type: string } }
@@ -885,8 +890,8 @@ paths:
         - { name: subject, in: query, description: "Case-insensitive substring of the subject or its name.", schema: { type: string } }
         - { name: category, in: query, schema: { type: string, enum: [human, pipeline, key] } }
         - { name: decision, in: query, schema: { type: string, enum: [allow, deny, error] } }
-        - { name: since, in: query, schema: { type: string, format: date-time } }
-        - { name: until, in: query, schema: { type: string, format: date-time } }
+        - { name: since, in: query, description: "RFC 3339, fractional seconds accepted; inclusive.", schema: { type: string, format: date-time } }
+        - { name: until, in: query, description: "RFC 3339, fractional seconds accepted; inclusive.", schema: { type: string, format: date-time } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 50 } }
         - { name: cursor, in: query, schema: { type: string } }
       responses:
@@ -2236,9 +2241,15 @@ components:
     AuditEntry:
       type: object
       properties:
+        event_id: { type: string, description: "UUIDv7, the same as on the stdout audit line. Absent on events recorded before 0.9." }
         time: { type: string, format: date-time }
         request_id: { type: string }
         actor: { $ref: "#/components/schemas/Actor" }
+        auth_method:
+          type: string
+          enum: [oidc, oidc-session, saml-session, gate-token, token-exchange, api-key, virtual-key]
+        source_ip: { type: string, description: "Client address. Served to policy.read holders only." }
+        user_agent: { type: string, maxLength: 256, description: "Client user agent. Served to policy.read holders only." }
         teams: { type: array, items: { type: string } }
         action: { type: string }
         zone: { type: string }

@@ -167,9 +167,13 @@ type Tombstone struct {
 
 // AuditEntry is one audit event as shown in the UI.
 type AuditEntry struct {
+	EventID    string     `json:"event_id,omitempty"`
 	Time       time.Time  `json:"time"`
 	RequestID  string     `json:"request_id"`
 	Actor      Actor      `json:"actor"`
+	AuthMethod string     `json:"auth_method,omitempty"`
+	SourceIP   string     `json:"source_ip,omitempty"`
+	UserAgent  string     `json:"user_agent,omitempty"`
 	Teams      []string   `json:"teams,omitempty"`
 	Action     string     `json:"action"`
 	Zone       string     `json:"zone,omitempty"`

@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/KamorionLabs/dns-gate/internal/audit"
 	"github.com/KamorionLabs/dns-gate/internal/authn"
 	"github.com/KamorionLabs/dns-gate/internal/config"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
@@ -340,6 +341,11 @@ func (u *uiAuth) sessionSubject(r *http.Request) (*identity.Subject, *session, e
 	if err := u.sealer.open(u.cookies.session, c.Value, &s); err != nil || s.Issuer != u.issuer.Name || u.now().Unix() > s.Expires {
 		return nil, nil, nil
 	}
+	method := audit.AuthOIDCSession
+	if u.saml != nil {
+		method = audit.AuthSAMLSession
+	}
+	audit.SetAuthMethod(r.Context(), method)
 	subj, err := u.subject(s.Claims)
 	if err != nil {
 		return nil, nil, err

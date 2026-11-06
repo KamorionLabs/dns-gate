@@ -101,7 +101,19 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 	if out == nil {
 		out = os.Stdout
 	}
-	auditLog := &audit.Tee{Primary: audit.NewJSON(out), Store: st, ErrorLog: log}
+	inst := opts.Holder
+	if inst == "" {
+		inst = os.Getenv("POD_NAME")
+	}
+	jl, err := audit.NewJSONWith(out, audit.Options{Format: cfg.Audit.Format, HashChain: cfg.Audit.HashChain,
+		ChainKey: cfg.Audit.HashChainKey, InstanceID: auditInstanceID(inst), ErrorLog: log})
+	if err != nil {
+		return nil, err
+	}
+	if id := jl.InstanceID(); id != "" {
+		log.Info("audit hash chain started", "instance_id", id, "format", cfg.Audit.Format, "keyed", len(cfg.Audit.HashChainKey) > 0)
+	}
+	auditLog := &audit.Tee{Primary: jl, Store: st, ErrorLog: log}
 	disc := discovery.New(discovery.Config{Sources: sources, Logger: log, OnFolderChange: folderChangeAudit(auditLog, time.Now)})
 	holder, err := policy.NewHolder(cfg)
 	if err != nil {
@@ -398,4 +410,15 @@ func openStore(ctx context.Context, cfg *config.Config, log *slog.Logger) (store
 		log.Warn("memory store: ownership is lost on restart, use it for tests only")
 		return store.NewMemory(), nil
 	}
+}
+
+// auditInstanceID names the audit hash chain of this process: a new UUIDv7,
+// prefixed with the pod name or the Lambda log stream when known, so that a
+// restart always starts a new chain.
+func auditInstanceID(holder string) string {
+	id := audit.NewID(time.Now())
+	if holder == "" {
+		return id
+	}
+	return holder + "/" + id
 }

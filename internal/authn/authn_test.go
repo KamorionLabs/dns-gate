@@ -307,3 +307,18 @@ func TestRebindUsesTheCurrentPolicy(t *testing.T) {
 		t.Fatal("expired virtual key bound again")
 	}
 }
+
+// A proxy may append its hop as a second X-Forwarded-For line: the lines are
+// one list, so a value the client wrote in the first line is not taken.
+func TestClientIPSeveralForwardedLines(t *testing.T) {
+	a, _ := setup(t)
+	r := vkRequest("vk-caddy", "vk-secret", "10.1.2.3:1")
+	r.Header.Add("X-Forwarded-For", "192.0.2.77")
+	r.Header.Add("X-Forwarded-For", "198.51.100.5, 10.9.9.9")
+	if ip := a.ClientIP(r); ip.String() != "198.51.100.5" {
+		t.Fatalf("client %s", ip)
+	}
+	if _, err := a.Authenticate(r); status(err) != 403 {
+		t.Fatalf("virtual key accepted through a spoofed first line: %v", err)
+	}
+}
