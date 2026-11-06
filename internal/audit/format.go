@@ -35,6 +35,7 @@ const (
 	ClassAuthentication Class = "authentication" // credentials checked or tokens issued
 	ClassAccountChange  Class = "account_change" // gate API key lifecycle
 	ClassPolicy         Class = "policy"         // managed policy and delegations
+	ClassDiscovery      Class = "discovery"      // zone folders found by provider discovery
 	ClassAPI            Class = "api"            // DNS, ownership and every other operation
 )
 
@@ -51,8 +52,15 @@ func Classify(e Event) (Class, Activity) {
 		return ClassAccountChange, activity(e)
 	case strings.HasPrefix(a, "policy."):
 		return ClassPolicy, activity(e)
+	case strings.HasPrefix(a, "gate.zone.folder"):
+		return ClassDiscovery, discoveryActivity[a]
 	}
 	return ClassAPI, activity(e)
+}
+
+var discoveryActivity = map[string]Activity{
+	"gate.zone.folder_changed": ActivityUpdate, "gate.zone.folder_seen": ActivityCreate,
+	"gate.zone.folder_gone": ActivityDelete, "gate.zone.folders_listed": ActivityRead,
 }
 
 var (
@@ -236,9 +244,11 @@ func ToECS(e Event) map[string]any {
 	case ClassAuthentication:
 		cats, types = []string{"authentication"}, []string{"start"}
 	case ClassAccountChange:
-		cats, types = []string{"iam"}, []string{"user", ecsChange(act)}
+		cats, types = []string{"iam"}, []string{"user", ecsInfo(act)}
 	case ClassPolicy:
-		cats, types = []string{"iam", "configuration"}, []string{ecsChange(act)}
+		cats, types = []string{"iam", "configuration"}, []string{ecsInfo(act)}
+	case ClassDiscovery:
+		cats, types = []string{"configuration"}, []string{ecsInfo(act)}
 	default:
 		cats = []string{"api"}
 		if act == ActivityRead {
@@ -253,9 +263,6 @@ func ToECS(e Event) map[string]any {
 		case "deny":
 			types = append(types, "denied")
 		}
-	}
-	if e.Decision == "error" && class != ClassAuthentication {
-		types = append(types, "error")
 	}
 	ev["category"], ev["type"] = cats, types
 
@@ -304,6 +311,15 @@ func ToECS(e Event) map[string]any {
 		m["related"] = related
 	}
 	return m
+}
+
+// ecsInfo is ecsChange for categories without "access" (iam): a read is
+// "info".
+func ecsInfo(a Activity) string {
+	if a == ActivityRead {
+		return "info"
+	}
+	return ecsChange(a)
 }
 
 func ecsChange(a Activity) string {

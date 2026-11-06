@@ -105,12 +105,13 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 	if inst == "" {
 		inst = os.Getenv("POD_NAME")
 	}
-	jl, err := audit.NewJSONWith(out, audit.Options{Format: cfg.Audit.Format, HashChain: cfg.Audit.HashChain, InstanceID: auditInstanceID(inst)})
+	jl, err := audit.NewJSONWith(out, audit.Options{Format: cfg.Audit.Format, HashChain: cfg.Audit.HashChain,
+		ChainKey: cfg.Audit.HashChainKey, InstanceID: auditInstanceID(inst), ErrorLog: log})
 	if err != nil {
 		return nil, err
 	}
 	if id := jl.InstanceID(); id != "" {
-		log.Info("audit hash chain started", "instance_id", id, "format", cfg.Audit.Format)
+		log.Info("audit hash chain started", "instance_id", id, "format", cfg.Audit.Format, "keyed", len(cfg.Audit.HashChainKey) > 0)
 	}
 	auditLog := &audit.Tee{Primary: jl, Store: st, ErrorLog: log}
 	disc := discovery.New(discovery.Config{Sources: sources, Logger: log, OnFolderChange: folderChangeAudit(auditLog, time.Now)})

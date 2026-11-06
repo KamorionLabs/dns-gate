@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/KamorionLabs/dns-gate/internal/audit"
+	"github.com/KamorionLabs/dns-gate/internal/config"
 )
 
 func TestAuditVerifyCommand(t *testing.T) {
@@ -44,5 +46,34 @@ func TestAuditVerifyCommand(t *testing.T) {
 
 	if err := runAudit([]string{"check"}, nil, &out, &errOut); err == nil {
 		t.Fatal("unknown subcommand accepted")
+	}
+}
+
+func TestAuditVerifyKeyAndUnchained(t *testing.T) {
+	key := bytes.Repeat([]byte{3}, 32)
+	var buf bytes.Buffer
+	l, _ := audit.NewJSONWith(&buf, audit.Options{HashChain: true, InstanceID: "i", ChainKey: key})
+	l.Log(context.Background(), audit.Event{Action: "a", Decision: "allow"})
+	audit.NewJSON(&buf).Log(context.Background(), audit.Event{Action: "injected", Decision: "allow"})
+	dir := t.TempDir()
+	kf := filepath.Join(dir, "key")
+	_ = os.WriteFile(kf, []byte(hex.EncodeToString(key)+"\n"), 0o600)
+	var out bytes.Buffer
+	run := func(args ...string) error {
+		out.Reset()
+		return runAudit(append([]string{"verify"}, args...), strings.NewReader(buf.String()), &out, &out)
+	}
+	if err := run("-key-file", kf); err == nil || !strings.Contains(out.String(), "without chain members") {
+		t.Fatalf("injected line: %v %s", err, out.String())
+	}
+	if err := run("-key-file", kf, "-allow-unchained"); err != nil {
+		t.Fatalf("allowed: %v %s", err, out.String())
+	}
+	if err := run("-allow-unchained"); err == nil || !strings.Contains(out.String(), "key_required") {
+		t.Fatalf("no key: %v %s", err, out.String())
+	}
+	t.Setenv(config.EnvAuditChainKey, hex.EncodeToString(key))
+	if err := run("-allow-unchained", "-require-genesis"); err != nil {
+		t.Fatalf("key from the environment: %v %s", err, out.String())
 	}
 }

@@ -36,11 +36,13 @@
     "instance_id": { "type": "string", "minLength": 1, "description": "Hash chain: id of the writing process." },
     "seq": { "type": "integer", "minimum": 1, "description": "Hash chain: position in the chain, from 1." },
     "prev_hash": { "$ref": "#/$defs/sha256" },
-    "hash": { "$ref": "#/$defs/sha256" }
+    "hash_alg": { "enum": ["sha256", "hmac-sha256"], "description": "Hash chain: sha256, or hmac-sha256 with audit.hash_chain_key." },
+    "hash": { "$ref": "#/$defs/sha256" },
+    "render_error": { "type": "string", "description": "The event could not be rendered as configured: only its identification fields are written." }
   },
   "dependentRequired": {
-    "hash": ["instance_id", "seq", "prev_hash"],
-    "instance_id": ["seq", "prev_hash", "hash"]
+    "hash": ["instance_id", "seq", "prev_hash", "hash_alg"],
+    "instance_id": ["seq", "prev_hash", "hash_alg", "hash"]
   },
   "$defs": {
     "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },

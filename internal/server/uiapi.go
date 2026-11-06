@@ -409,25 +409,27 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request, subj *ident
 		return
 	}
 	all := s.readsEveryManagedZone(readable)
+	client := s.pol.AllowMeta(subj, uiapi.ActionPolicyRead)
 	page := uiapi.AuditPage{Entries: []uiapi.AuditEntry{}, NextCursor: next}
 	for _, e := range events {
 		if (e.Zone == "" && !all) || (e.Zone != "" && !readable[e.Zone]) || !s.auditVisible(subj, e) {
 			continue
 		}
-		page.Entries = append(page.Entries, toAuditEntry(e))
+		page.Entries = append(page.Entries, toAuditEntry(e, client))
 	}
 	writeJSON(w, http.StatusOK, page)
 }
 
-func toAuditEntry(e audit.Event) uiapi.AuditEntry {
+// toAuditEntry is the journal view of an event. The client address and user
+// agent are shown to policy.read holders only (client); the stdout stream
+// always has them.
+func toAuditEntry(e audit.Event, client bool) uiapi.AuditEntry {
 	ae := uiapi.AuditEntry{
 		EventID:    e.EventID,
 		Time:       e.Time,
 		RequestID:  e.RequestID,
 		Actor:      uiapi.Actor{Subject: e.Subject, Name: e.SubjectName, Category: e.SubjectCategory},
 		AuthMethod: e.AuthMethod,
-		SourceIP:   e.SourceIP,
-		UserAgent:  e.UserAgent,
 		Teams:      e.Teams,
 		Action:     e.Action,
 		Zone:       e.Zone,
@@ -436,6 +438,9 @@ func toAuditEntry(e audit.Event) uiapi.AuditEntry {
 		Changes:    e.Changes,
 		Provider:   e.Provider,
 		SnapshotID: e.SnapshotID,
+	}
+	if client {
+		ae.SourceIP, ae.UserAgent = e.SourceIP, e.UserAgent
 	}
 	return ae
 }

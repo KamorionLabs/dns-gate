@@ -18,8 +18,12 @@ described below. The stdout line can be rewritten in a standard schema
 ```yaml
 audit:
   format: native      # native (default) | ecs | ocsf
-  hash_chain: false   # instance_id, seq, prev_hash and hash on every stdout line
+  hash_chain: false   # instance_id, seq, prev_hash, hash_alg and hash on every stdout line
 ```
+
+`DNS_GATE_AUDIT_CHAIN_KEY` (or `DNS_GATE_AUDIT_CHAIN_KEY_FILE`, 32 bytes as hex or
+base64, from the deployment secret) is `audit.hash_chain_key`: it makes the chain
+an HMAC, see [Tamper evidence](#tamper-evidence).
 
 Contents:
 
@@ -54,7 +58,7 @@ not know.
 | `subject_name` | string | optional | Display name (`name_claim`, e-mail, key id). |
 | `subject_category` | string | optional | `human`, `pipeline`, `key` or `system`. |
 | `auth_method` | string | requests with a credential | How the request authenticated, or tried to. See [Authentication methods](#authentication-methods). |
-| `source_ip` | string | requests | Client address. `X-Forwarded-For` is honoured only from `listen.trusted_proxies` (the rightmost untrusted hop wins). On Lambda it is `requestContext.http.sourceIp`. |
+| `source_ip` | string | requests | Client address. `X-Forwarded-For` is honoured only from `listen.trusted_proxies`: every `X-Forwarded-For` line of the request is read as one list, and the rightmost untrusted hop wins. On Lambda it is `requestContext.http.sourceIp`. |
 | `user_agent` | string | requests | `User-Agent` without control characters, truncated to 256 bytes. |
 | `teams` | string[] | optional | Teams the subject acts for. |
 | `action` | string | always | See [Actions](#actions). |
@@ -65,11 +69,16 @@ not know.
 | `changes` | object[] | optional | RRset changes: `op` (`create`, `update`, `delete`, `adopt`, `taint`, `expire`, `transfer`), `host`, `type`, `old_ttl`, `old_values`, `old_alias`, `new_ttl`, `new_values`, `new_alias`. `host` is relative to the zone (`@` for the apex). |
 | `snapshot_id` | string | optional | Provider snapshot taken before a write (EuroDNS). It is a rollback pointer. |
 | `extra` | object | optional | Action-specific details, see [Extra](#extra). |
-| `instance_id`, `seq`, `prev_hash`, `hash` | | stdout, `hash_chain` | See [Tamper evidence](#tamper-evidence). |
+| `instance_id`, `seq`, `prev_hash`, `hash_alg`, `hash` | | stdout, `hash_chain` | See [Tamper evidence](#tamper-evidence). |
+| `render_error` | string | rare | The event could not be rendered as configured (for example a value JSON cannot encode): the line keeps only `schema_version`, `event_id`, `time`, `request_id`, `subject`, `action`, `zone`, `decision`, `reason` and the error, still in the chain, and the gate logs an error. |
 
 "Requests" means every event produced while serving an HTTP request (API,
 EuroDNS-compatible API, UI, MCP, ACME, OAuth). Background events (reconciler,
-expiry, transfer retries) have no `source_ip`, `user_agent` or `auth_method`.
+expiry, transfer retries) have no `source_ip`, `user_agent` or `auth_method`,
+nor do events of system actors (`gate:*`, category `system`) produced while a
+request is served, such as a discovery refresh. Aggregated API key refusals
+(`apikey.authenticate`) keep the client of the refused request, even when the
+count is written later.
 
 Secrets never appear in events. That covers tokens, API keys, virtual key
 secrets, cookies, the `Authorization` header and request bodies. Token events
@@ -138,6 +147,8 @@ Refused authentications on this API carry the operation id of the request.
 | `policy.delegated.put_role`, `.put_binding`, `.delete_role`, `.delete_binding` | Delegated objects written by pipelines. Each write is followed by `policy.activate`. | allow, deny | no |
 | `policy.delegated.take_over` | A proposal takes delegated objects back. | allow | no |
 | `zone_profile.list`, `.get`, `.check`, `.create`, `.update`, `.delete` | EuroDNS zone profiles via the REST API. The EuroDNS-compatible API uses its operation ids (`listZoneProfiles`, `createZoneProfile`, ...), MCP uses `mcp.*_zone_profile(s)`. `provider` is the EuroDNS provider, `changes` lists host, type and op without values, and `extra` has `via`, `profile_id`, `profile` and `previous` (content), and `valid` (check). The journal shows them only to holders of `dns.zone.profile` on `*`. | allow, deny, error | no |
+| `gate.zone.folders_listed` | Discovery: first listing of a EuroDNS provider by a process. Subject `gate:discovery`, category `system`; `extra.count` (zones) and `extra.digest` (SHA-256 of the sorted `zone<TAB>folder` lines). | allow | no |
+| `gate.zone.folder_changed`, `gate.zone.folder_seen`, `gate.zone.folder_gone` | Discovery: a zone found in another folder, a new zone, a zone no longer listed (`extra.old`, `extra.new`). Same subject, one request id per listing. | allow | yes |
 | `mcp` | MCP endpoint authentication refused. | deny | no |
 | `mcp.<tool>` | MCP tool calls: `list_zones`, `list_rrsets`, `get_rrset`, `plan_rrset_change`, `apply_rrset_change`, `adopt_preview`, `adopt_apply`, `list_teams`, `get_team`, `transfer_list`, `transfer_propose`, `transfer_approve`, `transfer_reject`. `extra.via` is `mcp` and `extra.mcp_client` names the client. | allow, deny, error | per tool |
 
@@ -209,6 +220,8 @@ be refused, they carry the engine reason with `extra.allowed: false`.
 | `transfer_id`, `requester`, `requester_name`, `decided_by`, `decided_by_name`, `approval`, `moved`, `comment`, `status`, `apply` | `gate.transfer.*`, `mcp.transfer_*` | Transfer request, who decided it, `approval` `self` or `second`, RRsets moved. |
 | `comment`, `owner`, `adopted` | `gate.adopt`, `mcp.adopt_apply` | Adoption comment, owner team, count. |
 | `ignored_out_of_scope` | writes | Out-of-scope differences skipped by a rebase. |
+| `folder` | writes, adoptions, transfers | EuroDNS folder whose role rule granted the action. |
+| `old`, `new`, `count`, `digest` | `gate.zone.folder_*` | Folder before and after; zone count and digest of a first listing. |
 
 ## Examples
 
@@ -224,8 +237,8 @@ A write, native format, with the hash chain (one line on stdout, wrapped here):
  "changes":[{"op":"update","host":"www","type":"A","old_ttl":300,"old_values":["192.0.2.10"],
    "new_ttl":300,"new_values":["192.0.2.20"]}],"snapshot_id":"884301",
  "instance_id":"dns-gate-7c9f8-xk2lp/01a1b0d2-8f3e-7a51-9c2d-3e4f5a6b7c8d","seq":1,
- "prev_hash":"0000000000000000000000000000000000000000000000000000000000000000",
- "hash":"5525a036e93a8a88c0df7ba392caac98638f46281dd6141350509caccc6d9e89"}
+ "prev_hash":"0000000000000000000000000000000000000000000000000000000000000000","hash_alg":"sha256",
+ "hash":"fdc289572ce0f6e2f313a1db1f023e312a97d8a4b99de2c93d1780df4d713dac"}
 ```
 
 A refused authentication:
@@ -305,15 +318,17 @@ Categorization:
 | Events | `event.category` | `event.type` |
 |---|---|---|
 | Authentications: `apikey.authenticate`, `token.issue`, `gate.token.exchange`, any `deny` without a subject | `authentication` | `start` |
-| API key lifecycle `apikey.*` | `iam` | `user` and `creation`, `deletion`, `change` or `access` |
-| Policy `policy.*` | `iam`, `configuration` | `creation`, `deletion` or `change` |
+| API key lifecycle `apikey.*` (and `apikey.manage`, the refused access to the key list) | `iam` | `user` and `creation`, `deletion`, `change` or `info` |
+| Policy `policy.*` | `iam`, `configuration` | `creation`, `deletion`, `change` or `info` |
+| Discovery `gate.zone.folder_*` | `configuration` | `creation` (seen), `deletion` (gone), `change` (moved), `info` (first listing) |
 | Reads (`get*`, `list*`, plans, previews, ...) | `api` | `access`, plus `allowed` or `denied` |
 | Every other action | `api`, `configuration` | `creation`, `deletion` or `change`, plus `allowed` or `denied` |
 
-`error` events add `error` to `event.type`. Whether an action creates, changes
-or deletes is taken from the `op` of its `changes` when present (all `create`:
-creation; all `delete` or `expire`: deletion; otherwise change), else from the
-words of the action name.
+Every `event.type` is one ECS expects for one of the categories of the event.
+`error` events are `event.outcome: failure` with the reason in `event.reason`.
+Whether an action creates, changes or deletes is taken from the `op` of its
+`changes` when present (all `create`: creation; all `delete` or `expire`:
+deletion; otherwise change), else from the words of the action name.
 
 ### OCSF (`ocsf`, OCSF 1.3)
 
@@ -323,7 +338,7 @@ Three classes are used, chosen by what the event is about:
 |---|---|---|---|
 | Authentication | 3002 | `apikey.authenticate`, any `deny` without a subject (refused credentials), `token.issue`, `gate.token.exchange` | `1` Logon (credential checks), `3` Authentication Ticket (token issuance and exchange). `user` is the subject, or `{"name": "unknown"}`. `auth_protocol_id` is `99` (Other), with `auth_protocol` set to the `auth_method`. |
 | Account Change | 3001 | `apikey.*` (gate API key lifecycle: an API key is a credential account) | `1` Create, `6` Delete (revoke), `99` Other (update, rotate). `user` is the key (`uid` = `extra.key_id`). |
-| API Activity | 6003 | Every other action: DNS operations, adoption, ownership, ACME, policy, MCP | `1` Create, `2` Read, `3` Update, `4` Delete, as for ECS. `api.operation` is the action. `cloud.provider` is the provider id of the zone (`dns-gate` when none). `resources` lists the zone (`dns_zone`) and the changed names (`dns_record`). |
+| API Activity | 6003 | Every other action: DNS operations, adoption, ownership, ACME, policy, MCP, discovery | `1` Create, `2` Read, `3` Update, `4` Delete, as for ECS. `api.operation` is the action. `cloud.provider` is the provider id of the zone (`dns-gate` when none). `resources` lists the zone (`dns_zone`) and the changed names (`dns_record`). |
 
 Policy changes are API Activity rather than Account Change, because they change
 the gate's own authorization model, not an account.
@@ -345,21 +360,40 @@ With `audit.hash_chain: true`, every stdout line also carries:
 | `instance_id` | Id of the chain: one per process. It is `<pod name or Lambda log stream>/<UUIDv7>`, or the UUIDv7 alone. It is logged at startup (`audit hash chain started`). |
 | `seq` | Position in the chain, from 1, with no hole. |
 | `prev_hash` | `hash` of the previous line of the chain. The first line uses 64 zeros. |
-| `hash` | SHA-256 (hex) of the canonical form of the line without `hash`. |
+| `hash_alg` | `sha256`, or `hmac-sha256` with a chain key. |
+| `hash` | SHA-256, or HMAC-SHA256 with the chain key, (hex) of the canonical form of the line without `hash`. |
 
 The canonical form is the line re-encoded with object keys sorted, no
 whitespace, no HTML escaping, and numbers normalized (integers without a
 fraction, other numbers in shortest form). A pipeline that re-orders keys,
 re-indents or re-escapes the JSON does not break the chain. A pipeline that
 drops, adds or renames fields does break it, so keep the line intact. The hash
-covers the formatted line, so ECS and OCSF lines are chained as well.
+covers the formatted line, so ECS and OCSF lines are chained as well. An object
+with the same member twice, at any depth, never verifies: JSON decoders disagree
+on which value counts.
+
+**Keyed chain.** Without a key, anyone who can rewrite the stream can recompute
+the chain. With `DNS_GATE_AUDIT_CHAIN_KEY` set (`audit.hash_chain_key`, 32
+random bytes, `openssl rand -hex 32`, kept in the deployment secret and not
+readable by the operators of the sink), `hash` is an HMAC-SHA256 and
+`hash_alg` is `hmac-sha256`: forged or recomputed lines fail without the key.
+Verification needs the key (`-key-file`, or the same variables). With a key,
+plain `sha256` lines are refused (`unkeyed`), so a chain cannot be downgraded.
 
 Check an export with `dns-gate audit verify`:
 
 ```sh
 dns-gate audit verify export.jsonl            # or: ... | dns-gate audit verify
 dns-gate audit verify -json a.jsonl b.jsonl   # machine-readable report
+dns-gate audit verify -key-file chain.key -require-genesis export.jsonl
 ```
+
+| Flag | Effect |
+|---|---|
+| `-json` | Machine-readable report. |
+| `-key-file` | Chain key of keyed chains (else `DNS_GATE_AUDIT_CHAIN_KEY` or `DNS_GATE_AUDIT_CHAIN_KEY_FILE`). |
+| `-allow-unchained` | Accept audit lines without chain members next to chained ones. By default they fail: with `hash_chain` on, an unchained audit line is an injected line. |
+| `-require-genesis` | Fail a chain whose first event in the input is not `seq` 1, for exports that must hold whole chains. |
 
 It accepts the gate's JSON lines mixed with application logs, lines wrapped by
 container log collectors (`{"log": "<line>"}` or `{"message": "<line>"}`), and
@@ -372,12 +406,16 @@ order and from any number of instances. For each chain it reports:
 - **broken_link**: an event whose `prev_hash` is not the `hash` of the previous
   one, which is what a forged event with a recomputed hash produces;
 - **seq_conflict**: two different events with the same `seq`;
-- **bad_genesis**: a chain whose first event does not start from zeros.
+- **bad_genesis**: a chain whose first event does not start from zeros;
+- **key_required**, **unkeyed**: a keyed chain checked without the key, or a
+  plain line checked with one;
+- **no_genesis**: with `-require-genesis`, a chain that starts after `seq` 1.
 
-A chain whose first event in the export is not `seq` 1 is reported as starting
-mid-chain. That is expected for an export limited to a time window, and is not a
-failure. The command exits 1 when a chain has a gap or a problem, or when the
-input has no chained event.
+Without `-require-genesis`, a chain whose first event in the export is not
+`seq` 1 is reported as starting mid-chain. That is expected for an export
+limited to a time window, and is not a failure. The command exits 1 when a
+chain has a gap or a problem, when unchained audit lines are mixed with chained
+ones (unless `-allow-unchained`), or when the input has no chained event.
 
 Limits:
 
@@ -389,8 +427,9 @@ Limits:
   part of the same stream.
 - **Truncation at the end** of a chain is not detectable from the chain itself.
   Ship the logs continuously, and alert on gaps in delivery.
-- **Not a signature.** Anyone who can rewrite the whole stream from a given
-  point can recompute every hash after it. The chain proves the integrity of
+- **Not a signature without a key.** Anyone who can rewrite the whole stream
+  from a given point can recompute every plain hash after it; a chain key
+  limits that to holders of the key, which the gate itself holds. The chain proves the integrity of
   what reached the sink, so make the sink append-only: S3 Object Lock,
   CloudWatch Logs with no `DeleteLogStream`/`PutRetentionPolicy` rights for
   operators, or a SIEM with immutable storage. The gate itself cannot protect
@@ -508,10 +547,13 @@ events without a zone (authentication failures) are filtered out.
   continues to older events until it is absent.
 - `since` and `until` (RFC 3339, fractional seconds accepted) bound the window.
   Also available: `zone`, `decision`, `category`, `subject`, `host`, `type`.
-- Entries carry `event_id`, `auth_method`, `source_ip` and `user_agent` besides
-  the UI fields (actor, teams, action, zone, decision, reason, changes, provider,
-  snapshot). `extra` is not served: it can hold content, such as zone profile
-  records, that only the audit sink keeps.
+- Entries carry `event_id` and `auth_method` besides the UI fields (actor,
+  teams, action, zone, decision, reason, changes, provider, snapshot).
+  `source_ip` and `user_agent` are served only to holders of `policy.read`
+  (also in the MCP `search_audit` and `get_rrset` history): other journal
+  readers do not see the addresses of other users. `extra` is not served: it
+  can hold content, such as zone profile records, that only the audit sink
+  keeps. The stdout stream always has every field.
 
 A polling loop: keep a high-water mark `T` (the newest `time` seen). On each
 poll, request `since=T - 5m` and follow `next_cursor` until it is absent.

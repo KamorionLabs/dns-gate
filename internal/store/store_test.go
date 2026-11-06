@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -773,5 +774,34 @@ func reassignConformance(t *testing.T, s Store, clock *fakeClock) {
 	}
 	if err := s.Reassign(ctx, "web", make([]Ownership, MaxReassign+1), nil); err == nil {
 		t.Fatal("oversized reassign accepted")
+	}
+}
+
+// The event_id column is added without an index: nothing queries it, and an
+// index build would lock a large audit table during the upgrade.
+func TestAuditEventIDMigrationHasNoIndex(t *testing.T) {
+	for _, d := range []string{"sqlite", "postgres"} {
+		b, err := migrationsFS.ReadFile("migrations/" + d + "/0007_audit_event_id.sql")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(strings.ToUpper(string(b)), "INDEX") || !strings.Contains(string(b), "ADD COLUMN event_id") {
+			t.Fatalf("%s migration:\n%s", d, b)
+		}
+	}
+	ctx := context.Background()
+	st, err := NewSQLite(ctx, SQLiteConfig{Path: t.TempDir() + "/gate.db"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := st.(*sqlStore)
+	defer s.Close()
+	id := audit.NewID(time.Now())
+	if err := s.AppendAudit(ctx, audit.Event{EventID: id, Time: time.Now(), RequestID: "r", Decision: "allow"}); err != nil {
+		t.Fatal(err)
+	}
+	var got string
+	if err := s.db.QueryRowContext(ctx, "SELECT event_id FROM audit WHERE request_id = 'r'").Scan(&got); err != nil || got != id {
+		t.Fatalf("event_id column: %q %v", got, err)
 	}
 }

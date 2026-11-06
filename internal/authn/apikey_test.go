@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -336,5 +337,43 @@ func TestAPIKeyTeamMustBeDeclared(t *testing.T) {
 	}
 	if _, err := try("legacy"); status(err) != 403 {
 		t.Fatalf("a key of an undeclared team must be refused once teams are declared: %v", err)
+	}
+}
+
+type preparedLog struct{ events []audit.Event }
+
+func (p *preparedLog) Log(ctx context.Context, e audit.Event) {
+	audit.Prepare(ctx, &e)
+	p.events = append(p.events, e)
+}
+
+// An aggregated refusal emitted later (window count, eviction) keeps the
+// client of its own request, not the one of the request that flushes it.
+func TestAPIKeyRefusalKeepsItsRequestContext(t *testing.T) {
+	a, _ := setup(t)
+	now := time.Now()
+	a.SetClock(func() time.Time { return now })
+	log := &preparedLog{}
+	a.SetAPIKeys(store.NewMemory().(store.APIKeyStore), log)
+	a.noise.max = 1
+	try := func(remote, ua string) {
+		r := httptest.NewRequest("GET", "/", nil)
+		r.RemoteAddr = remote
+		r.Header.Set("Authorization", "Bearer dgk_garbage")
+		r = r.WithContext(audit.WithRequest(r.Context(), audit.Request{SourceIP: strings.Split(remote, ":")[0], UserAgent: ua}))
+		_, _ = a.Authenticate(r)
+	}
+	try("192.0.2.1:1", "first")
+	try("192.0.2.1:1", "first")
+	try("198.51.100.7:1", "second")
+	if len(log.events) != 3 {
+		t.Fatalf("events: %+v", log.events)
+	}
+	ev := log.events[1]
+	if ev.Extra["count"] != 1 || ev.SourceIP != "192.0.2.1" || ev.UserAgent != "first" || ev.AuthMethod != audit.AuthAPIKey {
+		t.Fatalf("evicted refusal: %+v", ev)
+	}
+	if log.events[2].SourceIP != "198.51.100.7" || log.events[0].EventID == ev.EventID || ev.EventID == "" {
+		t.Fatalf("events: %+v", log.events)
 	}
 }

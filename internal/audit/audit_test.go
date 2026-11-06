@@ -226,8 +226,8 @@ func TestECS(t *testing.T) {
 	if get(lines[2], "event.category").([]any)[0] != "iam" {
 		t.Fatalf("api key %v", lines[2])
 	}
-	if types := get(lines[4], "event.type").([]any); types[len(types)-1] != "error" {
-		t.Fatalf("error %v", types)
+	if get(lines[4], "event.outcome") != "failure" || get(lines[4], "event.reason") != "upstream" {
+		t.Fatalf("error %v", lines[4])
 	}
 }
 
@@ -281,6 +281,65 @@ func TestClassifyActivities(t *testing.T) {
 	for action, want := range cases {
 		if _, got := Classify(Event{Action: action, Subject: "s", Decision: "allow"}); got != want {
 			t.Errorf("%s: %s, want %s", action, got, want)
+		}
+	}
+}
+
+// Events of system actors (discovery, reconciler) logged while serving a
+// request do not take the client of that request.
+func TestPrepareSystemActor(t *testing.T) {
+	ctx := WithRequest(context.Background(), Request{SourceIP: "192.0.2.7", UserAgent: "ua"})
+	SetAuthMethod(ctx, AuthOIDC)
+	e := Event{Subject: "gate:discovery", SubjectCategory: "system", Action: "gate.zone.folder_seen", Decision: "allow"}
+	Prepare(ctx, &e)
+	if e.SourceIP != "" || e.UserAgent != "" || e.AuthMethod != "" || e.EventID == "" {
+		t.Fatalf("system event: %+v", e)
+	}
+}
+
+// ecsTypes are the event.type values ECS 8.11 expects per event.category.
+var ecsTypes = map[string][]string{
+	"api":            {"access", "admin", "allowed", "change", "creation", "deletion", "denied", "end", "info", "start", "user"},
+	"authentication": {"start", "end", "info"},
+	"configuration":  {"access", "change", "creation", "deletion", "info"},
+	"iam":            {"admin", "change", "creation", "deletion", "group", "info", "user"},
+}
+
+// Every ECS event.type must be expected for one of its categories.
+func TestECSCategorization(t *testing.T) {
+	cases := []struct {
+		e          Event
+		categories string
+		types      string
+	}{
+		{Event{Subject: "idp:a", Action: "apikey.manage", Decision: "deny", Reason: "forbidden"}, "iam", "user,info"},
+		{Event{Subject: "idp:a", Action: "apikey.create", Decision: "allow"}, "iam", "user,creation"},
+		{Event{Subject: "idp:a", Action: "apikey.revoke", Decision: "allow"}, "iam", "user,deletion"},
+		{Event{Subject: "idp:a", Action: "policy.activate", Decision: "deny", Reason: "conflict"}, "iam,configuration", "change"},
+		{Event{Subject: "idp:a", Action: "getDnsZone", Zone: "example.com", Decision: "deny", Reason: "forbidden"}, "api", "access,denied"},
+		{Event{Subject: "gate:reconciler", SubjectCategory: "system", Action: "gate.expire", Zone: "example.com", Decision: "error", Reason: "upstream"}, "api,configuration", "deletion"},
+		{Event{Subject: "gate:discovery", SubjectCategory: "system", Action: "gate.zone.folder_changed", Zone: "example.com", Decision: "allow"}, "configuration", "change"},
+		{Event{Subject: "gate:discovery", SubjectCategory: "system", Action: "gate.zone.folder_seen", Zone: "example.com", Decision: "allow"}, "configuration", "creation"},
+		{Event{Subject: "gate:discovery", SubjectCategory: "system", Action: "gate.zone.folder_gone", Zone: "example.com", Decision: "allow"}, "configuration", "deletion"},
+		{Event{Subject: "gate:discovery", SubjectCategory: "system", Action: "gate.zone.folders_listed", Decision: "allow"}, "configuration", "info"},
+		{Event{Action: "getDnsZone", Decision: "deny", Reason: "unauthenticated"}, "authentication", "start"},
+	}
+	for _, c := range cases {
+		ev := ToECS(c.e)["event"].(map[string]any)
+		cats, types := ev["category"].([]string), ev["type"].([]string)
+		if strings.Join(cats, ",") != c.categories || strings.Join(types, ",") != c.types {
+			t.Errorf("%s: %v %v, want %s %s", c.e.Action, cats, types, c.categories, c.types)
+		}
+		for _, ty := range types {
+			ok := false
+			for _, cat := range cats {
+				for _, allowed := range ecsTypes[cat] {
+					ok = ok || allowed == ty
+				}
+			}
+			if !ok {
+				t.Errorf("%s: type %s not expected for %v", c.e.Action, ty, cats)
+			}
 		}
 	}
 }

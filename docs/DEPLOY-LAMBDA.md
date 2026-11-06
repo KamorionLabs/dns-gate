@@ -98,7 +98,8 @@ Configuration notes for Lambda:
 - Audit events are JSON lines in the function's log group (keep the Text log format: the
   lines must reach CloudWatch unwrapped). Export them to a SIEM or S3 with a subscription
   filter `{ $.type = "audit" }` (`audit_export` in the Terraform module); each execution
-  environment writes its own hash chain with `audit.hash_chain: true`. See
+  environment writes its own hash chain with `audit.hash_chain: true` (put
+  `DNS_GATE_AUDIT_CHAIN_KEY` in the secret for a keyed chain). See
   [AUDIT.md](AUDIT.md#aws-lambda--cloudwatch-logs).
 - Gate-issued tokens and the token exchange (`issuers[].self`) need
   `DNS_GATE_TOKEN_SIGNING_KEY`, and the UI `DNS_GATE_SESSION_KEY`: put them in the

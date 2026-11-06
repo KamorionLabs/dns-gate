@@ -16,7 +16,22 @@ const (
 	ProblemLink     = "broken_link"  // prev_hash is not the hash of the previous event
 	ProblemConflict = "seq_conflict" // two different events with the same seq
 	ProblemGenesis  = "bad_genesis"  // the first event of a chain does not start from GenesisHash
+	ProblemKey      = "key_required" // keyed chain (hmac-sha256) checked without the key
+	ProblemUnkeyed  = "unkeyed"      // plain sha256 event while the chain key was given
+	ProblemStart    = "no_genesis"   // RequireGenesis: the chain does not start at seq 1
 )
+
+// VerifyOptions tune Verify.
+type VerifyOptions struct {
+	// AllowUnchained accepts audit lines without chain members next to
+	// chained ones (otherwise they are injected lines and fail).
+	AllowUnchained bool
+	// RequireGenesis fails a chain whose first event in the input is not
+	// seq 1 (an export expected to hold whole chains).
+	RequireGenesis bool
+	// Key is the chain key (audit.hash_chain_key) of keyed chains.
+	Key []byte
+}
 
 // Problem is a tamper finding on one event.
 type Problem struct {
@@ -55,12 +70,16 @@ type VerifyReport struct {
 	Unchained int            `json:"unchained"` // audit events without chain fields
 	Skipped   int            `json:"skipped"`   // lines that are not audit events
 	Chains    []*ChainReport `json:"chains"`
+	OKResult  bool           `json:"ok"`
+
+	opts VerifyOptions
 }
 
-// OK reports whether at least one chained event was read and every chain is
-// complete and intact.
+// OK reports whether at least one chained event was read, every chain is
+// complete and intact, and no unchained audit line was mixed in (unless
+// allowed).
 func (r *VerifyReport) OK() bool {
-	if len(r.Chains) == 0 {
+	if len(r.Chains) == 0 || (r.Unchained > 0 && !r.opts.AllowUnchained) {
 		return false
 	}
 	for _, c := range r.Chains {
@@ -74,6 +93,7 @@ func (r *VerifyReport) OK() bool {
 type chained struct {
 	seq            int64
 	hash, prev, id string
+	alg            string
 	line           int
 	altered        bool
 	time           string
@@ -86,8 +106,11 @@ type chained struct {
 // documents with a "logEvents" or "events" array (subscription payloads,
 // filter-log-events output). Other lines are skipped. Events may come in any
 // order and from several instances.
-func Verify(r io.Reader) (*VerifyReport, error) {
-	rep := &VerifyReport{}
+func Verify(r io.Reader) (*VerifyReport, error) { return VerifyWith(r, VerifyOptions{}) }
+
+// VerifyWith is Verify with options.
+func VerifyWith(r io.Reader, opts VerifyOptions) (*VerifyReport, error) {
+	rep := &VerifyReport{opts: opts}
 	byInst := map[string][]chained{}
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 1<<20), 16<<20)
@@ -104,7 +127,7 @@ func Verify(r io.Reader) (*VerifyReport, error) {
 		}
 		for _, raw := range objs {
 			rep.Events++
-			c, ok := readChained(raw)
+			c, ok := readChained(raw, opts.Key)
 			if !ok {
 				rep.Unchained++
 				continue
@@ -122,9 +145,10 @@ func Verify(r io.Reader) (*VerifyReport, error) {
 	}
 	sort.Strings(insts)
 	for _, inst := range insts {
-		rep.Chains = append(rep.Chains, checkChain(inst, byInst[inst]))
+		rep.Chains = append(rep.Chains, checkChain(inst, byInst[inst], opts))
 	}
 	sort.SliceStable(rep.Chains, func(i, j int) bool { return rep.Chains[i].FirstTime < rep.Chains[j].FirstTime })
+	rep.OKResult = rep.OK()
 	return rep, nil
 }
 
@@ -166,7 +190,7 @@ func extract(line []byte, depth int) [][]byte {
 	return nil
 }
 
-func readChained(raw []byte) (chained, bool) {
+func readChained(raw []byte, key []byte) (chained, bool) {
 	var m map[string]json.RawMessage
 	if json.Unmarshal(raw, &m) != nil {
 		return chained{}, false
@@ -211,8 +235,19 @@ func readChained(raw []byte) (chained, bool) {
 			c.time = fmt.Sprint(ms)
 		}
 	}
-	sum, err := hashObject(raw)
-	c.altered = err != nil || sum != c.hash
+	c.alg = firstString(m, "hash_alg")
+	if c.alg == "" {
+		c.alg = HashSHA256
+	}
+	var k []byte
+	if c.alg == HashHMACSHA256 {
+		if len(key) == 0 {
+			return c, true
+		}
+		k = key
+	}
+	sum, err := hashObject(raw, k)
+	c.altered = err != nil || sum != c.hash || (c.alg != HashSHA256 && c.alg != HashHMACSHA256)
 	return c, true
 }
 
@@ -226,7 +261,7 @@ func firstString(m map[string]json.RawMessage, keys ...string) string {
 	return ""
 }
 
-func checkChain(inst string, evs []chained) *ChainReport {
+func checkChain(inst string, evs []chained, opts VerifyOptions) *ChainReport {
 	sort.SliceStable(evs, func(i, j int) bool { return evs[i].seq < evs[j].seq })
 	rep := &ChainReport{InstanceID: inst}
 	var uniq []chained
@@ -247,8 +282,16 @@ func checkChain(inst string, evs []chained) *ChainReport {
 	}
 	rep.FirstSeq, rep.LastSeq = uniq[0].seq, uniq[len(uniq)-1].seq
 	rep.FirstTime, rep.LastTime = uniq[0].time, uniq[len(uniq)-1].time
+	if opts.RequireGenesis && rep.FirstSeq != 1 {
+		rep.Problems = append(rep.Problems, Problem{Kind: ProblemStart, Seq: rep.FirstSeq, EventID: uniq[0].id, Line: uniq[0].line})
+	}
 	for i, e := range uniq {
-		if e.altered {
+		switch {
+		case e.alg == HashHMACSHA256 && len(opts.Key) == 0:
+			rep.Problems = append(rep.Problems, Problem{Kind: ProblemKey, Seq: e.seq, EventID: e.id, Line: e.line})
+		case e.alg == HashSHA256 && len(opts.Key) > 0:
+			rep.Problems = append(rep.Problems, Problem{Kind: ProblemUnkeyed, Seq: e.seq, EventID: e.id, Line: e.line})
+		case e.altered:
 			rep.Problems = append(rep.Problems, Problem{Kind: ProblemAltered, Seq: e.seq, EventID: e.id, Line: e.line})
 		}
 		if i == 0 {
@@ -300,6 +343,9 @@ func (r *VerifyReport) WriteText(w io.Writer) {
 		for _, p := range c.Problems {
 			fmt.Fprintf(w, "  %s: seq %d, event %s, line %d\n", p.Kind, p.Seq, p.EventID, p.Line)
 		}
+	}
+	if r.Unchained > 0 && len(r.Chains) > 0 && !r.opts.AllowUnchained {
+		fmt.Fprintf(w, "FAILED: %d audit line(s) without chain members among chained ones (injected lines? -allow-unchained to accept)\n", r.Unchained)
 	}
 	if len(r.Chains) == 0 {
 		fmt.Fprintln(w, "no hash-chained audit event found (audit.hash_chain: true?)")

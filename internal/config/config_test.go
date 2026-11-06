@@ -688,3 +688,20 @@ func TestFolderWarnings(t *testing.T) {
 		t.Fatalf("no EuroDNS provider: %q", fw(c))
 	}
 }
+
+func TestAuditChainKey(t *testing.T) {
+	key := strings.Repeat("ab", 32)
+	c, err := Parse([]byte(base+"\naudit: {hash_chain: true}\n"), env(map[string]string{"EURODNS_API_KEY": "x", EnvAuditChainKey: key}))
+	if err != nil || len(c.Audit.HashChainKey) != 32 {
+		t.Fatalf("key: %v", err)
+	}
+	if _, err := Parse([]byte(base), env(map[string]string{"EURODNS_API_KEY": "x", EnvAuditChainKey: key})); err == nil || !strings.Contains(err.Error(), "hash_chain") {
+		t.Fatalf("key without chain: %v", err)
+	}
+	if _, err := Parse([]byte(base+"\naudit: {hash_chain: true}\n"), env(map[string]string{"EURODNS_API_KEY": "x", EnvAuditChainKey: "short"})); err == nil {
+		t.Fatal("short key accepted")
+	}
+	if _, err := Parse([]byte(base+"\naudit: {hash_chain_key: x}\n"), env(map[string]string{"EURODNS_API_KEY": "x"})); err == nil {
+		t.Fatal("key in the file accepted")
+	}
+}

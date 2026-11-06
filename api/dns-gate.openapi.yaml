@@ -2073,8 +2073,8 @@ components:
         auth_method:
           type: string
           enum: [oidc, oidc-session, saml-session, gate-token, token-exchange, api-key, virtual-key]
-        source_ip: { type: string }
-        user_agent: { type: string, maxLength: 256 }
+        source_ip: { type: string, description: "Client address. Served to policy.read holders only." }
+        user_agent: { type: string, maxLength: 256, description: "Client user agent. Served to policy.read holders only." }
         teams: { type: array, items: { type: string } }
         action: { type: string }
         zone: { type: string }

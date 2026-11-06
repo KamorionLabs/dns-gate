@@ -544,7 +544,7 @@ func (a *Authenticator) ClientIP(r *http.Request) netip.Addr {
 	if !a.isTrusted(peer) {
 		return peer
 	}
-	hops := strings.Split(r.Header.Get("X-Forwarded-For"), ",")
+	hops := strings.Split(strings.Join(r.Header.Values("X-Forwarded-For"), ","), ",")
 	for i := len(hops) - 1; i >= 0; i-- {
 		ip, err := netip.ParseAddr(strings.TrimSpace(hops[i]))
 		if err != nil {

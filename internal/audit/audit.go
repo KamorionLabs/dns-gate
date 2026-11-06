@@ -54,6 +54,10 @@ type Event struct {
 	Changes         []uiapi.Change   `json:"changes,omitempty"`
 	SnapshotID      uiapi.SnapshotID `json:"snapshot_id,omitempty"` // provider snapshot before a write
 	Extra           map[string]any   `json:"extra,omitempty"`
+
+	// captured: the request context was taken when the event was built
+	// (Capture); Prepare must not fill it from the emitting context.
+	captured bool
 }
 
 // Logger records events. Implementations must be safe for concurrent use.
@@ -63,7 +67,8 @@ type Logger interface {
 
 // Prepare completes an event before it is written: time, schema version,
 // event id and the request context (source address, user agent,
-// authentication method) when the event does not carry them. It is
+// authentication method) when the event does not carry them. Events of
+// system actors (gate:*) and captured events take nothing from ctx. It is
 // idempotent, so the same id reaches stdout and the store.
 func Prepare(ctx context.Context, e *Event) {
 	if e.Time.IsZero() {
@@ -75,7 +80,7 @@ func Prepare(ctx context.Context, e *Event) {
 	if e.EventID == "" {
 		e.EventID = NewID(e.Time)
 	}
-	if ri := requestFrom(ctx); ri != nil {
+	if ri := requestFrom(ctx); ri != nil && !e.captured && e.SubjectCategory != "system" {
 		if e.SourceIP == "" {
 			e.SourceIP = ri.sourceIP
 		}
@@ -87,6 +92,17 @@ func Prepare(ctx context.Context, e *Event) {
 		}
 	}
 	e.UserAgent = Truncate(e.UserAgent, MaxUserAgent)
+}
+
+// Capture records the request context of ctx in an event that may be
+// emitted later, under another request (aggregated refusals): Prepare then
+// keeps it instead of filling it from the emitting context. The event id is
+// still assigned when the event is emitted.
+func Capture(ctx context.Context, e *Event) {
+	if ri := requestFrom(ctx); ri != nil {
+		e.SourceIP, e.UserAgent, e.AuthMethod = ri.sourceIP, ri.userAgent, ri.method()
+	}
+	e.captured = true
 }
 
 // NewID returns a UUIDv7 (RFC 9562): 48 bits of Unix milliseconds of t,

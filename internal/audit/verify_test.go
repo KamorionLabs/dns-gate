@@ -5,6 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"math"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -84,7 +87,7 @@ func TestChainTampering(t *testing.T) {
 	m["decision"] = "deny"
 	delete(m, "hash")
 	b, _ := json.Marshal(m)
-	sum, _ := hashObject(b)
+	sum, _ := hashObject(b, nil)
 	m["hash"] = sum
 	b, _ = json.Marshal(m)
 	forged := append([]string(nil), lines...)
@@ -111,7 +114,7 @@ func TestChainTampering(t *testing.T) {
 	g["prev_hash"] = strings.Repeat("a", 64)
 	delete(g, "hash")
 	b, _ = json.Marshal(g)
-	sum, _ = hashObject(b)
+	sum, _ = hashObject(b, nil)
 	g["hash"] = sum
 	b, _ = json.Marshal(g)
 	rep = verify(t, []string{string(b)})
@@ -174,5 +177,135 @@ func TestChainConcurrent(t *testing.T) {
 	rep, err := Verify(&buf)
 	if err != nil || !rep.OK() || rep.Chains[0].Events != 50 || rep.Chains[0].InstanceID != l.InstanceID() {
 		t.Fatalf("%+v %v", rep, err)
+	}
+}
+
+// A duplicated member is ambiguous (decoders keep the first or the last):
+// verify marks the line altered, whichever value the hash covered.
+func TestVerifyRejectsDuplicateKeys(t *testing.T) {
+	lines := chainLines(t, FormatNative, "i-1", 3)
+	for _, forged := range []string{
+		strings.Replace(lines[1], `{`, `{"decision":"deny",`, 1),
+		strings.Replace(lines[1], `"extra":{`, `"extra":{"n":7,`, 1),
+	} {
+		in := append([]string(nil), lines...)
+		in[1] = forged
+		rep := verify(t, in)
+		if rep.OK() || len(rep.Chains[0].Problems) == 0 || rep.Chains[0].Problems[0].Kind != ProblemAltered || rep.Chains[0].Problems[0].Seq != 2 {
+			t.Fatalf("duplicate keys accepted: %+v", rep.Chains[0])
+		}
+	}
+	if _, err := hashObject([]byte(`{"a":1,"a":2}`), nil); err == nil {
+		t.Fatal("hashObject accepts duplicate keys")
+	}
+}
+
+// Audit lines without a chain among chained ones are injected lines.
+func TestVerifyUnchainedAmongChains(t *testing.T) {
+	lines := chainLines(t, FormatNative, "i-1", 2)
+	var buf bytes.Buffer
+	NewJSON(&buf).Log(context.Background(), Event{Action: "applyRRsets", Decision: "allow"})
+	in := append(lines, strings.TrimSpace(buf.String()))
+	if rep := verify(t, in); rep.OK() {
+		t.Fatal("unchained line accepted among chains")
+	}
+	rep, err := VerifyWith(strings.NewReader(strings.Join(in, "\n")), VerifyOptions{AllowUnchained: true})
+	if err != nil || !rep.OK() {
+		t.Fatalf("allow unchained: %+v %v", rep, err)
+	}
+	rep, err = VerifyWith(strings.NewReader(strings.Join(lines[1:], "\n")), VerifyOptions{RequireGenesis: true})
+	if err != nil || rep.OK() {
+		t.Fatalf("require genesis: %+v %v", rep, err)
+	}
+}
+
+// With a key, the chain is an HMAC: recomputing it without the key fails.
+func TestKeyedChain(t *testing.T) {
+	key := bytes.Repeat([]byte{7}, 32)
+	var buf bytes.Buffer
+	l, err := NewJSONWith(&buf, Options{HashChain: true, InstanceID: "i-k", ChainKey: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		l.Log(context.Background(), Event{Action: "applyRRsets", Decision: "allow"})
+	}
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	var m map[string]any
+	_ = json.Unmarshal([]byte(lines[0]), &m)
+	if m["hash_alg"] != HashHMACSHA256 {
+		t.Fatalf("hash_alg %v", m["hash_alg"])
+	}
+	if rep, _ := VerifyWith(strings.NewReader(buf.String()), VerifyOptions{Key: key}); !rep.OK() {
+		t.Fatalf("keyed chain rejected: %+v", rep.Chains[0])
+	}
+	if rep, _ := VerifyWith(strings.NewReader(buf.String()), VerifyOptions{}); rep.OK() {
+		t.Fatal("keyed chain verified without the key")
+	}
+	if rep, _ := VerifyWith(strings.NewReader(buf.String()), VerifyOptions{Key: bytes.Repeat([]byte{8}, 32)}); rep.OK() {
+		t.Fatal("keyed chain verified with another key")
+	}
+	// A forger without the key recomputes plain SHA-256 hashes.
+	m["decision"] = "deny"
+	delete(m, "hash")
+	b, _ := json.Marshal(m)
+	sum, _ := hashObject(b, nil)
+	m["hash"] = sum
+	b, _ = json.Marshal(m)
+	lines[0] = string(b)
+	if rep, _ := VerifyWith(strings.NewReader(strings.Join(lines, "\n")), VerifyOptions{Key: key}); rep.OK() {
+		t.Fatal("forged line accepted")
+	}
+}
+
+type errLog struct{ msgs []string }
+
+func (e *errLog) Write(p []byte) (int, error) { e.msgs = append(e.msgs, string(p)); return len(p), nil }
+
+// A line that cannot be rendered is still written, chained, with
+// render_error, and reported on the error log.
+func TestRenderFailureFallback(t *testing.T) {
+	var buf bytes.Buffer
+	el := &errLog{}
+	l, _ := NewJSONWith(&buf, Options{HashChain: true, InstanceID: `i-"q"`, ErrorLog: slog.New(slog.NewJSONHandler(el, nil))})
+	l.Log(context.Background(), Event{RequestID: "r1", Action: "applyRRsets", Decision: "allow", Extra: map[string]any{"bad": math.NaN()}})
+	l.Log(context.Background(), Event{RequestID: "r2", Action: "applyRRsets", Decision: "allow"})
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], `"render_error"`) || !strings.Contains(lines[0], `"request_id":"r1"`) || len(el.msgs) != 1 {
+		t.Fatalf("fallback: %q, errors %q", lines, el.msgs)
+	}
+	var fb map[string]any
+	_ = json.Unmarshal([]byte(lines[0]), &fb)
+	if err := schema(t).Validate(fb); err != nil {
+		t.Fatalf("fallback line: %v", err)
+	}
+	rep := verify(t, lines)
+	if !rep.OK() || rep.Chains[0].InstanceID != `i-"q"` {
+		t.Fatalf("chain: %+v", rep.Chains)
+	}
+}
+
+// The chained example of docs/AUDIT.md verifies and matches the schema.
+func TestDocumentedExample(t *testing.T) {
+	doc, err := os.ReadFile("../../docs/AUDIT.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(doc)
+	i := strings.Index(s, `{"type":"audit","schema_version":"1","event_id":"01a1b0d2-9a40`)
+	j := strings.Index(s[i:], "\n```")
+	if i < 0 || j < 0 {
+		t.Fatal("example not found")
+	}
+	line := strings.ReplaceAll(s[i:i+j], "\n", "")
+	var m map[string]any
+	if err := json.Unmarshal([]byte(line), &m); err != nil {
+		t.Fatal(err)
+	}
+	if err := schema(t).Validate(m); err != nil {
+		t.Fatal(err)
+	}
+	if rep := verify(t, []string{line}); !rep.OK() {
+		t.Fatalf("%+v", rep.Chains)
 	}
 }

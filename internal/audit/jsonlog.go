@@ -3,6 +3,7 @@ package audit
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -25,14 +26,25 @@ const (
 // GenesisHash is the prev_hash of the first event of a chain.
 const GenesisHash = "0000000000000000000000000000000000000000000000000000000000000000"
 
+// Hash algorithms of a chain (hash_alg).
+const (
+	HashSHA256     = "sha256"      // anyone can recompute the chain
+	HashHMACSHA256 = "hmac-sha256" // keyed: recomputing needs the chain key
+)
+
 // Options configure a JSONLogger.
 type Options struct {
 	// Format is native (default), ecs or ocsf.
 	Format string
-	// HashChain adds instance_id, seq, prev_hash and hash to every line.
+	// HashChain adds instance_id, seq, prev_hash, hash_alg and hash to every
+	// line.
 	HashChain bool
 	// InstanceID names the chain; a new UUIDv7 when empty.
 	InstanceID string
+	// ChainKey makes the chain an HMAC-SHA256 (audit.hash_chain_key).
+	ChainKey []byte
+	// ErrorLog reports lines that could not be rendered.
+	ErrorLog *slog.Logger
 }
 
 // JSONLogger writes one JSON object per line.
@@ -42,9 +54,11 @@ type JSONLogger struct {
 	now    func() time.Time
 	format string
 	chain  bool
+	key    []byte
 	inst   string
 	seq    int64
 	prev   string
+	errLog *slog.Logger
 }
 
 // NewJSON returns a logger writing native lines to w (stdout in production).
@@ -62,7 +76,10 @@ func NewJSONWith(w io.Writer, o Options) (*JSONLogger, error) {
 	default:
 		return nil, fmt.Errorf("audit: unknown format %q (native, ecs or ocsf)", o.Format)
 	}
-	l := &JSONLogger{w: w, now: time.Now, format: o.Format, chain: o.HashChain, inst: o.InstanceID, prev: GenesisHash}
+	if len(o.ChainKey) > 0 && len(o.ChainKey) < 16 {
+		return nil, fmt.Errorf("audit: chain key of %d bytes, at least 16 expected", len(o.ChainKey))
+	}
+	l := &JSONLogger{w: w, now: time.Now, format: o.Format, chain: o.HashChain, key: o.ChainKey, inst: o.InstanceID, prev: GenesisHash, errLog: o.ErrorLog}
 	if l.chain && l.inst == "" {
 		l.inst = NewID(time.Now())
 	}
@@ -77,7 +94,9 @@ func (l *JSONLogger) InstanceID() string {
 	return l.inst
 }
 
-// Log completes the event (Prepare) and writes it.
+// Log completes the event (Prepare) and writes it. A line that cannot be
+// rendered is replaced by a minimal native line with render_error, so that
+// the event and its place in the chain are not lost.
 func (l *JSONLogger) Log(ctx context.Context, e Event) {
 	if e.Time.IsZero() {
 		e.Time = l.now().UTC()
@@ -85,13 +104,19 @@ func (l *JSONLogger) Log(ctx context.Context, e Event) {
 	Prepare(ctx, &e)
 	b, err := l.render(e)
 	if err != nil {
-		return
+		b = l.fallback(e, err)
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.chain {
-		if b, err = l.link(b); err != nil {
-			return
+		linked, err := l.link(b)
+		if err != nil {
+			linked, err = l.link(l.fallback(e, err))
+		}
+		if err != nil {
+			l.report(e, err)
+		} else {
+			b = linked
 		}
 	}
 	_, _ = l.w.Write(append(b, '\n'))
@@ -110,11 +135,48 @@ func (l *JSONLogger) render(e Event) ([]byte, error) {
 	}{"audit", e})
 }
 
+// fallback is the line of an event that could not be rendered: the native
+// identification fields and the error.
+func (l *JSONLogger) fallback(e Event, cause error) []byte {
+	l.report(e, cause)
+	b, err := json.Marshal(struct {
+		Type          string    `json:"type"`
+		SchemaVersion string    `json:"schema_version"`
+		EventID       string    `json:"event_id"`
+		Time          time.Time `json:"time"`
+		RequestID     string    `json:"request_id"`
+		Subject       string    `json:"subject"`
+		Action        string    `json:"action"`
+		Zone          string    `json:"zone,omitempty"`
+		Decision      string    `json:"decision"`
+		Reason        string    `json:"reason,omitempty"`
+		RenderError   string    `json:"render_error"`
+	}{"audit", e.SchemaVersion, e.EventID, e.Time, e.RequestID, e.Subject, e.Action, e.Zone, e.Decision, e.Reason, cause.Error()})
+	if err != nil {
+		return []byte(`{"type":"audit","render_error":"unencodable event"}`)
+	}
+	return b
+}
+
+func (l *JSONLogger) report(e Event, err error) {
+	if l.errLog != nil {
+		l.errLog.Error("audit event not rendered as configured", "event_id", e.EventID, "action", e.Action, "err", err)
+	}
+}
+
 // link appends the chain fields to a rendered object; the caller holds mu.
 func (l *JSONLogger) link(b []byte) ([]byte, error) {
 	seq := l.seq + 1
-	b = appendFields(b, `"instance_id":`+strconv.Quote(l.inst)+`,"seq":`+strconv.FormatInt(seq, 10)+`,"prev_hash":"`+l.prev+`"`)
-	sum, err := hashObject(b)
+	inst, err := json.Marshal(l.inst)
+	if err != nil {
+		return nil, err
+	}
+	alg := HashSHA256
+	if len(l.key) > 0 {
+		alg = HashHMACSHA256
+	}
+	b = appendFields(b, `"instance_id":`+string(inst)+`,"seq":`+strconv.FormatInt(seq, 10)+`,"prev_hash":"`+l.prev+`","hash_alg":"`+alg+`"`)
+	sum, err := hashObject(b, l.key)
 	if err != nil {
 		return nil, err
 	}
@@ -134,9 +196,14 @@ func appendFields(obj []byte, members string) []byte {
 	return append(out, '}')
 }
 
-// hashObject is the SHA-256 (hex) of the canonical form of a JSON object
-// without its "hash" member.
-func hashObject(b []byte) (string, error) {
+// hashObject is the SHA-256 (hex), or the HMAC-SHA256 with key, of the
+// canonical form of a JSON object without its "hash" member. Objects with
+// a duplicated member, at any depth, are refused: decoders disagree on
+// which value counts.
+func hashObject(b []byte, key []byte) (string, error) {
+	if err := noDuplicateKeys(b); err != nil {
+		return "", err
+	}
 	var m map[string]any
 	dec := json.NewDecoder(bytes.NewReader(b))
 	dec.UseNumber()
@@ -148,8 +215,65 @@ func hashObject(b []byte) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if len(key) > 0 {
+		mac := hmac.New(sha256.New, key)
+		mac.Write(c)
+		return hex.EncodeToString(mac.Sum(nil)), nil
+	}
 	sum := sha256.Sum256(c)
 	return hex.EncodeToString(sum[:]), nil
+}
+
+// noDuplicateKeys walks the tokens of a JSON value and fails on an object
+// with the same member twice.
+func noDuplicateKeys(b []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.UseNumber()
+	type frame struct {
+		keys   map[string]bool
+		object bool
+		key    bool // next string token of an object is a key
+	}
+	var stack []*frame
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		var top *frame
+		if n := len(stack); n > 0 {
+			top = stack[n-1]
+		}
+		switch t := tok.(type) {
+		case json.Delim:
+			switch t {
+			case '{', '[':
+				if top != nil && top.object {
+					top.key = true
+				}
+				stack = append(stack, &frame{keys: map[string]bool{}, object: t == '{', key: t == '{'})
+				continue
+			case '}', ']':
+				stack = stack[:len(stack)-1]
+				continue
+			}
+		case string:
+			if top != nil && top.object && top.key {
+				if top.keys[t] {
+					return fmt.Errorf("duplicate member %q", t)
+				}
+				top.keys[t] = true
+				top.key = false
+				continue
+			}
+		}
+		if top != nil && top.object {
+			top.key = true
+		}
+	}
 }
 
 // canonical encodes v with sorted object keys, no insignificant whitespace,
