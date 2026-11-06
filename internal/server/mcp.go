@@ -583,6 +583,7 @@ func (m *mcpServer) addWriteTools(srv *mcp.Server) {
 			return nil, uiapi.PlanResult{}, toolError(err)
 		}
 		m.audit(ctx, req, subj, "apply_rrset_change", p.Zone, "allow", "", withTeam(map[string]any{"plan_id": in.PlanID}, team))
+		withNewHashes(res)
 		res.PlanID, res.Team = in.PlanID, team
 		return nil, *res, nil
 	})

@@ -518,13 +518,20 @@ paths:
         SERVFAIL, REFUSED, a name server answering without authority). An
         RRset that does not exist matches an empty answer, so a deletion can be
         followed too. Alias RRsets (Route53) and EuroDNS APEX RRsets are
-        compared on the addresses of their target, as each resolver resolves
-        it.
+        compared on the addresses of their target: every address answered
+        must be one of the target's (resolved by the gate for the
+        authoritative servers, by the same resolver otherwise), else the
+        answer is `indeterminate`, which never counts as up to date.
+        Authoritative answers must also carry the expected TTL, and cached
+        answers no more TTL left than it. `converged` needs a matching
+        authoritative answer.
 
         Requires dns.read on the RRset, in a zone managed by the gate (never
         an arbitrary name). Results are cached for `propagation.cache_ttl`
         (default 10s) per RRset content; other checks are limited per caller
-        (`propagation.requests_per_minute`, 429). Public resolvers answer from
+        (`propagation.requests_per_minute`, 429) and at most
+        `propagation.max_in_flight` checks run at once (503 `busy`), per
+        instance. Public resolvers answer from
         their cache until the TTL runs out: poll every few seconds, not in a
         tight loop. No audit event is written.
       parameters:
@@ -532,9 +539,12 @@ paths:
           in: query
           required: false
           description: |
-            Content hash just written (the ETag of a PUT, quoted or not), or
-            `absent` after a deletion: `412 precondition` when the RRset of
-            the gate inventory differs.
+            Content hash just written (the ETag of a PUT or `new_hash` of an
+            apply result, quoted or not), or `absent` after a deletion. The
+            gate inventory is a cache of the instance answering: when it
+            differs, the zone is read again from the provider (a few times a
+            minute per caller at most), and `412 precondition` is returned if
+            the RRset still differs.
           schema: { type: string }
       responses:
         "200":
@@ -549,6 +559,7 @@ paths:
         "429": { $ref: "#/components/responses/Error" }
         "501": { $ref: "#/components/responses/Error" }
         "502": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
 
   /api/v1/zones/{zone}/plan:
@@ -2192,14 +2203,15 @@ components:
         cached: { type: boolean, description: "Served from the short cache of an identical check." }
         summary:
           type: object
-          required: [total, match, stale, missing, error, converged, max_ttl_left]
+          required: [total, match, stale, missing, error, indeterminate, converged, max_ttl_left]
           properties:
             total: { type: integer }
             match: { type: integer }
             stale: { type: integer }
             missing: { type: integer }
             error: { type: integer }
-            converged: { type: boolean, description: "Every server that answered has the expected content." }
+            indeterminate: { type: integer, description: "Alias answers whose addresses could not be tied to the target." }
+            converged: { type: boolean, description: "Every server that answered has the expected content, with at least one authoritative match; indeterminate answers prevent it." }
             max_ttl_left: { type: integer, description: "Longest TTL left among the stale and missing answers, in seconds: when those caches expire at the latest." }
         answers: { type: array, items: { $ref: "#/components/schemas/PropagationAnswer" } }
 
@@ -2213,7 +2225,7 @@ components:
         location: { type: string }
         country: { type: string, description: "ISO 3166 code." }
         region: { type: string }
-        status: { type: string, enum: [match, stale, missing, error] }
+        status: { type: string, enum: [match, stale, missing, error, indeterminate] }
         values: { type: array, items: { type: string } }
         cnames: { type: array, items: { type: string }, description: "CNAME chain followed from the name." }
         ttl_left: { type: integer, description: "Remaining TTL of the answer, or of a negative answer (SOA minimum), in seconds." }
@@ -2221,6 +2233,8 @@ components:
         latency_ms: { type: integer }
         tcp: { type: boolean, description: "Answered over TCP after a truncated or failed UDP query." }
         error: { type: string }
+        filtering: { type: boolean, description: "The resolver blocks some names by policy: its negative answers may be a filter decision." }
+        truncated: { type: boolean, description: "Values left out (more than 32) or cut (over 512 bytes)." }
 
     RRsetChange:
       type: object
@@ -2252,6 +2266,7 @@ components:
         new_values: { type: array, items: { type: string } }
         new_alias: { $ref: "#/components/schemas/Alias" }
         new_forward: { $ref: "#/components/schemas/Forward" }
+        new_hash: { type: string, description: "Apply results: content hash of the RRset after a create or update, the `expect` of a propagation check (omitted after a delete: expect `absent`)." }
 
     PlanRequest:
       type: object

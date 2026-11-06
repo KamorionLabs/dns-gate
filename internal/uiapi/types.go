@@ -217,6 +217,9 @@ type Change struct {
 	NewValues  []string     `json:"new_values,omitempty"`
 	NewAlias   *dns.Alias   `json:"new_alias,omitempty"`
 	NewForward *dns.Forward `json:"new_forward,omitempty"`
+	// NewHash is the content hash of the RRset after an applied create or
+	// update (apply results only): the expect of a propagation check.
+	NewHash string `json:"new_hash,omitempty"`
 }
 
 // AuditPage is a page of audit entries, newest first.

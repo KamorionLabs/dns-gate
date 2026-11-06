@@ -16,6 +16,7 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/propagation"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
+	"github.com/KamorionLabs/dns-gate/internal/zonewrite"
 )
 
 type fakePropagator struct {
@@ -52,6 +53,10 @@ func (n nsEngine) RRset(ctx context.Context, s *identity.Subject, zone string, k
 		return &uiapi.RRset{Host: dns.Apex, Type: "NS", TTL: 172800, Values: []string{"ns1.dns.test.", "ns2.dns.test."}, Status: uiapi.StatusForeign}, nil
 	}
 	return n.fakeEngine.RRset(ctx, s, zone, key)
+}
+
+func (n nsEngine) ReadZone(context.Context, *identity.Subject, string, string) (*dns.Zone, int64, error) {
+	return nil, 0, &zonewrite.Error{Reason: zonewrite.ReasonUpstream, Message: "provider unavailable"}
 }
 
 func propagationEnv(t *testing.T) (*env, *fakePropagator) {
@@ -209,4 +214,73 @@ func (s staticLookup) LookupNetIP(_ context.Context, _, host string) ([]netip.Ad
 		return []netip.Addr{a}, nil
 	}
 	return nil, &net.DNSError{Err: "no such host", Name: host, IsNotFound: true}
+}
+
+type staleEngine struct {
+	nsEngine
+	mu     sync.Mutex
+	fresh  bool
+	reads  int
+	values []string
+}
+
+func (s *staleEngine) RRset(ctx context.Context, subj *identity.Subject, zone string, key dns.Key) (*uiapi.RRset, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if key == (dns.Key{Host: "www", Type: "A"}) && s.fresh {
+		return &uiapi.RRset{Host: "www", Type: "A", TTL: 600, Values: s.values, Status: uiapi.StatusManaged}, nil
+	}
+	return s.nsEngine.RRset(ctx, subj, zone, key)
+}
+
+func (s *staleEngine) ReadZone(ctx context.Context, subj *identity.Subject, zone, op string) (*dns.Zone, int64, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reads++
+	s.fresh = true
+	return &dns.Zone{Name: zone}, 1, nil
+}
+
+func TestPropagationExpectRereadsProvider(t *testing.T) {
+	e, f := propagationEnv(t)
+	eng := &staleEngine{nsEngine: nsEngine{e.engine}, values: []string{"192.0.2.99"}}
+	e.server.cfg.Engine = eng
+	tok := e.token("writer")
+	written := dns.ContentHash(dns.RRset{Key: dns.Key{Host: "www", Type: "A"}, TTL: 600, Values: []string{"192.0.2.99"}})
+	r := e.do(t, "GET", "/api/v1/zones/example.com/rrsets/www/A/propagation?expect="+written, tok, "", nil)
+	if r.StatusCode != 200 || eng.reads != 1 || f.last(t).Hash != written || f.last(t).Expected.Values[0] != "192.0.2.99" {
+		t.Fatalf("stale inventory: %d, %d reads, %+v", r.StatusCode, eng.reads, f.last(t))
+	}
+	if r := e.do(t, "GET", "/api/v1/zones/example.com/rrsets/www/A/propagation?expect="+written, tok, "", nil); r.StatusCode != 200 || eng.reads != 1 {
+		t.Fatalf("fresh inventory read again: %d, %d reads", r.StatusCode, eng.reads)
+	}
+	for i := range 10 {
+		if r := e.do(t, "GET", "/api/v1/zones/example.com/rrsets/www/A/propagation?expect=0123", tok, "", nil); r.StatusCode != 412 {
+			t.Fatalf("other content %d: %d", i, r.StatusCode)
+		}
+	}
+	if eng.reads > 1+rereadsPerMinute {
+		t.Errorf("%d provider reads for one subject", eng.reads)
+	}
+}
+
+func TestApplyReturnsNewHashes(t *testing.T) {
+	res := &uiapi.PlanResult{Changes: []uiapi.Change{
+		{Op: "create", Host: "app", Type: "CNAME", NewTTL: 600, NewValues: []string{"target.example.net."}},
+		{Op: "update", Host: "@", Type: "A", NewAlias: &dns.Alias{Target: "d111.cloudfront.net.", HostedZoneID: "Z2FDTNDATAQYW2"}},
+		{Op: "delete", Host: "old", Type: "A", OldTTL: 600, OldValues: []string{"192.0.2.1"}},
+	}}
+	withNewHashes(res)
+	want := dns.ContentHash(dns.RRset{TTL: 600, Values: []string{"target.example.net."}})
+	if res.Changes[0].NewHash != want || res.Changes[1].NewHash != dns.ContentHash(dns.RRset{Alias: res.Changes[1].NewAlias}) || res.Changes[2].NewHash != "" {
+		t.Fatalf("hashes: %+v", res.Changes)
+	}
+}
+
+func TestPropagationBusy(t *testing.T) {
+	e, f := propagationEnv(t)
+	f.err = propagation.ErrBusy
+	if r := e.do(t, "GET", "/api/v1/zones/example.com/rrsets/www/A/propagation", e.token("writer"), "", nil); r.StatusCode != 503 || r.Header.Get("Retry-After") == "" {
+		t.Fatalf("busy: %d", r.StatusCode)
+	}
 }
