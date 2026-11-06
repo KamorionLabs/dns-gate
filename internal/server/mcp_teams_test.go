@@ -191,6 +191,9 @@ func TestMCPTransfers(t *testing.T) {
 	if res := call(t, cs, "transfer_list", map[string]any{"status": "done"}, nil); !res.IsError {
 		t.Fatal("bad status accepted")
 	}
+	if res := call(t, cs, "transfer_list", map[string]any{"status": "applying"}, &page); res.IsError || page.Transfers[0].Status != uiapi.TransferApplying {
+		t.Fatalf("applying filter: %s %+v", errText(res), page)
+	}
 	if res := call(t, cs, "transfer_approve", map[string]any{"id": "tr-1", "comment": "ok"}, &tr); res.IsError || tr.Status != uiapi.TransferApplied || tr.DecisionComment != "ok" {
 		t.Fatalf("approve: %s %+v", errText(res), tr)
 	}
@@ -200,6 +203,10 @@ func TestMCPTransfers(t *testing.T) {
 	ft.fail = &zonewrite.Error{Reason: zonewrite.ReasonPrecondition, Message: "www A changed since the request"}
 	if res := call(t, cs, "transfer_approve", map[string]any{"id": "tr-1"}, nil); !res.IsError || !strings.Contains(errText(res), "precondition: www A changed since the request (transfer tr-1 is failed)") {
 		t.Fatalf("failed apply: %s", errText(res))
+	}
+	ft.fail, ft.failStatus = &zonewrite.Error{Reason: zonewrite.ReasonLocked, Message: "zone locked"}, uiapi.TransferApplying
+	if res := call(t, cs, "transfer_approve", map[string]any{"id": "tr-1"}, nil); !res.IsError || !strings.Contains(errText(res), "approved and applying: the gate retries it in the background") {
+		t.Fatalf("applying: %s", errText(res))
 	}
 
 	ro := mcpTeamsEnv(t, false)

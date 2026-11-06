@@ -24,7 +24,7 @@ type getTeamIn struct {
 
 type transferListIn struct {
 	Zone   string `json:"zone,omitempty" jsonschema:"managed zone; all the transfers you may see when omitted"`
-	Status string `json:"status,omitempty" jsonschema:"proposed (the inbox), approved, applied, rejected, expired or failed"`
+	Status string `json:"status,omitempty" jsonschema:"proposed (the inbox), applying (approved, being applied or retried), applied, rejected, expired or failed"`
 	Limit  int    `json:"limit,omitempty" jsonschema:"1 to 500, default 50"`
 	Cursor string `json:"cursor,omitempty"`
 }
@@ -108,7 +108,7 @@ func (m *mcpServer) ownershipNote(subj *identity.Subject, zone string, unmanaged
 		if len(subj.Teams) > 0 {
 			mine = strings.Join(subj.Teams, ", ")
 		}
-		return fmt.Sprintf("owned by team %s: you are not a member (your teams: %s); ask for a transfer (transfer_propose) approved by a member of team %s", rs.Owner, mine, rs.Owner)
+		return fmt.Sprintf("owned by team %s: you are not a member (your teams: %s); ask for a transfer (transfer_propose), approved by another person who may write it through team %s or holds dns.ownership.approve on it", rs.Owner, mine, rs.Owner)
 	case !m.s.cfg.Authz.AllowRRset(subj, policy.ActionRecordWrite, zone, dns.Key{Host: rs.Host, Type: rs.Type}):
 		return fmt.Sprintf("owned by team %s, one of your teams, but your roles do not grant dns.record.write on it", rs.Owner)
 	}
@@ -222,7 +222,7 @@ func (m *mcpServer) addTeamTools(srv *mcp.Server) {
 	}
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "transfer_list",
-		Description: "List the ownership transfer requests you may see, newest first: status proposed is the inbox (can_decide marks the ones you may approve or reject). A transfer is approved by a member of the owner team allowed to write in the zone, or a dns.ownership.approve holder, never by its requester; a team rename by another policy.approve holder.",
+		Description: "List the ownership transfer requests you may see, newest first: status proposed is the inbox (can_decide marks the ones you may approve or reject). A transfer is approved by another person (never the requester, even under another identity; humans only unless the gate allows machine approvers) who, for every RRset of the request, may write it through the roles of the owner team or holds dns.ownership.approve on it; a team rename by another policy.approve holder with dns.ownership.approve on every RRset of the team. Status applying: approved and being applied, retried by the gate in the background (error holds the last transient error).",
 		Annotations: readOnly("List transfers"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in transferListIn) (*mcp.CallToolResult, uiapi.TransferPage, error) {
 		subj, err := m.subject(ctx, req)
@@ -231,9 +231,9 @@ func (m *mcpServer) addTeamTools(srv *mcp.Server) {
 		}
 		q := store.TransferQuery{Zone: normZoneArg(in.Zone), Status: in.Status, Cursor: in.Cursor, Limit: 50}
 		switch q.Status {
-		case "", uiapi.TransferProposed, uiapi.TransferApproved, uiapi.TransferApplied, uiapi.TransferRejected, uiapi.TransferExpired, uiapi.TransferFailed:
+		case "", uiapi.TransferProposed, uiapi.TransferApplying, uiapi.TransferApplied, uiapi.TransferRejected, uiapi.TransferExpired, uiapi.TransferFailed:
 		default:
-			return nil, uiapi.TransferPage{}, errors.New("status must be proposed, approved, applied, rejected, expired or failed")
+			return nil, uiapi.TransferPage{}, errors.New("status must be proposed, applying, applied, rejected, expired or failed")
 		}
 		if in.Limit > 0 {
 			q.Limit = min(in.Limit, 500)
@@ -257,7 +257,7 @@ type teamsOut struct {
 func (m *mcpServer) addTransferWriteTools(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "transfer_propose",
-		Description: "Ask for the transfer of RRsets of a zone to another team: every RRset must be owned by the same team (or reserved for it by a tombstone). Needs dns.record.write or dns.ownership.approve on the zone, and membership of either team unless you hold dns.ownership.approve. Nothing moves until a second person approves (transfer_approve): a member of the owner team allowed to write in the zone, or a dns.ownership.approve holder. A comment is required.",
+		Description: "Ask for the transfer of RRsets of a zone to another team: every RRset must be owned by the same team (or reserved for it by a tombstone). For every RRset, you must be allowed to write it through the roles of one of the two teams, or hold dns.ownership.approve on it. Nothing moves until another person approves (transfer_approve): someone who, for every RRset, may write it through the roles of the owner team or holds dns.ownership.approve on it; humans only unless the gate allows machine approvers. A comment is required.",
 		Annotations: &mcp.ToolAnnotations{Title: "Propose a transfer", DestructiveHint: ptr(false), IdempotentHint: false, OpenWorldHint: ptr(false)},
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in transferProposeIn) (*mcp.CallToolResult, uiapi.Transfer, error) {
 		subj, err := m.subject(ctx, req)
@@ -300,6 +300,9 @@ func (m *mcpServer) addTransferWriteTools(srv *mcp.Server) {
 			if err != nil {
 				m.audit(ctx, req, subj, tool, "", "deny", reasonOf(err), map[string]any{"transfer_id": in.ID})
 				if ze, ok := zonewrite.AsError(err); ok && t != nil {
+					if t.Status == uiapi.TransferApplying {
+						return nil, uiapi.Transfer{}, fmt.Errorf("%s: %s (transfer %s is approved and applying: the gate retries it in the background, check it later with transfer_list)", ze.Reason, ze.Message, t.ID)
+					}
 					return nil, uiapi.Transfer{}, fmt.Errorf("%s: %s (transfer %s is %s)", ze.Reason, ze.Message, t.ID, t.Status)
 				}
 				return nil, uiapi.Transfer{}, toolError(err)
@@ -310,7 +313,7 @@ func (m *mcpServer) addTransferWriteTools(srv *mcp.Server) {
 	}
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "transfer_approve",
-		Description: "Approve a proposed transfer (transfer_list, can_decide): the RRsets move to the target team at once, if none changed since the request; otherwise the transfer fails. Allowed to a member of the owner team who may write in the zone, or a dns.ownership.approve holder, never to the requester; a team rename needs another policy.approve holder. Confirm with the user first.",
+		Description: "Approve a proposed transfer (transfer_list, can_decide): the RRsets move to the target team at once, if none changed since the request; otherwise the transfer fails. When the zone is locked or the store or provider is unavailable, the transfer stays applying and the gate retries it in the background. Allowed to another person than the requester (even under another identity), humans only unless the gate allows machine approvers, who for every RRset may write it through the roles of the owner team or holds dns.ownership.approve on it; a team rename needs another policy.approve holder with dns.ownership.approve on every RRset of the team. Confirm with the user first.",
 		Annotations: &mcp.ToolAnnotations{Title: "Approve a transfer", DestructiveHint: ptr(true), IdempotentHint: false, OpenWorldHint: ptr(false)},
 	}, decide(true))
 	mcp.AddTool(srv, &mcp.Tool{

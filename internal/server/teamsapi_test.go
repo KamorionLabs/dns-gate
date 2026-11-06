@@ -138,6 +138,8 @@ type fakeTransfers struct {
 	proposed []uiapi.TransferProposal
 	subjects []*identity.Subject
 	fail     error
+	// failStatus is the status of the transfer returned with fail (failed by default).
+	failStatus string
 }
 
 func (f *fakeTransfers) ProposeTransfer(ctx context.Context, s *identity.Subject, zone string, req uiapi.TransferProposal) (*uiapi.Transfer, error) {
@@ -163,7 +165,11 @@ func (f *fakeTransfers) ListTransfers(ctx context.Context, s *identity.Subject, 
 
 func (f *fakeTransfers) DecideTransfer(ctx context.Context, s *identity.Subject, id string, approve bool, comment string) (*uiapi.Transfer, error) {
 	if f.fail != nil {
-		return &uiapi.Transfer{ID: id, Status: uiapi.TransferFailed, Error: "changed"}, f.fail
+		st := uiapi.TransferFailed
+		if f.failStatus != "" {
+			st = f.failStatus
+		}
+		return &uiapi.Transfer{ID: id, Status: st, Error: "changed"}, f.fail
 	}
 	st := uiapi.TransferRejected
 	if approve {
