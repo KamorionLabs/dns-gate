@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -20,6 +21,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1047,5 +1049,32 @@ func TestHTTPReqValuesPerAuthor(t *testing.T) {
 	hdr := map[string]string{"X-Api-User": k1.ID, "X-Api-Key": k1.Key}
 	if status, b := e.do("POST", "/acme/acme-dns/update", hdr, `{"subdomain":"example.com", "txt": "`+challenge("d")+`"}`); status != 409 {
 		t.Fatalf("per-author cap across protocols: %d %s", status, b)
+	}
+}
+
+// Concurrent first uses of new subdomains cannot exceed the registration
+// cap: it is checked under the zone lock.
+func TestACMERegistrationCapConcurrent(t *testing.T) {
+	e := newACMEEnvWith(t, "acme: {max_registrations: 3}\n")
+	k := e.createKey(`{"name": "k", "team": "web", "role": "acme"}`)
+	hdr := map[string]string{"X-Api-User": k.ID, "X-Api-Key": k.Key}
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			d := fmt.Sprintf("n%d.example.com", i)
+			req, _ := http.NewRequest("POST", e.gate.URL+"/acme/acme-dns/update", strings.NewReader(`{"subdomain":"`+d+`", "txt": "`+challenge(d)+`"}`))
+			for k, v := range hdr {
+				req.Header.Set(k, v)
+			}
+			if resp, err := http.DefaultClient.Do(req); err == nil {
+				resp.Body.Close()
+			}
+		}(i)
+	}
+	wg.Wait()
+	if regs := e.registrations(k.ID); len(regs) > 3 {
+		t.Fatalf("%d registrations beyond the cap of 3", len(regs))
 	}
 }

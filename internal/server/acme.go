@@ -166,18 +166,15 @@ func (s *Server) handleHTTPReq(w http.ResponseWriter, r *http.Request, present b
 		return
 	}
 	owner, sub := acmeOwner(subj), "httpreq:"+t.domain
-	if present {
-		if _, err := s.cfg.APIKeys.GetACMERegistration(r.Context(), owner, sub); errors.Is(err, store.ErrNotFound) {
-			if ae := s.acmeRoom(r.Context(), owner); ae != nil {
-				writeError(w, ae.status, ae.reason, ae.message)
-				return
-			}
-		}
-	}
 	err = s.acmeWrite(r.Context(), subj, t, op, func(vals []string) ([]string, func(context.Context) error, error) {
 		now := s.now().UTC()
 		led, err := s.cfg.APIKeys.GetACMERegistration(r.Context(), owner, sub)
 		switch {
+		case errors.Is(err, store.ErrNotFound) && present:
+			if ae := s.acmeRoom(r.Context(), owner); ae != nil {
+				return nil, nil, ae
+			}
+			led = &store.ACMERegistration{KeyID: owner, Subdomain: sub, Domain: t.domain, Origin: store.ACMEOriginHTTPReq, CreatedAt: now}
 		case errors.Is(err, store.ErrNotFound):
 			led = &store.ACMERegistration{KeyID: owner, Subdomain: sub, Domain: t.domain, Origin: store.ACMEOriginHTTPReq, CreatedAt: now}
 		case err != nil:
@@ -485,12 +482,6 @@ func (s *Server) handleACMEDNSUpdate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad_subdomain", "message": msg})
 		return
 	}
-	if reg.Version == 0 {
-		if ae := s.acmeRoom(r.Context(), reg.KeyID); ae != nil {
-			writeJSON(w, ae.status, map[string]string{"error": ae.reason, "message": ae.message})
-			return
-		}
-	}
 	err := s.acmeWrite(r.Context(), subj, t, op, func(vals []string) ([]string, func(context.Context) error, error) {
 		cur := *reg
 		fresh, err := s.cfg.APIKeys.GetACMERegistration(r.Context(), reg.KeyID, reg.Subdomain)
@@ -501,6 +492,10 @@ func (s *Server) handleACMEDNSUpdate(w http.ResponseWriter, r *http.Request) {
 			return nil, nil, err
 		case reg.Version > 0:
 			return nil, nil, &acmeError{http.StatusConflict, "conflict", "the registration was removed meanwhile"}
+		default:
+			if ae := s.acmeRoom(r.Context(), reg.KeyID); ae != nil {
+				return nil, nil, ae
+			}
 		}
 		if slices.Contains(vals, req.TXT) && !slices.Contains(cur.Values, req.TXT) {
 			return nil, nil, errValueTaken
@@ -568,7 +563,8 @@ func (s *Server) acmeRegistration(ctx context.Context, subj *identity.Subject, s
 }
 
 // acmeRoom refuses a new registration (or httpreq ledger) beyond
-// acme.max_registrations for its owner.
+// acme.max_registrations for its owner. The ACME endpoints call it under
+// the zone lock, right before the write the registration follows.
 func (s *Server) acmeRoom(ctx context.Context, owner string) *acmeError {
 	regs, err := s.cfg.APIKeys.ListACMERegistrations(ctx, owner)
 	if err != nil {
