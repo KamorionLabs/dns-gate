@@ -272,7 +272,8 @@ func validateManagedFamilies(v *verrs, c *config.Config, d uiapi.PolicyDocument,
 			continue
 		}
 		fams = append(fams, t.Prefix)
-		f := config.TeamFamily{Key: config.TeamFromKey(t.Claim, t.Regex, t.Prefix), Prefix: t.Prefix, At: fmt.Sprintf("bindings[%d].team_from", i)}
+		f := config.TeamFamily{Key: config.TeamFromKey(t.Claim, t.Regex, t.Prefix), Prefix: t.Prefix, At: fmt.Sprintf("bindings[%d].team_from", i),
+			Issuers: managedIssuers(c, d, b)}
 		for _, o := range known {
 			if _, _, overlap := config.OverlappingFamilies([]config.TeamFamily{o, f}); overlap {
 				v.add(f.At, "prefix %q overlaps the prefix %q of %s: families of teams derived from claims must not overlap", f.Prefix, o.Prefix, o.At)
@@ -280,6 +281,15 @@ func validateManagedFamilies(v *verrs, c *config.Config, d uiapi.PolicyDocument,
 			}
 		}
 		known = append(known, f)
+		var same []config.TeamFamily
+		for _, o := range known {
+			if o.Key == f.Key {
+				same = append(same, o)
+			}
+		}
+		if _, issuers, mixed := config.MixedIssuerFamily(same); mixed {
+			v.add(f.At, "the family %s* derives teams from the claims of several issuers (%s): give each issuer its own prefix", f.Prefix, strings.Join(issuers, ", "))
+		}
 	}
 	if d.Delegated != nil {
 		for _, b := range d.Delegated.Bindings {
@@ -323,6 +333,24 @@ func validateManagedFamilies(v *verrs, c *config.Config, d uiapi.PolicyDocument,
 			inFamily(fmt.Sprintf("virtual_keys[%d].teams[%d]", i, j), t)
 		}
 	}
+}
+
+// managedIssuers returns the issuers of the subjects of a managed binding
+// and of the members of its groups (base or managed).
+func managedIssuers(c *config.Config, d uiapi.PolicyDocument, b uiapi.Binding) []string {
+	set := map[string]bool{}
+	for _, m := range b.Subjects {
+		set[m.Issuer] = true
+	}
+	for _, g := range b.Groups {
+		for _, m := range c.Groups[g].Members {
+			set[m.Issuer] = true
+		}
+		for _, m := range d.Groups[g].Members {
+			set[m.Issuer] = true
+		}
+	}
+	return sortedKeys(set)
 }
 
 func (t *teamRefs) hasMembers(team string) bool {

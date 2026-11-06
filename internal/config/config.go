@@ -1279,6 +1279,8 @@ type TeamFamily struct {
 	Key    string
 	Prefix string
 	At     string
+	// Issuers are the issuers whose subjects the family derives teams for.
+	Issuers []string
 }
 
 // TeamFromKey identifies a team_from derivation.
@@ -1292,20 +1294,59 @@ func (c *Config) TeamFamilyList() []TeamFamily {
 	var out []TeamFamily
 	for i, b := range c.Bindings {
 		if t := b.TeamFrom; t != nil {
-			out = append(out, TeamFamily{TeamFromKey(t.Claim, t.Regex, t.Prefix), t.Prefix, fmt.Sprintf("bindings[%d].team_from", i)})
+			out = append(out, TeamFamily{TeamFromKey(t.Claim, t.Regex, t.Prefix), t.Prefix, fmt.Sprintf("bindings[%d].team_from", i), c.SubjectIssuers(b.Subjects, b.Groups)})
 		}
 	}
 	for i, d := range c.Policy.Delegations {
 		if t := d.Allow.Teams.FromSubject; t != nil {
-			out = append(out, TeamFamily{TeamFromKey(t.Claim, t.Regex, t.Prefix), t.Prefix, fmt.Sprintf("policy.delegations[%d].allow.teams.from_subject", i)})
+			out = append(out, TeamFamily{TeamFromKey(t.Claim, t.Regex, t.Prefix), t.Prefix, fmt.Sprintf("policy.delegations[%d].allow.teams.from_subject", i), c.SubjectIssuers(d.Allow.BindingSubjects, nil)})
 		}
 	}
 	for _, is := range c.AllIssuers() {
 		if is.TeamClaim != "" {
-			out = append(out, TeamFamily{"team_claim of issuer " + is.Name, is.TeamClaimPrefix, "issuer " + is.Name + " team_claim_prefix"})
+			out = append(out, TeamFamily{"team_claim of issuer " + is.Name, is.TeamClaimPrefix, "issuer " + is.Name + " team_claim_prefix", []string{is.Name}})
 		}
 	}
 	return out
+}
+
+// SubjectIssuers returns the issuers of subject matchers and of the members
+// of groups of the file, sorted.
+func (c *Config) SubjectIssuers(subjects []Subject, groups []string) []string {
+	set := map[string]bool{}
+	for _, m := range subjects {
+		set[m.Issuer] = true
+	}
+	for _, g := range groups {
+		for _, m := range c.Groups[g].Members {
+			set[m.Issuer] = true
+		}
+	}
+	return sortedNames(set)
+}
+
+// MixedIssuerFamily reports a family (one derivation) that derives teams
+// for the subjects of several issuers: the same claim value on two
+// issuers would then give two different people or pipelines one team.
+func MixedIssuerFamily(fams []TeamFamily) (TeamFamily, []string, bool) {
+	byKey := map[string]map[string]bool{}
+	first := map[string]TeamFamily{}
+	var order []string
+	for _, f := range fams {
+		if byKey[f.Key] == nil {
+			byKey[f.Key], first[f.Key] = map[string]bool{}, f
+			order = append(order, f.Key)
+		}
+		for _, is := range f.Issuers {
+			byKey[f.Key][is] = true
+		}
+	}
+	for _, k := range order {
+		if len(byKey[k]) > 1 {
+			return first[k], sortedNames(byKey[k]), true
+		}
+	}
+	return TeamFamily{}, nil, false
 }
 
 // TeamFamilies returns the prefixes of the families of TeamFamilyList.
@@ -1364,6 +1405,9 @@ func (c *Config) validateTeamFamilies(add func(string, ...any)) {
 		if is.TeamClaim != "" && is.TeamClaimPrefix == "" {
 			add("issuer %s: team_claim_prefix is required with team_claim once a teams block exists (the teams of a claim form their own family)", is.Name)
 		}
+	}
+	if f, issuers, ok := MixedIssuerFamily(c.TeamFamilyList()); ok {
+		add("%s: the family %s* derives teams from the claims of several issuers (%s): give each issuer its own prefix", f.At, f.Prefix, strings.Join(issuers, ", "))
 	}
 	if a, b, ok := OverlappingFamilies(c.TeamFamilyList()); ok {
 		add("%s: prefix %q overlaps the prefix %q of %s: families of teams derived from claims must not overlap", a.At, a.Prefix, b.Prefix, b.At)

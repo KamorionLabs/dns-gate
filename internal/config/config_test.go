@@ -504,3 +504,21 @@ func TestSecondApproverNeedsPersonIssuers(t *testing.T) {
 		t.Fatalf("no issuer yields humans: %v", err)
 	}
 }
+
+func TestTeamFamilyFromOneIssuer(t *testing.T) {
+	e := env(map[string]string{"EURODNS_API_KEY": "k"})
+	issuer := "  - name: other\n    issuer: https://idp.example.org\n    audiences: [dns-gate]\nroles:"
+	fam := func(issuer string) string {
+		return "  - role: writer\n    team_from: {claim: sub, regex: \"^repo:acme/([a-z0-9-]+):.*$\", prefix: gh-}\n    subjects:\n      - issuer: " + issuer + "\n        claims: {sub: \"repo:acme/*\"}\n"
+	}
+	doc := strings.Replace(base, "roles:", issuer, 1) + fam("ci") + fam("other")
+	if _, err := Parse([]byte(doc), e); err != nil {
+		t.Fatalf("migration mode: %v", err)
+	}
+	if _, err := Parse([]byte(doc+"teams:\n  web: {}\n"), e); err == nil || !strings.Contains(err.Error(), "several issuers") {
+		t.Fatalf("one family fed by two issuers: %v", err)
+	}
+	if _, err := Parse([]byte(strings.Replace(base, "roles:", issuer, 1)+fam("ci")+fam("ci")+"teams:\n  web: {}\n"), e); err != nil {
+		t.Fatalf("one family, one issuer: %v", err)
+	}
+}

@@ -169,6 +169,7 @@ func TestDerivedTeamCannotJoinDeclaredTeam(t *testing.T) {
 
 func TestValidateManagedTeamFamilies(t *testing.T) {
 	c := teamsConfig(true)
+	c.Issuers = append(c.Issuers, config.Issuer{Name: "other", Issuer: "https://idp.example.org"})
 	base := BaseDocument(c)
 	cases := map[string]struct {
 		mut  func(*uiapi.PolicyDocument)
@@ -179,6 +180,10 @@ func TestValidateManagedTeamFamilies(t *testing.T) {
 		}, "bindings[2].team_from"},
 		"managed family overlapping a base family": {func(d *uiapi.PolicyDocument) {
 			d.Bindings = append(d.Bindings, uiapi.Binding{Role: "web-writer", TeamFrom: &uiapi.TeamFrom{Claim: "sub", Regex: "^(.+)$", Prefix: "gh-x-"}, Groups: []string{"operators"}})
+		}, "bindings[2].team_from"},
+		"managed binding of a base family on another issuer": {func(d *uiapi.PolicyDocument) {
+			d.Bindings = append(d.Bindings, uiapi.Binding{Role: "web-writer", TeamFrom: &uiapi.TeamFrom{Claim: "repo", Regex: "^acme/(.+)$", Prefix: "gh-"},
+				Subjects: []uiapi.SubjectMatcher{{Issuer: "other", Claims: map[string][]string{"repo": {"acme/x"}}}}})
 		}, "bindings[2].team_from"},
 		"managed team in a family": {func(d *uiapi.PolicyDocument) {
 			d.Teams = map[string]uiapi.Team{"gh-ops": {Members: uiapi.TeamMembers{Groups: []string{"operators"}}}}
