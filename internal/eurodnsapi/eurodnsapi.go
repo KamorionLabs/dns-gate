@@ -39,7 +39,10 @@ type Config struct {
 	Engine    zonewrite.Engine
 	Authz     policy.Authorizer
 	Providers provider.Resolver
-	Log       *slog.Logger
+	// Accounts are the configured providers, for the account-wide
+	// operations (zone profiles) that name no zone.
+	Accounts []provider.Provider
+	Log      *slog.Logger
 }
 
 // Facade serves the EuroDNS-compatible API. Safe for concurrent use.

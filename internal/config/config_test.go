@@ -522,3 +522,33 @@ func TestTeamFamilyFromOneIssuer(t *testing.T) {
 		t.Fatalf("one family, one issuer: %v", err)
 	}
 }
+
+func TestZoneProfileGrantWarning(t *testing.T) {
+	e := env(map[string]string{"EURODNS_API_KEY": "k"})
+	roles := `roles:
+  profiles:
+    rules:
+      - zones: ["*"]
+        actions: [dns.zone.profile]
+  narrow:
+    rules:
+      - zones: [example.com]
+        actions: [dns.zone.profile]
+`
+	c, err := Parse([]byte(strings.Replace(base, "roles:\n", roles, 1)), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var n int
+	for _, w := range c.Warnings {
+		if strings.Contains(w, "dns.zone.profile") {
+			n++
+			if !strings.Contains(w, "roles.narrow") {
+				t.Errorf("warning on the wrong role: %s", w)
+			}
+		}
+	}
+	if n != 1 {
+		t.Fatalf("warnings: %q", c.Warnings)
+	}
+}

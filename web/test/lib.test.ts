@@ -55,3 +55,10 @@ test('reads and dry runs are told apart from writes', () => {
   assert.equal(isRead({ ...base, action: 'saveDnsZone', decision: 'allow' }), false);
   assert.equal(isRead({ ...base, action: 'mcp.apply_rrset_change', decision: 'allow' }), false);
 });
+
+test('zone profile grants count on every zone only', async () => {
+  const { describePermissions } = await import('../src/lib/permissions.ts');
+  const grant = (zones: string[]) => ({ role: 'r', zones, actions: ['dns.zone.profile'], hosts: [], types: [] });
+  assert.deepEqual(describePermissions([grant(['*'])]), ['Manage the zone profiles of the EuroDNS accounts']);
+  assert.match(describePermissions([grant(['example.com'])])[0], /no effect/);
+});

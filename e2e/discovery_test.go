@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/KamorionLabs/dns-gate/internal/provider/eurodns/profiletest"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 	eurodns "github.com/KamorionLabs/eurodns-go"
 )
@@ -34,13 +35,13 @@ func (a *accountDomains) add(name string) {
 	a.names = append(a.names, name)
 }
 
-func (a *accountDomains) server(t *testing.T, fakeURL string) *httptest.Server {
+func (a *accountDomains) server(t *testing.T, fakeURL string, profiles *profiletest.Fake) *httptest.Server {
 	t.Helper()
 	target, err := url.Parse(fakeURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy := profiles.Wrap(httputil.NewSingleHostReverseProxy(target))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/domains/search" {
 			proxy.ServeHTTP(w, r)

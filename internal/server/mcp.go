@@ -53,6 +53,12 @@ func (s *Server) newMCP() *mcpServer {
 	})
 	m.addReadTools(srv)
 	m.addTeamTools(srv)
+	if s.cfg.EuroDNS != nil {
+		m.addProfileReadTools(srv)
+		if s.cfg.Config.MCP.AllowWrites {
+			m.addProfileWriteTools(srv)
+		}
+	}
 	if s.cfg.Config.MCP.AllowWrites && s.cfg.Ops != nil {
 		m.addWriteTools(srv)
 	}

@@ -73,6 +73,12 @@ var apiRoutes = []apiRoute{
 	{http.MethodGet, "/api/v1/policy/delegated/bindings/{name}"},
 	{http.MethodPut, "/api/v1/policy/delegated/bindings/{name}"},
 	{http.MethodDelete, "/api/v1/policy/delegated/bindings/{name}"},
+	{http.MethodGet, routeProfiles},
+	{http.MethodPost, routeProfiles},
+	{http.MethodPost, routeProfileCheck},
+	{http.MethodGet, routeProfile},
+	{http.MethodPut, routeProfile},
+	{http.MethodDelete, routeProfile},
 }
 
 // matchAPIRoute resolves a request path against apiRoutes. It returns the
