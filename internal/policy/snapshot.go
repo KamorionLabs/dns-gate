@@ -332,6 +332,29 @@ func (s *Snapshot) ruleApplies(cr *compiledRole, r uiapi.Rule, zone string, fold
 	return true, via
 }
 
+// folderZones returns the zone globs a zone selected through the folders of
+// a rule of cr must also match (ruleApplies), nil when they cover every zone.
+func (s *Snapshot) folderZones(cr *compiledRole) []string {
+	if cr.layer != LayerManaged {
+		return nil
+	}
+	zones := s.bounds.Zones
+	if cr.delegation != "" {
+		if d := s.delegations[cr.delegation]; d != nil {
+			zones = d.Allow.Zones
+		} else {
+			zones = []string{}
+		}
+	}
+	if ZoneCovered(zones, "*") {
+		return nil
+	}
+	if len(zones) == 0 {
+		return []string{""}
+	}
+	return append([]string{}, zones...)
+}
+
 // folderOnce returns a function computing the folder of zone at most once.
 func (s *Snapshot) folderOnce(zone string) func() string {
 	var f string
@@ -608,6 +631,9 @@ func (s *Snapshot) Permissions(roles []string) []uiapi.Permission {
 				continue
 			}
 			p := uiapi.Permission{Role: name, Zones: append([]string{}, r.Zones...), Folders: r.Folders, Actions: actions, Hosts: []string{}, Types: []string{}}
+			if len(r.Folders) > 0 {
+				p.FolderZones = s.folderZones(cr)
+			}
 			if r.Records != nil {
 				p.Hosts = append(p.Hosts, r.Records.Hosts...)
 				p.Types = append(p.Types, r.Records.Types...)

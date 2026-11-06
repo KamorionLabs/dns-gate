@@ -30,6 +30,8 @@ test('rules select zones by folder once the folder is known', () => {
   assert.ok(!ruleCovers({ zones: [], folders: ['/ES/**'] }, 'example.com'));
   assert.ok(ruleCovers({ zones: ['example.net'], folders: ['/ES/**'] }, 'example.net'));
   assert.ok(!ruleCovers({ zones: null, folders: ['/**'] }, 'unknown.org'));
+  assert.ok(!ruleCovers({ zones: [], folders: ['/ES/**'], folder_zones: ['example.com'] }, 'example.es'), 'managed folder rule outside the bounds');
+  assert.ok(ruleCovers({ zones: [], folders: ['/ES/**'], folder_zones: ['*.es'] }, 'example.es'));
 
   const me: Me = {
     subject: 'idp:es', name: 'es', category: 'human', roles: ['es'], teams: ['es'], groups: [],

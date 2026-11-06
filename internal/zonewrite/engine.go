@@ -48,6 +48,8 @@ func AsError(err error) (*Error, bool) {
 
 // Plan is a write computed against the current zone, under the zone lock.
 type Plan struct {
+	// grants records the folder of the authorization of the changes.
+	grants grants
 	// Changes are the RRset changes. The engine takes Old and Op from the
 	// current zone and replaces New with its provider.Normalize form.
 	Changes []dns.Change

@@ -237,14 +237,14 @@ func TestFolders(t *testing.T) {
 		changes = nil
 		return out
 	}
-	seen := sorted()
-	if len(seen) != 4 || len(ids) != 1 {
-		t.Fatalf("first listing: %+v (request ids %v)", seen, ids)
+	first := sorted()
+	if len(first) != 1 || len(ids) != 1 {
+		t.Fatalf("first listing: one summary expected, got %+v (request ids %v)", first, ids)
 	}
-	for _, c := range seen {
-		if c.Kind != FolderSeen || c.Old != "" || c.New == "" {
-			t.Fatalf("first listing: %+v", seen)
-		}
+	sum := first[0]
+	if sum.Kind != FolderListed || sum.Provider != "eu" || sum.Zone != "" || sum.Count != 4 ||
+		sum.Digest != FolderDigest(map[string]string{"example.es": "/ES", "madrid.example.es": "/ES/Madrid", "example.fr": "/FR", "example.com": "/"}) {
+		t.Fatalf("first listing summary: %+v", sum)
 	}
 
 	l.move("example.es", "/FR")
@@ -266,12 +266,14 @@ func TestFolders(t *testing.T) {
 
 	l.mu.Lock()
 	delete(l.folders, "example.com")
+	l.folders["late.example.es"] = "/ES"
 	l.mu.Unlock()
 	if err := d.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if gone := sorted(); len(gone) != 1 || gone[0] != (FolderChange{Kind: FolderGone, Provider: "eu", Zone: "example.com", Old: "/"}) {
-		t.Fatalf("zone removed from the account: %+v", gone)
+	if ev := sorted(); len(ev) != 2 || ev[0].Kind != FolderGone || ev[0].Zone != "example.com" || ev[0].Old != "/" ||
+		ev[1].Kind != FolderSeen || ev[1].Zone != "late.example.es" || ev[1].New != "/ES" {
+		t.Fatalf("zone removed from and added to the account: %+v", ev)
 	}
 
 	// A failed listing keeps the folders of the previous one, for three
@@ -303,5 +305,30 @@ func TestFolderOfZoneListedTwice(t *testing.T) {
 	}
 	if got := d.Folder("other.es"); got != "/FR" {
 		t.Fatalf("folder = %q", got)
+	}
+}
+
+// slowLister takes listDuration of the fake clock per listing.
+type slowLister struct {
+	folderLister
+	clock *time.Time
+	took  time.Duration
+}
+
+func (s *slowLister) ListZoneFolders(ctx context.Context) (map[string]string, error) {
+	*s.clock = s.clock.Add(s.took)
+	return s.folderLister.ListZoneFolders(ctx)
+}
+
+func TestFolderAgeFromTheEndOfTheListing(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	l := &slowLister{folderLister: folderLister{fakeLister: fakeLister{id: "eu"}, folders: map[string]string{"example.es": "/ES"}}, clock: &now, took: 10 * time.Minute}
+	d := New(Config{Sources: []Source{{Provider: l, Refresh: time.Hour, FolderMaxAge: 2 * time.Hour}}, Now: func() time.Time { return now }})
+	if err := d.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * time.Hour)
+	if got := d.Folder("example.es"); got != "/ES" {
+		t.Fatalf("folder 2h after the end of a 10 minute listing = %q", got)
 	}
 }

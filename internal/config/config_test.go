@@ -624,7 +624,7 @@ func TestFolders(t *testing.T) {
 		"partial double star":            strings.Replace(ok, "folders: [\"/ES\", \"/ES/**\"]", "folders: [\"/ES/a**\"]", 1),
 		"bad provider folder":            strings.Replace(ok, "zones: {folders: [\"/ES/**\", \"/\"]}", "zones: {folders: [\"/ES/\"]}", 1),
 		"route53 folders":                strings.Replace(ok, "providers:\n", "providers:\n"+route53, 1),
-		"bad folder expiry":              strings.Replace(ok, "zones: {folders: [\"/ES/**\", \"/\"]}", "zones: {folders: [\"/ES/**\", \"/\"], folder_expiry: -1}", 1),
+		"bad folder expiry":              strings.Replace(ok, "zones: {folders: [\"/ES/**\", \"/\"]}", "zones: {folders: [\"/ES/**\", \"/\"], folder_expiry: 1}", 1),
 		"bad bounds folder":              strings.Replace(ok, "folders: [\"/ES/**\"], actions", "folders: [\"/ES?\"], actions", 1),
 		"allow outside bounds":           strings.Replace(ok, "folders: [\"/ES/Madrid/**\"]", "folders: [\"/FR\"]", 1),
 		"bounds folders without zones":   strings.Replace(ok, "bounds: {zones: [\"*\"], ", "bounds: {", 1),

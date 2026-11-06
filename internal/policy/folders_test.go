@@ -355,3 +355,72 @@ func TestFolderRulesStayWithinBoundsZones(t *testing.T) {
 		t.Fatal("a delegated folder rule must apply within allow.zones")
 	}
 }
+
+func TestFolderKeyIssuanceRespectsBoundsZones(t *testing.T) {
+	c := folderConfig()
+	c.Zones = append(c.Zones, "secret.net")
+	c.Policy.Bounds.Zones = []string{"example.com"}
+	c.Policy.Bounds.Folders = []string{"/ES/**"}
+	c.Policy.Bounds.Actions = []string{ActionRecordWrite, ActionAPIKeyManage}
+	c.Roles["es-key"] = config.Role{Rules: []config.Rule{{Folders: []string{"/ES/**"}, Actions: []string{ActionRecordWrite}}}}
+	h := mustHolder(t, c)
+	h.SetDiscovery(&folderDiscovery{folders: map[string]string{"example.com": "/ES/a", "secret.net": "/ES/x"}})
+	doc := uiapi.PolicyDocument{Roles: map[string]uiapi.Role{"issuer": {Rules: []uiapi.Rule{{Folders: []string{"/ES/**"}, Actions: []string{ActionAPIKeyManage, ActionRecordWrite}}}}}}
+	Normalize(&doc)
+	snap, errs := h.Compile(&doc, "r1")
+	if len(errs) > 0 {
+		t.Fatalf("document: %+v", errs)
+	}
+	if snap.Decide([]string{"issuer"}, ActionRecordWrite, "secret.net", nil).Allowed || !snap.Decide([]string{"es-key"}, ActionRecordWrite, "secret.net", nil).Allowed {
+		t.Fatal("scenario: the issuer cannot write secret.net, the base key role can")
+	}
+	if p := snap.KeyRoleProblem([]string{"issuer"}, "es-key"); p == "" {
+		t.Fatal("an issuer narrowed by policy.bounds.zones gave a key a wider folder role")
+	}
+	if snap.GrantsFolderPattern([]string{"issuer"}, ActionAPIKeyManage, "/ES/**") {
+		t.Fatal("GrantsFolderPattern ignores the bounds narrowing")
+	}
+
+	c.Policy.Bounds.Zones = []string{"*"}
+	snap, _ = mustHolder(t, c).Compile(&doc, "r2")
+	if p := snap.KeyRoleProblem([]string{"issuer"}, "es-key"); p != "" {
+		t.Fatalf("bounds on every zone: %s", p)
+	}
+
+	dc := delegationConfig()
+	dc.Policy.Bounds.Zones = []string{"*"}
+	dc.Policy.Bounds.Folders = []string{"/ES/**"}
+	dc.Policy.Bounds.Actions = append(dc.Policy.Bounds.Actions, ActionAPIKeyManage)
+	dc.Policy.Delegations[0].Allow.Zones = []string{"example.com"}
+	dc.Policy.Delegations[0].Allow.Folders = []string{"/ES/**"}
+	dc.Policy.Delegations[0].Allow.Actions = []string{ActionRecordWrite, ActionAPIKeyManage}
+	dc.Roles["es-key"] = config.Role{Rules: []config.Rule{{Folders: []string{"/ES/**"}, Actions: []string{ActionRecordWrite}}}}
+	b := uiapi.Binding{Role: "r", Team: "team-a", Subjects: []uiapi.SubjectMatcher{{Issuer: "idp", Claims: map[string][]string{"sub": {"p-a"}}}}}
+	dd := delegatedDoc(uiapi.Rule{Folders: []string{"/ES/**"}, Actions: []string{ActionRecordWrite, ActionAPIKeyManage}}, b, "ci")
+	ds := compile(dc, BaseDocument(dc), &dd, "r", &folderDiscovery{folders: map[string]string{"example.org": "/ES/b"}})
+	if p := ds.KeyRoleProblem([]string{"r"}, "es-key"); p == "" {
+		t.Fatal("a delegated issuer narrowed by allow.zones gave a key a wider folder role")
+	}
+}
+
+func TestFolderPermissionsShowTheBoundsNarrowing(t *testing.T) {
+	c := folderConfig()
+	c.Policy.Bounds.Zones = []string{"example.com"}
+	h := mustHolder(t, c)
+	doc := uiapi.PolicyDocument{Roles: map[string]uiapi.Role{"m": {Rules: []uiapi.Rule{{Folders: []string{"/ES/**"}, Actions: []string{ActionRecordWrite}}}}}}
+	Normalize(&doc)
+	snap, errs := h.Compile(&doc, "r1")
+	if len(errs) > 0 {
+		t.Fatal(errs)
+	}
+	perms := snap.Permissions([]string{"m", "es-writer"})
+	if len(perms) != 2 || perms[0].Role != "es-writer" || len(perms[0].FolderZones) != 0 ||
+		perms[1].Role != "m" || strings.Join(perms[1].FolderZones, ",") != "example.com" {
+		t.Fatalf("permissions: %+v", perms)
+	}
+	c.Policy.Bounds.Zones = []string{"*"}
+	snap, _ = mustHolder(t, c).Compile(&doc, "r2")
+	if p := snap.Permissions([]string{"m"}); len(p) != 1 || len(p[0].FolderZones) != 0 {
+		t.Fatalf("no narrowing with bounds on every zone: %+v", p)
+	}
+}

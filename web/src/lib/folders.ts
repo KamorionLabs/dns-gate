@@ -17,11 +17,19 @@ export function rememberFolders(zones: { zone: string; folder?: string }[]): voi
 /** Folder of a zone as last read, "" when unknown or without folders. */
 export const folderOf = (zone: string): string => known.get(zone) ?? '';
 
-/** Whether a rule applies to the zone: its zones match it, or its folders the folder of the zone. */
-export function ruleCovers(r: { zones?: string[] | null; folders?: string[] | null }, zone: string): boolean {
+/**
+ * Whether a rule applies to the zone: its zones match it, or its folders the
+ * folder of the zone and, when set, its folder_zones the zone (the bounds of
+ * a managed or delegated rule).
+ */
+export function ruleCovers(
+  r: { zones?: string[] | null; folders?: string[] | null; folder_zones?: string[] | null },
+  zone: string,
+): boolean {
   if ((r.zones ?? []).some((z) => zoneMatch(z, zone))) return true;
   const f = folderOf(zone);
-  return !!f && (r.folders ?? []).some((p) => folderMatch(p, f));
+  if (!f || !(r.folders ?? []).some((p) => folderMatch(p, f))) return false;
+  return !r.folder_zones?.length || r.folder_zones.some((z) => zoneMatch(z, zone));
 }
 
 /** Whether a zone folder matches the folder glob of the filter (as ?folder= of the API); no filter keeps every zone. */

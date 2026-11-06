@@ -10,6 +10,8 @@ package discovery
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -51,7 +53,10 @@ const DefaultFolderPeriods = 3
 
 // Kinds of folder changes.
 const (
-	// FolderSeen: first listing of the zone by this process (Old is "").
+	// FolderListed: first listing of a provider by this process, one
+	// summary for every zone (Count and Digest, no Zone).
+	FolderListed = "listed"
+	// FolderSeen: a zone that a later listing finds (Old is "").
 	FolderSeen = "seen"
 	// FolderChanged: the zone is in another folder than at the previous
 	// listing.
@@ -60,14 +65,30 @@ const (
 	FolderGone = "gone"
 )
 
-// FolderChange is a zone whose folder this process sees for the first time,
-// sees changed, or no longer sees, between two listings of its provider.
-// Only zones selected by include and exclude are reported.
+// FolderChange is what a listing tells about folders: the summary of the
+// first listing by this process (FolderListed), or a zone found, moved or no
+// longer listed since the previous listing. Only zones selected by include
+// and exclude are reported.
 type FolderChange struct {
 	Kind     string
 	Provider string
 	Zone     string
 	Old, New string
+	// Count and Digest summarize a first listing: the number of zones and
+	// FolderDigest of their folders.
+	Count  int
+	Digest string
+}
+
+// FolderDigest is the SHA-256, in hex, of the "zone<TAB>folder" lines of
+// folders sorted by zone: two listings with the same digest saw the same
+// folders.
+func FolderDigest(folders map[string]string) string {
+	h := sha256.New()
+	for _, z := range sortedKeys(folders) {
+		fmt.Fprintf(h, "%s\t%s\n", z, folders[z])
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // Config configures a Discoverer.
@@ -117,11 +138,13 @@ type source struct {
 	// exclude (before the folder filter), nil for providers without
 	// folders.
 	folders map[string]string
-	sorted  []string
-	loaded  bool
-	lastAt  time.Time
-	tried   time.Time
-	err     error
+	// foldersAt is the end of the listing that read folders.
+	foldersAt time.Time
+	sorted    []string
+	loaded    bool
+	lastAt    time.Time
+	tried     time.Time
+	err       error
 }
 
 // Discoverer caches the filtered zone lists of the providers and resolves the
@@ -227,6 +250,7 @@ func listZones(ctx context.Context, p provider.Provider) ([]string, map[string]s
 func (d *Discoverer) list(ctx context.Context, s *source) ([]FolderChange, error) {
 	now := d.cfg.Now()
 	names, listed, err := listZones(ctx, s.Provider)
+	done := d.cfg.Now()
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	s.tried = now
@@ -239,9 +263,13 @@ func (d *Discoverer) list(ctx context.Context, s *source) ([]FolderChange, error
 	var changes []FolderChange
 	if listed != nil {
 		folders = make(map[string]string, len(zones))
+		first := s.folders == nil
 		for _, z := range zones {
 			f := listed[z]
 			folders[z] = f
+			if first {
+				continue
+			}
 			switch old, ok := s.folders[z]; {
 			case !ok && f != "":
 				changes = append(changes, FolderChange{Kind: FolderSeen, Provider: s.Provider.ID(), Zone: z, New: f})
@@ -254,8 +282,11 @@ func (d *Discoverer) list(ctx context.Context, s *source) ([]FolderChange, error
 				changes = append(changes, FolderChange{Kind: FolderGone, Provider: s.Provider.ID(), Zone: z, Old: s.folders[z]})
 			}
 		}
+		if first {
+			changes = []FolderChange{{Kind: FolderListed, Provider: s.Provider.ID(), Count: len(folders), Digest: FolderDigest(folders)}}
+		}
 	}
-	s.folders = folders
+	s.folders, s.foldersAt = folders, done
 	if len(s.Folders) > 0 {
 		kept := []string{}
 		for _, z := range zones {
@@ -412,9 +443,9 @@ func (d *Discoverer) Folder(zone string) string {
 }
 
 // foldersStale reports whether the folders of the source are older than
-// FolderMaxAge.
+// FolderMaxAge, counted from the end of the listing that read them.
 func (s *source) foldersStale(now time.Time) bool {
-	return s.folders != nil && now.Sub(s.lastAt) > s.FolderMaxAge
+	return s.folders != nil && now.Sub(s.foldersAt) > s.FolderMaxAge
 }
 
 // DiscoveredZones returns the filtered zones of every provider, sorted.

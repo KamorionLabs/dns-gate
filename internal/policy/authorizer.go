@@ -46,9 +46,9 @@ type Authorizer interface {
 }
 
 // FolderGrants is implemented by authorizers whose rules select zones by
-// provider folder. GrantFolder returns the folder through which an RRset
-// action is granted, "" when it is granted otherwise or refused; the write
-// engine records it in the audit.
+// provider folder. AllowRRsetFolder is AllowRRset that also returns the
+// folder through which the action is granted ("" when granted otherwise);
+// the write engine records it in the audit of the request it authorized.
 type FolderGrants interface {
-	GrantFolder(s *identity.Subject, action, zone string, key dns.Key) string
+	AllowRRsetFolder(s *identity.Subject, action, zone string, key dns.Key) (bool, string)
 }

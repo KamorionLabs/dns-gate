@@ -1952,8 +1952,8 @@ func (c *Config) validateProviders(add func(string, ...any)) {
 		if len(p.Zones.Folders) > 0 && p.Kind != KindEuroDNS {
 			add("%s.zones.folders: only EuroDNS accounts have folders", at)
 		}
-		if p.Zones.FolderExpiry < 1 || p.Zones.FolderExpiry > 100 {
-			add("%s.zones.folder_expiry: must be between 1 and 100 refresh periods", at)
+		if p.Zones.FolderExpiry < 2 || p.Zones.FolderExpiry > 100 {
+			add("%s.zones.folder_expiry: must be between 2 and 100 refresh periods (with 1, folder rules would close at every listing)", at)
 		}
 		if p.Zones.Refresh.D() < 5*time.Minute {
 			add("%s.zones.refresh: must be >= 5m (provider rate limits)", at)

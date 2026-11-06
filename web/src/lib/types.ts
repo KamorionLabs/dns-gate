@@ -23,6 +23,8 @@ export interface Permission {
   zones: string[];
   /** Folder globs (EuroDNS folders): the rule also applies to the zones in these folders. */
   folders?: string[];
+  /** Zones a zone selected through folders must also match (bounds of a managed or delegated rule). */
+  folder_zones?: string[];
   actions: string[];
   hosts: string[]; // empty: the whole zone
   types: string[]; // empty: any type

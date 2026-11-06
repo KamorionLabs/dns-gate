@@ -1816,6 +1816,7 @@ components:
         role: { type: string }
         zones: { type: array, items: { type: string } }
         folders: { type: array, items: { type: string }, description: "Folder globs: the rule also applies to the zones whose provider folder matches one." }
+        folder_zones: { type: array, items: { type: string }, description: "Zone globs a zone selected through folders must also match: policy.bounds.zones of a managed rule, allow.zones of a delegated one. Absent: no narrowing." }
         actions: { type: array, items: { type: string } }
         hosts: { type: array, items: { type: string } }
         types: { type: array, items: { type: string } }

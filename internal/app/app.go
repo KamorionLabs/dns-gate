@@ -197,7 +197,10 @@ const (
 	// ActionZoneFolderChanged: the zone is in another folder than at the
 	// previous listing.
 	ActionZoneFolderChanged = "gate.zone.folder_changed"
-	// ActionZoneFolderSeen: first listing of the zone by this process.
+	// ActionZoneFoldersListed: first listing of a provider by this process,
+	// one summary (extra.count, extra.digest: discovery.FolderDigest).
+	ActionZoneFoldersListed = "gate.zone.folders_listed"
+	// ActionZoneFolderSeen: a zone found by a later listing.
 	ActionZoneFolderSeen = "gate.zone.folder_seen"
 	// ActionZoneFolderGone: the zone is no longer listed.
 	ActionZoneFolderGone = "gate.zone.folder_gone"
@@ -206,16 +209,21 @@ const (
 var folderActions = map[string]string{
 	discovery.FolderChanged: ActionZoneFolderChanged,
 	discovery.FolderSeen:    ActionZoneFolderSeen,
+	discovery.FolderListed:  ActionZoneFoldersListed,
 	discovery.FolderGone:    ActionZoneFolderGone,
 }
 
 // folderChangeAudit records the folders found by discovery.
 func folderChangeAudit(l audit.Logger, now func() time.Time) func(context.Context, discovery.FolderChange) {
 	return func(ctx context.Context, c discovery.FolderChange) {
+		extra := map[string]any{"old": c.Old, "new": c.New}
+		if c.Kind == discovery.FolderListed {
+			extra = map[string]any{"count": c.Count, "digest": c.Digest}
+		}
 		l.Log(ctx, audit.Event{
 			Time: now().UTC(), RequestID: requestid.From(ctx), Subject: "gate:discovery", SubjectName: "gate:discovery",
 			SubjectCategory: identity.CategorySystem, Action: folderActions[c.Kind], Zone: c.Zone, Provider: c.Provider,
-			Decision: "allow", Extra: map[string]any{"old": c.Old, "new": c.New},
+			Decision: "allow", Extra: extra,
 		})
 	}
 }

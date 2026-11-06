@@ -44,9 +44,13 @@ type Permission struct {
 	Role    string   `json:"role"`
 	Zones   []string `json:"zones"`
 	Folders []string `json:"folders,omitempty"`
-	Actions []string `json:"actions"`
-	Hosts   []string `json:"hosts"` // empty: the whole zone
-	Types   []string `json:"types"` // empty: any type
+	// FolderZones, when set, are the zone globs a zone selected through
+	// Folders must also match (policy.bounds.zones of a managed rule, the
+	// allow.zones of a delegated one).
+	FolderZones []string `json:"folder_zones,omitempty"`
+	Actions     []string `json:"actions"`
+	Hosts       []string `json:"hosts"` // empty: the whole zone
+	Types       []string `json:"types"` // empty: any type
 }
 
 // Connect is what a client needs to reach the gate (Connect page).

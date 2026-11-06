@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -183,14 +184,15 @@ roles:
 	if err != nil {
 		t.Fatal(err)
 	}
-	moved, seen := map[string]string{}, map[string]string{}
+	moved := map[string]string{}
+	var listed []map[string]any
 	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
 		var e struct {
 			Action, Zone, Provider, Subject string
 			RequestID                       string `json:"request_id"`
-			Extra                           map[string]string
+			Extra                           map[string]any
 		}
-		if json.Unmarshal([]byte(line), &e) != nil || !strings.HasPrefix(e.Action, "gate.zone.folder_") {
+		if json.Unmarshal([]byte(line), &e) != nil || !strings.HasPrefix(e.Action, "gate.zone.folder") {
 			continue
 		}
 		if e.Provider != "eurodns" || e.Subject != "gate:discovery" || e.RequestID == "" {
@@ -198,13 +200,15 @@ roles:
 		}
 		switch e.Action {
 		case ActionZoneFolderChanged:
-			moved[e.Zone] = e.Extra["old"] + " -> " + e.Extra["new"]
+			moved[e.Zone] = fmt.Sprint(e.Extra["old"]) + " -> " + fmt.Sprint(e.Extra["new"])
+		case ActionZoneFoldersListed:
+			listed = append(listed, e.Extra)
 		case ActionZoneFolderSeen:
-			seen[e.Zone] = e.Extra["new"]
+			t.Fatalf("one summary per first listing, not one event per zone: %s", line)
 		}
 	}
-	if len(seen) != 5 || seen["example.it"] != "/IT" || seen["example.com"] != "/" || seen["madrid.example.es"] != "/ES/Madrid" {
-		t.Fatalf("zones seen: %v", seen)
+	if len(listed) != 1 || listed[0]["count"] != float64(5) || len(fmt.Sprint(listed[0]["digest"])) != 64 {
+		t.Fatalf("first listing summary: %v", listed)
 	}
 	if len(moved) != 2 || moved["example.es"] != "/ES -> /FR" || moved["example.fr"] != "/FR -> /ES/Barcelona" {
 		t.Fatalf("folder change events: %v\n%s", moved, raw)

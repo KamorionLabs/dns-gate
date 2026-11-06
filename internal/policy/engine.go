@@ -77,13 +77,11 @@ func (e *Engine) AllowRRset(s *identity.Subject, action, zone string, key dns.Ke
 	return e.snap().Decide(roles(s), action, zone, &key).Allowed
 }
 
-// GrantFolder returns the folder of the zone when the rule granting the
-// RRset action applies through its folders, "" otherwise.
-func (e *Engine) GrantFolder(s *identity.Subject, action, zone string, key dns.Key) string {
-	if d := e.snap().Decide(roles(s), action, zone, &key); d.Allowed {
-		return d.Folder
-	}
-	return ""
+// AllowRRsetFolder is AllowRRset with the folder of the zone when the rule
+// granting the action applies through its folders.
+func (e *Engine) AllowRRsetFolder(s *identity.Subject, action, zone string, key dns.Key) (bool, string) {
+	d := e.snap().Decide(roles(s), action, zone, &key)
+	return d.Allowed, d.Folder
 }
 
 // IsProtected reports whether an RRset is in the protected list.

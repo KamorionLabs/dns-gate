@@ -123,12 +123,33 @@ func (s *Snapshot) grantsRule(roles []string, action string, sel selector, recor
 			continue
 		}
 		for _, r := range cr.role.Rules {
-			if contains(r.Actions, action) && s.ruleEffective(cr, r, action) && ruleCovers(r, sel) && scopeCovered(r.Records, records) {
+			if contains(r.Actions, action) && s.ruleEffective(cr, r, action) && s.roleRuleCovers(cr, r, sel) && scopeCovered(r.Records, records) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// roleRuleCovers is ruleCovers for a rule of the role cr. A managed rule
+// reaches through its folders only the zones of policy.bounds.zones, and a
+// delegated one only those of its allow.zones (Snapshot.ruleApplies): it
+// covers a folder pattern only when those bounds cover every zone.
+func (s *Snapshot) roleRuleCovers(cr *compiledRole, r uiapi.Rule, sel selector) bool {
+	if !ruleCovers(r, sel) {
+		return false
+	}
+	if !sel.folder || cr.layer != LayerManaged {
+		return true
+	}
+	if !ZoneCovered(s.bounds.Zones, "*") {
+		return false
+	}
+	if cr.delegation != "" {
+		d := s.delegations[cr.delegation]
+		return d != nil && ZoneCovered(d.Allow.Zones, "*")
+	}
+	return true
 }
 
 // scopeCovered reports whether the record scope k (nil: every record) is
