@@ -92,7 +92,8 @@ func (s *Snapshot) teamWrites() map[string]map[string]bool {
 			return
 		}
 		for _, r := range cr.role.Rules {
-			if !contains(r.Actions, ActionRecordWrite) || !s.ruleEffective(cr, r, ActionRecordWrite) {
+			if !(contains(r.Actions, ActionRecordWrite) && s.ruleEffective(cr, r, ActionRecordWrite)) &&
+				!(contains(r.Actions, ActionForwardWrite) && s.ruleEffective(cr, r, ActionForwardWrite)) {
 				continue
 			}
 			for z := range s.zones {
@@ -248,6 +249,18 @@ func Impact(old, new *Snapshot, owned OwnedCounter) []uiapi.ImpactItem {
 			role, _, _ := strings.Cut(w, ".rules[")
 			items = append(items, uiapi.ImpactItem{Kind: "warning", Who: "role " + role, Role: role, Actions: []string{ActionZoneProfile},
 				Message: fmt.Sprintf("%s grants %s without effect: zone profiles are account-wide, the action only counts on zones [\"*\"] without records", w, ActionZoneProfile)})
+		}
+	}
+
+	oldUnscoped := map[string]bool{}
+	for _, w := range old.ForwardWithoutHosts(LayerManaged) {
+		oldUnscoped[w] = true
+	}
+	for _, w := range new.ForwardWithoutHosts(LayerManaged) {
+		if !oldUnscoped[w] {
+			role, _, _ := strings.Cut(w, ".rules[")
+			items = append(items, uiapi.ImpactItem{Kind: "warning", Who: "role " + role, Role: role, Actions: []string{ActionForwardWrite},
+				Message: fmt.Sprintf("%s grants %s on every host: records.types does not apply to URL forwards, scope them with records.hosts", w, ActionForwardWrite)})
 		}
 	}
 
