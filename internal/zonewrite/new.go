@@ -46,6 +46,13 @@ type Config struct {
 	// TransferTTL is how long a transfer request waits for approval
 	// (default 7 days).
 	TransferTTL time.Duration
+	// MachineApprovers lets pipelines and virtual keys approve transfers;
+	// by default only humans may.
+	MachineApprovers bool
+	// PersonClaims identify the person behind a token: requester and
+	// approver of a transfer must differ on the first non-empty one
+	// (default email, preferred_username, oid).
+	PersonClaims []string
 	// Teams tells which teams may own RRsets; any valid team name when nil.
 	Teams  TeamDirectory
 	Now    func() time.Time

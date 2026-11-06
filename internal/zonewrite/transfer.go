@@ -99,7 +99,7 @@ func (e *engine) ProposeTransfer(ctx context.Context, s *identity.Subject, zoneI
 	}
 	t := store.Transfer{
 		ID: newTransferID(e), Kind: uiapi.TransferKindRRsets, Zone: zone, ToTeam: req.ToTeam, Comment: req.Comment,
-		Status: uiapi.TransferProposed, Requester: s.String(), RequesterName: s.Name, RequesterCategory: s.Category,
+		Status: uiapi.TransferProposed, Requester: s.String(), RequesterName: s.Name, RequesterCategory: s.Category, RequesterPerson: e.personKey(s),
 		CreatedAt: e.now().UTC(), ExpiresAt: e.now().UTC().Add(e.cfg.TransferTTL),
 	}
 	seen := map[dns.Key]bool{}
@@ -240,9 +240,12 @@ func (e *engine) DecideTransfer(ctx context.Context, s *identity.Subject, id str
 		return nil, fail(ReasonExpired, "transfer %s expired at %s", id, t.ExpiresAt.Format(time.RFC3339))
 	}
 	self := s.String() == t.Requester
+	samePerson := t.RequesterPerson != "" && e.personKey(s) == t.RequesterPerson
 	switch {
-	case approve && self:
-		return nil, e.deny(ctx, s, action, t.Zone, fail(ReasonForbidden, "the requester cannot approve its own transfer: a second person must"))
+	case approve && (self || samePerson):
+		return nil, e.deny(ctx, s, action, t.Zone, fail(ReasonForbidden, "the requester cannot approve its own transfer, with this identity or another one: a second person must"))
+	case approve && !e.cfg.MachineApprovers && s.Category != identity.CategoryHuman:
+		return nil, e.deny(ctx, s, action, t.Zone, fail(ReasonForbidden, "transfers are approved by a person, not by a %s identity (ownership.machine_approvers)", s.Category))
 	case !self && !e.mayDecide(s, *t):
 		return nil, e.deny(ctx, s, action, t.Zone, fail(ReasonForbidden, "%s", e.decideRule(*t)))
 	}
@@ -530,6 +533,17 @@ func (e *engine) mayDecide(s *identity.Subject, t store.Transfer) bool {
 	return len(t.Items) > 0
 }
 
+// personKey identifies the person behind s: the first non-empty value of
+// the person claims, lowercased; "" when none is present.
+func (e *engine) personKey(s *identity.Subject) string {
+	for _, c := range e.cfg.PersonClaims {
+		if v, ok := s.Claims[c].(string); ok && strings.TrimSpace(v) != "" {
+			return strings.ToLower(strings.TrimSpace(v))
+		}
+	}
+	return ""
+}
+
 // teamWrites reports whether s may write an RRset through the roles of its
 // bindings for team (not through the roles it holds for another team).
 func (e *engine) teamWrites(s *identity.Subject, team, zone string, k dns.Key) bool {
@@ -570,7 +584,8 @@ func (e *engine) transferView(s *identity.Subject, t store.Transfer) *uiapi.Tran
 	if t.Status == uiapi.TransferProposed && !e.now().Before(t.ExpiresAt) {
 		v.Status = uiapi.TransferExpired
 	}
-	v.CanDecide = v.Status == uiapi.TransferProposed && s.String() != t.Requester && e.mayDecide(s, t)
+	v.CanDecide = v.Status == uiapi.TransferProposed && s.String() != t.Requester && e.mayDecide(s, t) &&
+		(t.RequesterPerson == "" || e.personKey(s) != t.RequesterPerson) && (e.cfg.MachineApprovers || s.Category == identity.CategoryHuman)
 	return v
 }
 

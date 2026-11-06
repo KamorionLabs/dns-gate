@@ -9,6 +9,7 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/store"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
+	"github.com/KamorionLabs/eurodns-go/eurodnstest"
 )
 
 func TestTransferLifecycle(t *testing.T) {
@@ -269,5 +270,46 @@ func TestRenameApprovalNeedsOwnershipApproveOnEveryRRset(t *testing.T) {
 	e.wantReason(err, ReasonForbidden)
 	if o := e.own("@", "A"); o.Owner != "team-a" {
 		t.Fatalf("renamed without the right on the RRset: %+v", o)
+	}
+}
+
+func TestTransferApprovalRequiresAnotherPerson(t *testing.T) {
+	e := newTeamsEnv(t)
+	ctx := context.Background()
+	for _, h := range []string{"p1", "p2"} {
+		if _, err := e.eng.ApplyRRsets(ctx, alice, zoneName, put(h, "192.0.2.1"), 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tr := e.eng.(Transfers)
+	requester := bound(&identity.Subject{Issuer: "idp", ID: "alice", Category: identity.CategoryHuman, Roles: []string{"writer"}, Teams: []string{"team-a"},
+		Claims: map[string]any{"email": "alice@example.com"}})
+	v, err := tr.ProposeTransfer(ctx, requester, zoneName, uiapi.TransferProposal{RRsets: adoptRefs("p1 A"), ToTeam: "team-b", Comment: "move"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pipeline := bound(&identity.Subject{Issuer: "ci", ID: "deploy", Category: identity.CategoryPipeline, Roles: []string{"writer"}, Teams: []string{"team-a"}})
+	_, err = tr.DecideTransfer(ctx, pipeline, v.ID, true, "")
+	e.wantReason(err, ReasonForbidden)
+	sameHuman := bound(&identity.Subject{Issuer: "other-idp", ID: "a-1", Category: identity.CategoryHuman, Roles: []string{"writer"}, Teams: []string{"team-a"},
+		Claims: map[string]any{"preferred_username": "Alice@Example.com"}})
+	_, err = tr.DecideTransfer(ctx, sameHuman, v.ID, true, "")
+	e.wantReason(err, ReasonForbidden)
+	if done, err := tr.DecideTransfer(ctx, teamMate, v.ID, true, ""); err != nil || done.Status != uiapi.TransferApplied {
+		t.Fatalf("another person approves: %+v %v", done, err)
+	}
+
+	m := newEnvConfig(t, eurodnstest.Options{}, nil, func(c *Config) {
+		c.Teams, c.MachineApprovers = teamList{"team-a": true, "team-b": true}, true
+	})
+	if _, err := m.eng.ApplyRRsets(ctx, alice, zoneName, put("p3", "192.0.2.1"), 0); err != nil {
+		t.Fatal(err)
+	}
+	w, err := m.eng.(Transfers).ProposeTransfer(ctx, requester, zoneName, uiapi.TransferProposal{RRsets: adoptRefs("p3 A"), ToTeam: "team-b", Comment: "move"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done, err := m.eng.(Transfers).DecideTransfer(ctx, pipeline, w.ID, true, ""); err != nil || done.Status != uiapi.TransferApplied {
+		t.Fatalf("machine approvers allowed: %+v %v", done, err)
 	}
 }

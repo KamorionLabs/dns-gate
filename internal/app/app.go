@@ -123,6 +123,8 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		TombstoneTTL:            cfg.TombstoneTTL(),
 		TransferTTL:             cfg.Ownership.TransferTTL.D(),
 		Teams:                   authz,
+		PersonClaims:            cfg.Ownership.PersonClaims,
+		MachineApprovers:        cfg.Ownership.MachineApprovers,
 		Now:                     time.Now,
 		Logger:                  log,
 	})

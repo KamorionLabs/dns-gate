@@ -67,6 +67,7 @@ type Transfer struct {
 	Requester         string         `json:"requester"`
 	RequesterName     string         `json:"requester_name,omitempty"`
 	RequesterCategory string         `json:"requester_category,omitempty"`
+	RequesterPerson   string         `json:"requester_person,omitempty"` // person key of the requester (ownership.person_claims)
 	CreatedAt         time.Time      `json:"created_at"`
 	ExpiresAt         time.Time      `json:"expires_at"`
 	DecidedBy         string         `json:"decided_by,omitempty"`

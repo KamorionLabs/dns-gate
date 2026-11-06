@@ -143,7 +143,18 @@ type Ownership struct {
 	// TransferTTL is how long a transfer request waits for its approval
 	// (default 7 days).
 	TransferTTL Duration `yaml:"transfer_ttl"`
+	// MachineApprovers lets pipelines and virtual keys approve transfers
+	// and renames; by default only humans may, after a recent login.
+	MachineApprovers bool `yaml:"machine_approvers"`
+	// PersonClaims identify the person behind a token across issuers: the
+	// first non-empty one, compared case-insensitively, must differ between
+	// the requester and the approver of a transfer (default email,
+	// preferred_username, oid).
+	PersonClaims []string `yaml:"person_claims"`
 }
+
+// DefaultPersonClaims are the default ownership.person_claims.
+var DefaultPersonClaims = []string{"email", "preferred_username", "oid"}
 
 // Default ownership durations.
 const (
@@ -661,6 +672,9 @@ func (c *Config) defaults() {
 	if c.Ownership.TransferTTL == 0 {
 		c.Ownership.TransferTTL = Duration(DefaultTransferTTL)
 	}
+	if c.Ownership.PersonClaims == nil {
+		c.Ownership.PersonClaims = DefaultPersonClaims
+	}
 	for i := range c.Policy.Delegations {
 		if c.Policy.Delegations[i].Allow.MaxObjects == 0 {
 			c.Policy.Delegations[i].Allow.MaxObjects = DefaultDelegationMaxObjects
@@ -1032,6 +1046,11 @@ func (c *Config) Validate() error {
 	c.validateTeamFamilies(add)
 	if t := c.Ownership.TombstoneTTL; t != nil && (t.D() < 0 || t.D() > 365*24*time.Hour) {
 		add("ownership.tombstone_ttl: must be between 0s (disabled) and 8760h")
+	}
+	for i, pc := range c.Ownership.PersonClaims {
+		if strings.TrimSpace(pc) == "" {
+			add("ownership.person_claims[%d]: empty claim name", i)
+		}
 	}
 	if d := c.Ownership.TransferTTL.D(); d < time.Hour || d > 90*24*time.Hour {
 		add("ownership.transfer_ttl: must be between 1h and 2160h")
