@@ -2,6 +2,7 @@ package zonewrite
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -189,4 +190,54 @@ func TestAdoptionNeverLiftsAnotherTeamTombstone(t *testing.T) {
 		t.Fatalf("an approver lifted the tombstone of team-a: %+v %v", p, err)
 	}
 	e.wantReason(e.eng.Adopt(ctx, admin, zoneName, adoptRefs("kept A"), "team-b"), ReasonNotOwner)
+}
+
+type tombstoneFailStore struct {
+	store.Store
+	fail bool
+}
+
+func (f *tombstoneFailStore) PutTombstone(ctx context.Context, t store.Tombstone) error {
+	if f.fail {
+		return errors.New("tombstone write failed")
+	}
+	return f.Store.PutTombstone(ctx, t)
+}
+
+func (f *tombstoneFailStore) DeleteWithTombstone(ctx context.Context, zone, host, typ string, version int64, t store.Tombstone) error {
+	if f.fail {
+		return errors.New("tombstone write failed")
+	}
+	return f.Store.DeleteWithTombstone(ctx, zone, host, typ, version, t)
+}
+
+func TestTombstoneFailureKeepsOwnership(t *testing.T) {
+	c := &clock{t: time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)}
+	fs := &tombstoneFailStore{Store: store.NewMemoryWithClock(c.Now)}
+	e := newEnvConfig(t, eurodnstest.Options{}, fs, func(cfg *Config) {
+		cfg.TombstoneTTL = 7 * 24 * time.Hour
+	})
+	ctx := context.Background()
+	if _, err := e.eng.ApplyRRsets(ctx, alice, zoneName, put("fragile", "192.0.2.1"), 0); err != nil {
+		t.Fatal(err)
+	}
+	fs.fail = true
+	if _, err := e.eng.ApplyRRsets(ctx, alice, zoneName, del("fragile"), 0); err != nil {
+		t.Fatal(err)
+	}
+	if o := e.own("fragile", "A"); o == nil || o.Owner != "team-a" {
+		t.Fatalf("ownership dropped without its tombstone: %+v", o)
+	}
+	_, err := e.eng.ApplyRRsets(ctx, bob, zoneName, put("fragile", "192.0.2.2"), 0)
+	e.wantReason(err, ReasonNotOwner)
+	fs.fail = false
+	if err := e.eng.Reconcile(ctx, zoneName); err != nil {
+		t.Fatal(err)
+	}
+	if o := e.own("fragile", "A"); o != nil {
+		t.Fatalf("reconcile kept the deleted RRset: %+v", o)
+	}
+	if tb, err := fs.GetTombstone(ctx, zoneName, "fragile", "A"); err != nil || tb.Team != "team-a" {
+		t.Fatalf("tombstone after retry: %+v %v", tb, err)
+	}
 }

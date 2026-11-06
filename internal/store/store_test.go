@@ -589,6 +589,28 @@ func tombstoneConformance(t *testing.T, s Store, clock *fakeClock) {
 	if _, isDynamo := s.(*dynamo); !isDynamo && n != 1 {
 		t.Fatalf("gc removed %d tombstones", n)
 	}
+	if err := s.Put(ctx, Ownership{Zone: z, Host: "gone", Type: "A", Owner: "web", State: StateActive, CreatedAt: now, UpdatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	gone := Tombstone{Zone: z, Host: "gone", Type: "A", Team: "web", DeletedAt: now, ExpiresAt: now.Add(time.Hour)}
+	if err := s.DeleteWithTombstone(ctx, z, "gone", "A", 7, gone); !errors.Is(err, ErrConflict) {
+		t.Fatalf("stale delete with tombstone: %v", err)
+	}
+	if _, err := s.GetTombstone(ctx, z, "gone", "A"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a refused delete wrote its tombstone: %v", err)
+	}
+	if err := s.DeleteWithTombstone(ctx, z, "gone", "A", 1, gone); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Get(ctx, z, "gone", "A"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("ownership kept: %v", err)
+	}
+	if tb, err := s.GetTombstone(ctx, z, "gone", "A"); err != nil || tb.Team != "web" {
+		t.Fatalf("tombstone of the delete: %+v %v", tb, err)
+	}
+	if err := s.DeleteWithTombstone(ctx, z, "gone", "A", 1, gone); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("delete of an absent entry: %v", err)
+	}
 	if err := s.DeleteTombstone(ctx, z, "www", "A"); err != nil {
 		t.Fatal(err)
 	}

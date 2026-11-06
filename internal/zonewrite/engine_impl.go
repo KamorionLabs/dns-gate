@@ -397,10 +397,7 @@ func (e *engine) resolvePending(ctx context.Context, zone string, sets map[dns.K
 		case o.ContentHash == "" && present, o.PendingHash != pendingDelete && present && hash == o.PendingHash:
 			next.State, next.ContentHash = store.StateActive, hash
 		case o.ContentHash == "" || (o.PendingHash == pendingDelete && !present):
-			if o.ContentHash != "" {
-				e.tombstone(ctx, o)
-			}
-			if err := e.cfg.Store.Delete(ctx, zone, o.Host, o.Type, o.Version); err != nil {
+			if err := e.deleteOwned(ctx, o); err != nil {
 				e.log.Warn("pending cleanup failed", "zone", zone, "rrset", keyString(key), "error", err)
 				continue
 			}
@@ -796,8 +793,7 @@ func (e *engine) confirm(ctx context.Context, zone string, claims []claim, after
 		var err error
 		switch {
 		case cl.change.New == nil && !present:
-			e.tombstone(ctx, o)
-			err = e.cfg.Store.Delete(ctx, zone, o.Host, o.Type, o.Version)
+			err = e.deleteOwned(ctx, o)
 		case cl.change.New != nil && present:
 			o.State, o.ContentHash = store.StateActive, dns.ContentHash(set)
 			err = e.cfg.Store.Put(ctx, o)

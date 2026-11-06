@@ -120,6 +120,32 @@ func (d *dynamo) ListTombstones(ctx context.Context, zone string) ([]Tombstone, 
 	}
 }
 
+func (d *dynamo) DeleteWithTombstone(ctx context.Context, zone, host, typ string, version int64, t Tombstone) error {
+	item, err := attributevalue.MarshalMap(toTombstoneItem(t))
+	if err != nil {
+		return fmt.Errorf("store: encode tombstone: %w", err)
+	}
+	_, err = d.api.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{TransactItems: []types.TransactWriteItem{
+		{Delete: &types.Delete{
+			TableName: aws.String(d.table), Key: keyAttrs(zonePK(zone), rrsetSK(host, typ)),
+			ConditionExpression:       aws.String("attribute_exists(pk) AND version = :v"),
+			ExpressionAttributeValues: map[string]types.AttributeValue{":v": numAttr(version)},
+		}},
+		{Put: &types.Put{TableName: aws.String(d.table), Item: item}},
+	}})
+	if err == nil {
+		return nil
+	}
+	var tce *types.TransactionCanceledException
+	if errors.As(err, &tce) {
+		if _, gerr := d.Get(ctx, zone, host, typ); errors.Is(gerr, ErrNotFound) {
+			return ErrNotFound
+		}
+		return ErrConflict
+	}
+	return fmt.Errorf("store: delete with tombstone: %w", err)
+}
+
 func (d *dynamo) DeleteTombstone(ctx context.Context, zone, host, typ string) error {
 	_, err := d.api.DeleteItem(ctx, &dynamodb.DeleteItemInput{TableName: aws.String(d.table), Key: keyAttrs(zonePK(zone), tombSK(host, typ))})
 	if err != nil {

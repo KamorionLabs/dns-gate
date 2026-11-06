@@ -38,6 +38,10 @@ type TombstoneStore interface {
 	GetTombstone(ctx context.Context, zone, host, typ string) (*Tombstone, error)
 	// ListTombstones returns the tombstones of a zone, sorted by host and type.
 	ListTombstones(ctx context.Context, zone string) ([]Tombstone, error)
+	// DeleteWithTombstone removes an ownership entry (version must match,
+	// as for Delete) and writes the tombstone of the RRset, atomically:
+	// both or neither.
+	DeleteWithTombstone(ctx context.Context, zone, host, typ string, version int64, t Tombstone) error
 	// DeleteTombstone removes a tombstone; removing an absent one is not an error.
 	DeleteTombstone(ctx context.Context, zone, host, typ string) error
 	// GCTombstones removes the tombstones expired at now and returns how
@@ -249,6 +253,22 @@ func sortTombstones(ts []Tombstone) {
 	})
 }
 
+func (m *memory) DeleteWithTombstone(_ context.Context, zone, host, typ string, version int64, t Tombstone) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k := memKey{zone, host, typ}
+	cur, ok := m.entries[k]
+	if !ok {
+		return ErrNotFound
+	}
+	if cur.Version != version {
+		return ErrConflict
+	}
+	delete(m.entries, k)
+	m.tombstones[tombKey(t.Zone, t.Host, t.Type)] = t
+	return nil
+}
+
 func (m *memory) DeleteTombstone(_ context.Context, zone, host, typ string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -367,6 +387,11 @@ func (m *memory) Reassign(_ context.Context, from string, owns []Ownership, tomb
 
 const tombstoneColumns = "zone, host, type, team, content_hash, deleted_by, deleted_by_name, deleted_by_category, deleted_at, expires_at, request_id"
 
+const tombstoneUpsert = "INSERT INTO ownership_tombstone (" + tombstoneColumns + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) " +
+	"ON CONFLICT (zone, host, type) DO UPDATE SET team = excluded.team, content_hash = excluded.content_hash, " +
+	"deleted_by = excluded.deleted_by, deleted_by_name = excluded.deleted_by_name, deleted_by_category = excluded.deleted_by_category, " +
+	"deleted_at = excluded.deleted_at, expires_at = excluded.expires_at, request_id = excluded.request_id"
+
 func tombstoneArgs(t Tombstone) []any {
 	return []any{t.Zone, t.Host, t.Type, t.Team, t.ContentHash, t.DeletedBy, t.DeletedByName, t.DeletedByCategory,
 		micros(t.DeletedAt), micros(t.ExpiresAt), t.RequestID}
@@ -382,10 +407,7 @@ func scanTombstone(r scanner) (Tombstone, error) {
 }
 
 func (s *sqlStore) PutTombstone(ctx context.Context, t Tombstone) error {
-	_, err := s.exec(ctx, "INSERT INTO ownership_tombstone ("+tombstoneColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "+
-		"ON CONFLICT (zone, host, type) DO UPDATE SET team = excluded.team, content_hash = excluded.content_hash, "+
-		"deleted_by = excluded.deleted_by, deleted_by_name = excluded.deleted_by_name, deleted_by_category = excluded.deleted_by_category, "+
-		"deleted_at = excluded.deleted_at, expires_at = excluded.expires_at, request_id = excluded.request_id", tombstoneArgs(t)...)
+	_, err := s.exec(ctx, tombstoneUpsert, tombstoneArgs(t)...)
 	if err != nil {
 		return fmt.Errorf("store: put tombstone: %w", err)
 	}
@@ -419,6 +441,38 @@ func (s *sqlStore) ListTombstones(ctx context.Context, zone string) ([]Tombstone
 		out = append(out, t)
 	}
 	return out, rows.Err()
+}
+
+func (s *sqlStore) DeleteWithTombstone(ctx context.Context, zone, host, typ string, version int64, t Tombstone) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: delete with tombstone: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, s.rebind("DELETE FROM ownership WHERE zone = ? AND host = ? AND type = ? AND version = ?"), zone, host, typ, version)
+	if err != nil {
+		return fmt.Errorf("store: delete with tombstone: %w", err)
+	}
+	if n, err := res.RowsAffected(); err != nil || n == 0 {
+		if err != nil {
+			return fmt.Errorf("store: delete with tombstone: %w", err)
+		}
+		var n int
+		if err := tx.QueryRowContext(ctx, s.rebind("SELECT COUNT(*) FROM ownership WHERE zone = ? AND host = ? AND type = ?"), zone, host, typ).Scan(&n); err != nil {
+			return fmt.Errorf("store: delete with tombstone: %w", err)
+		}
+		if n == 0 {
+			return ErrNotFound
+		}
+		return ErrConflict
+	}
+	if _, err := tx.ExecContext(ctx, s.rebind(tombstoneUpsert), tombstoneArgs(t)...); err != nil {
+		return fmt.Errorf("store: delete with tombstone: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: delete with tombstone: %w", err)
+	}
+	return nil
 }
 
 func (s *sqlStore) DeleteTombstone(ctx context.Context, zone, host, typ string) error {

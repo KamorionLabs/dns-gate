@@ -7,12 +7,15 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/store"
 )
 
-// tombstone reserves a deleted RRset for its team. o is the ownership entry
-// of the delete claim: its actor is the subject that deleted it. Ephemeral
-// RRsets (ACME challenges) leave no tombstone.
-func (e *engine) tombstone(ctx context.Context, o store.Ownership) {
-	if e.cfg.TombstoneTTL <= 0 || o.ExpiresAt != nil || o.Owner == "" {
-		return
+// deleteOwned removes the ownership entry of a deleted RRset and, unless
+// tombstones are disabled or the RRset was ephemeral (ACME challenges),
+// writes its tombstone in the same store transaction: if the tombstone
+// cannot be written the entry stays, pending, and the next reconcile
+// retries. o is the entry of the delete claim: its actor is the subject
+// that deleted the RRset.
+func (e *engine) deleteOwned(ctx context.Context, o store.Ownership) error {
+	if e.cfg.TombstoneTTL <= 0 || o.ExpiresAt != nil || o.Owner == "" || o.ContentHash == "" {
+		return e.cfg.Store.Delete(ctx, o.Zone, o.Host, o.Type, o.Version)
 	}
 	now := e.now()
 	t := store.Tombstone{
@@ -20,9 +23,7 @@ func (e *engine) tombstone(ctx context.Context, o store.Ownership) {
 		DeletedBy: o.UpdatedBy, DeletedByName: o.UpdatedByName, DeletedByCategory: o.UpdatedByCategory,
 		DeletedAt: now, ExpiresAt: now.Add(e.cfg.TombstoneTTL), RequestID: o.RequestID,
 	}
-	if err := e.cfg.Store.PutTombstone(ctx, t); err != nil {
-		e.log.Warn("tombstone failed", "zone", o.Zone, "rrset", o.Host+" "+o.Type, "error", err)
-	}
+	return e.cfg.Store.DeleteWithTombstone(ctx, o.Zone, o.Host, o.Type, o.Version, t)
 }
 
 func (e *engine) dropTombstone(ctx context.Context, zone string, k dns.Key) {
