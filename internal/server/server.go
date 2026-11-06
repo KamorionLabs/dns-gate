@@ -209,7 +209,7 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		s.mcp.ServeHTTP(w, r)
 	case (p == resourceMetaPath || p == resourceMetaPath+mcpPath) && s.mcp != nil:
 		s.mcp.serveResourceMetadata(w, r)
-	case p == GateInfoPath:
+	case p == GateInfoPath || p == LegacyGateInfoPath:
 		s.handleGateInfo(w, r)
 	case p == jwksPath && s.cfg.Authn.TokenIssuer() != nil:
 		s.handleJWKS(w, r)
@@ -219,7 +219,7 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		s.handleAuthorize(w, r)
 	case p == oauthTokenPath && s.authorizationServer():
 		s.handleToken(w, r)
-	case strings.HasPrefix(p, GateInfoPath+"/"):
+	case strings.HasPrefix(p, GateInfoPath+"/") || strings.HasPrefix(p, LegacyGateInfoPath+"/"):
 		s.handleExtension(w, r)
 	case strings.HasPrefix(p, "/acme/"):
 		s.handleACME(w, r)
@@ -437,9 +437,17 @@ const (
 // detect a gate.
 const GateInfoPath = "/.well-known/dns-gate"
 
-// handleExtension serves POST /.well-known/dns-gate/zones/{domain}/adopt.
+// LegacyGateInfoPath serves the same discovery document and extensions under
+// the name of eurodns-gate, for terraform-provider-eurodns before v0.4.0.
+const LegacyGateInfoPath = "/.well-known/eurodns-gate"
+
+// handleExtension serves POST /.well-known/dns-gate/zones/{domain}/adopt
+// (and the same path under LegacyGateInfoPath).
 func (s *Server) handleExtension(w http.ResponseWriter, r *http.Request) {
-	rest := strings.TrimPrefix(r.URL.Path, GateInfoPath+"/")
+	rest, ok := strings.CutPrefix(r.URL.Path, GateInfoPath+"/")
+	if !ok {
+		rest = strings.TrimPrefix(r.URL.Path, LegacyGateInfoPath+"/")
+	}
 	parts := strings.Split(rest, "/")
 	if len(parts) != 3 || parts[0] != "zones" || parts[2] != "adopt" || r.URL.RawQuery != "" || r.URL.EscapedPath() != r.URL.Path {
 		writeError(w, http.StatusNotFound, "not_found", "unknown extension endpoint")
