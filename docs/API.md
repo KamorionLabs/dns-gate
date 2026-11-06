@@ -358,7 +358,8 @@ provider of another kind answers `400 invalid_provider`. Writes need a recent
 login from humans (`403 reauth_required`); a record of the protected list is
 refused (`403 protected`), on check too; each subject may run 60 zone profile
 operations per minute (`429 rate_limited`). An update is audited with the
-previous content and the changed records. EuroDNS refusals are `400 rejected`, with the
+previous content and the changed records (host, type and operation only in the
+journal, which shows zone profile events to `dns.zone.profile` holders only). EuroDNS refusals are `400 rejected`, with the
 EuroDNS report or errors in `details`. EuroDNS clients can also use the
 EuroDNS routes (`/zone-profiles`, `/zone-profiles/check`, `/zone-profiles/{id}`,
 pagination headers passed through) on the gate, with the same rule; when the gate

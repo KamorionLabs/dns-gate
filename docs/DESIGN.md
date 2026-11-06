@@ -265,7 +265,8 @@ content; nothing ties it to a domain, nor names a default profile.
 - **Same guards as other sensitive writes.** Writes need a recent login from
   humans (`stepUp`, with the session or the token `auth_time`) on every channel;
   profile records matching the protected list are refused whatever the zones of
-  the entry (the profile may land on any domain), on check too; a per-subject
+  the entry (the profile may land on any domain), on check too, mail forwards
+  counting as the apex MX and URL forwards as A, AAAA and CNAME of their host; a per-subject
   limiter (60 operations a minute, all channels) keeps one caller from draining
   the account's EuroDNS budget, and listings stop at 20 pages of 100.
 - **No ownership.** The gate cannot attribute a profile to the team of the domains
@@ -283,8 +284,10 @@ content; nothing ties it to a domain, nor names a default profile.
   `/api/v1/providers/{provider}/zone-profiles`; any other kind is refused.
 - **Audit.** Every operation is audited with the provider and the profile id,
   refusals included (malformed requests as `bad_request`); writes carry the
-  profile content (an update and a delete read it first: `previous`), and a
-  per-record summary in `changes` for the journal; never credentials.
+  profile content (an update and a delete read it first: `previous`), and the
+  host, type and operation of each changed record in `changes`, without values;
+  never credentials. The journal shows zone profile events only to holders of
+  `dns.zone.profile` on `*`: ui.read on every zone is not enough.
 - **After the arrival.** The records EuroDNS creates from a profile are foreign to
   the gate: they are adopted by their teams once the zone is managed (6.3).
 
