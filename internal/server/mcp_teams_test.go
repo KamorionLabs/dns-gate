@@ -42,7 +42,7 @@ func TestMCPTeamTools(t *testing.T) {
 		t.Fatal("transfer tools without transfers")
 	}
 	var list teamsOut
-	if res := call(t, cs, "list_teams", map[string]any{}, &list); res.IsError || strings.Join(list.MyTeams, ",") != "web,edge" || !list.Strict {
+	if res := call(t, cs, "list_teams", map[string]any{}, &list); res.IsError || strings.Join(list.MyTeams, ",") != "web,edge" || !list.Strict || list.RequireSecondApprover {
 		t.Fatalf("list_teams: %s %+v", errText(res), list)
 	}
 	counts := map[string]int{}
@@ -177,9 +177,14 @@ func TestMCPTransfers(t *testing.T) {
 	var tr uiapi.Transfer
 	args := map[string]any{"zone": "Example.com.", "rrsets": []map[string]string{{"host": "www", "type": "A"}}, "to_team": "Ops", "comment": "move", "team": "edge"}
 	if res := call(t, cs, "transfer_propose", args, &tr); res.IsError || tr.ID != "tr-1" || tr.Zone != "example.com" || ft.proposed[0].ToTeam != "ops" ||
-		strings.Join(ft.subjects[0].Teams, ",") != "edge" {
+		strings.Join(ft.subjects[0].Teams, ",") != "edge" || ft.proposed[0].Apply {
 		t.Fatalf("propose: %s %+v", errText(res), tr)
 	}
+	args["apply"] = true
+	if res := call(t, cs, "transfer_propose", args, &tr); res.IsError || !ft.proposed[1].Apply {
+		t.Fatalf("propose and apply: %s %+v", errText(res), ft.proposed)
+	}
+	delete(args, "apply")
 	args["zone"] = "unknown.example"
 	if res := call(t, cs, "transfer_propose", args, nil); !res.IsError || !strings.Contains(errText(res), "not managed") {
 		t.Fatalf("unmanaged zone: %s", errText(res))
