@@ -22,6 +22,7 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/identitystore"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
+	eurodnsprov "github.com/KamorionLabs/dns-gate/internal/provider/eurodns"
 	"github.com/KamorionLabs/dns-gate/internal/requestid"
 	"github.com/KamorionLabs/dns-gate/internal/routes"
 	"github.com/KamorionLabs/dns-gate/internal/store"
@@ -99,6 +100,9 @@ type EuroDNSAPI interface {
 	// Proxy forwards an authorized passthrough request to the account of
 	// zone; path is the validated upstream path.
 	Proxy(w http.ResponseWriter, r *http.Request, zone, path string)
+	// ProfileAccount returns the EuroDNS provider of the zone profile
+	// operations: the provider named id, or the only EuroDNS provider.
+	ProfileAccount(id string) (*eurodnsprov.Provider, error)
 }
 
 // ZoneVersions reads the gate version of a zone (store.Store).
@@ -128,6 +132,8 @@ type Server struct {
 	now     func() time.Time
 	delegMu sync.Mutex // serializes delegated policy writes in this replica
 	owners  ownerCounts
+	// profileLimiter bounds the zone profile operations per subject.
+	profileLimiter *subjectLimiter
 }
 
 // New builds the server.
@@ -154,7 +160,7 @@ func New(c Config) (*Server, error) {
 		}
 		c.Policy = h
 	}
-	s := &Server{cfg: c, log: c.Log, now: c.Now, pol: policy.New(c.Policy)}
+	s := &Server{cfg: c, log: c.Log, now: c.Now, pol: policy.New(c.Policy), profileLimiter: newSubjectLimiter(profileRequestsPerMinute, c.Now)}
 	s.table = routes.NewDynamic(s.pol.Managed)
 	if c.Config.MCP.Enabled {
 		s.mcp = s.newMCP()
@@ -297,6 +303,10 @@ func (s *Server) handleEuroDNS(w http.ResponseWriter, r *http.Request) {
 	ctx := identity.With(r.Context(), subj)
 	r = r.WithContext(ctx)
 
+	if rerr == nil && m.Rule.Kind == routes.Account {
+		s.serveEuroDNSProfile(w, r, subj, m)
+		return
+	}
 	if rerr != nil {
 		reason := "operation_denied"
 		if errors.Is(rerr, routes.ErrZoneUnknown) {

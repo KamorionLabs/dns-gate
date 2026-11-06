@@ -94,6 +94,9 @@ type EuroDNSConfig struct {
 	AppID      string `yaml:"app_id"`
 	Rate       Rate   `yaml:"rate"`
 	MaxRetries *int   `yaml:"max_retries"`
+	// ZoneProfiles opens the zone profiles of the account through the gate
+	// (dns.zone.profile); off by default.
+	ZoneProfiles bool `yaml:"zone_profiles"`
 
 	APIKey string `yaml:"-"`
 }
@@ -507,6 +510,7 @@ var knownActions = map[string]bool{
 	"dns.record.write":      true,
 	"dns.record.adopt":      true,
 	"dns.zone.admin":        true,
+	"dns.zone.profile":      true,
 	"ui.read":               true,
 	"policy.read":           true,
 	"policy.propose":        true,
@@ -1095,6 +1099,7 @@ func (c *Config) Validate() error {
 			add("ownership.person_claims[%d]: %q is not a claim name or a + composite of claim names", i, pc)
 		}
 	}
+	c.Warnings = append(c.Warnings, c.zoneProfileWarnings()...)
 	if c.Ownership.RequireSecondApprover && len(c.Ownership.PersonIssuers) == 0 && !c.Ownership.MachineApprovers {
 		switch humans := c.HumanIssuers(); len(humans) {
 		case 0:
@@ -1243,6 +1248,35 @@ func (c *Config) Validate() error {
 	}
 
 	return errors.Join(errs...)
+}
+
+// zoneProfileWarnings flags the dns.zone.profile grants that have no
+// effect: zone profiles are account-wide, the action only counts on zones
+// ["*"] without a record scope.
+func (c *Config) zoneProfileWarnings() []string {
+	var out []string
+	for name, r := range c.Roles {
+		for j, rule := range r.Rules {
+			if containsString(rule.Actions, "dns.zone.profile") && (!glob.Covered(rule.Zones, "*") || rule.Records != nil) {
+				out = append(out, fmt.Sprintf("roles.%s.rules[%d].actions: dns.zone.profile has no effect here, it only counts on zones [\"*\"] without records: zone profiles are account-wide", name, j))
+			}
+		}
+	}
+	sort.Strings(out)
+	granted := false
+	for _, r := range c.Roles {
+		for _, rule := range r.Rules {
+			granted = granted || containsString(rule.Actions, "dns.zone.profile")
+		}
+	}
+	enabled := false
+	for _, p := range c.Providers {
+		enabled = enabled || (p.EuroDNS != nil && p.EuroDNS.ZoneProfiles)
+	}
+	if granted && !enabled {
+		out = append(out, "roles: dns.zone.profile is granted but no eurodns provider sets zone_profiles: true")
+	}
+	return out
 }
 
 // teamHasMembers reports whether team is declared with at least one member.

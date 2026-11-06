@@ -237,6 +237,18 @@ func Impact(old, new *Snapshot, owned OwnedCounter) []uiapi.ImpactItem {
 		}
 	}
 
+	oldIneffective := map[string]bool{}
+	for _, w := range old.IneffectiveProfileGrants(LayerManaged) {
+		oldIneffective[w] = true
+	}
+	for _, w := range new.IneffectiveProfileGrants(LayerManaged) {
+		if !oldIneffective[w] {
+			role, _, _ := strings.Cut(w, ".rules[")
+			items = append(items, uiapi.ImpactItem{Kind: "warning", Who: "role " + role, Role: role, Actions: []string{ActionZoneProfile},
+				Message: fmt.Sprintf("%s grants %s without effect: zone profiles are account-wide, the action only counts on zones [\"*\"] without records", w, ActionZoneProfile)})
+		}
+	}
+
 	order := map[string]int{"warning": 0, "loss": 1, "gain": 2}
 	sort.Slice(items, func(i, j int) bool {
 		if order[items[i].Kind] != order[items[j].Kind] {

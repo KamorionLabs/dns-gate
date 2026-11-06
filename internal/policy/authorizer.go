@@ -13,7 +13,11 @@ const (
 	ActionDNSRead     = "dns.read"
 	ActionRecordWrite = "dns.record.write"
 	ActionRecordAdopt = "dns.record.adopt"
-	ActionZoneAdmin   = "dns.zone.admin" // DNSSEC sign/unsign, zone profiles
+	ActionZoneAdmin   = "dns.zone.admin" // DNSSEC sign/unsign, zone settings (EuroDNS forwards)
+	// ActionZoneProfile manages the zone profiles of a EuroDNS account
+	// (templates applied to domains on arrival). Profiles are account-wide
+	// objects: the action counts only when granted on every zone ("*").
+	ActionZoneProfile = "dns.zone.profile"
 	ActionDomainRead  = "domain.read"
 	ActionUIRead      = "ui.read" // read-only UI and /api/v1
 )
