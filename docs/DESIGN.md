@@ -1012,14 +1012,20 @@ Go SDK), so LLM agents can inspect DNS and, if explicitly allowed, propose chang
 | Tool | Kind | Equivalent |
 |---|---|---|
 | `list_zones` | read | `GET /api/v1/zones` |
-| `list_rrsets` | read | zone inventory |
-| `get_rrset` | read | one RRset with ownership and history |
+| `list_rrsets` | read | zone inventory, with owner teams and tombstones |
+| `get_rrset` | read | one RRset with ownership (and why the caller may change it), tombstone and history |
 | `search_audit` | read | audit search |
 | `explain` | read | decision simulation for the caller |
 | `who_can` | read | who may act on an RRset |
+| `list_teams`, `get_team` | read | `GET /api/v1/teams[/{team}]` |
+| `transfer_list` | read | `GET /api/v1/transfers` |
 | `plan_rrset_change` | write (disabled by default) | dry run of desired RRset states; returns the changes, the decision and a `plan_id` |
 | `apply_rrset_change` | write (disabled by default) | applies exactly one plan, by `plan_id` |
 | `adopt_preview`, `adopt_apply` | write (disabled by default) | bulk adoption (16.1), with the same token and comment rules |
+| `transfer_propose`, `transfer_approve`, `transfer_reject` | write (disabled by default) | ownership transfers between teams, with a second approver |
+
+The plan and adoption tools take an optional `team`, one of the caller's teams,
+like the `X-DNS-Gate-Team` header of the REST API.
 
 ### 17.3 Plan then apply
 
