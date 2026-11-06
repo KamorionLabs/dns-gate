@@ -80,6 +80,7 @@ func TestEndToEnd(t *testing.T) {
 	t.Run("13_policy_delegation", e.scenarioDelegation)
 	t.Run("14_dnsgate_provider", e.scenarioDNSGateProvider)
 	t.Run("15_zone_profiles", e.scenarioZoneProfiles)
+	t.Run("16_eurodns_folders", e.scenarioFolders)
 }
 
 func setup(t *testing.T) *env {
@@ -198,10 +199,18 @@ roles:
       - zones: [%[9]s]
         actions: [dns.read, dns.record.write, ui.read]
         records: {hosts: ["*.apps"], types: [CNAME]}
+  es-writer:
+    rules:
+      - folders: ["/ES", "/ES/**"]
+        actions: [dns.read, dns.record.write, ui.read]
+        records: {hosts: ["*.es"], types: [CNAME]}
 bindings:
   - role: profile-admin
     team: platform
     subjects: [{issuer: ci, claims: {sub: [ci-profiles]}}]
+  - role: es-writer
+    team: es
+    subjects: [{issuer: ci, claims: {sub: [ci-es]}}]
   - role: pipeline-writer
     team_from: {claim: sub, regex: "^pipeline:([a-z0-9-]+)$", prefix: p-}
     subjects: [{issuer: ci, claims: {sub: ["pipeline:*"]}}]
