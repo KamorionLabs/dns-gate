@@ -170,7 +170,9 @@ Configuration and details: [CONFIG.md](CONFIG.md#token-exchange).
 
 API keys are issued by the gate at runtime, for third parties that have no OIDC
 identity: a hosting provider renewing certificates, an appliance. A key is bound
-to one team (the owner of the RRsets it creates) and one role, with an optional
+to one team (the owner of the RRsets it creates; a declared team once a
+[`teams`](CONFIG.md#teams) block exists, otherwise the key is refused at creation and
+in use) and one role, with an optional
 expiry and source CIDRs. Only its SHA-256 is stored; the key is shown once, at
 creation and at each rotation. The same key works on this API, on the
 [ACME endpoints](ACME.md) and on the EuroDNS-compatible API (`X-App-Id: <id>`,

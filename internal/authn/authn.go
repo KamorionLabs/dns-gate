@@ -308,6 +308,26 @@ func (a *Authenticator) Rebind(s *identity.Subject) (*identity.Subject, error) {
 		}
 		return nil, unauthorized("virtual key removed")
 	}
+	if s.Kind == identity.KindAPIKey {
+		if a.keys == nil {
+			return nil, unauthorized("API keys are not enabled")
+		}
+		k, err := a.keys.GetAPIKey(context.Background(), s.ID)
+		if err != nil {
+			return nil, unauthorized("API key not found")
+		}
+		snap := a.policy.Current()
+		switch {
+		case k.RevokedAt != nil:
+			return nil, unauthorized("API key revoked")
+		case k.ExpiresAt != nil && !a.now().Before(*k.ExpiresAt):
+			return nil, unauthorized("API key expired")
+		case !snap.HasRole(k.Role) || snap.RoleReserved(k.Role) || (snap.StrictTeams() && !snap.TeamDeclared(k.Team)):
+			return nil, unauthorized("the role or the team of this API key is no longer valid")
+		}
+		return &identity.Subject{Kind: identity.KindAPIKey, Issuer: APIKeyIssuer, ID: k.ID, Claims: map[string]any{}, Roles: []string{k.Role},
+			Teams: []string{k.Team}, TeamRoles: map[string][]string{k.Team: {k.Role}}, Name: s.Name, Category: identity.CategoryKey}, nil
+	}
 	return a.SubjectFromClaims(s.Issuer, s.Claims, s.Category)
 }
 

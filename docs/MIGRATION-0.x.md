@@ -103,7 +103,7 @@ version:
   prefix is then required), never a declared team: move such people and pipelines
   into `teams.<name>.members`. Families must not overlap (no prefix starts with
   another). Declare
-  every team the warnings listed, plus the store owners `GET /api/v1/teams` shows as
+  every team the warnings listed, the teams of the API keys, plus the store owners `GET /api/v1/teams` shows as
   `store`, before adding the block; or rename them with
   `POST /api/v1/teams/{team}/rename` (two policy administrators).
 - A later version will refuse undeclared teams even without the block.
@@ -151,7 +151,8 @@ Other changes of the same version:
   default): other teams can no longer re-create it at once (`403 not_owner`), they ask
   for a transfer. Set `ownership.tombstone_ttl: 0s` to keep the previous behaviour.
 - SQL stores get migrations `0004` (tables `ownership_tombstone` and
-  `ownership_transfer`, column `rrset_plan.team`) and `0005` (column
-  `ownership.transfer_id`), applied at startup. The DynamoDB
+  `ownership_transfer`, column `rrset_plan.team`) and `0006` (column
+  `ownership.transfer_id`), applied at startup; on a database already at `0005` (API
+  keys, 0.7.0), `0004` is applied then, migrations being recorded one by one. The DynamoDB
   table needs no change (new `TOMB#` and `TR#` items, the existing `ttl` attribute);
   the gate role needs `dynamodb:Scan` on it for team renames.

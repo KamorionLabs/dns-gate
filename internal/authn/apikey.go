@@ -91,6 +91,9 @@ func (a *Authenticator) authenticateAPIKey(ctx context.Context, user, token stri
 	if !snap.HasRole(k.Role) || snap.RoleReserved(k.Role) {
 		return nil, a.keyFailure(ctx, id, ip, &Error{Status: http.StatusForbidden, Reason: "no_binding", Message: "the role of this API key no longer exists or grants policy.* or gate.* actions"})
 	}
+	if snap.StrictTeams() && !snap.TeamDeclared(k.Team) {
+		return nil, a.keyFailure(ctx, id, ip, &Error{Status: http.StatusForbidden, Reason: "no_binding", Message: "the team of this API key is not declared under teams"})
+	}
 	var issued policy.RoleGrant
 	cur, _ := snap.RoleGrant(k.Role)
 	if err := json.Unmarshal([]byte(k.RoleGrant), &issued); err != nil || !cur.Within(issued) {
@@ -105,15 +108,16 @@ func (a *Authenticator) authenticateAPIKey(ctx context.Context, user, token stri
 		name = id
 	}
 	return &identity.Subject{
-		Kind:     identity.KindAPIKey,
-		Issuer:   APIKeyIssuer,
-		ID:       id,
-		Claims:   map[string]any{},
-		Roles:    []string{k.Role},
-		Teams:    []string{k.Team},
-		Name:     name,
-		Category: identity.CategoryKey,
-		Addr:     ip,
+		Kind:      identity.KindAPIKey,
+		Issuer:    APIKeyIssuer,
+		ID:        id,
+		Claims:    map[string]any{},
+		Roles:     []string{k.Role},
+		Teams:     []string{k.Team},
+		TeamRoles: map[string][]string{k.Team: {k.Role}},
+		Name:      name,
+		Category:  identity.CategoryKey,
+		Addr:      ip,
 	}, nil
 }
 

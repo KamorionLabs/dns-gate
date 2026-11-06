@@ -71,6 +71,15 @@ func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request, subj *ide
 	}
 }
 
+// keyTeamProblem tells why an API key may not be bound to team: once the
+// teams block exists, the team must be declared (as for virtual keys).
+func keyTeamProblem(snap *policy.Snapshot, team string) string {
+	if snap.StrictTeams() && !snap.TeamDeclared(team) {
+		return "team " + team + " is not declared under teams"
+	}
+	return ""
+}
+
 // canManageKey: a team of the subject (any team for gate-wide managers,
 // holding gate.apikey.manage on "*") and gate.apikey.manage on every zone of
 // the key role.
@@ -274,6 +283,9 @@ func (s *Server) createAPIKey(w http.ResponseWriter, r *http.Request, subj *iden
 	}
 	if !keyTeamRe.MatchString(req.Team) {
 		return perr(http.StatusBadRequest, "invalid", "team: a lowercase identifier is required")
+	}
+	if msg := keyTeamProblem(snap, req.Team); msg != "" {
+		return perr(http.StatusBadRequest, "invalid", msg)
 	}
 	if msg := snap.KeyRoleProblem(subj.Roles, req.Role); msg != "" {
 		s.apiAudit(r, subj, "apikey.create", "", "deny", "forbidden", map[string]any{"team": req.Team, "role": req.Role})

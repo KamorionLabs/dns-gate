@@ -10,6 +10,7 @@ import (
 
 	"github.com/KamorionLabs/dns-gate/internal/config"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
+	"github.com/KamorionLabs/dns-gate/internal/policy"
 	"github.com/KamorionLabs/dns-gate/internal/store"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 	"github.com/KamorionLabs/dns-gate/internal/zonewrite"
@@ -292,5 +293,18 @@ func TestNewFamilyTakingOverStoreTeamsIsReported(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("a new family silently takes over the RRsets of a store team: %+v", d.Impact)
+	}
+}
+
+func TestAPIKeyTeamProblem(t *testing.T) {
+	strict := policy.FromConfig(&config.Config{Teams: map[string]config.Team{"web": {}}}).Holder().Current()
+	if msg := keyTeamProblem(strict, "web"); msg != "" {
+		t.Fatalf("declared team refused: %s", msg)
+	}
+	if msg := keyTeamProblem(strict, "legacy"); msg == "" {
+		t.Fatal("an API key of an undeclared team must be refused once teams are declared")
+	}
+	if msg := keyTeamProblem(policy.FromConfig(&config.Config{}).Holder().Current(), "legacy"); msg != "" {
+		t.Fatalf("migration mode: %s", msg)
 	}
 }
