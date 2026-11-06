@@ -1,20 +1,28 @@
 <!doctype html>
-<html lang="en" data-theme="light">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>dns-gate API reference</title>
-<meta name="description" content="OpenAPI 3.1 reference of the dns-gate API: zones, RRsets with content-hash preconditions, plan and apply, audit, adoption, Terraform export and policy delegation.">
+<meta name="description" content="OpenAPI 3.1 reference of the dns-gate API: zones, RRsets with content-hash preconditions, URL forwards, plan and apply, adoption, transfers, audit, API keys and ACME endpoints, with code samples and a request client.">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="style.css">
 <style>
+  :root[data-theme='dark'] {
+    --paper: #111419; --sheet: #161a21; --sheet-raised: #1b2029; --well: #0d1014;
+    --ink: #e6e8ec; --ink-2: #b3b9c4; --ink-3: #868d9a;
+    --rule: rgba(255, 255, 255, 0.08); --rule-soft: rgba(255, 255, 255, 0.05); --rule-strong: rgba(255, 255, 255, 0.16);
+    --seal-ink: #8fb0e6; --seal-ink-wash: rgba(143, 176, 230, 0.1); --wax: #e0786e;
+    color-scheme: dark;
+  }
   html { scroll-behavior: auto; scroll-padding-top: 0; }
   body { background: var(--sheet); }
   .api-note { border-bottom: 1px solid var(--rule-soft); background: var(--paper); font-size: 14px; color: var(--ink-2); }
-  .api-note .wrap { display: flex; flex-wrap: wrap; gap: 8px 20px; padding-top: 10px; padding-bottom: 10px; }
+  .api-note .wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; padding-top: 10px; padding-bottom: 10px; }
   .api-note a { color: var(--seal-ink); }
-  #redoc { min-height: 60vh; }
+  .api-note label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; cursor: pointer; }
   .api-fallback { padding: 48px 0; }
+  #api { min-height: 60vh; }
 </style>
 </head>
 <body>
@@ -24,7 +32,8 @@
     <a class="brand" href="index.html"><svg width="22" height="22" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="8" cy="8" r="2.5" fill="currentColor"/></svg>dns-gate</a>
     <nav class="nav" aria-label="Sections">
       <a href="index.html">Overview</a>
-      <a href="https://github.com/KamorionLabs/dns-gate/blob/main/docs/API.md">API guide</a>
+      <a href="docs/">Docs</a>
+      <a href="docs/api/">API by example</a>
       <a href="dns-gate.openapi.yaml" download>OpenAPI file</a>
       <a class="gh" href="https://github.com/KamorionLabs/dns-gate">GitHub</a>
     </nav>
@@ -33,39 +42,101 @@
 
 <div class="api-note">
   <div class="wrap">
-    <span>The gate's REST API under <code>/api/v1</code>, the same for every DNS provider, and the ACME endpoints under <code>/acme</code>. For EuroDNS zones the gate also serves the EuroDNS-compatible API, documented by <a href="https://docapi.eurodns.com/">EuroDNS</a>.</span>
+    <span>The gate's REST API under <code>/api/v1</code>, the same for every DNS provider, and the ACME endpoints under <code>/acme</code>. EuroDNS zones also have the EuroDNS-compatible API, documented by <a href="https://docapi.eurodns.com/">EuroDNS</a>. To send requests from this page, pick your gate in <em>Server</em> and paste a token in <em>Authentication</em>; tokens stay in this tab unless you tick the box. <a href="docs/api/#try-it-from-the-reference">Requirements</a>.</span>
+    <label><input type="checkbox" id="persist-auth"> Remember tokens in this browser</label>
   </div>
 </div>
 
-<main id="redoc">
+<main id="api">
   <div class="wrap api-fallback">
     <p>Loading the reference. Without JavaScript, read <a href="dns-gate.openapi.yaml">dns-gate.openapi.yaml</a> directly.</p>
   </div>
 </main>
 
-<script src="https://cdn.jsdelivr.net/npm/redoc@2.1.5/bundles/redoc.standalone.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.75.1/dist/browser/standalone.js"></script>
 <script>
   (function () {
-    var css = getComputedStyle(document.documentElement);
-    function v(name) { return css.getPropertyValue(name).trim(); }
-    if (!window.Redoc) return;
-    window.Redoc.init('dns-gate.openapi.yaml', {
-      scrollYOffset: 'header.top',
-      hideDownloadButton: false,
-      expandResponses: '200,204',
-      jsonSampleExpandLevel: 3,
-      sortTagsAlphabetically: false,
-      theme: {
-        colors: { primary: { main: v('--seal-ink') || '#24406b' }, text: { primary: v('--ink') || '#1b2230' } },
-        typography: {
-          fontFamily: v('--font-ui') || 'system-ui, sans-serif',
-          headings: { fontFamily: v('--font-ui') || 'system-ui, sans-serif', fontWeight: '600' },
-          code: { fontFamily: v('--font-record') || 'ui-monospace, monospace' }
+    var PERSIST = 'dns-gate-api:persist-auth';
+    var AUTH_PREFIX = 'scalar-reference-auth';
+
+    function stored(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
+    function forgetAuth() {
+      try {
+        for (var i = localStorage.length - 1; i >= 0; i--) {
+          var k = localStorage.key(i);
+          if (k && k.indexOf(AUTH_PREFIX) === 0) localStorage.removeItem(k);
+        }
+      } catch (e) { /* storage unavailable: nothing was persisted */ }
+    }
+
+    var persist = stored(PERSIST) === '1';
+    if (!persist) forgetAuth();
+    var box = document.getElementById('persist-auth');
+    box.checked = persist;
+    box.addEventListener('change', function () {
+      try {
+        if (box.checked) localStorage.setItem(PERSIST, '1');
+        else { localStorage.removeItem(PERSIST); forgetAuth(); }
+      } catch (e) { /* storage unavailable */ }
+      location.reload();
+    });
+
+    if (!window.Scalar) return;
+
+    var dark = !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+    new MutationObserver(function () {
+      document.documentElement.dataset.theme = document.body.classList.contains('dark-mode') ? 'dark' : 'light';
+    }).observe(document.body, { attributes: true, attributeFilter: ['class'] });
+
+    var css = [
+      '.light-mode, .dark-mode { --scalar-font: var(--font-ui); --scalar-font-code: var(--font-record); --scalar-radius: 4px; --scalar-radius-lg: 8px; --scalar-radius-xl: 12px; }',
+      '.light-mode { --scalar-background-1: #fdfcf9; --scalar-background-2: #f6f5f1; --scalar-background-3: #efede7; --scalar-background-accent: rgba(36, 64, 107, 0.08);',
+      '  --scalar-color-1: #1b2230; --scalar-color-2: #444d5e; --scalar-color-3: #6b7383; --scalar-color-accent: #24406b; --scalar-border-color: rgba(27, 34, 48, 0.1);',
+      '  --scalar-color-red: #b4372f; --scalar-color-orange: #9a6a12; --scalar-color-green: #2c7451; --scalar-color-blue: #24406b;',
+      '  --scalar-sidebar-background-1: #f6f5f1; --scalar-sidebar-color-active: #24406b; --scalar-sidebar-item-active-background: rgba(36, 64, 107, 0.08); }',
+      '.dark-mode { --scalar-background-1: #161a21; --scalar-background-2: #111419; --scalar-background-3: #1b2029; --scalar-background-accent: rgba(143, 176, 230, 0.1);',
+      '  --scalar-color-1: #e6e8ec; --scalar-color-2: #b3b9c4; --scalar-color-3: #868d9a; --scalar-color-accent: #8fb0e6; --scalar-border-color: rgba(255, 255, 255, 0.08);',
+      '  --scalar-color-red: #e0786e; --scalar-color-orange: #d6a54c; --scalar-color-green: #6cc095; --scalar-color-blue: #8fb0e6;',
+      '  --scalar-sidebar-background-1: #111419; --scalar-sidebar-color-active: #8fb0e6; --scalar-sidebar-item-active-background: rgba(143, 176, 230, 0.1); }'
+    ].join('\n');
+
+    document.getElementById('api').innerHTML = '';
+    document.documentElement.style.setProperty('--scalar-custom-header-height', '57px');
+
+    Scalar.createApiReference('#api', {
+      url: 'dns-gate.openapi.yaml',
+      theme: 'none',
+      customCss: css,
+      withDefaultFonts: false,
+      darkMode: dark,
+      layout: 'modern',
+      telemetry: false,
+      persistAuth: persist,
+      agent: { disabled: true },
+      documentDownloadType: 'yaml',
+      servers: [
+        {
+          url: '{scheme}://{gate}',
+          description: 'Your gate',
+          variables: {
+            scheme: { default: 'https', enum: ['https', 'http'] },
+            gate: { default: 'dns-gate.example.com', description: 'Host name, and port if any, of the gate.' }
+          }
         },
-        sidebar: { backgroundColor: v('--paper') || '#f6f5f1', textColor: v('--ink-2') || '#444d5e' },
-        rightPanel: { backgroundColor: '#1b2230' }
+        { url: 'http://127.0.0.1:8080', description: 'Quickstart gate on this machine' }
+      ],
+      authentication: { preferredSecurityScheme: 'bearer' },
+      defaultHttpClient: { targetKey: 'shell', clientKey: 'curl' },
+      hiddenClients: {
+        c: true, clojure: true, csharp: true, dart: true, fsharp: true, http: true, java: true, js: true,
+        julia: true, kotlin: true, objc: true, ocaml: true, php: true, r: true, ruby: true, rust: true, swift: true,
+        shell: ['httpie', 'wget'],
+        python: ['python3', 'httpx_sync', 'httpx_async', 'aiohttp'],
+        node: ['axios', 'ofetch', 'undici'],
+        powershell: ['webrequest']
       }
-    }, document.getElementById('redoc'));
+    });
   })();
 </script>
 </body>
