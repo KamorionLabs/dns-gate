@@ -1,64 +1,6 @@
 /* The ledger of the gate console, at page scale: paper, one registry ink, seal
    colors only where they carry a record's state. Borders-only depth. */
 
-:root {
-  --font-ui: -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
-  --font-record: ui-monospace, 'SF Mono', 'Cascadia Code', 'JetBrains Mono', Menlo, Consolas, monospace;
-
-  --paper: #f6f5f1;
-  --sheet: #fdfcf9;
-  --sheet-raised: #ffffff;
-  --well: #efede7;
-  --ink: #1b2230;
-  --ink-2: #444d5e;
-  --ink-3: #6b7383;
-  --rule: rgba(27, 34, 48, 0.1);
-  --rule-soft: rgba(27, 34, 48, 0.06);
-  --rule-strong: rgba(27, 34, 48, 0.2);
-
-  --seal-ink: #24406b;
-  --seal-ink-wash: rgba(36, 64, 107, 0.08);
-  --on-seal: #fdfcf9;
-  --gate-bg: #24406b;
-  --gate-ink: #fdfcf9;
-  --wax: #b4372f;
-  --brass: #9a6a12;
-  --stamp: #2c7451;
-  --pencil: #8a8f99;
-
-  --r-sm: 4px;
-  --r-md: 8px;
-  --r-lg: 12px;
-  --page: 1200px;
-  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
-
-  color-scheme: light;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme='light']) {
-    --paper: #111419;
-    --sheet: #161a21;
-    --sheet-raised: #1b2029;
-    --well: #0d1014;
-    --ink: #e6e8ec;
-    --ink-2: #b3b9c4;
-    --ink-3: #868d9a;
-    --rule: rgba(255, 255, 255, 0.08);
-    --rule-soft: rgba(255, 255, 255, 0.05);
-    --rule-strong: rgba(255, 255, 255, 0.16);
-    --seal-ink: #8fb0e6;
-    --seal-ink-wash: rgba(143, 176, 230, 0.1);
-    --on-seal: #111419;
-    --gate-bg: #1c2a42;
-    --gate-ink: #e6e8ec;
-    --wax: #e0786e;
-    --brass: #d6a54c;
-    --stamp: #6cc095;
-    --pencil: #7c828d;
-    color-scheme: dark;
-  }
-}
 
 *, *::before, *::after { box-sizing: border-box; }
 
@@ -84,22 +26,6 @@ pre code { padding: 0; background: none; }
 :focus-visible { outline: 2px solid var(--seal-ink); outline-offset: 2px; border-radius: var(--r-sm); }
 
 .wrap { max-width: var(--page); margin: 0 auto; padding: 0 24px; }
-
-/* header */
-.top {
-  position: sticky; top: 0; z-index: 10;
-  background: color-mix(in srgb, var(--paper) 88%, transparent);
-  backdrop-filter: blur(8px);
-  border-bottom: 1px solid var(--rule-soft);
-}
-.top .wrap { display: flex; align-items: center; gap: 24px; height: 56px; }
-.brand { display: flex; align-items: center; gap: 10px; color: var(--ink); text-decoration: none; font-weight: 600; }
-.brand svg { color: var(--seal-ink); }
-.nav { display: flex; gap: 20px; margin-left: auto; font-size: 14px; }
-.nav a { color: var(--ink-2); text-decoration: none; }
-.nav a:hover { color: var(--ink); }
-.nav .gh { color: var(--ink); font-weight: 500; }
-@media (max-width: 760px) { .nav a:not(.gh) { display: none; } }
 
 /* sections */
 section { padding: 96px 0; border-top: 1px solid var(--rule-soft); }
@@ -298,10 +224,5 @@ pre.code .k { color: var(--seal-ink); }
 .status p { color: var(--ink-2); font-size: 15px; }
 .status b { color: var(--ink); }
 @media (max-width: 960px) { .run { grid-template-columns: minmax(0, 1fr); } }
-
-/* footer */
-.foot { border-top: 1px solid var(--rule-soft); color: var(--ink-3); font-size: 13px; }
-.foot .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; padding-top: 20px; padding-bottom: 28px; }
-.foot a { color: var(--ink-2); }
 
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } * { transition: none !important; } }

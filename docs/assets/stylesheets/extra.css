@@ -1,118 +1,128 @@
-/* The landing page palette (site/style.css) on Material for MkDocs: paper,
-   one registry ink, the seal blue for links and accents. */
+/* Material for MkDocs dressed as the project site: the tokens of chrome.css
+   (light and dark follow data-theme on <html>), the site container, fonts,
+   links and code. The header and the footer bar come from chrome/. */
+
+html { font-size: 125%; }
+@media screen and (min-width: 100em) { html { font-size: 125%; } }
+@media screen and (min-width: 125em) { html { font-size: 125%; } }
 
 :root {
-  --gate-paper: #f6f5f1;
-  --gate-sheet: #fdfcf9;
-  --gate-well: #efede7;
-  --gate-ink: #1b2230;
-  --gate-ink-2: #444d5e;
-  --gate-rule: rgba(27, 34, 48, 0.1);
-  --gate-seal: #24406b;
-  --gate-seal-wash: rgba(36, 64, 107, 0.08);
-  --gate-wax: #b4372f;
-
-  --md-text-font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
-  --md-code-font-family: ui-monospace, 'SF Mono', 'Cascadia Code', 'JetBrains Mono', Menlo, Consolas, monospace;
+  --md-text-font-family: var(--font-ui);
+  --md-code-font-family: var(--font-record);
 }
 
-[data-md-color-scheme="default"] {
-  --md-primary-fg-color: var(--gate-seal);
-  --md-primary-fg-color--light: #3a5a8c;
-  --md-primary-fg-color--dark: #1b3254;
-  --md-primary-bg-color: var(--gate-ink);
-  --md-primary-bg-color--light: var(--gate-ink-2);
-  --md-accent-fg-color: var(--gate-wax);
-  --md-accent-fg-color--transparent: rgba(180, 55, 47, 0.1);
-  --md-default-bg-color: var(--gate-paper);
-  --md-default-fg-color: var(--gate-ink);
-  --md-default-fg-color--light: var(--gate-ink-2);
-  --md-typeset-a-color: var(--gate-seal);
-  --md-code-bg-color: var(--gate-well);
-  --md-footer-bg-color: var(--gate-sheet);
-  --md-footer-bg-color--dark: var(--gate-well);
-  --md-footer-fg-color: var(--gate-ink);
-  --md-footer-fg-color--light: var(--gate-ink-2);
-  --md-footer-fg-color--lighter: #6b7383;
+[data-md-color-scheme] {
+  --md-primary-fg-color: var(--seal-ink);
+  --md-primary-fg-color--light: var(--seal-ink);
+  --md-primary-fg-color--dark: var(--seal-ink);
+  --md-primary-bg-color: var(--ink);
+  --md-primary-bg-color--light: var(--ink-2);
+  --md-accent-fg-color: var(--seal-ink);
+  --md-accent-fg-color--transparent: var(--seal-ink-wash);
+  --md-default-bg-color: var(--paper);
+  --md-default-bg-color--light: var(--sheet);
+  --md-default-fg-color: var(--ink);
+  --md-default-fg-color--light: var(--ink-2);
+  --md-default-fg-color--lighter: var(--ink-3);
+  --md-default-fg-color--lightest: var(--rule-strong);
+  --md-typeset-color: var(--ink);
+  --md-typeset-a-color: var(--seal-ink);
+  --md-code-bg-color: var(--well);
+  --md-code-fg-color: var(--ink);
+  --md-typeset-table-color: var(--rule);
+  --md-typeset-table-color--light: var(--seal-ink-wash);
+  --md-admonition-bg-color: var(--sheet);
+  --md-footer-bg-color: var(--paper);
+  --md-footer-bg-color--dark: var(--paper);
+  --md-footer-fg-color: var(--ink);
+  --md-footer-fg-color--light: var(--ink-2);
+  --md-footer-fg-color--lighter: var(--ink-3);
+  --md-shadow-z1: none;
+  --md-shadow-z2: 0 8px 24px rgba(0, 0, 0, 0.12);
+  --md-shadow-z3: 0 8px 24px rgba(0, 0, 0, 0.16);
+}
+[data-md-color-scheme="slate"] { --md-hue: 218; }
+
+body { background: var(--paper); -webkit-font-smoothing: antialiased; }
+
+/* The site container: same width as the landing page. */
+.md-grid { max-width: var(--page); }
+
+/* Below the 56 px site header. */
+.md-sidebar { top: 57px; }
+.md-typeset [id] { scroll-margin-top: 72px; }
+
+/* Room for the footer bar at the end of the sidebars and the content. */
+.md-sidebar__scrollwrap { padding-bottom: var(--foot-h); }
+.md-footer-meta { display: none; }
+.md-footer__inner { padding-bottom: 16px; }
+.md-footer__link { color: var(--ink-2); }
+.md-footer__link:hover { color: var(--ink); }
+
+/* Material's drawer and search buttons in the site header. */
+.md-drawer-btn svg, .md-search-btn svg { fill: currentColor; }
+@media screen and (min-width: 76.25em) { .md-drawer-btn { display: none; } }
+@media screen and (min-width: 60em) { .md-search-btn { display: none; } }
+.top .md-search__form { background-color: var(--sheet); border: 1px solid var(--rule); border-radius: var(--r-md); box-shadow: none; }
+.top .md-search__form:hover { border-color: var(--rule-strong); background-color: var(--sheet); }
+.top .md-search__input { color: var(--ink); }
+.top .md-search__input::placeholder { color: var(--ink-3); }
+.top .md-search__icon { color: var(--ink-3); }
+.md-search__scrollwrap, .md-search-result { background-color: var(--sheet-raised); }
+.md-search-result__meta { background-color: var(--sheet); color: var(--ink-2); }
+
+/* Navigation and table of contents, quiet as on the landing page. */
+.md-nav__title { color: var(--ink); }
+.md-nav__item--section > .md-nav__link { color: var(--ink); font-weight: 600; }
+.md-nav__link { color: var(--ink-2); }
+.md-nav__link:hover, .md-nav__link:focus { color: var(--ink); }
+.md-nav__link--active, .md-nav__link--active:hover { color: var(--seal-ink); font-weight: 500; }
+.md-nav--secondary .md-nav__title { background: var(--paper); box-shadow: none; }
+@media screen and (max-width: 76.234375em) {
+  .md-nav--primary .md-nav__title { background: var(--sheet); color: var(--ink); }
+  .md-sidebar--primary { background-color: var(--paper); }
 }
 
-[data-md-color-scheme="slate"] {
-  --gate-paper: #111419;
-  --gate-sheet: #161a21;
-  --gate-well: #0d1014;
-  --gate-ink: #e6e8ec;
-  --gate-ink-2: #b3b9c4;
-  --gate-rule: rgba(255, 255, 255, 0.08);
-  --gate-seal: #8fb0e6;
-  --gate-seal-wash: rgba(143, 176, 230, 0.1);
-  --gate-wax: #e0786e;
+/* Type: the landing page's headings, links and code. */
+.md-typeset { line-height: 1.6; }
+.md-typeset h1 { color: var(--ink); font-weight: 600; font-size: 1.8rem; line-height: 1.15; letter-spacing: -0.01em; margin-bottom: 0.8em; }
+.md-typeset h2 { font-weight: 600; font-size: 1.2rem; line-height: 1.25; padding-top: 1.2rem; border-top: 1px solid var(--rule-soft); }
+.md-typeset h3 { font-weight: 600; }
+.md-typeset a { color: var(--seal-ink); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--seal-ink) 35%, transparent); text-underline-offset: 3px; }
+.md-typeset a:hover { color: var(--seal-ink); text-decoration-color: currentColor; }
+.md-typeset .headerlink { text-decoration: none; color: var(--ink-3); }
+.md-typeset code { border-radius: var(--r-sm); }
+.md-typeset pre > code { border: 1px solid var(--rule); border-radius: var(--r-md); }
+.md-typeset .tabbed-labels > label { color: var(--ink-3); font-weight: 500; }
+.md-typeset .tabbed-labels > label:hover { color: var(--ink); }
+.md-typeset .tabbed-set > input:checked + label { color: var(--ink); }
+.md-typeset .admonition, .md-typeset details { border-radius: var(--r-md); border-width: 1px; box-shadow: none; }
+.md-typeset table:not([class]) { font-size: 0.72rem; border: 1px solid var(--rule); border-radius: var(--r-md); box-shadow: none; }
+.md-typeset table:not([class]) th { background-color: var(--seal-ink-wash); color: var(--ink); font-weight: 600; }
 
-  --md-hue: 218;
-  --md-primary-fg-color: var(--gate-seal);
-  --md-primary-fg-color--light: #a9c3ee;
-  --md-primary-fg-color--dark: #6f92cc;
-  --md-primary-bg-color: var(--gate-ink);
-  --md-primary-bg-color--light: var(--gate-ink-2);
-  --md-accent-fg-color: var(--gate-wax);
-  --md-accent-fg-color--transparent: rgba(224, 120, 110, 0.1);
-  --md-default-bg-color: var(--gate-paper);
-  --md-typeset-a-color: var(--gate-seal);
-  --md-code-bg-color: var(--gate-sheet);
-  --md-footer-bg-color: var(--gate-sheet);
-  --md-footer-bg-color--dark: var(--gate-well);
-}
-
-/* Header and tabs on paper, as on the landing page, instead of a colored bar. */
-.md-header,
-.md-tabs {
-  background-color: var(--gate-sheet);
-  color: var(--gate-ink);
-}
-.md-header {
-  box-shadow: 0 1px 0 var(--gate-rule);
-}
-.md-header--shadow {
-  box-shadow: 0 1px 0 var(--gate-rule), 0 2px 8px rgba(0, 0, 0, 0.04);
-}
-.md-header__button.md-logo img {
-  height: 1.4rem;
-}
-.md-search__form {
-  background-color: var(--gate-seal-wash);
-}
-.md-search__input::placeholder,
-.md-search__icon {
-  color: var(--gate-ink-2);
-}
-
-.md-typeset h1 {
-  color: var(--gate-ink);
-  font-weight: 600;
-}
-.md-typeset h2,
-.md-typeset h3 {
-  font-weight: 600;
-}
-
-.md-typeset table:not([class]) {
-  font-size: 0.72rem;
-  border-color: var(--gate-rule);
-}
-.md-typeset table:not([class]) th {
-  background-color: var(--gate-seal-wash);
-}
-
-.md-typeset code {
-  border-radius: 4px;
-}
-
-/* Cards for the overview page ("grid cards" of Material, styled with borders only). */
+/* Cards of the docs home, borders only. */
 .md-typeset .grid.cards > ul > li,
-.md-typeset .grid > .card {
-  border-color: var(--gate-rule);
-  background-color: var(--gate-sheet);
+.md-typeset .grid > .card { border: 1px solid var(--rule); border-radius: var(--r-md); background-color: var(--sheet); box-shadow: none; }
+.md-typeset .grid.cards > ul > li:hover { border-color: var(--rule-strong); box-shadow: none; }
+
+.md-top { background-color: var(--sheet-raised); color: var(--ink-2); bottom: calc(var(--foot-h) + 12px); border: 1px solid var(--rule); }
+
+:focus-visible { outline: 2px solid var(--seal-ink); outline-offset: 2px; }
+
+.md-typeset .tabbed-labels > label { text-decoration: none; }
+.top.md-header--shadow { box-shadow: none; }
+@media screen and (min-width: 76.25em) { .md-main__inner.md-grid { padding-left: 10px; padding-right: 10px; } }
+.md-search__scrollwrap { padding-bottom: var(--foot-h); }
+
+/* The site header carries .md-header for Material's search and drawer rules;
+   keep the site's look. */
+.top.md-header { background: var(--paper); -webkit-backdrop-filter: none; backdrop-filter: none; color: var(--ink); box-shadow: none; z-index: 30; height: auto; }
+.top.md-header .wrap { height: 56px; }
+.top .brand, .top .nav, .top .top-tools { flex: none; }
+.top .nav a { white-space: nowrap; }
+.top-search { min-width: 0; }
+@media screen and (min-width: 60em) {
+  [data-md-toggle="search"]:checked ~ .md-header .md-search__inner { width: 24rem; }
+  .top .md-search__scrollwrap { width: 24rem; }
 }
-.md-typeset .grid.cards > ul > li:hover {
-  border-color: var(--gate-seal);
-  box-shadow: none;
-}
+.md-typeset .tabbed-labels a { color: inherit; text-decoration: none; }

@@ -1,0 +1,70 @@
+/* The Scalar API reference dressed as the rest of the site: centered in the
+   site container, site fonts and palette through Scalar's CSS variables (they
+   follow the light and dark tokens of chrome.css), room for the header and the
+   footer bar. Scalar itself is not modified. */
+
+html { scroll-behavior: auto; scroll-padding-top: 0; }
+body.api-page { background: var(--paper); }
+
+.api-note { border-bottom: 1px solid var(--rule-soft); font-size: 14px; color: var(--ink-2); }
+.api-note .wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 24px; padding-top: 12px; padding-bottom: 12px; }
+.api-note p { flex: 1 1 520px; }
+.api-note a { color: var(--seal-ink); }
+.api-note label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; cursor: pointer; }
+.api-fallback { padding: 48px 0; }
+#api { min-height: 60vh; }
+
+/* Scalar inside the site container. Its sticky sidebar sits below the site
+   header (57 px) and its heights stop above the footer bar. */
+:root { --scalar-custom-header-height: 57px; }
+.api-wrap { padding-left: 0; padding-right: 0; }
+@media (min-width: 1000px) {
+  .api-wrap { padding-left: 24px; padding-right: 24px; }
+}
+.api-wrap .references-layout { --full-height: calc(100dvh - var(--foot-h)) !important; }
+.api-wrap .scalar-app,
+.api-wrap .references-layout { background: transparent; }
+.api-wrap .t-doc__sidebar { border-right: 1px solid var(--rule); }
+
+.light-mode, .dark-mode {
+  --scalar-font: var(--font-ui);
+  --scalar-font-code: var(--font-record);
+  --scalar-radius: var(--r-sm);
+  --scalar-radius-lg: var(--r-md);
+  --scalar-radius-xl: var(--r-lg);
+  --scalar-background-1: var(--paper);
+  --scalar-background-2: var(--sheet);
+  --scalar-background-3: var(--well);
+  --scalar-background-accent: var(--seal-ink-wash);
+  --scalar-color-1: var(--ink);
+  --scalar-color-2: var(--ink-2);
+  --scalar-color-3: var(--ink-3);
+  --scalar-color-accent: var(--seal-ink);
+  --scalar-border-color: var(--rule);
+  --scalar-color-red: var(--wax);
+  --scalar-color-orange: var(--brass);
+  --scalar-color-yellow: var(--brass);
+  --scalar-color-green: var(--stamp);
+  --scalar-color-blue: var(--seal-ink);
+  --scalar-color-purple: var(--seal-ink);
+  --scalar-button-1: var(--seal-ink);
+  --scalar-button-1-color: var(--on-seal);
+  --scalar-button-1-hover: color-mix(in srgb, var(--seal-ink) 88%, var(--ink));
+  --scalar-sidebar-background-1: var(--paper);
+  --scalar-sidebar-color-1: var(--ink);
+  --scalar-sidebar-color-2: var(--ink-2);
+  --scalar-sidebar-border-color: var(--rule);
+  --scalar-sidebar-item-hover-background: var(--seal-ink-wash);
+  --scalar-sidebar-item-active-background: var(--seal-ink-wash);
+  --scalar-sidebar-color-active: var(--seal-ink);
+  --scalar-sidebar-search-background: var(--sheet);
+  --scalar-sidebar-search-border-color: var(--rule);
+  --scalar-sidebar-search-color: var(--ink-3);
+}
+.api-wrap .scalar-app h1,
+.api-wrap .scalar-app h2,
+.api-wrap .scalar-app h3 { font-weight: 600; letter-spacing: -0.005em; }
+.api-wrap .scalar-app code { font-family: var(--font-record); }
+
+/* Scalar's own promotion is not part of this reference. */
+.api-wrap [class*="explore-scalar"] { display: none !important; }

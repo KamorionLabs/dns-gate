@@ -22,21 +22,11 @@ theme:
   font: false
   icon:
     repo: fontawesome/brands/github
+  custom_dir: overrides
   palette:
-    - media: "(prefers-color-scheme: light)"
-      scheme: default
-      primary: custom
-      accent: custom
-      toggle:
-        icon: material/weather-night
-        name: Dark mode
-    - media: "(prefers-color-scheme: dark)"
-      scheme: slate
-      primary: custom
-      accent: custom
-      toggle:
-        icon: material/weather-sunny
-        name: Light mode
+    scheme: default
+    primary: custom
+    accent: custom
   features:
     - navigation.sections
     - navigation.indexes
@@ -56,6 +46,7 @@ extra:
   generator: false
 
 extra_css:
+  - chrome.css
   - assets/stylesheets/extra.css
 
 markdown_extensions:

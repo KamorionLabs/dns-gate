@@ -1,0 +1,35 @@
+{#- Shared header of the project site, the docs and the API reference.
+    Context: root (path to the site root, "" or "../.."), current (overview,
+    docs or api), header_class, header_attrs, header_start (before the brand) and
+    header_search (after it), HTML slots. -#}
+<header class="top{{ header_class }}"{{ header_attrs }}>
+  <div class="wrap">
+    {%- if header_start %}{{ header_start }}{% endif %}
+    <a class="brand" href="{{ root }}./"><svg width="22" height="22" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="8" cy="8" r="2.5" fill="currentColor"/></svg>dns-gate</a>
+    {%- if header_search %}
+    <div class="top-search">{{ header_search }}</div>
+    {%- endif %}
+    <nav class="nav" aria-label="Site">
+      <a href="{{ root }}./"{% if current == "overview" %} aria-current="page"{% endif %}>Overview</a>
+      <a href="{{ root }}docs/"{% if current == "docs" %} aria-current="page"{% endif %}>Docs</a>
+      <a href="{{ root }}api.html"{% if current == "api" %} aria-current="page"{% endif %}>API reference</a>
+      <a class="gh" href="https://github.com/KamorionLabs/dns-gate">GitHub</a>
+    </nav>
+    <div class="top-tools">
+      <button class="icon-btn theme-switch" type="button" aria-label="Switch to dark theme" title="Switch theme">
+        <svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+      </button>
+      <details class="menu">
+        <summary class="icon-btn" aria-label="Site menu" title="Site menu"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5.5" r="1.7" fill="currentColor"/><circle cx="12" cy="12" r="1.7" fill="currentColor"/><circle cx="12" cy="18.5" r="1.7" fill="currentColor"/></svg></summary>
+        <div class="menu-panel">
+          <a href="{{ root }}./"{% if current == "overview" %} aria-current="page"{% endif %}>Overview</a>
+          <a href="{{ root }}docs/"{% if current == "docs" %} aria-current="page"{% endif %}>Docs</a>
+          <a href="{{ root }}api.html"{% if current == "api" %} aria-current="page"{% endif %}>API reference</a>
+          <a href="https://github.com/KamorionLabs/dns-gate">GitHub</a>
+        </div>
+      </details>
+    </div>
+  </div>
+  <script>(function(){var K="dns-gate-theme",r=document.documentElement,b=document.currentScript.parentNode.querySelector(".theme-switch"),q=window.matchMedia?matchMedia("(prefers-color-scheme: dark)"):null;function apply(t){r.dataset.theme=t;document.body.setAttribute("data-md-color-scheme",t==="dark"?"slate":"default");b.setAttribute("aria-label",t==="dark"?"Switch to light theme":"Switch to dark theme");document.dispatchEvent(new CustomEvent("dns-gate:theme",{detail:t}))}apply(r.dataset.theme==="dark"?"dark":"light");b.addEventListener("click",function(){var t=r.dataset.theme==="dark"?"light":"dark";try{localStorage.setItem(K,t)}catch(e){}apply(t)});if(q&&q.addEventListener)q.addEventListener("change",function(e){var s;try{s=localStorage.getItem(K)}catch(x){}if(!s)apply(e.matches?"dark":"light")})})()</script>
+</header>
