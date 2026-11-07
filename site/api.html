@@ -45,13 +45,6 @@
 </header>
 <!-- /chrome:header -->
 
-<div class="api-note">
-  <div class="wrap">
-    <p>The gate's REST API under <code>/api/v1</code>, the same for every DNS provider, and the ACME endpoints under <code>/acme</code>. EuroDNS zones also have the EuroDNS-compatible API, documented by <a href="https://docapi.eurodns.com/">EuroDNS</a>. To send requests from this page, pick your gate in <em>Server</em> and paste a token in <em>Authentication</em>; tokens stay in this tab unless you tick the box. <a href="docs/api/#try-it-from-the-reference">Requirements</a>.</p>
-    <label><input type="checkbox" id="persist-auth"> Remember tokens in this browser</label>
-  </div>
-</div>
-
 <main class="wrap api-wrap">
   <div id="api">
     <p class="api-fallback">Loading the reference. Without JavaScript, read <a href="dns-gate.openapi.yaml">dns-gate.openapi.yaml</a> directly.</p>
@@ -92,7 +85,13 @@
 
     var persist = stored(PERSIST) === '1';
     if (!persist) forgetAuth();
-    var box = document.getElementById('persist-auth');
+    // "Remember tokens" sits in Scalar's authentication card, under the token
+    // input; Scalar may re-render the card, so it is put back when missing.
+    var remember = document.createElement('div');
+    remember.className = 'remember-auth';
+    remember.innerHTML = '<label><input type="checkbox"> Remember tokens in this browser</label>' +
+      '<span>Requests go from your browser to your gate: <a href="docs/api/#try-it-from-the-reference">requirements</a>.</span>';
+    var box = remember.querySelector('input');
     box.checked = persist;
     box.addEventListener('change', function () {
       try {
@@ -101,6 +100,11 @@
       } catch (e) { /* storage unavailable */ }
       location.reload();
     });
+    function placeRemember() {
+      var card = document.querySelector('.scalar-reference-intro-auth');
+      if (card && remember.parentNode !== card) card.appendChild(remember);
+    }
+    new MutationObserver(placeRemember).observe(document.getElementById('api'), { childList: true, subtree: true });
 
     if (!window.Scalar) return;
 

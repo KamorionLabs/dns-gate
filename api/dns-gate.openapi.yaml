@@ -4,69 +4,19 @@ info:
   version: "1"
   summary: Security gateway in front of DNS provider APIs (EuroDNS, Route53).
   description: |
-    The gate's own API: zone inventory with ownership, RRset reads and writes
-    with content-hash preconditions, plan/apply, audit log, adoption of records
-    created outside the gate, Terraform export, teams and ownership transfers
-    between them, and the policy API (delegations used by Terraform pipelines,
-    and the policy editor of the web UI).
-
-    Every write goes through the gate engine: RBAC (zone, host pattern, record
-    type), ownership by team, per-zone lock, protected records, blast-radius
-    limits and audit. A guide with examples is in
-    [docs/API.md](https://github.com/KamorionLabs/dns-gate/blob/main/docs/API.md).
-
-    **Authentication.** A bearer token (JWT from an issuer declared in the gate
-    configuration), a gate API key (`dgk_...`, as a bearer token, as the
-    password of basic authentication with the key id as user name, or in
-    `X-Api-Key`), a virtual key (`X-App-Id` + `X-Api-Key`), or the web UI
-    session cookie. With the session cookie, every request other than GET must
-    carry the `X-Gate-CSRF` header (equal to the `gate_csrf` cookie) and a
-    same-origin `Origin` header; humans need a recent login for writes
-    (`403 reauth_required` otherwise).
-
-    **Teams.** RRsets are owned by teams. A caller acting for several teams
-    writes for its default team (the first one, `default_team` of
-    `/api/v1/me`) and may change the RRsets of any of them; the
-    `X-DNS-Gate-Team` header (or the `team` field of plan and apply) makes it
-    act for one of its teams only (`403 not_team_member` otherwise). The
-    EuroDNS-compatible API always uses the default team.
-
-    **Errors** are `{"reason", "message", "details"}`; `reason` is stable and
-    meant for programs.
-
-    **EuroDNS-compatible API.** Every other path of the gate is the EuroDNS
-    API, served under RBAC and ownership for the zones of EuroDNS providers
-    (`404 zone_not_eurodns` for a zone of another provider), plus the zone
-    profiles of the EuroDNS account (`/zone-profiles`, under
-    `dns.zone.profile` on `*`, the provider named by `X-DNS-Gate-Provider`
-    when there are several); it is documented by EuroDNS at
-    <https://docapi.eurodns.com/> and not repeated here.
-
-    **Gate tokens and OAuth.** With an issuer marked `self: true`, the gate
-    signs its own tokens: `POST /api/v1/tokens` issues one to a web UI
-    session, and its keys are served at `/.well-known/jwks.json`. With a SAML
-    UI login, the gate also runs a stateless OAuth 2.0 authorization server
-    for the Claude Desktop extension (`/.well-known/oauth-authorization-server`,
-    `/.well-known/openid-configuration`, `/oauth/authorize`, `/oauth/token`),
-    standard OAuth 2.0 with PKCE not described here.
-
-    **Token exchange.** `POST /api/v1/token-exchange` (RFC 8693) turns a
-    token of an opted-in issuer (`token_exchange: true`) into a short-lived
-    gate token with the same identity, for tools that need a credential
-    longer than the CI or workload token lives.
-
-    **ACME DNS-01.** `/acme/httpreq/present` and `/cleanup` serve the lego
-    `httpreq` DNS provider, `/acme/acme-dns/update` and `/register` the
-    acme-dns API (acme.sh `dns_acmedns`, the certbot acme-dns hook,
-    cert-manager, Caddy). They write `_acme-challenge` TXT RRsets through the
-    engine, as the caller, whose role must have an `ephemeral_ttl`. Guide:
-    [docs/ACME.md](https://github.com/KamorionLabs/dns-gate/blob/main/docs/ACME.md).
+    The gate's own API, the same whatever the DNS provider of a zone: zones and
+    RRsets owned by teams, writes with content-hash preconditions, plans,
+    adoption, transfers, audit, API keys and ACME DNS-01 endpoints. Send a bearer
+    token: an OIDC token of an issuer of the gate configuration, a gate token or
+    a gate API key ([Authentication](#tag/identity)). Guides:
+    [API guide](https://kamorionlabs.github.io/dns-gate/docs/API/) and
+    [API by example](https://kamorionlabs.github.io/dns-gate/docs/api/).
   license:
     name: MIT
     url: https://github.com/KamorionLabs/dns-gate/blob/main/LICENSE
 externalDocs:
-  description: dns-gate documentation
-  url: https://github.com/KamorionLabs/dns-gate#documentation
+  description: Documentation
+  url: https://kamorionlabs.github.io/dns-gate/docs/
 servers:
   - url: https://{gate}
     variables:
@@ -81,13 +31,55 @@ security:
   - session: []
 tags:
   - name: discovery
-    description: Gate detection.
+    description: |
+      Gate detection.
+
+      **Errors** are `{"reason", "message", "details"}`; `reason` is stable and
+      meant for programs.
+
+      **EuroDNS-compatible API.** Every other path of the gate is the EuroDNS
+      API, served under RBAC and ownership for the zones of EuroDNS providers
+      (`404 zone_not_eurodns` for a zone of another provider), plus the zone
+      profiles of the EuroDNS account (`/zone-profiles`, under
+      `dns.zone.profile` on `*`, the provider named by `X-DNS-Gate-Provider`
+      when there are several); it is documented by EuroDNS at
+      <https://docapi.eurodns.com/> and not repeated here.
   - name: identity
-    description: Who is calling, how to connect, and gate-issued tokens.
+    description: |
+      Who is calling, how to connect, and gate-issued tokens.
+
+      **Authentication.** A bearer token (JWT from an issuer declared in the gate
+      configuration), a gate API key (`dgk_...`, as a bearer token, as the
+      password of basic authentication with the key id as user name, or in
+      `X-Api-Key`), a virtual key (`X-App-Id` + `X-Api-Key`), or the web UI
+      session cookie. With the session cookie, every request other than GET must
+      carry the `X-Gate-CSRF` header (equal to the `gate_csrf` cookie) and a
+      same-origin `Origin` header; humans need a recent login for writes
+      (`403 reauth_required` otherwise).
+
+      **Gate tokens and OAuth.** With an issuer marked `self: true`, the gate
+      signs its own tokens: `POST /api/v1/tokens` issues one to a web UI
+      session, and its keys are served at `/.well-known/jwks.json`. With a SAML
+      UI login, the gate also runs a stateless OAuth 2.0 authorization server
+      for the Claude Desktop extension (`/.well-known/oauth-authorization-server`,
+      `/.well-known/openid-configuration`, `/oauth/authorize`, `/oauth/token`),
+      standard OAuth 2.0 with PKCE not described here.
+
+      **Token exchange.** `POST /api/v1/token-exchange` (RFC 8693) turns a
+      token of an opted-in issuer (`token_exchange: true`) into a short-lived
+      gate token with the same identity, for tools that need a credential
+      longer than the CI or workload token lives.
   - name: zones
     description: Zones and their RRsets.
   - name: rrsets
-    description: Single RRset reads and writes, with content-hash preconditions.
+    description: |
+      Single RRset reads and writes, with content-hash preconditions.
+
+      Every write goes through the gate engine: RBAC (zone, host pattern, record
+      type), ownership by team, per-zone lock, protected records, blast-radius
+      limits and audit. `GET` returns the content hash of the RRset as `ETag`;
+      `If-Match` on `PUT` and `DELETE` acts only on that content, `If-None-Match: *`
+      creates only (`412 precondition` otherwise).
   - name: forwards
     description: URL forwards (HTTP redirects), owned like RRsets, for providers with forwards (EuroDNS).
   - name: plans
@@ -95,7 +87,15 @@ tags:
   - name: adoption
     description: Take over RRsets created outside the gate, and export them to Terraform.
   - name: teams
-    description: Teams, and ownership transfers between them with a second approver.
+    description: |
+      Teams, and ownership transfers between them with a second approver.
+
+      RRsets are owned by teams. A caller acting for several teams writes for
+      its default team (the first one, `default_team` of `/api/v1/me`) and may
+      change the RRsets of any of them; the `X-DNS-Gate-Team` header (or the
+      `team` field of plan and apply) makes it act for one of its teams only
+      (`403 not_team_member` otherwise). The EuroDNS-compatible API always uses
+      the default team.
   - name: audit
     description: Audit log.
   - name: delegation
@@ -105,10 +105,17 @@ tags:
   - name: api-keys
     description: Gate-issued API keys for third parties without OIDC (ACME clients, appliances).
   - name: acme
-    description: ACME DNS-01 endpoints compatible with lego httpreq and acme-dns.
+    description: |
+      ACME DNS-01 endpoints compatible with lego httpreq and acme-dns.
+
+      `/acme/httpreq/present` and `/cleanup` serve the lego `httpreq` DNS
+      provider, `/acme/acme-dns/update` and `/register` the acme-dns API
+      (acme.sh `dns_acmedns`, the certbot acme-dns hook, cert-manager, Caddy).
+      They write `_acme-challenge` TXT RRsets through the engine, as the caller,
+      whose role must have an `ephemeral_ttl`. Guide:
+      [certificates](https://kamorionlabs.github.io/dns-gate/docs/ACME/).
   - name: zone-profiles
     description: Zone profiles of EuroDNS accounts, prepared before a domain transfer.
-
 paths:
   /.well-known/dns-gate:
     get:

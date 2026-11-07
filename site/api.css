@@ -6,11 +6,6 @@
 html { scroll-behavior: auto; scroll-padding-top: 0; }
 body.api-page { background: var(--paper); }
 
-.api-note { border-bottom: 1px solid var(--rule-soft); font-size: 14px; color: var(--ink-2); }
-.api-note .wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 24px; padding-top: 12px; padding-bottom: 12px; }
-.api-note p { flex: 1 1 520px; }
-.api-note a { color: var(--seal-ink); }
-.api-note label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; cursor: pointer; }
 .api-fallback { padding: 48px 0; }
 #api { min-height: 60vh; }
 
@@ -68,3 +63,38 @@ body.api-page { background: var(--paper); }
 
 /* Scalar's own promotion is not part of this reference. */
 .api-wrap [class*="explore-scalar"] { display: none !important; }
+
+/* Introduction: the description full width at a readable measure, then the
+   request settings as one "Try it" bar: Server | Token | Language. */
+#api .introduction-section .badge { display: none; }
+#api .introduction-section .section-header-wrapper { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+#api .introduction-section .section-header-wrapper > * { margin-bottom: 0; }
+#api .introduction-section .section-columns { display: flex; flex-direction: column; gap: 20px; }
+#api .introduction-section .section-column { width: 100%; max-width: none; flex: none; }
+#api .introduction-description { margin-top: 14px; }
+#api .introduction-description .markdown { max-width: 70ch; font-size: 16px; line-height: 1.6; }
+#api .download-container { margin: 0; }
+#api .download-button { font-size: 13px; font-weight: 400; color: var(--ink-2); text-decoration: underline; text-decoration-color: var(--rule-strong); text-underline-offset: 3px; }
+#api .download-button:hover { color: var(--ink); text-decoration-color: currentColor; }
+#api .sticky-cards { position: static; }
+#api .introduction-card {
+  display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.5fr) minmax(0, 0.9fr); gap: 16px; align-items: start;
+  padding: 0; border: 0; background: none;
+}
+#api .introduction-card::before {
+  content: "Try it"; grid-column: 1 / -1; margin-bottom: -6px;
+  font-size: 13px; font-weight: 600; color: var(--ink-2);
+}
+#api .introduction-card-item { margin: 0; min-width: 0; }
+@media (max-width: 1000px) {
+  #api .introduction-card { grid-template-columns: minmax(0, 1fr); }
+}
+#api .remember-auth { display: grid; gap: 4px; padding: 10px 2px 0; font-size: 13px; color: var(--ink-3); }
+#api .remember-auth label { display: inline-flex; align-items: center; gap: 6px; color: var(--ink-2); cursor: pointer; }
+#api .remember-auth a { color: var(--seal-ink); }
+
+#api .introduction-section { padding-top: 40px; }
+
+/* Clutter: SDK generation. */
+#api .generate-sdk-button,
+#api .introduction-card .card-footer .scalar-button { display: none !important; }
