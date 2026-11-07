@@ -64,7 +64,8 @@ The sandbox issuer signs a one-hour token for any name:
     $Gate = "http://127.0.0.1:8080"
     $Token = Invoke-RestMethod "http://127.0.0.1:8090/mint?sub=alice"
     $H = @{ Authorization = "Bearer $Token" }
-    (Invoke-RestMethod "$Gate/api/v1/zones/example.com/rrsets" -Headers $H).rrsets | Format-Table host, type, status, owner
+    $Zone = Invoke-RestMethod "$Gate/api/v1/zones/example.com/rrsets" -Headers $H
+    $Zone.rrsets | Format-Table host, type, status, owner
     ```
 
 === "Python"

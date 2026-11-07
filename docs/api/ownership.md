@@ -40,7 +40,8 @@ team `web`.
 
     Invoke-RestMethod "$Gate/api/v1/zones/example.com/adopt" -Method Post -Headers $AH `
       -ContentType "application/json" -Body (@{ rrsets = $Sel; owner = "web"
-        preview_token = $Preview.preview_token; comment = "www belongs to the web site" } | ConvertTo-Json -Depth 4)
+        preview_token = $Preview.preview_token
+        comment = "www belongs to the web site" } | ConvertTo-Json -Depth 4)
     ```
 
 === "Python"

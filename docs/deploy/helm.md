@@ -50,7 +50,7 @@ kubectl -n dns-gate create secret generic dns-gate-ui \
   --from-literal=client-secret=<oidc client secret, if the client is confidential>
 
 kubectl -n dns-gate create secret generic dns-gate-postgres \
-  --from-literal=dsn='postgres://dns_gate:<password>@postgres.example.internal:5432/dns_gate?sslmode=require'
+  --from-literal=dsn='postgres://dns_gate:<password>@db.example.internal:5432/dns_gate?sslmode=require'
 ```
 
 | Values | Secret keys | Becomes |
@@ -92,7 +92,8 @@ Generate the token signing key with
 Check a file before deploying with the same version of the gate:
 
 ```sh
-docker run --rm -v "$PWD/config.yaml:/c.yaml:ro" ghcr.io/kamorionlabs/dns-gate:0.8.1 -check -config /c.yaml
+docker run --rm -v "$PWD/config.yaml:/c.yaml:ro" \
+  ghcr.io/kamorionlabs/dns-gate:0.8.1 -check -config /c.yaml
 ```
 
 ### Store values

@@ -65,7 +65,10 @@ filled in for your gate.
       "mcpServers": {
         "dns-gate": {
           "command": "npx",
-          "args": ["-y", "mcp-remote", "https://dns-gate.example.com/mcp", "--header", "Authorization:${AUTH_HEADER}"],
+          "args": [
+            "-y", "mcp-remote", "https://dns-gate.example.com/mcp",
+            "--header", "Authorization:${AUTH_HEADER}"
+          ],
           "env": { "AUTH_HEADER": "Bearer <access token>" }
         }
       }

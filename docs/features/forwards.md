@@ -18,7 +18,8 @@ needs the action `dns.forward.write`, scoped by the `records.hosts` of the role
     curl -sS "${auth[@]}" -X PUT "$F" -H "Content-Type: application/json" \
       -H "If-None-Match: *" -d '{"type": "301", "url": "https://www.example.com/landing"}'
 
-    curl -fsS "${auth[@]}" "$GATE/api/v1/zones/example.com/forwards" | jq '.https, [.forwards[] | {host, forward}]'
+    curl -fsS "${auth[@]}" "$GATE/api/v1/zones/example.com/forwards" |
+      jq '.https, [.forwards[] | {host, forward}]'
 
     ETAG=$(curl -fsS "${auth[@]}" "$F" | jq -r '"\"" + .hash + "\""')
     curl -sS "${auth[@]}" -X DELETE "$F" -H "If-Match: $ETAG"
@@ -28,7 +29,8 @@ needs the action `dns.forward.write`, scoped by the `records.hosts` of the role
 
     ```powershell
     $F = "$Gate/api/v1/zones/example.com/forwards/go"
-    Invoke-RestMethod $F -Method Put -Headers ($H + @{ "If-None-Match" = "*" }) -ContentType "application/json" `
+    Invoke-RestMethod $F -Method Put -Headers ($H + @{ "If-None-Match" = "*" }) `
+      -ContentType "application/json" `
       -Body (@{ type = "301"; url = "https://www.example.com/landing" } | ConvertTo-Json)
 
     $null = Invoke-RestMethod $F -Headers $H -ResponseHeadersVariable RH

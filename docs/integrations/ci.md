@@ -87,7 +87,8 @@ For each platform: the issuer to declare, a binding, and how the job gets its to
         scriptType: bash
         scriptLocation: inlineScript
         inlineScript: |
-          export DNSGATE_TOKEN=$(az account get-access-token --scope api://dns-gate/.default --query accessToken -o tsv)
+          export DNSGATE_TOKEN=$(az account get-access-token --scope api://dns-gate/.default \
+            --query accessToken -o tsv)
           terraform apply -auto-approve
     ```
 
@@ -105,7 +106,8 @@ For each platform: the issuer to declare, a binding, and how the job gets its to
     # gate configuration
     issuers:
       - name: aws
-        issuer: https://<id>.tokens.sts.global.api.aws   # aws iam get-outbound-web-identity-federation-info
+        # the account issuer: aws iam get-outbound-web-identity-federation-info
+        issuer: https://<id>.tokens.sts.global.api.aws
         audiences: [dns-gate]
         category: pipeline
     bindings:
@@ -129,7 +131,8 @@ For each platform: the issuer to declare, a binding, and how the job gets its to
     # gate configuration
     issuers:
       - name: k8s
-        issuer: https://oidc.eks.eu-west-1.amazonaws.com/id/EXAMPLE   # kubectl get --raw /.well-known/openid-configuration
+        # the cluster issuer: kubectl get --raw /.well-known/openid-configuration
+        issuer: https://oidc.eks.eu-west-1.amazonaws.com/id/EXAMPLE
         audiences: [dns-gate]
         category: pipeline
     bindings:

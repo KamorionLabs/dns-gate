@@ -1,7 +1,5 @@
 ---
 title: dns-gate documentation
-hide:
-  - navigation
 ---
 
 # dns-gate

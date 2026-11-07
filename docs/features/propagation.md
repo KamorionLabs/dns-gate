@@ -37,9 +37,10 @@ the MCP server.
 === "Node.js"
 
     ```js
-    const p = await (await fetch(`${GATE}/api/v1/zones/example.com/rrsets/app/CNAME/propagation`, { headers: auth })).json();
+    const url = `${GATE}/api/v1/zones/example.com/rrsets/app/CNAME/propagation`;
+    const p = await (await fetch(url, { headers: auth })).json();
     console.log(p.summary);
-    console.table(p.answers.map(({ kind, name, location, status, ttl_left }) => ({ kind, name, location, status, ttl_left })));
+    console.table(p.answers, ["kind", "name", "location", "status", "ttl_left"]);
     ```
 
 === "MCP"
