@@ -108,7 +108,8 @@ issuer stands in for GitHub Actions, GitLab, Entra ID, AWS or Kubernetes
     ```
 
 ```json
-{"access_token": "eyJ…", "issued_token_type": "urn:ietf:params:oauth:token-type:access_token", "token_type": "Bearer", "expires_in": 900}
+{"access_token": "eyJ…", "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+ "token_type": "Bearer", "expires_in": 900}
 ```
 
 Gate tokens and API keys are never exchanged. A person signed in to the web UI gets
@@ -169,7 +170,8 @@ one role, never with more rights than their creator. The key is shown once.
     const { key } = await (await fetch(`${GATE}/api/v1/api-keys`, {
       method: "POST",
       headers: { Authorization: `Bearer ${admin}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ name: "web certificates", team: "web", role: "acme-solver", expires_at: "2027-06-30T00:00:00Z" }),
+      body: JSON.stringify({ name: "web certificates", team: "web", role: "acme-solver",
+        expires_at: "2027-06-30T00:00:00Z" }),
     })).json();
 
     await fetch(`${GATE}/api/v1/zones/example.com/rrsets/_acme-challenge/TXT`, {

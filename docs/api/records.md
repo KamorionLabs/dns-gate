@@ -29,7 +29,7 @@ change against the zone as it is at the provider, under a per-zone lock.
 
     ```js
     const zones = await (await fetch(`${GATE}/api/v1/zones`, { headers: auth })).json();
-    console.table(zones.map(({ zone, provider, managed, foreign }) => ({ zone, provider, managed, foreign })));
+    console.table(zones, ["zone", "provider", "managed", "foreign"]);
     ```
 
 === "Terraform"
@@ -62,7 +62,8 @@ back in `If-Match` to change exactly what you read.
 === "PowerShell"
 
     ```powershell
-    $RRset = Invoke-RestMethod "$Gate/api/v1/zones/example.com/rrsets/www/CNAME" -Headers $H -ResponseHeadersVariable RH
+    $RRset = Invoke-RestMethod "$Gate/api/v1/zones/example.com/rrsets/www/CNAME" -Headers $H `
+      -ResponseHeadersVariable RH
     $ETag = $RH.ETag[0]
     ```
 
@@ -124,7 +125,8 @@ read-only until [adopted](ownership.md)), `tainted` (changed outside the gate),
       -H "If-None-Match: *" -d '{"ttl": 3600, "values": ["web.example.net."]}'
 
     # update what was read
-    ETAG=$(curl -fsS -o /dev/null -D - "${auth[@]}" "$U" | awk 'tolower($1)=="etag:" {print $2}' | tr -d '\r')
+    ETAG=$(curl -fsS -o /dev/null -D - "${auth[@]}" "$U" |
+      awk 'tolower($1)=="etag:" {print $2}' | tr -d '\r')
     curl -sS "${auth[@]}" -X PUT "$U" -H "Content-Type: application/json" \
       -H "If-Match: $ETAG" -d '{"ttl": 600, "values": ["web2.example.net."]}'
 
@@ -140,12 +142,14 @@ read-only until [adopted](ownership.md)), `tainted` (changed outside the gate),
 
     # create
     $Body = @{ ttl = 3600; values = @("web.example.net.") } | ConvertTo-Json
-    Invoke-RestMethod $U -Method Put -Headers ($H + @{ "If-None-Match" = "*" }) -ContentType "application/json" -Body $Body
+    Invoke-RestMethod $U -Method Put -Headers ($H + @{ "If-None-Match" = "*" }) `
+      -ContentType "application/json" -Body $Body
 
     # update what was read
     $null = Invoke-RestMethod $U -Headers $H -ResponseHeadersVariable RH
     $Body = @{ ttl = 600; values = @("web2.example.net.") } | ConvertTo-Json
-    Invoke-RestMethod $U -Method Put -Headers ($H + @{ "If-Match" = $RH.ETag[0] }) -ContentType "application/json" -Body $Body
+    Invoke-RestMethod $U -Method Put -Headers ($H + @{ "If-Match" = $RH.ETag[0] }) `
+      -ContentType "application/json" -Body $Body
 
     # delete
     $null = Invoke-RestMethod $U -Headers $H -ResponseHeadersVariable RH
@@ -216,12 +220,14 @@ returns a single-use `plan_id` bound to you, the zone and its version.
     ```sh
     PLAN=$(curl -fsS "${auth[@]}" -X POST "$GATE/api/v1/zones/example.com/plan" \
       -H "Content-Type: application/json" -d '{"changes": [
-        {"host": "api",  "type": "A",     "ttl": 600,  "values": ["192.0.2.20"], "must_not_exist": true},
-        {"host": "docs", "type": "CNAME", "ttl": 3600, "values": ["web.example.net."], "must_not_exist": true}]}')
+        {"host": "api", "type": "A", "ttl": 600, "values": ["192.0.2.20"], "must_not_exist": true},
+        {"host": "docs", "type": "CNAME", "ttl": 3600, "values": ["web.example.net."],
+         "must_not_exist": true}]}')
     echo "$PLAN" | jq '{allowed, reason, changes}'
 
+    PLAN_ID=$(echo "$PLAN" | jq -r .plan_id)
     curl -fsS "${auth[@]}" -X POST "$GATE/api/v1/zones/example.com/apply" \
-      -H "Content-Type: application/json" -d "$(jq -n --arg id "$(echo "$PLAN" | jq -r .plan_id)" '{plan_id: $id}')"
+      -H "Content-Type: application/json" -d "{\"plan_id\": \"$PLAN_ID\"}"
     ```
 
 === "PowerShell"
@@ -230,7 +236,8 @@ returns a single-use `plan_id` bound to you, the zone and its version.
     $Plan = Invoke-RestMethod "$Gate/api/v1/zones/example.com/plan" -Method Post -Headers $H `
       -ContentType "application/json" -Body (@{ changes = @(
         @{ host = "api"; type = "A"; ttl = 600; values = @("192.0.2.20"); must_not_exist = $true },
-        @{ host = "docs"; type = "CNAME"; ttl = 3600; values = @("web.example.net."); must_not_exist = $true }
+        @{ host = "docs"; type = "CNAME"; ttl = 3600; values = @("web.example.net.")
+           must_not_exist = $true }
       ) } | ConvertTo-Json -Depth 5)
     $Plan.changes | Format-Table op, host, type, new_values
 
@@ -243,7 +250,8 @@ returns a single-use `plan_id` bound to you, the zone and its version.
     ```python
     plan = s.post(f"{GATE}/api/v1/zones/example.com/plan", json={"changes": [
         {"host": "api", "type": "A", "ttl": 600, "values": ["192.0.2.20"], "must_not_exist": True},
-        {"host": "docs", "type": "CNAME", "ttl": 3600, "values": ["web.example.net."], "must_not_exist": True},
+        {"host": "docs", "type": "CNAME", "ttl": 3600, "values": ["web.example.net."],
+         "must_not_exist": True},
     ]}).json()
     if not plan["allowed"]:
         raise SystemExit(f'{plan["reason"]}: {plan["message"]}')

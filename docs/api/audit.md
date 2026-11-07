@@ -30,7 +30,8 @@ is filtered to the zones the caller can read.
 === "Node.js"
 
     ```js
-    const page = await (await fetch(`${GATE}/api/v1/audit?zone=example.com&limit=20`, { headers: auth })).json();
+    const url = `${GATE}/api/v1/audit?zone=example.com&limit=20`;
+    const page = await (await fetch(url, { headers: auth })).json();
     for (const e of page.entries) console.log(e.time, e.actor.name, e.action, e.decision);
     ```
 

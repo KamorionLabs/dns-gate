@@ -226,3 +226,6 @@ pre.code .k { color: var(--seal-ink); }
 @media (max-width: 960px) { .run { grid-template-columns: minmax(0, 1fr); } }
 
 @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } * { transition: none !important; } }
+
+/* The container is wide; text keeps a readable measure. */
+main p, main li { max-width: 70ch; }

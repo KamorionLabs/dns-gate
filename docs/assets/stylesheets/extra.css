@@ -126,3 +126,27 @@ body { background: var(--paper); -webkit-font-smoothing: antialiased; }
   .top .md-search__scrollwrap { width: 24rem; }
 }
 .md-typeset .tabbed-labels a { color: inherit; text-decoration: none; }
+
+/* Column widths: navigation 240 px, table of contents 210 px, the content gets
+   the rest (about 850 px at 1440 px wide). Below 1440 px the table of contents
+   moves into the navigation, under the current page, instead of squeezing the
+   content. */
+.md-sidebar--primary { width: 12rem; }
+.md-sidebar--secondary { width: 10.5rem; }
+@media screen and (min-width: 60em) and (max-width: 1439.98px) {
+  .md-sidebar--secondary:not([hidden]) { display: none; }
+}
+@media screen and (min-width: 60em) and (max-width: 76.234375em) {
+  .md-nav--primary .md-nav__link[for="__toc"] { display: flex; }
+  .md-nav--primary .md-nav__link[for="__toc"] .md-icon:after { content: ""; }
+  .md-nav--primary .md-nav__link[for="__toc"] + .md-nav__link { display: none; }
+  .md-nav--primary .md-nav__link[for="__toc"] ~ .md-nav { display: flex; }
+}
+@media screen and (min-width: 76.25em) and (max-width: 1439.98px) {
+  .md-nav--primary > .md-nav__list > .md-nav__item--active .md-nav__link[for="__toc"] ~ .md-nav--secondary {
+    display: block; visibility: visible; opacity: 1; margin: 0.2rem 0 0.8rem; border-left: 1px solid var(--rule-strong);
+  }
+  .md-nav--primary > .md-nav__list > .md-nav__item--active .md-nav--secondary > .md-nav__title { display: none; }
+  .md-nav--primary > .md-nav__list > .md-nav__item--active .md-nav--secondary > .md-nav__list { padding-bottom: 0; overflow: visible; }
+}
+.md-typeset pre > code { font-size: 0.8em; }
