@@ -6,52 +6,73 @@
 <title>dns-gate API reference</title>
 <meta name="description" content="OpenAPI 3.1 reference of the dns-gate API: zones, RRsets with content-hash preconditions, URL forwards, plan and apply, adoption, transfers, audit, API keys and ACME endpoints, with code samples and a request client.">
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="chrome.css">
 <link rel="stylesheet" href="style.css">
-<style>
-  :root[data-theme='dark'] {
-    --paper: #111419; --sheet: #161a21; --sheet-raised: #1b2029; --well: #0d1014;
-    --ink: #e6e8ec; --ink-2: #b3b9c4; --ink-3: #868d9a;
-    --rule: rgba(255, 255, 255, 0.08); --rule-soft: rgba(255, 255, 255, 0.05); --rule-strong: rgba(255, 255, 255, 0.16);
-    --seal-ink: #8fb0e6; --seal-ink-wash: rgba(143, 176, 230, 0.1); --wax: #e0786e;
-    color-scheme: dark;
-  }
-  html { scroll-behavior: auto; scroll-padding-top: 0; }
-  body { background: var(--sheet); }
-  .api-note { border-bottom: 1px solid var(--rule-soft); background: var(--paper); font-size: 14px; color: var(--ink-2); }
-  .api-note .wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; padding-top: 10px; padding-bottom: 10px; }
-  .api-note a { color: var(--seal-ink); }
-  .api-note label { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; cursor: pointer; }
-  .api-fallback { padding: 48px 0; }
-  #api { min-height: 60vh; }
-</style>
+<link rel="stylesheet" href="api.css">
+<!-- chrome:head -->
+<script>(function(){var t;try{t=localStorage.getItem("dns-gate-theme")}catch(e){}if(t!=="light"&&t!=="dark"){t=window.matchMedia&&matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light"}document.documentElement.dataset.theme=t})()</script>
+<!-- /chrome:head -->
 </head>
-<body>
+<body class="api-page">
 
+<!-- chrome:header -->
 <header class="top">
   <div class="wrap">
-    <a class="brand" href="index.html"><svg width="22" height="22" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="8" cy="8" r="2.5" fill="currentColor"/></svg>dns-gate</a>
-    <nav class="nav" aria-label="Sections">
-      <a href="index.html">Overview</a>
+    <a class="brand" href="./"><svg width="22" height="22" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="8" cy="8" r="2.5" fill="currentColor"/></svg>dns-gate</a>
+    <nav class="nav" aria-label="Site">
+      <a href="./">Overview</a>
       <a href="docs/">Docs</a>
-      <a href="docs/api/">API by example</a>
-      <a href="dns-gate.openapi.yaml" download>OpenAPI file</a>
+      <a href="api.html" aria-current="page">API reference</a>
       <a class="gh" href="https://github.com/KamorionLabs/dns-gate">GitHub</a>
     </nav>
+    <div class="top-tools">
+      <button class="icon-btn theme-switch" type="button" aria-label="Switch to dark theme" title="Switch theme">
+        <svg class="sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <svg class="moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+      </button>
+      <details class="menu">
+        <summary class="icon-btn" aria-label="Site menu" title="Site menu"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="5.5" r="1.7" fill="currentColor"/><circle cx="12" cy="12" r="1.7" fill="currentColor"/><circle cx="12" cy="18.5" r="1.7" fill="currentColor"/></svg></summary>
+        <div class="menu-panel">
+          <a href="./">Overview</a>
+          <a href="docs/">Docs</a>
+          <a href="api.html" aria-current="page">API reference</a>
+          <a href="https://github.com/KamorionLabs/dns-gate">GitHub</a>
+        </div>
+      </details>
+    </div>
   </div>
+  <script>(function(){var K="dns-gate-theme",r=document.documentElement,b=document.currentScript.parentNode.querySelector(".theme-switch"),q=window.matchMedia?matchMedia("(prefers-color-scheme: dark)"):null;function apply(t){r.dataset.theme=t;document.body.setAttribute("data-md-color-scheme",t==="dark"?"slate":"default");b.setAttribute("aria-label",t==="dark"?"Switch to light theme":"Switch to dark theme");document.dispatchEvent(new CustomEvent("dns-gate:theme",{detail:t}))}apply(r.dataset.theme==="dark"?"dark":"light");b.addEventListener("click",function(){var t=r.dataset.theme==="dark"?"light":"dark";try{localStorage.setItem(K,t)}catch(e){}apply(t)});if(q&&q.addEventListener)q.addEventListener("change",function(e){var s;try{s=localStorage.getItem(K)}catch(x){}if(!s)apply(e.matches?"dark":"light")})})()</script>
 </header>
+<!-- /chrome:header -->
 
 <div class="api-note">
   <div class="wrap">
-    <span>The gate's REST API under <code>/api/v1</code>, the same for every DNS provider, and the ACME endpoints under <code>/acme</code>. EuroDNS zones also have the EuroDNS-compatible API, documented by <a href="https://docapi.eurodns.com/">EuroDNS</a>. To send requests from this page, pick your gate in <em>Server</em> and paste a token in <em>Authentication</em>; tokens stay in this tab unless you tick the box. <a href="docs/api/#try-it-from-the-reference">Requirements</a>.</span>
+    <p>The gate's REST API under <code>/api/v1</code>, the same for every DNS provider, and the ACME endpoints under <code>/acme</code>. EuroDNS zones also have the EuroDNS-compatible API, documented by <a href="https://docapi.eurodns.com/">EuroDNS</a>. To send requests from this page, pick your gate in <em>Server</em> and paste a token in <em>Authentication</em>; tokens stay in this tab unless you tick the box. <a href="docs/api/#try-it-from-the-reference">Requirements</a>.</p>
     <label><input type="checkbox" id="persist-auth"> Remember tokens in this browser</label>
   </div>
 </div>
 
-<main id="api">
-  <div class="wrap api-fallback">
-    <p>Loading the reference. Without JavaScript, read <a href="dns-gate.openapi.yaml">dns-gate.openapi.yaml</a> directly.</p>
+<main class="wrap api-wrap">
+  <div id="api">
+    <p class="api-fallback">Loading the reference. Without JavaScript, read <a href="dns-gate.openapi.yaml">dns-gate.openapi.yaml</a> directly.</p>
   </div>
 </main>
+
+<!-- chrome:footer -->
+<footer class="foot-bar">
+  <div class="wrap">
+    <nav aria-label="Footer">
+      <a href="docs/">Docs</a>
+      <a class="wide" href="docs/quickstart/">Quickstart</a>
+      <a href="api.html">API</a>
+      <a href="https://github.com/KamorionLabs/dns-gate" aria-label="GitHub"><svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg><span class="wide">GitHub</span></a>
+      <a class="wide" href="https://github.com/KamorionLabs/dns-gate/releases">Releases</a>
+      <a class="wide" href="https://github.com/KamorionLabs/dns-gate/blob/main/LICENSE">MIT</a>
+    </nav>
+    <span class="by"><span class="by-text">Made by </span><a href="https://kamorion.com">Kamorion Labs</a></span>
+  </div>
+</footer>
+<!-- /chrome:footer -->
 
 <script src="https://cdn.jsdelivr.net/npm/@scalar/api-reference@1.75.1/dist/browser/standalone.js"></script>
 <script>
@@ -83,33 +104,20 @@
 
     if (!window.Scalar) return;
 
-    var dark = !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
-    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
-    new MutationObserver(function () {
-      document.documentElement.dataset.theme = document.body.classList.contains('dark-mode') ? 'dark' : 'light';
-    }).observe(document.body, { attributes: true, attributeFilter: ['class'] });
-
-    var css = [
-      '.light-mode, .dark-mode { --scalar-font: var(--font-ui); --scalar-font-code: var(--font-record); --scalar-radius: 4px; --scalar-radius-lg: 8px; --scalar-radius-xl: 12px; }',
-      '.light-mode { --scalar-background-1: #fdfcf9; --scalar-background-2: #f6f5f1; --scalar-background-3: #efede7; --scalar-background-accent: rgba(36, 64, 107, 0.08);',
-      '  --scalar-color-1: #1b2230; --scalar-color-2: #444d5e; --scalar-color-3: #6b7383; --scalar-color-accent: #24406b; --scalar-border-color: rgba(27, 34, 48, 0.1);',
-      '  --scalar-color-red: #b4372f; --scalar-color-orange: #9a6a12; --scalar-color-green: #2c7451; --scalar-color-blue: #24406b;',
-      '  --scalar-sidebar-background-1: #f6f5f1; --scalar-sidebar-color-active: #24406b; --scalar-sidebar-item-active-background: rgba(36, 64, 107, 0.08); }',
-      '.dark-mode { --scalar-background-1: #161a21; --scalar-background-2: #111419; --scalar-background-3: #1b2029; --scalar-background-accent: rgba(143, 176, 230, 0.1);',
-      '  --scalar-color-1: #e6e8ec; --scalar-color-2: #b3b9c4; --scalar-color-3: #868d9a; --scalar-color-accent: #8fb0e6; --scalar-border-color: rgba(255, 255, 255, 0.08);',
-      '  --scalar-color-red: #e0786e; --scalar-color-orange: #d6a54c; --scalar-color-green: #6cc095; --scalar-color-blue: #8fb0e6;',
-      '  --scalar-sidebar-background-1: #111419; --scalar-sidebar-color-active: #8fb0e6; --scalar-sidebar-item-active-background: rgba(143, 176, 230, 0.1); }'
-    ].join('\n');
+    function scheme() { return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'; }
+    function syncScheme() {
+      var dark = scheme() === 'dark';
+      document.body.classList.toggle('dark-mode', dark);
+      document.body.classList.toggle('light-mode', !dark);
+    }
 
     document.getElementById('api').innerHTML = '';
-    document.documentElement.style.setProperty('--scalar-custom-header-height', '57px');
-
-    Scalar.createApiReference('#api', {
+    var app = Scalar.createApiReference('#api', {
       url: 'dns-gate.openapi.yaml',
       theme: 'none',
-      customCss: css,
       withDefaultFonts: false,
-      darkMode: dark,
+      forceDarkModeState: scheme(),
+      hideDarkModeToggle: true,
       layout: 'modern',
       telemetry: false,
       persistAuth: persist,
@@ -138,6 +146,14 @@
         node: ['axios', 'ofetch', 'undici'],
         powershell: ['webrequest']
       }
+    });
+
+    syncScheme();
+    document.addEventListener('dns-gate:theme', function () {
+      if (app && typeof app.updateConfiguration === 'function') {
+        try { app.updateConfiguration({ forceDarkModeState: scheme() }); } catch (e) { /* older API: classes below */ }
+      }
+      syncScheme();
     });
   })();
 </script>

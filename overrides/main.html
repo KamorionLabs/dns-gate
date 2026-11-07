@@ -1,0 +1,22 @@
+{#- The site chrome (chrome/header.html, chrome/footer.html) around Material
+    for MkDocs, with Material's drawer and search in the header slots. -#}
+{% extends "base.html" %}
+
+{% block extrahead %}
+  {% include "head.html" %}
+{% endblock %}
+
+{% block header %}
+  {% set drawer %}<label class="icon-btn md-drawer-btn" for="__drawer" aria-label="Documentation navigation" title="Documentation navigation">{% include ".icons/material/menu.svg" %}</label>{% endset %}
+  {% set search %}<label class="icon-btn md-search-btn" for="__search" aria-label="Search" title="Search">{% include ".icons/material/magnify.svg" %}</label>{% include "partials/search.html" %}{% endset %}
+  {% with root = base_url ~ "/../", current = "docs", version = config.extra.gate_version, header_class = ' md-header', header_attrs = ' data-md-component="header"', header_start = drawer, header_search = search %}
+    {% include "header.html" %}
+  {% endwith %}
+{% endblock %}
+
+{% block footer %}
+  {% include "partials/footer.html" %}
+  {% with root = base_url ~ "/../", version = config.extra.gate_version %}
+    {% include "footer.html" %}
+  {% endwith %}
+{% endblock %}

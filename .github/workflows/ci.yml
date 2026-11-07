@@ -111,6 +111,8 @@ jobs:
           cache: pip
           cache-dependency-path: docs/requirements.txt
       - run: pip install -r docs/requirements.txt
+      - name: site chrome rendered from chrome/ (python3 scripts/chrome.py)
+        run: python3 scripts/chrome.py --check
       - name: mkdocs build --strict (broken links and anchors fail)
         env:
           NO_MKDOCS_2_WARNING: "1"
