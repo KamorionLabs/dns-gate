@@ -189,6 +189,7 @@ func native(e Event) map[string]any {
 	}
 	set("subject_category", e.SubjectCategory)
 	set("auth_method", e.AuthMethod)
+	set("client_id", e.ClientID)
 	set("provider", e.Provider)
 	set("snapshot_id", string(e.SnapshotID))
 	set("request_id", e.RequestID)
@@ -384,6 +385,12 @@ func ToOCSF(e Event) map[string]any {
 	actor := map[string]any{"authorizations": []map[string]any{{"decision": e.Decision}}}
 	if u := ocsfUser(e); u != nil {
 		actor["user"] = u
+	}
+	if e.Actor != nil && e.Actor.ID != "" {
+		actor["app_uid"] = e.Actor.ID
+		if e.Actor.Name != "" {
+			actor["app_name"] = e.Actor.Name
+		}
 	}
 	m["actor"] = actor
 	if e.SourceIP != "" && validIP(e.SourceIP) {

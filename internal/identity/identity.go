@@ -37,6 +37,48 @@ type Subject struct {
 
 	// Addr is the source address of the request of an API key subject.
 	Addr netip.Addr
+
+	// Client is the delegated client the token of the subject was issued
+	// to, nil when the subject acts directly. A delegated subject holds the
+	// rights of the user capped by Scopes and the zones of the client.
+	Client *Client
+	// Scopes cap the actions of a delegated subject (internal/scope).
+	Scopes []string
+	// Intent is set on a copy of a delegated subject evaluated for a plan
+	// or for the ownership checks of a transfer.
+	Intent Intent
+}
+
+// Client is a delegated client of an issuer (issuers[].delegated_clients).
+type Client struct {
+	ID       string
+	Name     string
+	Zones    []string
+	Surfaces []string
+}
+
+// Intent is the purpose a delegated subject is evaluated for.
+type Intent string
+
+// Intents.
+const (
+	IntentPlan     Intent = "plan"
+	IntentTransfer Intent = "transfer"
+)
+
+// WithIntent returns a copy of the subject evaluated for intent.
+func (s *Subject) WithIntent(i Intent) *Subject {
+	c := *s
+	c.Intent = i
+	return &c
+}
+
+// ClientID returns the id of the delegated client, empty when none.
+func (s *Subject) ClientID() string {
+	if s == nil || s.Client == nil {
+		return ""
+	}
+	return s.Client.ID
 }
 
 // Subject categories, shown in the UI and the audit log.

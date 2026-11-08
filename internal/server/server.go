@@ -542,10 +542,11 @@ func (s *Server) audit(r *http.Request, subj *identity.Subject, action, zone, de
 }
 
 type errorBody struct {
-	Reason  string                  `json:"reason"`
-	Message string                  `json:"message"`
-	Details any                     `json:"details,omitempty"`
-	Errors  []uiapi.ValidationError `json:"errors,omitempty"`
+	Reason        string                  `json:"reason"`
+	Message       string                  `json:"message"`
+	RequiredScope string                  `json:"required_scope,omitempty"`
+	Details       any                     `json:"details,omitempty"`
+	Errors        []uiapi.ValidationError `json:"errors,omitempty"`
 }
 
 func writeError(w http.ResponseWriter, status int, reason, msg string) {

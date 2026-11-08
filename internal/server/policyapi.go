@@ -713,6 +713,9 @@ func (s *Server) policyExplain(w http.ResponseWriter, r *http.Request, subj *ide
 	if req.Action == "" || (!policy.IsMeta(req.Action) && req.Zone == "") {
 		return perr(http.StatusBadRequest, "bad_request", "action and zone are required")
 	}
+	if e := delegatedPolicyQuery(subj, req.Zone, req.RevisionID); e != nil {
+		return e
+	}
 	snap, e := s.snapshotFor(r.Context(), req.RevisionID)
 	if e != nil {
 		return e
@@ -751,6 +754,9 @@ func (s *Server) policyWhoCan(w http.ResponseWriter, r *http.Request, subj *iden
 	}
 	if q.Get("zone") == "" && !policy.IsMeta(action) {
 		return perr(http.StatusBadRequest, "bad_request", "zone is required")
+	}
+	if e := delegatedPolicyQuery(subj, q.Get("zone"), q.Get("revision_id")); e != nil {
+		return e
 	}
 	snap, e := s.snapshotFor(r.Context(), q.Get("revision_id"))
 	if e != nil {

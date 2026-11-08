@@ -85,7 +85,7 @@ func (e *engine) ProposeTransfer(ctx context.Context, s *identity.Subject, zoneI
 	if req.Apply && e.cfg.RequireSecondApprover {
 		return nil, fail(ReasonInvalid, "apply: a second approver is required (ownership.require_second_approver)")
 	}
-	if !e.cfg.Authz.Allow(s, policy.ActionOwnershipApprove, zone) && !e.writesIn(s, zone) {
+	if !e.cfg.Authz.Allow(s, policy.ActionOwnershipApprove, zone) && !e.writesIn(s.WithIntent(identity.IntentTransfer), zone) {
 		return nil, e.deny(ctx, s, actionTransferPropose, zone, fail(ReasonForbidden, "%s, %s or %s is required on %s", policy.ActionRecordWrite, policy.ActionForwardWrite, policy.ActionOwnershipApprove, zone))
 	}
 	if err := checkComment(req.Comment); err != nil {
@@ -478,13 +478,21 @@ func (e *engine) finishApplied(ctx context.Context, t *store.Transfer) bool {
 }
 
 func subjectRecord(s *identity.Subject) *store.SubjectRecord {
-	return &store.SubjectRecord{Kind: string(s.Kind), Issuer: s.Issuer, ID: s.ID, Name: s.Name, Category: s.Category,
+	r := &store.SubjectRecord{Kind: string(s.Kind), Issuer: s.Issuer, ID: s.ID, Name: s.Name, Category: s.Category,
 		Claims: s.Claims, Roles: s.Roles, Teams: s.Teams, TeamRoles: s.TeamRoles}
+	if s.Client != nil {
+		r.ClientID, r.ClientZones, r.Scopes = s.Client.ID, s.Client.Zones, s.Scopes
+	}
+	return r
 }
 
 func recordSubject(r store.SubjectRecord) *identity.Subject {
-	return &identity.Subject{Kind: identity.Kind(r.Kind), Issuer: r.Issuer, ID: r.ID, Name: r.Name, Category: r.Category,
+	s := &identity.Subject{Kind: identity.Kind(r.Kind), Issuer: r.Issuer, ID: r.ID, Name: r.Name, Category: r.Category,
 		Claims: r.Claims, Roles: r.Roles, Teams: r.Teams, TeamRoles: r.TeamRoles}
+	if r.ClientID != "" {
+		s.Client, s.Scopes = &identity.Client{ID: r.ClientID, Name: r.ClientID, Zones: r.ClientZones}, r.Scopes
+	}
+	return s
 }
 
 func errorText(err error) string {
@@ -888,7 +896,7 @@ func (e *engine) teamWrites(g *grants, s *identity.Subject, team, zone string, k
 		return false
 	}
 	c := *s
-	c.Roles = roles
+	c.Roles, c.Intent = roles, identity.IntentTransfer
 	return e.allowRRset(g, &c, policy.WriteAction(k), zone, k)
 }
 

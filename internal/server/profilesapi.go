@@ -19,6 +19,7 @@ import (
 	eurodnsprov "github.com/KamorionLabs/dns-gate/internal/provider/eurodns"
 	"github.com/KamorionLabs/dns-gate/internal/requestid"
 	"github.com/KamorionLabs/dns-gate/internal/routes"
+	"github.com/KamorionLabs/dns-gate/internal/scope"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 	"github.com/KamorionLabs/dns-gate/internal/zonewrite"
 	api "github.com/KamorionLabs/eurodns-go"
@@ -90,7 +91,7 @@ type profileAuditor func(ctx context.Context, provider, decision, reason string,
 // zone: profiles are account-wide objects that name no domain and are
 // applied to any domain of the account, so no narrower grant is enough.
 func (s *Server) canManageProfiles(subj *identity.Subject) bool {
-	return subj != nil && s.cfg.Policy.Current().GrantsPattern(subj.Roles, policy.ActionZoneProfile, "*")
+	return subj != nil && !scope.Delegated(subj) && s.cfg.Policy.Current().GrantsPattern(subj.Roles, policy.ActionZoneProfile, "*")
 }
 
 func profileForbidden() *zonewrite.Error {

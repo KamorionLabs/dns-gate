@@ -93,6 +93,14 @@ issuers:
     category_claim: idtyp
     category_map: {app: pipeline, user: human}
     name_claim: name
+    # Applications acting for users with capped rights (docs/config/authentication.md
+    # #delegated-clients): Microsoft 365 Copilot through the Enterprise token store.
+    delegated_clients:
+      - id: m365-copilot
+        name: Microsoft 365 Copilot
+        azp: ab3be6b7-f5df-413d-ac2d-abf1e3fd9c0b
+        scopes: [dns.read]
+        surfaces: [mcp]
 
   # Corporate IdP, used by humans through the UI.
   - name: sso

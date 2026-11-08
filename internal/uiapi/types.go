@@ -36,6 +36,18 @@ type Me struct {
 	// DefaultTeam is the team the caller writes for unless it names
 	// another of its teams (X-DNS-Gate-Team header, team field).
 	DefaultTeam string `json:"default_team,omitempty"`
+	// Client is the delegated client the caller acts through; Scopes cap
+	// its rights, and Permissions are then clipped to them.
+	Client *MeClient `json:"client,omitempty"`
+	Scopes []string  `json:"scopes,omitempty"`
+}
+
+// MeClient is the delegated client of the caller.
+type MeClient struct {
+	ID       string   `json:"id"`
+	Name     string   `json:"name,omitempty"`
+	Zones    []string `json:"zones"`
+	Surfaces []string `json:"surfaces"`
 }
 
 // Permission is one effective rule of a role of the subject (base and
@@ -167,21 +179,29 @@ type Tombstone struct {
 
 // AuditEntry is one audit event as shown in the UI.
 type AuditEntry struct {
-	EventID    string     `json:"event_id,omitempty"`
-	Time       time.Time  `json:"time"`
-	RequestID  string     `json:"request_id"`
-	Actor      Actor      `json:"actor"`
-	AuthMethod string     `json:"auth_method,omitempty"`
-	SourceIP   string     `json:"source_ip,omitempty"`
-	UserAgent  string     `json:"user_agent,omitempty"`
-	Teams      []string   `json:"teams,omitempty"`
-	Action     string     `json:"action"`
-	Zone       string     `json:"zone,omitempty"`
-	Decision   string     `json:"decision"` // allow | deny | error
-	Reason     string     `json:"reason,omitempty"`
-	Changes    []Change   `json:"changes,omitempty"`
-	Provider   string     `json:"provider,omitempty"` // id of the provider of the zone
-	SnapshotID SnapshotID `json:"snapshot_id,omitempty"`
+	EventID    string    `json:"event_id,omitempty"`
+	Time       time.Time `json:"time"`
+	RequestID  string    `json:"request_id"`
+	Actor      Actor     `json:"actor"`
+	AuthMethod string    `json:"auth_method,omitempty"`
+	// Client is the delegated client the actor acted through.
+	Client     *AuditClient `json:"client,omitempty"`
+	SourceIP   string       `json:"source_ip,omitempty"`
+	UserAgent  string       `json:"user_agent,omitempty"`
+	Teams      []string     `json:"teams,omitempty"`
+	Action     string       `json:"action"`
+	Zone       string       `json:"zone,omitempty"`
+	Decision   string       `json:"decision"` // allow | deny | error
+	Reason     string       `json:"reason,omitempty"`
+	Changes    []Change     `json:"changes,omitempty"`
+	Provider   string       `json:"provider,omitempty"` // id of the provider of the zone
+	SnapshotID SnapshotID   `json:"snapshot_id,omitempty"`
+}
+
+// AuditClient is the delegated client of an audit event.
+type AuditClient struct {
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
 }
 
 // SnapshotID is the provider snapshot taken before a write (EuroDNS). It
