@@ -139,7 +139,7 @@ issuers:
 - A plan made through a client is applied only by the same user **through the same client**; a plan made without client is never applied through one, and the other way round.
 - Tokens of clients that are not declared keep today's behaviour, unless `require_known_client: true`: they are then refused with `403 unknown_client` (tokens without `azp` nor `appid` too), and the refusal is audited.
 - Delegated requests are audited with `auth_method: oauth-delegated`, `client_id` and `actor: {type: oauth_client, id, name}` (see [AUDIT.md](../AUDIT.md#fields)); the subject stays the user. The id and name come from this configuration, never from token claims.
-- A delegated subject is never a person for the rules on approvers: it cannot approve a transfer unless `ownership.machine_approvers`, nor be the second person of `require_second_approver`, and the step-up of humans does not apply to it.
+- A delegated subject is never a person for the rules on approvers: it cannot approve a transfer unless `ownership.machine_approvers`, nor be the second person of `require_second_approver`. The step-up of humans still applies to it: actions behind the step-up (adoption) answer `reauth_required` unless its token carries a recent `auth_time`.
 - `GET /api/v1/me` (roles, groups) and `GET /api/v1/teams/{team}` (roles and permissions of the team) still show the roles of the user and of its teams, for information: what the client may do is given by `client`, `scopes` and the clipped `permissions` of `/me`.
 - When an issuer has delegated clients, the gate logs a warning once per undeclared client id it sees: such a token holds the full rights of its user.
 - UI logins are not affected: the UI is the gate itself.

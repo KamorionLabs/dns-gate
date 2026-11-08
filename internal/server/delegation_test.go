@@ -429,7 +429,11 @@ func TestStepUpOfDelegatedSubject(t *testing.T) {
 	}
 	d := *human
 	d.Client, d.Scopes = &identity.Client{ID: "copilot"}, []string{scope.DNSAdopt}
+	if pe := e.server.stepUp(&d, nil); pe == nil || pe.reason != "reauth_required" {
+		t.Fatalf("a delegated subject never skips the step-up: %+v", pe)
+	}
+	d.Claims = map[string]any{"auth_time": float64(time.Now().Unix())}
 	if pe := e.server.stepUp(&d, nil); pe != nil {
-		t.Fatalf("a delegated subject is not a person: %+v", pe)
+		t.Fatalf("delegated subject with a recent auth_time: %+v", pe)
 	}
 }

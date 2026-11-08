@@ -172,8 +172,8 @@ names an application and caps it:
 - **Identity.** `identity.Subject` keeps the user (`String()` unchanged) and gains
   `Client` and `Scopes`; a transfer approver is recorded with them and rebound from
   the current client configuration on retries. A delegated subject is not a person
-  for the approver rules and the step-up, and sees only the transfers of its client
-  zones.
+  for the approver rules (it keeps the step-up of humans), and sees only the
+  transfers of its client zones.
 - **Matching.** `client_ids` (aliases `azp`, `appid`) are lowercased at load and
   compared with the `azp` claim, else `appid`, so one entry covers v1 and v2 tokens.
 - **Audit.** Events carry `client_id` and `actor {type: oauth_client, id, name}` from
