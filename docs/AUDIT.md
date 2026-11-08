@@ -58,6 +58,8 @@ not know.
 | `subject_name` | string | optional | Display name (`name_claim`, e-mail, key id). |
 | `subject_category` | string | optional | `human`, `pipeline`, `key` or `system`. |
 | `auth_method` | string | requests with a credential | How the request authenticated, or tried to. See [Authentication methods](#authentication-methods). |
+| `client_id` | string | delegated requests | [Delegated client](config/authentication.md#delegated-clients) the subject acted through (`issuers[].delegated_clients[].id`). The subject stays the user. |
+| `actor` | object | with `client_id` | The application acting for the subject: `{"type": "oauth_client", "id": <client id>, "name": <display name>}`. Id and name come from the configuration, never from token claims. |
 | `source_ip` | string | requests | Client address. `X-Forwarded-For` is honoured only from `listen.trusted_proxies`: every `X-Forwarded-For` line of the request is read as one list, and the rightmost untrusted hop wins. On Lambda it is `requestContext.http.sourceIp`. |
 | `user_agent` | string | requests | `User-Agent` without control characters, truncated to 256 bytes. |
 | `teams` | string[] | optional | Teams the subject acts for. |
@@ -96,6 +98,7 @@ secret.
 | `token-exchange` | Requests to `/api/v1/token-exchange` (the presented subject token), and bearer gate tokens that the exchange issued (claim `gate_xchg`). |
 | `api-key` | Gate API key (`dgk_...`) as bearer, basic password, `X-Api-Key` or acme-dns credentials. |
 | `virtual-key` | `X-App-Id` / `X-Api-Key` virtual key from the configuration. |
+| `oauth-delegated` | Bearer JWT of a configured issuer whose `azp` / `appid` is a declared [delegated client](config/authentication.md#delegated-clients); the event then carries `client_id` and `actor`. |
 
 The method is recorded when the credential is read, before it is verified, so a
 refused attempt still says which kind of credential was presented. A request
@@ -167,6 +170,8 @@ key, `api-key:<id>`, when the id was readable):
 | `role_widened` | The role of an API key now grants more than when it was issued. |
 | `unavailable` | API key store lookup failed. |
 | `not_exchangeable` | Token exchange refused: gate token, or exchange disabled for the issuer. |
+| `unknown_client` | `require_known_client`: the `azp` / `appid` of the token is no declared delegated client. |
+| `not_delegable` | Token of a delegated client on a surface or endpoint closed to delegated clients (EuroDNS-compatible API, ACME, token exchange, a surface outside its `surfaces`). |
 | `registration_requires_api_key` | acme-dns `/register` without credentials. |
 | `forbidden` | acme-dns credentials missing or not an API key. |
 
@@ -186,6 +191,7 @@ key, `api-key:<id>`, when the id was readable):
 | `reauth_required` | deny | Step-up: a recent login (or the required AMR) is needed. |
 | `plan_not_found`, `plan_expired`, `store_unavailable`, `team_mismatch` | deny | Plan apply refused. |
 | `not_team_member` | deny | Requested team is not one of the subject's teams. |
+| `not_delegable`, `scope_insufficient` | deny | Delegated client: endpoint or MCP tool closed to delegated clients, or outside the client scopes (action `api` or `mcp.<tool>`). |
 | `invalid_zone` | error | Provider or validation refusal of the content. |
 | `https_unavailable` | error | `require_https` on a URL forward of a zone whose forwards answer plain HTTP only. |
 | `zone_locked` | error | Zone lock not acquired, or a previous write not settled. |
@@ -314,7 +320,7 @@ ECS, `unmapped.dns_gate` in OCSF), so no information is lost.
 | `related.user`, `related.ip`, `related.hosts` | Subject and name; source address; zone and the FQDNs of `changes` |
 | `service.name`, `service.version` | `dns-gate` and the gate version |
 | `message` | `<decision> <action> on <zone> by <name>: <reason>` |
-| `dns_gate.*` | `schema_version`, `decision`, `request_id`, `subject_category`, `auth_method`, `teams`, `provider`, `changes`, `snapshot_id`, `extra` |
+| `dns_gate.*` | `schema_version`, `decision`, `request_id`, `subject_category`, `auth_method`, `client_id`, `teams`, `provider`, `changes`, `snapshot_id`, `extra` |
 
 Categorization:
 
@@ -349,7 +355,8 @@ the gate's own authorization model, not an account.
 Common members: `time` (epoch milliseconds), `metadata.uid` = `event_id`,
 `metadata.correlation_uid` = `request_id`, `metadata.product`, `actor.user`
 (`uid` = subject, `type_id` 1 for humans, 3 for system actors, 99 otherwise, and
-`groups` = teams), `actor.authorizations[].decision` = decision, `src_endpoint.ip`,
+`groups` = teams), `actor.app_uid` and `actor.app_name` = the delegated client
+(`client_id` and its name), `actor.authorizations[].decision` = decision, `src_endpoint.ip`,
 `http_request.user_agent`, `status_id`/`status` (1 Success for `allow`,
 2 Failure otherwise), `status_detail` = reason, `severity_id` (1 for `allow`,
 2 for `deny`, 3 for `error`). `type_uid` is `class_uid × 100 + activity_id`.
