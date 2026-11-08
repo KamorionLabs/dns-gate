@@ -12,7 +12,7 @@ client, recomputed on every request.
 | **Journal** | the audit journal, filtered by zone, host, type, subject, category, decision and time, with diffs and refusal reasons |
 | **Teams** | teams, their members and what they own; the transfer inbox |
 | **Policy** | who may do what, per group, pipeline and API key (simple view), or every layer, binding, role and bound (expert view); revisions with diff, impact analysis, approval and rollback |
-| **Connect** | ready-to-paste setups for Claude Code, Claude Desktop, Terraform and curl, and a short-lived API token for the signed-in user |
+| **Connect** | ready-to-paste setups for Claude Code, Claude Desktop, Terraform and curl, a short-lived API token for the signed-in user, and the *Connected applications* ([OAuth clients](../config/authentication.md#oauth-clients)) the user allowed, with revocation |
 
 ## Changing DNS from the UI
 

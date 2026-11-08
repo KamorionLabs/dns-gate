@@ -48,6 +48,7 @@ type Config struct {
 	ACME              ACME             `yaml:"acme"`
 	Propagation       Propagation      `yaml:"propagation"`
 	Audit             Audit            `yaml:"audit"`
+	OAuth             OAuth            `yaml:"oauth"`
 
 	Hash     string    `yaml:"-"` // sha256 of the file
 	LoadedAt time.Time `yaml:"-"`
@@ -638,6 +639,7 @@ var knownActions = map[string]bool{
 	"policy.approve":        true,
 	"domain.read":           true,
 	"gate.apikey.manage":    true,
+	"gate.oauth.manage":     true,
 	"dns.ownership.approve": true,
 }
 
@@ -767,6 +769,9 @@ func (c *Config) applyEnv(getenv func(string) string) error {
 		if c.UI.SessionKey, err = decodeKey(k); err != nil {
 			return fmt.Errorf("config: DNS_GATE_SESSION_KEY: %w", err)
 		}
+	}
+	if err := c.applyOAuthEnv(read); err != nil {
+		return err
 	}
 	return c.applySAMLEnv(read)
 }
@@ -917,6 +922,7 @@ func (c *Config) defaults() {
 		c.Zones[i] = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(c.Zones[i])), ".")
 	}
 	c.samlDefaults()
+	c.oauthDefaults()
 	for i := range c.Issuers {
 		if len(c.Issuers[i].Algorithms) == 0 {
 			c.Issuers[i].Algorithms = DefaultAlgorithms
@@ -1434,6 +1440,7 @@ func (c *Config) Validate() error {
 			add("ui.session_ttl: must be between 1m and 24h")
 		}
 	}
+	c.validateOAuth(add)
 	if c.UI.CLIScope != "" && (len(c.UI.CLIScope) > 512 || !cliScopeRe.MatchString(c.UI.CLIScope)) {
 		add("ui.cli_scope: one scope of letters, digits and . _ ~ : / %% - expected, got %q", c.UI.CLIScope)
 	}

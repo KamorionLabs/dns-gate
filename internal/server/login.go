@@ -48,6 +48,9 @@ type uiAuth struct {
 	sealer     *sealer
 	origin     string // expected Origin of mutations
 	editMaxAge time.Duration
+	// oauthClients tells that declared OAuth clients exist: SAML sessions
+	// then keep their assertion groups for the refreshes.
+	oauthClients bool
 
 	mu        sync.Mutex
 	endpoints *oidcEndpoints
@@ -82,6 +85,7 @@ func newUIAuth(c *config.Config, a *authn.Authenticator, client *http.Client, no
 	u.cookies = newCookieNames(redirect.Scheme == "https")
 	u.origin = redirect.Scheme + "://" + redirect.Host
 	u.editMaxAge = c.Policy.EditMaxAge.D()
+	u.oauthClients = len(c.OAuth.Clients) > 0
 	if u.sealer, err = newSealer(c.UI.SessionKey); err != nil {
 		return nil, err
 	}

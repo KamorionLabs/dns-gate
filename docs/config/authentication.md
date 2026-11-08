@@ -58,7 +58,7 @@ issuers:
 Tokens are obtained:
 
 - by a signed-in browser session: `POST /api/v1/tokens` (session cookie, `X-Gate-CSRF` header and same-origin `Origin`, as every UI mutation) answers `{"access_token", "token_type": "Bearer", "expires_in", "expires_at", "issuer"}`. Bearer tokens and virtual keys cannot get one (`403 session_required`): a token never extends itself;
-- by the [Claude Desktop extension](ui-mcp.md#claude-desktop-extension) and other native clients, through the gate authorization server: `GET /.well-known/openid-configuration` (also `/.well-known/oauth-authorization-server`) describes `/oauth/authorize` and `/oauth/token`. Only the public client `dns-gate-relay` with a loopback redirect `http://localhost:<port>` or `http://127.0.0.1:<port>` (no path) is accepted, with PKCE S256 required. `/oauth/authorize` sends a user without session through the UI login (SAML or OIDC), then shows a consent page ("Allow" posts back with the CSRF token and the origin checked). The authorization code (2 minutes) and the refresh token (until the end of the session) are sealed with the session key: nothing is stored, any instance redeems them. A code is not single-use within its 2 minutes, but it is useless without the PKCE verifier that only the client holds. The refresh grant re-checks the bindings of the subject before signing a new token.
+- by the [Claude Desktop extension](ui-mcp.md#claude-desktop-extension) and other native clients, through the gate authorization server: `GET /.well-known/openid-configuration` (also `/.well-known/oauth-authorization-server`) describes `/oauth/authorize`, `/oauth/token` and `/oauth/revoke`. The built-in public client `dns-gate-relay` accepts a loopback redirect `http://localhost:<port>` or `http://127.0.0.1:<port>` (no path), with PKCE S256 required; the applications of [`oauth.clients`](#oauth-clients) are the other clients. `/oauth/authorize` sends a user without session through the UI login (SAML or OIDC), then shows a consent page ("Allow" posts back with the CSRF token and the origin checked). The authorization code (2 minutes) and the refresh token (until the end of the session) are sealed with the session key: nothing is stored, any instance redeems them. A code is not single-use within its 2 minutes, but it is useless without the PKCE verifier that only the client holds. The refresh grant re-checks the bindings of the subject before signing a new token. Every redirect carries `iss` (RFC 9207).
 
 The authorization server also works with an OIDC UI login, but the Claude Desktop extension keeps signing in with the OIDC issuer in that case.
 
@@ -145,6 +145,116 @@ issuers:
 - UI logins are not affected: the UI is the gate itself.
 
 Setting up Microsoft 365 Copilot: [Microsoft 365 Copilot](../integrations/m365-copilot.md).
+
+### OAuth clients
+
+A delegated client of an issuer needs that issuer to know the application (an Entra
+tenant shared with it). **Declared OAuth clients** are applications the gate
+authorization server itself signs users in for, whatever the UI login (OIDC or SAML):
+a SaaS such as Skopea, or a Microsoft 365 Copilot agent on a gate without Entra. The
+user signs in at the gate, consents, and the application gets gate tokens holding the
+rights of the user capped by the scopes of the client, exactly as a
+[delegated client](#delegated-clients) (same scopes, zones, surfaces, never-delegable
+actions, plans bound to the client, audit).
+
+```yaml
+issuers:
+  - name: gate
+    self: true
+    issuer: https://dns.example.com       # required: signs the delegated tokens
+store: {type: dynamodb, dynamodb: {table: dns-gate}}   # persistent store required
+oauth:
+  clients:
+    - id: skopea-acme                     # one client per application tenant
+      name: "Skopea — Acme"               # shown on the consent page and in the audit
+      auth_method: private_key_jwt        # or client_secret_basic / client_secret_post
+      jwks_uri: https://app.skopea.io/api/v1/orgs/acme/dns/connections/c-7f3a/jwks.json
+      redirect_uris: [https://app.skopea.io/api/v1/orgs/acme/dns/oauth/callback]
+      scopes: [dns.read, dns.plan, dns.write]
+      default_scopes: [dns.read]
+      write_max_age: 12h
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `id` | (required) | Lowercase identifier, the OAuth `client_id`. Unique, never `dns-gate-relay` nor the id of a delegated client of an issuer. |
+| `name` | `id` | Display name, from this file only (the client never chooses it). |
+| `type` | `confidential` | `confidential` (authenticates at the token endpoint) or `public` (`auth_method: none`, PKCE only). |
+| `auth_method` | `none` for public clients | `private_key_jwt` (RFC 7523, with `jwks_uri` or an inline `jwks` of public keys), `client_secret_basic` or `client_secret_post` (the secret from `DNS_GATE_OAUTH_CLIENT_<ID>_SECRET` or `_FILE`, at least 32 characters, compared in constant time; both methods accept the secret in the `Authorization: Basic` header, URL-encoded or not, or in the form). Two client ids may not map to the same variable. |
+| `redirect_uris` | (required) | Exact HTTPS redirect URIs (no wildcard, fragment, user information, quote or space). |
+| `scopes` | (required) | Ceiling of the client, the scopes of [delegated clients](#delegated-clients). Lowering it applies to the tokens in circulation at their next request. |
+| `default_scopes` | `[dns.read]` if in `scopes` | Granted when the request names no scope; a subset of `scopes`. |
+| `zones`, `surfaces` | every zone, `[api]` | As for delegated clients. |
+| `access_token_ttl` | `10m` | Lifetime of the access tokens, 1 minute to the gate issuer `token_ttl`. |
+| `refresh_idle_ttl` | `14d` | A grant unused this long expires. |
+| `refresh_max_ttl` | `90d` | Absolute lifetime of a grant from the last consent (at most `180d`). |
+| `claims_max_age` | `7d` | Age of the session claims (groups) a refresh may replay; then the user signs in again. With `ui.saml.groups_from_identity_store`, the groups are looked up again at every refresh instead, and a user the identity store no longer knows is refused. |
+| `write_max_age` | none | `dns.write`, `dns.transfer` and `dns.adopt` then need a sign-in at the gate within this time (`403 reauth_required`, the client sends the user to `/oauth/authorize?prompt=login`). |
+| `require_pkce` | `true` | PKCE S256 is always required; `false` is refused. |
+| `disabled` | `false` | Cuts every grant of the client at its next request (`401`), and its sign-ins. |
+
+Durations accept a number of days (`14d`) besides Go durations (`336h`).
+
+Requirements, checked at load: a gate issuer (`self: true`), the UI login
+(`ui.enabled`), and a persistent store (`sqlite`, `postgres` or `dynamodb`): grants,
+authorization codes and client assertion ids live in the store.
+
+**Protocol.**
+
+- `GET /oauth/authorize`: `response_type=code`, the exact `redirect_uri`,
+  `code_challenge` (S256), `state`, `scope` (scopes of the client, plus `openid` and
+  `offline_access`, accepted and echoed), `prompt` (`login`, `select_account`,
+  `consent`, `none`), `max_age`, `login_hint` (shown on the consent page, never used to
+  sign in). An unknown client or redirect URI answers `400` without redirect; other
+  errors go back to the redirect URI (`invalid_scope`, `invalid_request`,
+  `login_required`, `consent_required`, `access_denied`). Every answer carries `iss`.
+  `prompt=login` and an exceeded `max_age` send the user through a forced sign-in;
+  when the IdP does not renew it, the answer is `login_required`.
+- **Consent** shows the configured client name, the user, the scopes in words, the
+  zones and the duration, posted with the CSRF token and a same-origin check; the page
+  may only post to the gate and the redirect URI (`form-action`) and is never framed.
+  Consent is remembered per client and user for confidential clients: a request
+  within the scopes already granted gets its code without the page (unless
+  `prompt=consent`), a wider one shows the page again and the grant then holds the
+  union (incremental consent). Public clients always get the consent page
+  (`prompt=none` answers `consent_required`).
+- `POST /oauth/token`: `authorization_code` (codes are stored, single use, 2 minutes,
+  bound to the client, the redirect URI and the PKCE verifier) and `refresh_token`.
+  One grant per client and user: a new authorization of the same user replaces the
+  refresh tokens issued before (one instance of the client per user). The token of a
+  code carries the scopes requested; a refresh carries every scope of the grant.
+  A code issued from a remembered consent is refused once the grant is revoked.
+  Each refresh returns a new refresh token; presenting
+  an earlier one revokes the grant (`oauth.refresh_reuse`), except within 30 seconds of
+  a rotation, when the same answer is returned again (two instances of the client
+  racing). A refresh fails (`invalid_grant`) once the grant is revoked, idle, past
+  `refresh_max_ttl`, past `claims_max_age`, or when the user is no longer bound; a
+  disabled client fails client authentication (`401 invalid_client`). `scope` on a
+  refresh may narrow the token.
+- `private_key_jwt` (also at the revocation endpoint): the assertion has `iss` =
+  `sub` = the client id, `aud` the token endpoint (or the issuer URL), `exp` at most 5 minutes ahead and a `jti`, recorded
+  until it expires: a replayed assertion is refused.
+- `POST /oauth/revoke` (RFC 7009, client authenticated): a refresh or access token of
+  the client revokes its grant. Other tokens get `200` without effect.
+- Access tokens are gate tokens (`typ: at+jwt`) with `client_id`, `act`
+  (`{"sub": "client:<id>"}`), `scope`, `gate_grant` and the `auth_time` of the sign-in
+  at the consent. The gate checks at every request that the client is declared and
+  enabled and that the grant is active (cached 30 seconds per process: a revocation
+  reaches the other replicas within that time). These claims are never copied from a
+  session or an exchanged token.
+- Refresh tokens are sealed with the session key and name their grant: rotating
+  `DNS_GATE_SESSION_KEY` ends every grant.
+
+**Connected applications.** Users list and revoke their grants in the UI (*Connect*,
+*Connected applications*) or with `GET /api/v1/oauth/grants` and
+`DELETE /api/v1/oauth/grants/{id}`. People holding `gate.oauth.manage` (never a key
+nor a delegated client) list the grants of a client or a user
+(`?client=…`, `?subject=issuer:id`) and revoke them all
+(`DELETE /api/v1/oauth/grants?client=…`), when someone leaves or a client is
+compromised.
+
+Guides: [third-party applications](../integrations/oauth-clients.md),
+[Microsoft 365 Copilot without Entra](../integrations/m365-copilot.md#gates-without-entra-id).
 
 ### Entra ID
 

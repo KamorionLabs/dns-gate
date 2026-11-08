@@ -82,6 +82,11 @@ func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
 		writeDelegationError(w, de)
 		return
 	}
+	if de := s.delegatedWriteAge(subj, delegableRoutes[r.Method+" "+pattern]); de != nil {
+		s.audit(r, subj, "api", params["zone"], "deny", de.reason)
+		writeDelegationError(w, de)
+		return
+	}
 	if r.Method != http.MethodGet && sess != nil && !s.ui.checkCSRF(r) {
 		writeError(w, http.StatusForbidden, "csrf", "missing or invalid CSRF token or origin")
 		return
@@ -107,6 +112,9 @@ func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	case pattern == routeTokens:
 		s.handleIssueToken(w, r, subj, sess)
+		return
+	case pattern == routeOAuthGrants || pattern == routeOAuthGrant:
+		s.handleOAuthGrants(w, r, me, pattern, params["id"])
 		return
 	case strings.HasPrefix(pattern, routeProfiles):
 		s.handleZoneProfilesAPI(w, r, subj, sess, pattern, params)

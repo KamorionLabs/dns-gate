@@ -283,6 +283,7 @@ func TestClassifyActivities(t *testing.T) {
 		"mcp.list_zones": ActivityRead, "mcp.apply_rrset_change": ActivityUpdate, "api.plan": ActivityRead,
 		"policy.delegated.delete_role": ActivityDelete, "apikey.revoke": ActivityDelete, "gate.transfer.propose": ActivityCreate,
 		"acme.register": ActivityCreate, "acme.update": ActivityUpdate,
+		"oauth.authorize": ActivityCreate, "oauth.revoke": ActivityDelete,
 	}
 	for action, want := range cases {
 		if _, got := Classify(Event{Action: action, Subject: "s", Decision: "allow"}); got != want {
@@ -293,6 +294,33 @@ func TestClassifyActivities(t *testing.T) {
 
 // Events of system actors (discovery, reconciler) logged while serving a
 // request do not take the client of that request.
+func TestClassifyOAuth(t *testing.T) {
+	for action, want := range map[string]Class{
+		"oauth.token": ClassAuthentication, "oauth.client_auth": ClassAuthentication, "oauth.refresh_reuse": ClassAuthentication,
+		"oauth.authorize": ClassAccountChange, "oauth.revoke": ClassAccountChange,
+	} {
+		if got, _ := Classify(Event{Action: action, Subject: "s", Decision: "allow"}); got != want {
+			t.Errorf("%s: %s, want %s", action, got, want)
+		}
+	}
+}
+
+func TestGrantOfTheRequest(t *testing.T) {
+	ctx := WithRequest(context.Background(), Request{})
+	SetClient(ctx, "skopea", "Skopea")
+	SetGrant(ctx, "g-1", []string{"dns.read"})
+	e := Event{Subject: "idp:alice", Action: "api.rrset.put", Decision: "allow", ClientID: "skopea", Extra: map[string]any{"via": "api"}}
+	Prepare(ctx, &e)
+	if e.Extra["grant_id"] != "g-1" || e.Extra["via"] != "api" {
+		t.Fatalf("grant of the request: %+v", e.Extra)
+	}
+	other := Event{Subject: "idp:alice", Action: "x", Decision: "allow"}
+	Prepare(ctx, &other)
+	if other.Extra != nil {
+		t.Fatalf("grant on an event without the client: %+v", other.Extra)
+	}
+}
+
 func TestPrepareSystemActor(t *testing.T) {
 	ctx := WithRequest(context.Background(), Request{SourceIP: "192.0.2.7", UserAgent: "ua"})
 	SetAuthMethod(ctx, AuthOIDC)

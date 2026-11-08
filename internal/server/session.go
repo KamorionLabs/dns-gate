@@ -69,6 +69,12 @@ type session struct {
 	// unknown (a silent SSO login): edits then require a re-authentication.
 	AuthTime int64    `json:"at,omitempty"`
 	AMR      []string `json:"amr,omitempty"`
+	// StoreGroups tells that the groups were looked up in the identity
+	// store (ui.saml.groups_from_identity_store); BaseGroups are then the
+	// groups of the assertion, merged again with the store at an OAuth
+	// refresh.
+	StoreGroups bool     `json:"sg,omitempty"`
+	BaseGroups  []string `json:"bg,omitempty"`
 }
 
 // loginState is the short-lived cookie of an ongoing login.

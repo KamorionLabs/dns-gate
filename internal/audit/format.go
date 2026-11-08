@@ -44,11 +44,11 @@ const (
 func Classify(e Event) (Class, Activity) {
 	a := strings.ToLower(e.Action)
 	switch {
-	case a == "apikey.authenticate", a == "token.issue", a == "gate.token.exchange":
+	case a == "apikey.authenticate", a == "token.issue", a == "gate.token.exchange", a == "oauth.token", a == "oauth.client_auth", a == "oauth.refresh_reuse":
 		return ClassAuthentication, ActivityOther
 	case e.Subject == "" && e.Decision == "deny":
 		return ClassAuthentication, ActivityOther
-	case strings.HasPrefix(a, "apikey."):
+	case strings.HasPrefix(a, "apikey."), strings.HasPrefix(a, "oauth."):
 		return ClassAccountChange, activity(e)
 	case strings.HasPrefix(a, "policy."):
 		return ClassPolicy, activity(e)
@@ -65,7 +65,7 @@ var discoveryActivity = map[string]Activity{
 
 var (
 	readWords   = []string{"get", "list", "read", "search", "export", "plan", "preview", "check", "explain", "manage"}
-	createWords = []string{"create", "issue", "propose", "generate", "register", "add"}
+	createWords = []string{"create", "issue", "propose", "generate", "register", "add", "authorize"}
 	deleteWords = []string{"delete", "revoke", "remove", "expire", "cleanup"}
 )
 
@@ -413,7 +413,7 @@ func ToOCSF(e Event) map[string]any {
 	case ClassAuthentication:
 		classUID, className, categoryName = OCSFAuthentication, "Authentication", "Identity & Access Management"
 		activityID, activityName = 1, "Logon"
-		if e.Action == "token.issue" || e.Action == "gate.token.exchange" {
+		if e.Action == "token.issue" || e.Action == "gate.token.exchange" || e.Action == "oauth.token" {
 			activityID, activityName = 3, "Authentication Ticket"
 		}
 		user := ocsfUser(e)

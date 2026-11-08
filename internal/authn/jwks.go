@@ -21,7 +21,10 @@ const (
 )
 
 // keySet fetches and caches the JWKS of an issuer, resolving it through OIDC
-// discovery when no explicit URL is configured.
+// discovery when no explicit URL is configured. One fetch runs at a time:
+// callers holding a cached key never wait for it, callers needing it wait
+// for the fetch in flight, and a fetch starts at most every jwksRefreshMin
+// (an unknown kid in between is refused without fetching).
 type keySet struct {
 	issuer  string
 	jwksURL string
@@ -30,6 +33,8 @@ type keySet struct {
 	mu        sync.Mutex
 	keys      jose.JSONWebKeySet
 	fetchedAt time.Time
+	attemptAt time.Time
+	inflight  chan struct{}
 	now       func() time.Time
 }
 
@@ -41,25 +46,52 @@ func newKeySet(issuer, jwksURL string, client *http.Client) *keySet {
 // is unknown (rotation) or the cache is old.
 func (k *keySet) key(ctx context.Context, kid string) (*jose.JSONWebKey, error) {
 	k.mu.Lock()
-	defer k.mu.Unlock()
 	now := k.now()
-	stale := now.Sub(k.fetchedAt) > jwksMaxAge
-	if !stale {
+	cached := k.lookup(kid)
+	if cached != nil && now.Sub(k.fetchedAt) <= jwksMaxAge {
+		k.mu.Unlock()
+		return cached, nil
+	}
+	if wait := k.inflight; wait != nil {
+		k.mu.Unlock()
+		select {
+		case <-wait:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		k.mu.Lock()
+		defer k.mu.Unlock()
 		if key := k.lookup(kid); key != nil {
 			return key, nil
 		}
+		return nil, fmt.Errorf("unknown key id %q", kid)
 	}
-	if stale || now.Sub(k.fetchedAt) > jwksRefreshMin {
-		if err := k.fetch(ctx); err != nil {
-			if key := k.lookup(kid); key != nil {
-				return key, nil
-			}
-			return nil, err
+	if !k.attemptAt.IsZero() && now.Sub(k.attemptAt) <= jwksRefreshMin {
+		k.mu.Unlock()
+		if cached != nil {
+			return cached, nil
 		}
-		k.fetchedAt = now
+		return nil, fmt.Errorf("unknown key id %q", kid)
+	}
+	done := make(chan struct{})
+	k.inflight, k.attemptAt = done, now
+	jwksURL := k.jwksURL
+	k.mu.Unlock()
+
+	set, resolved, err := k.fetch(ctx, jwksURL)
+
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.inflight = nil
+	close(done)
+	if err == nil {
+		k.keys, k.jwksURL, k.fetchedAt = set, resolved, now
 	}
 	if key := k.lookup(kid); key != nil {
 		return key, nil
+	}
+	if err != nil {
+		return nil, err
 	}
 	return nil, fmt.Errorf("unknown key id %q", kid)
 }
@@ -83,20 +115,21 @@ func (k *keySet) lookup(kid string) *jose.JSONWebKey {
 	return nil
 }
 
-func (k *keySet) fetch(ctx context.Context) error {
-	if k.jwksURL == "" {
+// fetch reads the key set, discovering its URL first when jwksURL is empty;
+// it returns the set and the URL it came from.
+func (k *keySet) fetch(ctx context.Context, jwksURL string) (jose.JSONWebKeySet, string, error) {
+	var set jose.JSONWebKeySet
+	if jwksURL == "" {
 		u, err := k.discover(ctx)
 		if err != nil {
-			return err
+			return set, "", err
 		}
-		k.jwksURL = u
+		jwksURL = u
 	}
-	var set jose.JSONWebKeySet
-	if err := k.getJSON(ctx, k.jwksURL, &set); err != nil {
-		return fmt.Errorf("jwks: %w", err)
+	if err := k.getJSON(ctx, jwksURL, &set); err != nil {
+		return set, "", fmt.Errorf("jwks: %w", err)
 	}
-	k.keys = set
-	return nil
+	return set, jwksURL, nil
 }
 
 func (k *keySet) discover(ctx context.Context) (string, error) {

@@ -9,11 +9,10 @@ default, and the audit records that Copilot acted.
 
 Requirements:
 
-- The gate signs users in with **Entra ID** (an `issuers` entry for your tenant). Gates
-  whose users sign in with SAML (IAM Identity Center) cannot use this path yet: they
-  need declared OAuth clients on the gate authorization server (static registration
-  with the redirect `https://teams.microsoft.com/api/platform/v1.0/oAuthRedirect`),
-  tracked in [issue #89](https://github.com/KamorionLabs/dns-gate/issues/89).
+- The gate signs users in with **Entra ID** (an `issuers` entry for your tenant).
+  Gates whose users sign in otherwise (SAML with IAM Identity Center, another OIDC
+  provider) declare Copilot as an OAuth client of the gate instead: see
+  [Gates without Entra ID](#gates-without-entra-id).
 - The gate MCP endpoint is reachable **from Microsoft's cloud** over HTTPS (public
   endpoint, or an ingress that allows Microsoft 365 egress). A gate on a private
   network only is not reachable by Copilot.
@@ -116,5 +115,73 @@ to each client only the tools of its scopes.
 In the audit journal of the UI, calls of the agent show the client next to the
 user.
 
+## Gates without Entra ID
+
+When users sign in to the gate with SAML (IAM Identity Center, as Homebox does) or a
+non-Microsoft OIDC provider, Copilot cannot get a token of that provider. The gate
+authorization server signs the user in instead: Copilot is a static
+[OAuth client](../config/authentication.md#oauth-clients) of the gate, registered in
+the Teams developer portal with a client id and a secret. Copilot sends the user to
+the gate sign-in and consent page, then redeems the code with PKCE (S256) at the
+gate token endpoint and refreshes the token on its own.
+
+1. Generate a secret (`openssl rand -base64 48`) and give it to the gate as
+   `DNS_GATE_OAUTH_CLIENT_M365_COPILOT_SECRET` (or `_FILE`).
+2. Declare the client:
+
+    ```yaml
+    issuers:
+      - name: gate
+        self: true
+        issuer: https://dns.example.com
+    store: {type: dynamodb, dynamodb: {table: dns-gate}}   # not memory
+    oauth:
+      clients:
+        - id: m365-copilot
+          name: Microsoft 365 Copilot
+          auth_method: client_secret_basic          # both Basic and form secrets are accepted
+          redirect_uris: [https://teams.microsoft.com/api/platform/v1.0/oAuthRedirect]
+          scopes: [dns.read]                        # [dns.read, dns.plan] to prepare plans
+          surfaces: [mcp]
+          # refresh_idle_ttl: 14d                   # a user idle that long signs in again
+    mcp:
+      enabled: true
+    ```
+
+3. In the [Teams developer portal](https://dev.teams.microsoft.com/tools), **Tools** >
+   **OAuth client registration** > **Register client**:
+
+    | Field | Value |
+    |---|---|
+    | Base URL | `https://dns.example.com` (prefix of the MCP endpoint and of the token endpoint) |
+    | Restrict usage by org | your organization |
+    | Restrict usage by app | **Any Teams app** (an app-bound registration makes every MCP call fail with `404`) |
+    | Client ID | `m365-copilot` |
+    | Client secret | the secret of step 1 |
+    | Authorization endpoint | `https://dns.example.com/oauth/authorize` |
+    | Token endpoint, Refresh endpoint | `https://dns.example.com/oauth/token` |
+    | Scope | `dns.read offline_access` |
+    | Enable PKCE | on (the gate requires it) |
+
+    The registration returns an **OAuth client registration ID**.
+4. In `ai-plugin.json`, set `"auth": {"type": "OAuthPluginVault", "reference_id": "<OAuth client registration ID>"}`
+   and keep the rest of the [package](#3-the-agent-package).
+
+The first call opens the gate sign-in (Identity Center, then the consent page naming
+*Microsoft 365 Copilot* and `dns.read`). Each user then appears under *Connected
+applications* in the gate UI and can revoke Copilot there; `gate.oauth.manage` holders
+revoke it for everyone (`DELETE /api/v1/oauth/grants?client=m365-copilot`), and
+`disabled: true` cuts it at once. Audit events carry `client_id: m365-copilot`,
+`actor` and `extra.grant_id`; consents, tokens and refreshes are audited as
+`oauth.authorize` and `oauth.token`. With Identity Center groups
+(`groups_from_identity_store`), the groups of the user are looked up again at each
+refresh, so removing someone from a group cuts Copilot within one access token
+lifetime (10 minutes).
+
+Microsoft does not document whether the token store sends the secret with HTTP Basic
+or in the form: the gate accepts both for `client_secret_basic` and
+`client_secret_post`.
+
 References: [Build a plugin from an MCP server](https://learn.microsoft.com/en-us/microsoft-365/copilot/extensibility/build-mcp-plugins),
-[Configure Microsoft Entra SSO authentication](https://learn.microsoft.com/en-us/microsoft-365/copilot/extensibility/plugin-authentication-entra-sso).
+[Configure Microsoft Entra SSO authentication](https://learn.microsoft.com/en-us/microsoft-365/copilot/extensibility/plugin-authentication-entra-sso),
+[Configure OAuth 2.0 authentication](https://learn.microsoft.com/en-us/microsoft-365/copilot/extensibility/plugin-authentication-oauth).

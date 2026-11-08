@@ -120,6 +120,7 @@ func Prepare(ctx context.Context, e *Event) {
 		if e.ClientID == "" && e.Subject == "" {
 			ri.clientInto(e)
 		}
+		ri.grantInto(e)
 	}
 	e.UserAgent = Truncate(e.UserAgent, MaxUserAgent)
 }
@@ -134,6 +135,7 @@ func Capture(ctx context.Context, e *Event) {
 		if e.ClientID == "" && e.Subject == "" {
 			ri.clientInto(e)
 		}
+		ri.grantInto(e)
 	}
 	e.captured = true
 }
@@ -194,6 +196,26 @@ type requestInfo struct {
 	auth                string
 	clientID            string
 	clientName          string
+	grantID             string
+	scopes              []string
+}
+
+// grantInto adds the OAuth grant and scopes of the request to an event of
+// its client (extra.grant_id, extra.scopes), unless the event sets them.
+func (r *requestInfo) grantInto(e *Event) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.grantID == "" || e.ClientID != r.clientID {
+		return
+	}
+	if _, ok := e.Extra["grant_id"]; ok {
+		return
+	}
+	extra := map[string]any{"grant_id": r.grantID, "scopes": append([]string{}, r.scopes...)}
+	for k, v := range e.Extra {
+		extra[k] = v
+	}
+	e.Extra = extra
 }
 
 func (r *requestInfo) clientInto(e *Event) {
@@ -238,6 +260,18 @@ func SetClient(ctx context.Context, id, name string) {
 	if ri := requestFrom(ctx); ri != nil {
 		ri.mu.Lock()
 		ri.clientID, ri.clientName = id, name
+		ri.mu.Unlock()
+	}
+}
+
+// SetGrant records the OAuth grant of the gate authorization server and
+// the scopes the request authenticates with: the events of its client
+// carry them in extra.grant_id and extra.scopes. No-op without
+// WithRequest.
+func SetGrant(ctx context.Context, grantID string, scopes []string) {
+	if ri := requestFrom(ctx); ri != nil {
+		ri.mu.Lock()
+		ri.grantID, ri.scopes = grantID, append([]string(nil), scopes...)
 		ri.mu.Unlock()
 	}
 }

@@ -1,4 +1,4 @@
-import { ApiError, createRequest, dnsWrites, forwardsApi, issueToken, teamsApi } from './http';
+import { ApiError, createRequest, dnsWrites, forwardsApi, issueToken, oauthGrantsApi, teamsApi, type GrantFilter } from './http';
 import { rememberFolders } from './folders';
 import type {
   AdoptApply,
@@ -16,6 +16,7 @@ import type {
   GeneratedKey,
   IssuedToken,
   Me,
+  OAuthGrantList,
   PlanResult,
   Propagation,
   ProposeRequest,
@@ -69,6 +70,9 @@ export interface Backend {
   proposeTransfer(zone: string, req: TransferProposal): Promise<Transfer>;
   decideTransfer(id: string, approve: boolean, comment: string): Promise<Transfer>;
   renameTeam(team: string, to: string, comment: string, apply?: boolean): Promise<Transfer>;
+  oauthGrants(f?: GrantFilter): Promise<OAuthGrantList>;
+  revokeGrant(id: string): Promise<string>;
+  revokeGrants(f: GrantFilter): Promise<{ revoked: number }>;
 }
 
 export function loginURL(reauth = false): string {
@@ -103,6 +107,7 @@ const request = createRequest({
 const writes = dnsWrites(request);
 const teamCalls = teamsApi(request);
 const forwardCalls = forwardsApi(request);
+const grantCalls = oauthGrantsApi(request);
 
 function query(q: object): string {
   const p = new URLSearchParams();
@@ -163,6 +168,9 @@ const http: Backend = {
   issueToken: () => issueToken(request),
   ...teamCalls,
   ...forwardCalls,
+  oauthGrants: grantCalls.list,
+  revokeGrant: grantCalls.revoke,
+  revokeGrants: grantCalls.revokeAll,
 };
 
 export const usingFixtures = import.meta.env.VITE_FIXTURES === '1';

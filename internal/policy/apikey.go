@@ -14,6 +14,11 @@ import (
 // the zone patterns of the key role, not on one zone.
 const ActionAPIKeyManage = "gate.apikey.manage"
 
+// ActionOAuthManage lets a person list and revoke the OAuth grants of
+// every user (connected applications). Never delegable, never held by
+// keys.
+const ActionOAuthManage = "gate.oauth.manage"
+
 // IsGate reports whether an action is a gate.* action. API keys never hold
 // one: a key cannot manage keys.
 func IsGate(action string) bool { return strings.HasPrefix(action, "gate.") }

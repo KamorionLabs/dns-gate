@@ -18,6 +18,7 @@
   import CopyText from '../components/CopyText.svelte';
   import HclBlock from '../components/HclBlock.svelte';
   import Icon from '../components/Icon.svelte';
+  import ConnectedApps from '../components/ConnectedApps.svelte';
 
   let info = $state<Connect | null>(null);
   let error = $state<string | null>(null);
@@ -48,6 +49,7 @@
     { key: 'claude-code', label: 'Claude Code' },
     { key: 'terraform', label: 'Terraform / OpenTofu' },
     { key: 'api', label: 'API' },
+    { key: 'apps', label: 'Connected applications' },
   ] as const;
   const tab = $derived(tabs.find((t) => t.key === router.params.get('tab'))?.key ?? 'desktop');
   const entra = $derived(info?.issuer?.kind === 'entra');
@@ -139,6 +141,8 @@
         {:else}Terraform signs in with a token of the gate's issuer{#if entra} (locally, your <span class="mono">az login</span>: <span class="mono">{tokenCommand(info)}</span>){/if}; the provider documentation lists the supported sign-in methods.{/if}
         To move records the gate already holds into a stack, open a zone and use Export Terraform.
       </p>
+    {:else if tab === 'apps'}
+      <ConnectedApps />
     {:else if tab === 'api'}
       <p class="lead">The REST API under <span class="mono">/api/v1</span> is the same for every DNS provider and accepts bearer tokens. A change is planned first, then that exact plan is applied:</p>
       <HclBlock hcl={curlCommand(info, exampleZone)} filename="shell" download={false} />

@@ -4,6 +4,7 @@ package identity
 import (
 	"context"
 	"net/netip"
+	"time"
 )
 
 // Kind is how the caller authenticated.
@@ -49,12 +50,19 @@ type Subject struct {
 	Intent Intent
 }
 
-// Client is a delegated client of an issuer (issuers[].delegated_clients).
+// Client is a delegated client: of an issuer (issuers[].delegated_clients),
+// or of the gate authorization server (oauth.clients, Grant set).
 type Client struct {
 	ID       string
 	Name     string
 	Zones    []string
 	Surfaces []string
+	// Grant is the id of the OAuth grant of a gate token issued to a
+	// declared client.
+	Grant string
+	// WriteMaxAge is how recent the last sign-in at the gate must be for
+	// dns.write (0: no limit).
+	WriteMaxAge time.Duration
 }
 
 // Intent is the purpose a delegated subject is evaluated for.

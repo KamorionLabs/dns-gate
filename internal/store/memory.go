@@ -30,6 +30,9 @@ type memory struct {
 	acmeRegs       map[memRegKey]ACMERegistration
 	tombstones     map[memKey]Tombstone
 	transfers      map[string]Transfer
+	grants         map[string]OAuthGrant
+	codes          map[string]OAuthCode
+	jtis           map[string]memJTI
 	now            func() time.Time
 }
 

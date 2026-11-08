@@ -59,6 +59,8 @@ func TestOpenAPICoversRoutes(t *testing.T) {
 		served["POST "+p] = true
 	}
 	served["POST "+TokenExchangePath] = true
+	served["POST "+oauthTokenPath] = true
+	served["POST "+oauthRevokePath] = true
 	var missing, extra []string
 	for k := range served {
 		if !spec[k] {

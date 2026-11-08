@@ -59,11 +59,9 @@ tags:
 
       **Gate tokens and OAuth.** With an issuer marked `self: true`, the gate
       signs its own tokens: `POST /api/v1/tokens` issues one to a web UI
-      session, and its keys are served at `/.well-known/jwks.json`. With a SAML
-      UI login, the gate also runs a stateless OAuth 2.0 authorization server
-      for the Claude Desktop extension (`/.well-known/oauth-authorization-server`,
-      `/.well-known/openid-configuration`, `/oauth/authorize`, `/oauth/token`),
-      standard OAuth 2.0 with PKCE not described here.
+      session, and its keys are served at `/.well-known/jwks.json`. The gate
+      also runs an OAuth 2.0 authorization server for the Claude Desktop
+      extension and the declared OAuth clients (tag `oauth`).
 
       **Token exchange.** `POST /api/v1/token-exchange` (RFC 8693) turns a
       token of an opted-in issuer (`token_exchange: true`) into a short-lived
@@ -116,6 +114,17 @@ tags:
       [certificates](https://kamorionlabs.github.io/dns-gate/docs/ACME/).
   - name: zone-profiles
     description: Zone profiles of EuroDNS accounts, prepared before a domain transfer.
+  - name: oauth
+    description: |
+      Gate authorization server (issuer with `self: true` and the UI login):
+      authorization code with PKCE (S256) for the Claude Desktop extension and
+      for the applications declared under `oauth.clients`, refresh token
+      rotation, revocation (RFC 7009) and the connected applications of each
+      user. `GET /oauth/authorize` (consent page) and the metadata documents
+      (`/.well-known/oauth-authorization-server`,
+      `/.well-known/openid-configuration`) are standard and not described
+      here. Guide:
+      [OAuth clients](https://kamorionlabs.github.io/dns-gate/docs/config/authentication/#oauth-clients).
 paths:
   /.well-known/dns-gate:
     get:
@@ -172,6 +181,152 @@ paths:
               schema: { $ref: "#/components/schemas/IssuedToken" }
         "401": { $ref: "#/components/responses/Error" }
         "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /oauth/token:
+    post:
+      tags: [oauth]
+      operationId: oauthToken
+      summary: Redeem an authorization code or a refresh token
+      description: |
+        `authorization_code` (single use, 2 minutes, with `code_verifier` and
+        the exact `redirect_uri`) or `refresh_token`. Declared clients
+        authenticate with `client_secret_basic`, `client_secret_post` or
+        `private_key_jwt` (RFC 7523: `iss` = `sub` = client id, `aud` this
+        endpoint or the issuer, `exp` at most 5 minutes ahead, `jti` used
+        once); public clients send `client_id` only. Every refresh returns a
+        new refresh token: a used one revokes the grant
+        (`oauth.refresh_reuse`), except within 30 seconds, where the same
+        answer is returned again. Errors follow RFC 6749 (`invalid_client`
+        401, `invalid_grant`, `invalid_scope`, `unsupported_grant_type`).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [grant_type]
+              properties:
+                grant_type: { type: string, enum: [authorization_code, refresh_token] }
+                code: { type: string }
+                redirect_uri: { type: string }
+                code_verifier: { type: string }
+                refresh_token: { type: string }
+                scope: { type: string, description: "Refresh only: a subset of the granted scopes." }
+                client_id: { type: string }
+                client_secret: { type: string }
+                client_assertion_type: { type: string, enum: ["urn:ietf:params:oauth:client-assertion-type:jwt-bearer"] }
+                client_assertion: { type: string }
+      responses:
+        "200":
+          description: Tokens.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OAuthTokenResponse" }
+        "400":
+          description: OAuth error.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OAuthError" }
+        "401":
+          description: Client authentication failed (`invalid_client`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OAuthError" }
+
+  /oauth/revoke:
+    post:
+      tags: [oauth]
+      operationId: oauthRevoke
+      summary: Revoke a refresh or access token (RFC 7009)
+      description: |
+        Revokes the grant of a refresh or access token of the authenticated
+        client: every token of the grant stops working (access tokens within
+        30 seconds on other replicas). Unknown tokens and tokens of other
+        clients get 200 without effect, as do the stateless tokens of the
+        Claude Desktop extension (`dns-gate-relay`).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [token]
+              properties:
+                token: { type: string }
+                token_type_hint: { type: string, enum: [refresh_token, access_token] }
+                client_id: { type: string }
+                client_secret: { type: string }
+                client_assertion_type: { type: string }
+                client_assertion: { type: string }
+      responses:
+        "200": { description: Revoked, or nothing to revoke. }
+        "400":
+          description: OAuth error.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OAuthError" }
+        "401":
+          description: Client authentication failed (`invalid_client`).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OAuthError" }
+
+  /api/v1/oauth/grants:
+    get:
+      tags: [oauth]
+      operationId: listOAuthGrants
+      summary: Connected applications
+      description: |
+        The grants of the caller to the declared OAuth clients. With
+        `gate.oauth.manage` (a person signed in directly, never a key or a
+        delegated client), `client` or `subject` list the grants of a client
+        or of a user (`403` otherwise).
+      parameters:
+        - { name: client, in: query, schema: { type: string } }
+        - { name: subject, in: query, description: "issuer:id", schema: { type: string } }
+      responses:
+        "200":
+          description: Grants, newest first.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OAuthGrantList" }
+        "403": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [oauth]
+      operationId: revokeOAuthGrants
+      summary: Revoke every grant of a client or a user
+      description: "`gate.oauth.manage` and `client` or `subject` required (a departing user, a compromised client)."
+      parameters:
+        - { name: client, in: query, schema: { type: string } }
+        - { name: subject, in: query, description: "issuer:id", schema: { type: string } }
+      responses:
+        "200":
+          description: Number of grants revoked.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [revoked]
+                properties:
+                  revoked: { type: integer }
+        "403": { $ref: "#/components/responses/Error" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/oauth/grants/{id}:
+    delete:
+      tags: [oauth]
+      operationId: revokeOAuthGrant
+      summary: Revoke a grant
+      description: A grant of the caller, or any grant with `gate.oauth.manage` (404 otherwise).
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: Revoked. }
         "404": { $ref: "#/components/responses/Error" }
         default: { $ref: "#/components/responses/Error" }
 
@@ -2665,6 +2820,44 @@ components:
         ExplainRequest, ExplainResponse, WhoCanResponse) are documented in
         internal/uiapi/policy.go and may change before 1.0.
 
+    OAuthTokenResponse:
+      type: object
+      required: [access_token, token_type, expires_in]
+      properties:
+        access_token: { type: string, description: "JWT (typ at+jwt) with client_id, act, scope, gate_grant, auth_time." }
+        token_type: { type: string, enum: [Bearer] }
+        expires_in: { type: integer }
+        refresh_token: { type: string }
+        scope: { type: string }
+    OAuthError:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string }
+        error_description: { type: string }
+    OAuthGrant:
+      type: object
+      required: [id, client_id, client_name, subject, scopes, status, created_at, consented_at, last_used_at, expires_at]
+      properties:
+        id: { type: string }
+        client_id: { type: string }
+        client_name: { type: string }
+        subject: { type: string }
+        subject_name: { type: string }
+        scopes: { type: array, items: { type: string } }
+        status: { type: string, enum: [active, expired, revoked] }
+        created_at: { type: string, format: date-time }
+        consented_at: { type: string, format: date-time }
+        last_used_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time, description: "The earlier of the absolute and the idle expiry." }
+        revoked_at: { type: string, format: date-time }
+        revoked_by: { type: string }
+    OAuthGrantList:
+      type: object
+      required: [grants, manage]
+      properties:
+        grants: { type: array, items: { $ref: "#/components/schemas/OAuthGrant" } }
+        manage: { type: boolean, description: "The caller holds gate.oauth.manage." }
     APIKey:
       type: object
       required: [id, name, team, role, status, allowed_cidrs, acme_domains, acme_dns, created_at, created_by]

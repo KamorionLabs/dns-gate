@@ -78,11 +78,11 @@ Those users have no bearer token for the API, MCP or Terraform, so the gate can 
 own issuer (`issuers[].self`): it signs short-lived JWTs (ES256 or EdDSA, JWKS at
 `/.well-known/jwks.json`) carrying the session claims plus `gate_iss`, and binds them
 back as that issuer, so one set of bindings covers the session and its tokens. Tokens
-come from `POST /api/v1/tokens` (session + CSRF) or from a stateless OAuth
-authorization server (`/oauth/authorize`, `/oauth/token`, PKCE, loopback redirects
-only, consent page) used by the Claude Desktop extension. Codes and refresh tokens
-are sealed with the session key; nothing is stored, so the gate stays stateless
-across instances (Lambda).
+come from `POST /api/v1/tokens` (session + CSRF) or from the OAuth authorization
+server (`/oauth/authorize`, `/oauth/token`, PKCE, consent page). For the Claude
+Desktop extension (`dns-gate-relay`, loopback redirects) it is stateless: codes and
+refresh tokens are sealed with the session key, nothing is stored. Declared OAuth
+clients (9.8) use persisted grants.
 
 SAML response validation (`/auth/saml/acs`). Validation of the response posted to `/auth/saml/acs`: XML signature of the response or of the assertion with a certificate of the IdP metadata (unsigned responses refused, encrypted assertions decrypted with the SP key when configured), response `Destination` and assertion `Recipient` equal to `acs_url`, `InResponseTo` equal to the id of the AuthnRequest kept in the sealed login cookie, `RelayState` equal to the random state of that cookie, issuer equal to the IdP entity id, every `AudienceRestriction` equal to `entity_id` (at least one required), `IssueInstant` at most 90 s old, `NotBefore`/`NotOnOrAfter` with 3 minutes of clock skew, a bearer `SubjectConfirmation` and a non-empty NameID. The session then follows the OIDC rules: `sub` = NameID, mapped claims, `auth_time` = `AuthnInstant`, `amr` = the `AuthnContextClassRef` (and the `amr` attribute if mapped), lifetime `ui.session_ttl` capped by `SessionNotOnOrAfter`.
 
@@ -181,6 +181,42 @@ names an application and caps it:
   the client recorded in the request context only fills events without subject
   (refusals before binding). `auth_method` is `oauth-delegated`.
 - Tokens of undeclared clients keep the full rights of the user unless
-  `require_known_client` refuses them. Gate tokens are not delegated yet: declared
-  OAuth clients of the gate authorization server will carry `client_id` and `scope`
-  in gate tokens and reuse the same `Subject.Client`, `Subject.Scopes` and checks.
+  `require_known_client` refuses them. Gate tokens of declared OAuth clients (9.8)
+  carry `client_id` and `scope` and reuse the same `Subject.Client`,
+  `Subject.Scopes` and checks.
+
+### 9.8 Declared OAuth clients
+
+Delegated clients need an issuer that knows the application. Declared clients
+(`oauth.clients`, [configuration](../config/authentication.md#oauth-clients)) are
+registered at the gate authorization server instead, so any UI login (SAML Identity
+Center included) can delegate to a SaaS or to a Copilot agent.
+
+- **Grant.** One `oauth_grant` per (client, subject) in the store (memory, SQLite,
+  PostgreSQL, DynamoDB): session claims snapshot, `auth_time`, AMR, scopes (union of
+  the consents), creation, consent, last use, absolute expiry, claims age,
+  generation counters, SHA-256 of the current and previous refresh tokens, the sealed
+  answer of the last rotation, revocation. Codes (`oauth_code`, by SHA-256, taken
+  atomically) and client assertion ids (`oauth_jti`) sit next to it; DynamoDB items
+  carry the `ttl` attribute.
+- **Refresh tokens** are sealed references `{grant, generation, nonce}`: the gate
+  recognises any token it issued, so an earlier generation of the current consent is
+  a reuse (the grant is revoked), a generation from before the last consent is just
+  stale. Rotation is an optimistic update on the grant version: a racing second
+  refresh with the previous token within 30 s gets the sealed previous answer back.
+- **Access tokens** are gate tokens with `typ: at+jwt`, `client_id`, `act`, `scope`,
+  `gate_grant` and the `auth_time` of the consent sign-in. `bindGateToken` binds them
+  as the origin issuer, then requires the client to be declared and enabled, the
+  surface to be one of its surfaces, and the grant to be active for that client and
+  subject (store read cached 30 s per process); the subject gets `Client` (with the
+  grant and `write_max_age`) and the token scopes intersected with the current
+  ceiling of the client. Everything of 9.7 then applies unchanged. These claims are
+  registered: never copied from a session or an exchanged token.
+- **Claims.** A refresh rebinds the subject from the snapshot; with
+  `groups_from_identity_store` the groups are looked up again (assertion groups kept
+  in the session for that), otherwise the snapshot may not be older than
+  `claims_max_age`.
+- **Client authentication** happens in `authn` (`private_key_jwt` keys inline or from
+  `jwks_uri`, secrets compared on SHA-256 digests in constant time), failures
+  aggregated like API keys.
+- **Not implemented:** dynamic client registration, PAR, DPoP.

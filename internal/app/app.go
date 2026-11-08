@@ -181,6 +181,7 @@ func New(ctx context.Context, cfg *config.Config, log *slog.Logger, opts Options
 		Ops:         eng,
 		Terraform:   server.InventoryTerraform(eng),
 		Plans:       st,
+		OAuth:       st,
 		Versions:    st,
 		APIKeys:     keys,
 		Tombstones:  st,
@@ -287,8 +288,9 @@ func CheckManagedPolicy(ctx context.Context, cfg *config.Config) ([]string, erro
 }
 
 // GCPlans purges the expired RRset plans, the idle ACME registrations, the
-// expired tombstones and the transfer requests expired for longer than
-// store.TransferRetention.
+// expired tombstones, the transfer requests expired for longer than
+// store.TransferRetention and the expired OAuth codes, assertion ids and
+// grants.
 func (a *App) GCPlans(ctx context.Context) error {
 	now := a.now()
 	n, err := a.Store.GCPlans(ctx, now)
@@ -310,7 +312,11 @@ func (a *App) GCPlans(ctx context.Context) error {
 	if nr > 0 {
 		a.log.Info("transfer gc", "removed", nr)
 	}
-	return errors.Join(err, terr, rerr)
+	no, oerr := a.Store.PurgeOAuth(ctx, now)
+	if no > 0 {
+		a.log.Info("oauth gc", "removed", no)
+	}
+	return errors.Join(err, terr, rerr, oerr)
 }
 
 // Handler is the HTTP handler of the gate.
