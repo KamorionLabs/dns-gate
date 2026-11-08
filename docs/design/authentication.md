@@ -171,10 +171,15 @@ names an application and caps it:
   the client that made it, and a plan made without client never through one.
 - **Identity.** `identity.Subject` keeps the user (`String()` unchanged) and gains
   `Client` and `Scopes`; a transfer approver is recorded with them and rebound from
-  the current client configuration on retries.
-- **Audit.** The authenticator records the client in the request context; every event
-  of the request carries `client_id`, `actor {type: oauth_client, id, name}` and
-  `auth_method: oauth-delegated`, from the configuration only.
+  the current client configuration on retries. A delegated subject is not a person
+  for the approver rules and the step-up, and sees only the transfers of its client
+  zones.
+- **Matching.** `client_ids` (aliases `azp`, `appid`) are lowercased at load and
+  compared with the `azp` claim, else `appid`, so one entry covers v1 and v2 tokens.
+- **Audit.** Events carry `client_id` and `actor {type: oauth_client, id, name}` from
+  the client of their subject (configuration only), so background retries keep it;
+  the client recorded in the request context only fills events without subject
+  (refusals before binding). `auth_method` is `oauth-delegated`.
 - Tokens of undeclared clients keep the full rights of the user unless
   `require_known_client` refuses them. Gate tokens are not delegated yet: declared
   OAuth clients of the gate authorization server will carry `client_id` and `scope`

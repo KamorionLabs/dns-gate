@@ -41,8 +41,11 @@ Requirements:
 3. Audiences: with v2 access tokens (`accessTokenAcceptedVersion: 2` in the manifest,
    as the gate recommends) the `aud` of the token stays the **client id** of the gate
    app, whatever URI Copilot asked for, so `audiences` needs no change when it already
-   lists that GUID. With v1 tokens, add the generated Application ID URI to the
-   issuer `audiences`.
+   lists that GUID, and the token store is in the `azp` claim. With v1 tokens
+   (issuer `https://sts.windows.net/<tenant-id>/`) the `aud` is the URI that was
+   requested: add the generated Application ID URI to the issuer `audiences`; the
+   token store is then in the `appid` claim, which the same `client_ids` entry
+   matches.
 
 ## 2. Declare Copilot on the gate
 
@@ -58,7 +61,7 @@ issuers:
     delegated_clients:
       - id: m365-copilot
         name: Microsoft 365 Copilot
-        azp: ab3be6b7-f5df-413d-ac2d-abf1e3fd9c0b
+        client_ids: [ab3be6b7-f5df-413d-ac2d-abf1e3fd9c0b]   # azp (v2) or appid (v1), any case
         scopes: [dns.read]          # or [dns.read, dns.plan] to let it prepare plans
         surfaces: [mcp]
         # zones: ["*.example.com"]  # optional ceiling on the zones
@@ -73,8 +76,9 @@ mcp:
   delegable.
 - With `dns.plan`, Copilot can call `plan_rrset_change` to show a change; it cannot
   apply it, and no other client can apply its plan either.
-- Seven read tools keep the agent under the tool count Microsoft recommends for a
-  plugin.
+- `dns.read` opens eight read tools (`transfer_list` when ownership transfers are
+  enabled), which keeps the agent under the tool count Microsoft recommends for a
+  plugin. The example package pins seven; add `transfer_list` if you use transfers.
 - Audit events of the agent carry `client_id: m365-copilot`,
   `actor: {type: oauth_client, id: m365-copilot, name: Microsoft 365 Copilot}` and
   `auth_method: oauth-delegated`, the subject being the user.

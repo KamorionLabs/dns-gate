@@ -94,7 +94,7 @@ curl -fsS https://dns.example.com/api/v1/token-exchange \
 
 ### Delegated clients
 
-A token of a trusted issuer carries the rights of its user, whatever application obtained it. A **delegated client** caps them: when the client a token was issued to (`azp` claim, Entra v2; `appid` when the token has no `azp`, Entra v1) is declared on the issuer, the request holds the RBAC of the user **intersected** with the actions of the client scopes and with its zones, on the surfaces it may use.
+A token of a trusted issuer carries the rights of its user, whatever application obtained it. A **delegated client** caps them: when the client a token was issued to (`azp` claim, Entra v2; `appid` when the token has no `azp`, Entra v1) is one of the `client_ids` of a client declared on the issuer (compared without case), the request holds the RBAC of the user **intersected** with the actions of the client scopes and with its zones, on the surfaces it may use.
 
 ```yaml
 issuers:
@@ -106,11 +106,11 @@ issuers:
     delegated_clients:
       - id: m365-copilot                 # shown in the audit (client_id)
         name: Microsoft 365 Copilot
-        azp: ab3be6b7-f5df-413d-ac2d-abf1e3fd9c0b
+        client_ids: [ab3be6b7-f5df-413d-ac2d-abf1e3fd9c0b]
         scopes: [dns.read]
         surfaces: [mcp]
       - id: skopea
-        appid: [11111111-2222-3333-4444-555555555555]
+        client_ids: [11111111-2222-3333-4444-555555555555]
         scopes: [dns.read, dns.plan]
         zones: ["*.example.com"]
 ```
@@ -119,7 +119,7 @@ issuers:
 |---|---|---|
 | `id` | (required) | Lowercase identifier, recorded as `client_id` in the audit. |
 | `name` | `id` | Display name (audit `actor.name`). |
-| `azp`, `appid` | | Exact client ids (string or list); one of them is required. A value matches one client only. |
+| `client_ids` | (required) | Client ids (string or list), exact but compared without case, matched against the `azp` claim of the token or, without `azp`, its `appid` claim: one entry covers v1 and v2 tokens. A value matches one client only. `azp` and `appid` are accepted as aliases (same meaning). |
 | `scopes` | (required) | Ceiling of the client, below. An unknown scope fails the load. |
 | `zones` | every zone | Zone globs the client may act on (`*` wildcards), on top of the zones of the user. |
 | `surfaces` | `[api]` | `api` (`/api/v1`) and/or `mcp` (`/mcp`). |
@@ -139,6 +139,9 @@ issuers:
 - A plan made through a client is applied only by the same user **through the same client**; a plan made without client is never applied through one, and the other way round.
 - Tokens of clients that are not declared keep today's behaviour, unless `require_known_client: true`: they are then refused with `403 unknown_client` (tokens without `azp` nor `appid` too), and the refusal is audited.
 - Delegated requests are audited with `auth_method: oauth-delegated`, `client_id` and `actor: {type: oauth_client, id, name}` (see [AUDIT.md](../AUDIT.md#fields)); the subject stays the user. The id and name come from this configuration, never from token claims.
+- A delegated subject is never a person for the rules on approvers: it cannot approve a transfer unless `ownership.machine_approvers`, nor be the second person of `require_second_approver`, and the step-up of humans does not apply to it.
+- `GET /api/v1/me` (roles, groups) and `GET /api/v1/teams/{team}` (roles and permissions of the team) still show the roles of the user and of its teams, for information: what the client may do is given by `client`, `scopes` and the clipped `permissions` of `/me`.
+- When an issuer has delegated clients, the gate logs a warning once per undeclared client id it sees: such a token holds the full rights of its user.
 - UI logins are not affected: the UI is the gate itself.
 
 Setting up Microsoft 365 Copilot: [Microsoft 365 Copilot](../integrations/m365-copilot.md).
