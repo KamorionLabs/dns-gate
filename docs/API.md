@@ -324,7 +324,8 @@ The full list is in the `Error` schema of the OpenAPI document.
 | `GET /api/v1/connect/claude-desktop.mcpb` | the [Claude Desktop extension](config/ui-mcp.md#claude-desktop-extension) |
 | `/mcp`, `/.well-known/oauth-protected-resource` | [MCP](config/ui-mcp.md#mcp) |
 | `/auth/login`, `/auth/callback`, `/auth/logout`, `POST /auth/saml/acs`, `GET /auth/saml/metadata` | UI login, OIDC or SAML |
-| `GET /.well-known/jwks.json`, `/.well-known/openid-configuration`, `/.well-known/oauth-authorization-server`, `/oauth/authorize`, `POST /oauth/token` | the gate issuer's keys and its authorization server for native clients |
+| `GET /.well-known/jwks.json`, `/.well-known/openid-configuration`, `/.well-known/oauth-authorization-server`, `/oauth/authorize`, `POST /oauth/token`, `POST /oauth/revoke` | the gate issuer's keys and its authorization server for native clients and [declared OAuth clients](config/authentication.md#oauth-clients) |
+| `GET`, `DELETE /api/v1/oauth/grants`, `DELETE /api/v1/oauth/grants/{id}` | connected applications of the caller; of a client or user with `gate.oauth.manage` |
 | `POST /acme/httpreq/present`, `/cleanup`, `/acme/acme-dns/update`, `/register` | [ACME endpoints](ACME.md) |
 | `POST /.well-known/dns-gate/zones/{zone}/adopt` | adoption for the `eurodns` Terraform provider on import (RRsets already owned by the caller's team: a no-op needing `dns.record.write`) |
 | EuroDNS API paths | for zones of a `eurodns` provider only (`404 zone_not_eurodns` otherwise): `getDnsZone`, `saveDnsZone`, `checkDnsZone`, `addDnsRecords`, `deleteDnsRecord` through the zone engine; `listDnsZoneSnapshots`, `getSnapShot`, `getDnssecStatus`, `getDomain` proxied; the zone profile operations. Every other operation is `403 operation_denied`; query strings, encoded separators and dot segments are refused |

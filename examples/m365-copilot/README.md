@@ -1,7 +1,9 @@
 # Microsoft 365 Copilot declarative agent for dns-gate
 
 A minimal, read-only declarative agent package that reaches the dns-gate MCP
-endpoint through Microsoft Entra SSO. Setup of the gate and of Entra:
+endpoint through Microsoft Entra SSO, or, on gates without Entra (SAML Identity
+Center), through a static OAuth client registration of the gate itself. Setup of the
+gate and of Entra or the OAuth registration:
 [docs/integrations/m365-copilot.md](../../docs/integrations/m365-copilot.md).
 
 | File | Content |
@@ -16,7 +18,8 @@ Before packaging:
 1. Replace `dns.example.com` with the public origin of your gate (`spec.url` of
    `ai-plugin.json`, the developer URLs of `manifest.json`).
 2. Set `reference_id` to the **Microsoft Entra SSO registration ID** given by the
-   Teams developer portal (or let the Microsoft 365 Agents Toolkit fill it).
+   Teams developer portal (or let the Microsoft 365 Agents Toolkit fill it); on a
+   gate without Entra, to the **OAuth client registration ID**.
 3. Give the app a new GUID (`id`) and add `color.png` (192x192) and `outline.png`
    (32x32, transparent) icons.
 4. Zip the content of `appPackage/` and upload it (Teams admin center, or Agents

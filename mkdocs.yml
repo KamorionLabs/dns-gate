@@ -103,6 +103,7 @@ nav:
       - CI pipelines: integrations/ci.md
       - "MCP and Claude": integrations/mcp.md
       - "Microsoft 365 Copilot": integrations/m365-copilot.md
+      - "Third-party applications (OAuth)": integrations/oauth-clients.md
       - "Certificates and third parties": integrations/certificates.md
       - "ACME clients: full guide": ACME.md
       - SIEM and audit export: integrations/siem.md

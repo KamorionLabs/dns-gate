@@ -150,6 +150,7 @@ Only users assigned to the application, directly or through a group, can sign in
 SAML users have no access token of their own: the gate issues its tokens (`issuer: gate, self: true`).
 
 - **Claude Desktop**: the Connect page offers the extension. On first use it opens the browser on `https://dns.example.com/oauth/authorize`, which goes through the Identity Center login if needed, then asks the user to allow the extension. The extension keeps a refresh token valid until the end of the gate session (`ui.session_ttl`), then opens the browser again. Nothing to register in Identity Center.
+- **Microsoft 365 Copilot and third-party applications**: declare them as [OAuth clients](config/authentication.md#oauth-clients) of the gate (no Entra needed); the groups of the identity store are looked up again at each refresh of their tokens. See [Microsoft 365 Copilot without Entra](integrations/m365-copilot.md#gates-without-entra-id).
 - **Terraform, scripts, other MCP clients**: `POST /api/v1/tokens` from a signed-in UI session returns a token valid `token_ttl` (default 1 hour, never beyond the session). The gate accepts it as a bearer token, bound as `identity-center` with the same bindings.
 
 The same `gate` issuer also signs the tokens of the [token exchange](config/authentication.md#token-exchange), which lets pipelines trade an OIDC token of another issuer for a short-lived gate token.

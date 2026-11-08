@@ -59,11 +59,9 @@ tags:
 
       **Gate tokens and OAuth.** With an issuer marked `self: true`, the gate
       signs its own tokens: `POST /api/v1/tokens` issues one to a web UI
-      session, and its keys are served at `/.well-known/jwks.json`. With a SAML
-      UI login, the gate also runs a stateless OAuth 2.0 authorization server
-      for the Claude Desktop extension (`/.well-known/oauth-authorization-server`,
-      `/.well-known/openid-configuration`, `/oauth/authorize`, `/oauth/token`),
-      standard OAuth 2.0 with PKCE not described here.
+      session, and its keys are served at `/.well-known/jwks.json`. The gate
+      also runs an OAuth 2.0 authorization server for the Claude Desktop
+      extension and the declared OAuth clients (tag `oauth`).
 
       **Token exchange.** `POST /api/v1/token-exchange` (RFC 8693) turns a
       token of an opted-in issuer (`token_exchange: true`) into a short-lived

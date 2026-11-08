@@ -1,6 +1,6 @@
 # Configuration reference
 
-dns-gate reads one YAML file (`-config`, default `/etc/dns-gate/config.yaml`, or `DNS_GATE_CONFIG_URI` / `DNS_GATE_CONFIG`): a file path, `s3://bucket/key` or `ssm:/parameter/name`. Decoding is strict: an unknown field stops the gate at startup. `dns-gate -check -config file.yaml` validates a file and exits.
+dns-gate reads one YAML file (`-config`, default `/etc/dns-gate/config.yaml`, or `DNS_GATE_CONFIG_URI` / `DNS_GATE_CONFIG`): a file path, `s3://bucket/key` or `ssm:/parameter/name`. Decoding is strict: an unknown field stops the gate at startup. Durations are Go durations (`90s`, `24h`) or a whole number of days (`14d`). `dns-gate -check -config file.yaml` validates a file and exits.
 
 A complete example is in [`examples/config.yaml`](../examples/config.yaml); a small one runs the [Quickstart](quickstart.md).
 
@@ -8,7 +8,7 @@ A complete example is in [`examples/config.yaml`](../examples/config.yaml); a sm
 |---|---|
 | This page | [secrets](#secrets), [top level and limits](#top-level), [store](#store), [audit](#audit), [propagation check](#propagation-check) |
 | [Providers, discovery and folders](config/providers.md) | `providers`, zone discovery, EuroDNS folders, zone profiles |
-| [Issuers and keys](config/authentication.md) | `issuers`, gate-issued tokens, token exchange, delegated clients and scopes, Entra ID, Azure DevOps, `virtual_keys` |
+| [Issuers and keys](config/authentication.md) | `issuers`, gate-issued tokens, token exchange, delegated clients and scopes, `oauth.clients`, Entra ID, Azure DevOps, `virtual_keys` |
 | [Roles, teams and bindings](config/policy.md) | `roles`, URL forward rules, `groups`, `teams`, `ownership`, `bindings`, `team_from`, `protected`, adoption and Terraform export |
 | [Managed policy and delegations](config/managed-policy.md) | `policy`: the UI-edited layer, `policy.delegations` and the delegation API |
 | [Web UI and MCP](config/ui-mcp.md) | `ui`, SAML login, `mcp`, connecting assistants |
@@ -26,8 +26,9 @@ Secrets never live in the YAML file. Each one is read from an environment variab
 | `DNS_GATE_UI_CLIENT_SECRET` | OIDC client secret of the UI | no (public client with PKCE) |
 | `DNS_GATE_SAML_SP_KEY`, `DNS_GATE_SAML_SP_CERT` | PEM key (RSA or ECDSA) and certificate of the SAML service provider, signing the AuthnRequests | no (unsigned requests) |
 | `DNS_GATE_TOKEN_SIGNING_KEY` | PEM key (EC P-256 or Ed25519) signing [gate-issued tokens](config/authentication.md#gate-issued-tokens) | with an issuer `self: true` |
+| `DNS_GATE_OAUTH_CLIENT_<ID>_SECRET` | Secret of an [OAuth client](config/authentication.md#oauth-clients) with `client_secret_basic` or `client_secret_post` (at least 32 characters) | for those clients |
 
-`<ID>` is the provider id in upper case, every character other than a letter or a digit replaced by `_` (`eu-2` gives `EURODNS_EU_2_API_KEY`); the unprefixed variables serve every EuroDNS provider without its own. Route53 providers use the default AWS credential chain (IRSA, Pod Identity, instance role, environment), optionally assuming a role.
+`<ID>` is the provider (or OAuth client) id in upper case, every character other than a letter or a digit replaced by `_` (`eu-2` gives `EURODNS_EU_2_API_KEY`); the unprefixed variables serve every EuroDNS provider without its own. Route53 providers use the default AWS credential chain (IRSA, Pod Identity, instance role, environment), optionally assuming a role.
 
 `DNS_GATE_SECRETS_ARN` names a Secrets Manager secret holding a JSON object of these variables (`{"EURODNS_API_KEY":"…"}`), loaded into the environment at startup; a variable already set wins. See [DEPLOY-LAMBDA.md](DEPLOY-LAMBDA.md#configuration).
 
@@ -64,7 +65,7 @@ Generate a session key with `openssl rand -hex 32`, a token signing key with `op
 | `store.postgres.max_conns` | `5` | Pool size (1 to 100). The DSN comes from `DNS_GATE_POSTGRES_DSN`. |
 | `store.dynamodb.table`, `region`, `endpoint` | | Single-table backend; credentials from the default AWS chain (EKS Pod Identity, IRSA, environment). |
 
-`memory` loses ownership on restart: tests only. `memory` and `sqlite` support **one replica** (the chart refuses `replicaCount > 1` with them); use `postgres` or `dynamodb` to run several replicas.
+`memory` loses ownership on restart: tests only (refused with `oauth.clients`). `memory` and `sqlite` support **one replica** (the chart refuses `replicaCount > 1` with them); use `postgres` or `dynamodb` to run several replicas.
 
 ## Audit
 

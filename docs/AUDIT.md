@@ -98,7 +98,7 @@ secret.
 | `token-exchange` | Requests to `/api/v1/token-exchange` (the presented subject token), and bearer gate tokens that the exchange issued (claim `gate_xchg`). |
 | `api-key` | Gate API key (`dgk_...`) as bearer, basic password, `X-Api-Key` or acme-dns credentials. |
 | `virtual-key` | `X-App-Id` / `X-Api-Key` virtual key from the configuration. |
-| `oauth-delegated` | Bearer JWT of a configured issuer whose `azp` / `appid` is a declared [delegated client](config/authentication.md#delegated-clients); the event then carries `client_id` and `actor`. |
+| `oauth-delegated` | Bearer JWT of a configured issuer whose `azp` / `appid` is a declared [delegated client](config/authentication.md#delegated-clients), or gate token issued to a declared [OAuth client](config/authentication.md#oauth-clients) (claim `client_id`); the event then carries `client_id` and `actor`, and for an OAuth client `extra.grant_id` and `extra.scopes`. |
 
 The method is recorded when the credential is read, before it is verified, so a
 refused attempt still says which kind of credential was presented. A request
@@ -144,7 +144,13 @@ Refused authentications on this API carry the operation id of the request.
 | `apikey.authenticate` | Refused gate API key uses, aggregated per key or source per minute (`extra.count`). | deny | no |
 | `apikey.manage` | Access to `/api/v1/api-keys` refused. | deny | no |
 | `apikey.create`, `.update`, `.revoke`, `.rotate` | Gate API key lifecycle. | allow, deny | no |
-| `token.issue` | Gate token issued (UI, OAuth code or refresh grant). | allow | no |
+| `token.issue` | Gate token issued (UI, OAuth code or refresh grant of the Claude Desktop extension). | allow | no |
+| `oauth.authorize` | Consent to a declared [OAuth client](config/authentication.md#oauth-clients): `reason` `consent` (page allowed) or `remembered` (within the scopes of the grant), deny `access_denied`; `extra.scopes`. | allow, deny | no |
+| `oauth.token` | Access token of a declared client (`extra.via` `authorization_code` or `refresh_token`, `jti`, `expires_at`, `scopes`, `grant_id`), refused redemptions (`invalid_grant`, `invalid_scope`, with `message`), and `reason` `grace` when a refresh within 30 seconds of a rotation gets the same answer again. | allow, deny | no |
+| `oauth.refresh_reuse` | A refresh token already rotated was presented: the grant is revoked (`extra.generation`, `current_generation`). | deny | no |
+| `oauth.revoke` | Grant revoked: by the client (`/oauth/revoke`, `reason` `client`), its user (`user`) or a `gate.oauth.manage` holder (`admin`), with `extra.grant_id`, `grant_subject`, `client_id`. | allow, deny | no |
+| `oauth.client_auth` | Failed client authentications at the token and revocation endpoints, aggregated per client and source per minute (`extra.count`, `message`). | deny | no |
+| `oauth.grants` | Access to `/api/v1/oauth/grants` refused. | deny | no |
 | `gate.token.exchange` | Token exchange (RFC 8693). | allow, deny | no |
 | `policy.propose`, `.approve`, `.reject`, `.activate` | Managed policy revisions. | allow, deny | no |
 | `policy.generate_key` | Virtual key generated from the UI. | allow | no |
@@ -213,7 +219,8 @@ be refused, they carry the engine reason with `extra.allowed: false`.
 |---|---|---|
 | `remote_addr` | refused authentications, `apikey.authenticate` | Client address. It predates `source_ip` and is kept for compatibility. On `apikey.authenticate` it is the IPv4 address or the IPv6 /64 of the aggregated refusals. |
 | `message` | deny, error, `gate.taint` | Human-readable detail. |
-| `count` | `apikey.authenticate` | Refusals aggregated in the window. |
+| `count` | `apikey.authenticate`, `oauth.client_auth` | Refusals aggregated in the window. |
+| `grant_id`, `scopes` | requests of an OAuth client, `oauth.*` | Grant of the gate authorization server the token belongs to, and the scopes it carries. |
 | `via` | REST, MCP, ACME, `token.issue` | Entry point: `api`, `mcp`; for `token.issue` the grant: `api`, `authorization_code`, `refresh_token`. |
 | `mcp_client` | `mcp.*` | MCP client name, or User-Agent. |
 | `plan_id`, `allowed` | plans and applies | Plan id; whether the dry run would apply. |
