@@ -64,6 +64,10 @@ type Config struct {
 	// Ops and Terraform back adoption, RRset plans (MCP) and the HCL export.
 	Ops       Operations
 	Terraform TerraformRenderer
+	// OAuth persists the grants, codes and client assertion ids of the
+	// declared OAuth clients (oauth.clients); an in-process store when nil
+	// (tests).
+	OAuth store.OAuthStore
 	// Plans persists the RRset plans of MCP and of the REST API, shared by
 	// every gate instance; an in-process store when nil (one replica).
 	Plans store.PlanStore
@@ -159,6 +163,11 @@ func New(c Config) (*Server, error) {
 	if c.Plans == nil {
 		c.Plans = store.NewMemory()
 	}
+	if c.OAuth == nil {
+		c.OAuth = store.NewMemoryWithClock(c.Now)
+	}
+	c.Authn.SetOAuthGrants(c.OAuth)
+	c.Authn.SetAuditLog(c.Audit)
 	if c.Propagation == nil {
 		c.Propagation = newPropagator(c)
 	}
@@ -234,6 +243,8 @@ func (s *Server) route(w http.ResponseWriter, r *http.Request) {
 		s.handleAuthorize(w, r)
 	case p == oauthTokenPath && s.authorizationServer():
 		s.handleToken(w, r)
+	case p == oauthRevokePath && s.authorizationServer():
+		s.handleRevoke(w, r)
 	case strings.HasPrefix(p, GateInfoPath+"/") || strings.HasPrefix(p, LegacyGateInfoPath+"/"):
 		s.handleExtension(w, r)
 	case strings.HasPrefix(p, "/acme/"):

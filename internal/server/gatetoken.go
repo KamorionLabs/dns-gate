@@ -9,13 +9,17 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/KamorionLabs/dns-gate/internal/audit"
 	"github.com/KamorionLabs/dns-gate/internal/authn"
+	"github.com/KamorionLabs/dns-gate/internal/config"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/requestid"
+	"github.com/KamorionLabs/dns-gate/internal/scope"
 )
 
 // Endpoints of the gate token issuer. The authorization server is a
@@ -37,6 +41,8 @@ const (
 	sealOAuthCode    = "dns-gate-oauth-code"
 	sealOAuthRefresh = "dns-gate-oauth-refresh"
 )
+
+var clientAssertionAlgs = []string{"RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512", "EdDSA"}
 
 var pkceVerifierRe = regexp.MustCompile(`^[A-Za-z0-9._~-]{43,128}$`)
 
@@ -80,24 +86,46 @@ func (s *Server) handleOAuthMetadata(w http.ResponseWriter, r *http.Request) {
 	for _, k := range t.JWKS().Keys {
 		algs = append(algs, k.Algorithm)
 	}
+	scopes := []string{"openid", scope.OfflineAccess}
+	for _, sc := range scope.All {
+		for _, oc := range s.cfg.Config.OAuth.Clients {
+			if slices.Contains(oc.Scopes, sc) && !slices.Contains(scopes, sc) {
+				scopes = append(scopes, sc)
+			}
+		}
+	}
+	authMethods := []string{config.OAuthNone, config.OAuthClientSecretBasic, config.OAuthClientSecretPost, config.OAuthPrivateKeyJWT}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"issuer":                                base,
-		"authorization_endpoint":                base + oauthAuthorizePath,
-		"token_endpoint":                        base + oauthTokenPath,
-		"jwks_uri":                              base + jwksPath,
-		"response_types_supported":              []string{"code"},
-		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
-		"code_challenge_methods_supported":      []string{"S256"},
-		"token_endpoint_auth_methods_supported": []string{"none"},
-		"scopes_supported":                      []string{"openid", "offline_access"},
-		"subject_types_supported":               []string{"public"},
-		"id_token_signing_alg_values_supported": algs,
+		"issuer":                                           base,
+		"authorization_endpoint":                           base + oauthAuthorizePath,
+		"token_endpoint":                                   base + oauthTokenPath,
+		"revocation_endpoint":                              base + oauthRevokePath,
+		"jwks_uri":                                         base + jwksPath,
+		"response_types_supported":                         []string{"code"},
+		"response_modes_supported":                         []string{"query"},
+		"grant_types_supported":                            []string{"authorization_code", "refresh_token"},
+		"code_challenge_methods_supported":                 []string{"S256"},
+		"token_endpoint_auth_methods_supported":            authMethods,
+		"token_endpoint_auth_signing_alg_values_supported": clientAssertionAlgs,
+		"revocation_endpoint_auth_methods_supported":       authMethods,
+		"scopes_supported":                                 scopes,
+		"prompt_values_supported":                          []string{"none", "login", "consent", "select_account"},
+		"authorization_response_iss_parameter_supported":   true,
+		"subject_types_supported":                          []string{"public"},
+		"id_token_signing_alg_values_supported":            algs,
 	})
 }
 
-// authorizeRequest is a validated authorization request.
+// authorizeRequest is a validated authorization request. client is set
+// for a declared client (oauth.clients), nil for the relay client.
 type authorizeRequest struct {
 	ClientID, RedirectURI, State, Challenge, Nonce, Scope string
+	Prompt, MaxAge, LoginHint                             string
+	Reauthed                                              bool
+
+	client *config.OAuthClient
+	scopes []string
+	extra  []string
 }
 
 func (a authorizeRequest) values() url.Values {
@@ -105,10 +133,13 @@ func (a authorizeRequest) values() url.Values {
 		"response_type": {"code"}, "client_id": {a.ClientID}, "redirect_uri": {a.RedirectURI},
 		"code_challenge": {a.Challenge}, "code_challenge_method": {"S256"},
 	}
-	for k, val := range map[string]string{"state": a.State, "nonce": a.Nonce, "scope": a.Scope} {
+	for k, val := range map[string]string{"state": a.State, "nonce": a.Nonce, "scope": a.Scope, "prompt": a.Prompt, "max_age": a.MaxAge, "login_hint": a.LoginHint} {
 		if val != "" {
 			v.Set(k, val)
 		}
+	}
+	if a.Reauthed {
+		v.Set("gate_reauth", "1")
 	}
 	return v
 }
@@ -126,14 +157,19 @@ func loopbackRedirect(raw string) bool {
 	return u.Path == "" || u.Path == "/"
 }
 
-// parseAuthorize validates an authorization request. A nil redirect means
-// the error must not be sent to the client (unknown client or redirect).
-func parseAuthorize(v url.Values) (*authorizeRequest, string, bool) {
+// parseAuthorize validates an authorization request. A false redirectable
+// means the error must not be sent to the client (unknown client or
+// redirect).
+func (s *Server) parseAuthorize(v url.Values) (*authorizeRequest, string, bool) {
 	a := &authorizeRequest{
 		ClientID: v.Get("client_id"), RedirectURI: v.Get("redirect_uri"), State: v.Get("state"),
 		Challenge: v.Get("code_challenge"), Nonce: v.Get("nonce"), Scope: v.Get("scope"),
 	}
-	if a.ClientID != RelayClientID || !loopbackRedirect(a.RedirectURI) {
+	if a.ClientID != RelayClientID {
+		oauthErr, ok := s.parseDeclared(v, a)
+		return a, oauthErr, ok
+	}
+	if !loopbackRedirect(a.RedirectURI) {
 		return nil, "unknown client or redirect URI", false
 	}
 	if len(a.State) > 512 || len(a.Nonce) > 512 || len(a.Scope) > 512 {
@@ -148,10 +184,15 @@ func parseAuthorize(v url.Values) (*authorizeRequest, string, bool) {
 	return a, "", true
 }
 
-func redirectWith(w http.ResponseWriter, r *http.Request, a *authorizeRequest, params url.Values) {
+func (s *Server) redirectWith(w http.ResponseWriter, r *http.Request, a *authorizeRequest, params url.Values) {
+	if a.client != nil {
+		s.redirectDeclared(w, r, a, params)
+		return
+	}
 	if a.State != "" {
 		params.Set("state", a.State)
 	}
+	params.Set("iss", s.cfg.Authn.TokenIssuer().URL())
 	target := a.RedirectURI
 	if strings.HasSuffix(target, "/") {
 		target += "?" + params.Encode()
@@ -179,13 +220,13 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "GET or POST only")
 		return
 	}
-	a, oauthErr, redirectable := parseAuthorize(values)
+	a, oauthErr, redirectable := s.parseAuthorize(values)
 	if !redirectable {
 		writeError(w, http.StatusBadRequest, "invalid_request", oauthErr)
 		return
 	}
 	if oauthErr != "" {
-		redirectWith(w, r, a, url.Values{"error": {oauthErr}})
+		s.redirectWith(w, r, a, url.Values{"error": {oauthErr}})
 		return
 	}
 	subj, sess, err := s.ui.sessionSubject(r)
@@ -203,7 +244,19 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, "unauthenticated", "login required")
 			return
 		}
-		http.Redirect(w, r, "/auth/login?"+url.Values{"return_to": {oauthAuthorizePath + "?" + a.values().Encode()}}.Encode(), http.StatusFound)
+		if a.client != nil && a.prompts("none") {
+			s.redirectWith(w, r, a, url.Values{"error": {"login_required"}})
+			return
+		}
+		target := "/auth/login?" + url.Values{"return_to": {oauthAuthorizePath + "?" + a.values().Encode()}}.Encode()
+		if a.client != nil && a.needsLogin(&session{}, s.now()) {
+			target = a.reauthURL()
+		}
+		http.Redirect(w, r, target, http.StatusFound)
+		return
+	}
+	if a.client != nil {
+		s.authorizeDeclared(w, r, a, subj, sess, values)
 		return
 	}
 	if r.Method == http.MethodGet {
@@ -215,7 +268,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if values.Get("decision") != "allow" {
-		redirectWith(w, r, a, url.Values{"error": {"access_denied"}})
+		s.redirectWith(w, r, a, url.Values{"error": {"access_denied"}})
 		return
 	}
 	g := oauthGrant{
@@ -227,7 +280,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "internal", "internal error")
 		return
 	}
-	redirectWith(w, r, a, url.Values{"code": {code}})
+	s.redirectWith(w, r, a, url.Values{"code": {code}})
 }
 
 var consentTemplate = template.Must(template.New("consent").Parse(`<!doctype html>
@@ -235,8 +288,13 @@ var consentTemplate = template.Must(template.New("consent").Parse(`<!doctype htm
 <style>` + consentCSS + `</style></head>
 <body><main>
 <h1>Allow access to {{.Host}}?</h1>
-<p>A local application (the Claude Desktop extension of this gate) asks to act as <strong>{{.Name}}</strong> on {{.Host}}, with your permissions, for the rest of this session.</p>
-<p>Only allow it if you just started this sign-in yourself.</p>
+{{if .Client}}<p><strong>{{.Client}}</strong> asks to act as <strong>{{.Name}}</strong> ({{.Subject}}) on {{.Host}}, with your permissions, limited to:</p>
+<ul>{{range .Scopes}}<li>{{.}}</li>{{end}}</ul>
+{{if .Zones}}<p>Only on the zones {{.Zones}}.</p>{{end}}
+{{if .Hint}}<p class="note">The application asked for {{.Hint}}.</p>{{end}}
+<p>Access lasts until you revoke it, at most {{.Duration}}, and stops after {{.Idle}} without use. Revoke it at any time under <a href="/ui/#/connect?tab=apps">Connected applications</a>.</p>
+{{else}}<p>A local application (the Claude Desktop extension of this gate) asks to act as <strong>{{.Name}}</strong> on {{.Host}}, with your permissions, for the rest of this session.</p>
+{{end}}<p>Only allow it if you just started this sign-in yourself.</p>
 <form method="post" action="` + oauthAuthorizePath + `">
 {{range $k, $v := .Fields}}<input type="hidden" name="{{$k}}" value="{{$v}}">
 {{end}}<input type="hidden" name="csrf" value="{{.CSRF}}">
@@ -245,7 +303,7 @@ var consentTemplate = template.Must(template.New("consent").Parse(`<!doctype htm
 </form>
 </main></body></html>`))
 
-const consentCSS = `body{font-family:system-ui,sans-serif;margin:0;background:#f6f7f9;color:#1d2330}main{max-width:34em;margin:4em auto;padding:2em;background:#fff;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.12);line-height:1.5}h1{font-size:1.3em;margin-top:0}button{font:inherit;padding:.5em 1.2em;margin-right:.6em;border-radius:6px;border:1px solid #2b59c3;background:#2b59c3;color:#fff;cursor:pointer}button.secondary{background:#fff;color:#2b59c3}@media (prefers-color-scheme:dark){body{background:#14171c;color:#e4e7ec}main{background:#1d2129;box-shadow:none}button.secondary{background:#1d2129}}`
+const consentCSS = `body{font-family:system-ui,sans-serif;margin:0;background:#f6f7f9;color:#1d2330}main{max-width:34em;margin:4em auto;padding:2em;background:#fff;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.12);line-height:1.5}h1{font-size:1.3em;margin-top:0}button{font:inherit;padding:.5em 1.2em;margin-right:.6em;border-radius:6px;border:1px solid #2b59c3;background:#2b59c3;color:#fff;cursor:pointer}button.secondary{background:#fff;color:#2b59c3}.note{color:#5b6475}a{color:#2b59c3}@media (prefers-color-scheme:dark){body{background:#14171c;color:#e4e7ec}main{background:#1d2129;box-shadow:none}button.secondary{background:#1d2129}}`
 
 var consentStyleHash = func() string {
 	sum := sha256.Sum256([]byte(consentCSS))
@@ -269,9 +327,38 @@ func (s *Server) consentPage(w http.ResponseWriter, r *http.Request, a *authoriz
 	if u, err := url.Parse(host); err == nil {
 		host = u.Host
 	}
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src "+consentStyleHash+"; form-action 'self' http://localhost:* http://127.0.0.1:*; frame-ancestors 'none'; base-uri 'none'")
+	data := map[string]any{"Host": host, "Name": subj.Name, "Fields": fields, "CSRF": csrf}
+	formAction := "'self' http://localhost:* http://127.0.0.1:*"
+	if oc := a.client; oc != nil {
+		labels := make([]string, 0, len(a.scopes))
+		for _, sc := range a.scopes {
+			labels = append(labels, scope.Label(sc))
+		}
+		data["Client"], data["Subject"], data["Scopes"] = oc.Name, subj.String(), labels
+		data["Duration"], data["Idle"] = humanDays(oc.RefreshMaxTTL.D()), humanDays(oc.RefreshIdleTTL.D())
+		if len(oc.Zones) > 0 {
+			data["Zones"] = strings.Join(oc.Zones, ", ")
+		}
+		if a.LoginHint != "" && !strings.EqualFold(a.LoginHint, subj.Name) && !strings.EqualFold(a.LoginHint, subj.ID) {
+			data["Hint"] = a.LoginHint
+		}
+		formAction = "'self' " + a.RedirectURI
+	}
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; style-src "+consentStyleHash+"; form-action "+formAction+"; frame-ancestors 'none'; base-uri 'none'")
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	_ = consentTemplate.Execute(w, map[string]any{"Host": host, "Name": subj.Name, "Fields": fields, "CSRF": csrf})
+	_ = consentTemplate.Execute(w, data)
+}
+
+// humanDays renders a duration in days ("90 days"), or hours below a day.
+func humanDays(d time.Duration) string {
+	if d >= 24*time.Hour {
+		n := int(d / (24 * time.Hour))
+		if n == 1 {
+			return "1 day"
+		}
+		return strconv.Itoa(n) + " days"
+	}
+	return d.Round(time.Hour).String()
 }
 
 // checkFormCSRF validates the CSRF token of a form post and its Origin.
@@ -311,6 +398,10 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	f := r.PostForm
+	if !relayRequest(r, f) {
+		s.handleClientToken(w, r, f)
+		return
+	}
 	now := s.now()
 	var g oauthGrant
 	refresh := ""

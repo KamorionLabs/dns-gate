@@ -168,7 +168,11 @@ func (m *mcpServer) scopeMiddleware(next mcp.MethodHandler) mcp.MethodHandler {
 			if !ok || cr.Params == nil {
 				return nil, errors.New("not_delegable: unexpected tool call")
 			}
-			if de := delegatedTool(subj, cr.Params.Name); de != nil {
+			de := delegatedTool(subj, cr.Params.Name)
+			if de == nil {
+				de = m.s.delegatedWriteAge(subj, mcpToolScopes[cr.Params.Name])
+			}
+			if de != nil {
 				tool := cr.Params.Name
 				if !toolNameRe.MatchString(tool) {
 					tool = "call"

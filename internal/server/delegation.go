@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/scope"
@@ -86,6 +87,23 @@ func checkDelegated(subj *identity.Subject, required []string, known bool, what 
 	}
 	return &delegationError{reason: "scope_insufficient", required: required[0],
 		message: what + " requires the scope " + strings.Join(required, " or ") + ", not granted to client " + subj.Client.ID}
+}
+
+// delegatedWriteAge refuses the writes of a subject delegated to a
+// declared OAuth client with write_max_age (routes and tools requiring
+// dns.write only) when its last sign-in at the gate is older:
+// reauth_required, the client sends the user to /oauth/authorize with
+// prompt=login.
+func (s *Server) delegatedWriteAge(subj *identity.Subject, required []string) *delegationError {
+	if !scope.Delegated(subj) || subj.Client.WriteMaxAge <= 0 || len(required) != 1 || required[0] != scope.DNSWrite {
+		return nil
+	}
+	at, _ := subj.Claims["auth_time"].(float64)
+	if at > 0 && s.now().Sub(time.Unix(int64(at), 0)) <= subj.Client.WriteMaxAge {
+		return nil
+	}
+	return &delegationError{reason: "reauth_required", required: scope.DNSWrite,
+		message: "client " + subj.Client.ID + " needs a sign-in at the gate within " + subj.Client.WriteMaxAge.String() + " to write: authorize again with prompt=login"}
 }
 
 // delegatedRoute checks a delegated subject against an /api/v1 route.

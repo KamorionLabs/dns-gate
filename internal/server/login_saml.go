@@ -98,7 +98,7 @@ func (u *uiAuth) samlACS(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "unauthenticated", "invalid SAML response")
 		return
 	}
-	claims, amr, err := u.samlClaims(r.Context(), res)
+	claims, amr, base, err := u.samlClaims(r.Context(), res)
 	if err != nil {
 		u.logError("saml groups", err)
 		writeError(w, http.StatusBadGateway, "groups_unavailable", "group membership unavailable")
@@ -114,6 +114,9 @@ func (u *uiAuth) samlACS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess := session{Issuer: u.issuer.Name, Claims: claims, Expires: exp.Unix(), AMR: amr}
+	if u.storeGroups() {
+		sess.StoreGroups, sess.BaseGroups = true, base
+	}
 	if !res.AuthnInstant.IsZero() {
 		sess.AuthTime = res.AuthnInstant.Unix()
 	} else if st.Reauth {
@@ -125,8 +128,8 @@ func (u *uiAuth) samlACS(w http.ResponseWriter, r *http.Request) {
 // samlClaims maps a validated assertion to session claims: "sub" is the
 // NameID, mapped attributes become claims ("groups" always a list, merged
 // with the identity store groups), an "amr" mapping and the authentication
-// context class go to the AMR list.
-func (u *uiAuth) samlClaims(ctx context.Context, res *samlauth.Result) (map[string]any, []string, error) {
+// context class go to the AMR list. base are the groups of the assertion.
+func (u *uiAuth) samlClaims(ctx context.Context, res *samlauth.Result) (map[string]any, []string, []string, error) {
 	cfg := u.cfg.SAML
 	claims := map[string]any{"sub": res.NameID}
 	for claim, attr := range cfg.SAMLAttributes() {
@@ -139,26 +142,9 @@ func (u *uiAuth) samlClaims(ctx context.Context, res *samlauth.Result) (map[stri
 			claims[claim] = anyList(vals)
 		}
 	}
-	if u.groups != nil && cfg.GroupsFromIdentityStore != nil {
-		user, _ := claims[cfg.GroupsFromIdentityStore.UserClaim].(string)
-		names, err := u.groups.Groups(ctx, user)
-		if err != nil && !errors.Is(err, identitystore.ErrUserNotFound) {
-			return nil, nil, err
-		}
-		if len(names) > 0 {
-			merged := policyClaimStrings(claims["groups"])
-			seen := map[string]bool{}
-			for _, g := range merged {
-				seen[g] = true
-			}
-			for _, g := range names {
-				if !seen[g] {
-					seen[g] = true
-					merged = append(merged, g)
-				}
-			}
-			claims["groups"] = anyList(merged)
-		}
+	base := policyClaimStrings(claims["groups"])
+	if err := u.mergeStoreGroups(ctx, claims, base); err != nil {
+		return nil, nil, nil, err
 	}
 	var amr []string
 	if v, ok := claims["amr"]; ok {
@@ -173,7 +159,43 @@ func (u *uiAuth) samlClaims(ctx context.Context, res *samlauth.Result) (map[stri
 			delete(claims, k)
 		}
 	}
-	return claims, amr, nil
+	return claims, amr, base, nil
+}
+
+// storeGroups reports whether the groups of SAML users come from the
+// identity store.
+func (u *uiAuth) storeGroups() bool {
+	return u.saml != nil && u.groups != nil && u.cfg.SAML.GroupsFromIdentityStore != nil
+}
+
+// mergeStoreGroups sets the "groups" claim to base merged with the groups
+// of the user in the identity store, when configured.
+func (u *uiAuth) mergeStoreGroups(ctx context.Context, claims map[string]any, base []string) error {
+	if !u.storeGroups() {
+		return nil
+	}
+	user, _ := claims[u.cfg.SAML.GroupsFromIdentityStore.UserClaim].(string)
+	names, err := u.groups.Groups(ctx, user)
+	if err != nil && !errors.Is(err, identitystore.ErrUserNotFound) {
+		return err
+	}
+	merged := append([]string(nil), base...)
+	seen := map[string]bool{}
+	for _, g := range merged {
+		seen[g] = true
+	}
+	for _, g := range names {
+		if !seen[g] {
+			seen[g] = true
+			merged = append(merged, g)
+		}
+	}
+	if len(merged) > 0 {
+		claims["groups"] = anyList(merged)
+	} else {
+		delete(claims, "groups")
+	}
+	return nil
 }
 
 func anyList(vals []string) []any {
