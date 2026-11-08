@@ -8,6 +8,8 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/glob"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
+	"github.com/KamorionLabs/dns-gate/internal/scope"
+	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 )
 
 // Engine implements Authorizer on the current snapshot of a Holder. Deny by
@@ -60,28 +62,79 @@ func roles(s *identity.Subject) []string {
 	return s.Roles
 }
 
+// scoped reports whether the scopes and the client zones of a delegated
+// subject allow action on zone (policy.* actions ignore the zone).
+func scoped(s *identity.Subject, action, zone string) bool {
+	if IsMeta(action) {
+		zone = ""
+	}
+	return scope.Permits(s, action, zone)
+}
+
 // Allow checks an action on a zone, ignoring record scopes. policy.*
-// actions ignore the zone.
+// actions ignore the zone. A delegated subject is first capped by its
+// scopes and the zones of its client.
 func (e *Engine) Allow(s *identity.Subject, action, zone string) bool {
-	return e.snap().Decide(roles(s), action, zone, nil).Allowed
+	return scoped(s, action, zone) && e.snap().Decide(roles(s), action, zone, nil).Allowed
 }
 
 // AllowMeta checks a policy.* action.
 func (e *Engine) AllowMeta(s *identity.Subject, action string) bool {
-	return IsMeta(action) && e.snap().Decide(roles(s), action, "", nil).Allowed
+	return IsMeta(action) && scoped(s, action, "") && e.snap().Decide(roles(s), action, "", nil).Allowed
 }
 
 // AllowRRset checks an action on one RRset. Protected RRsets are never
 // writable nor adoptable; they stay readable.
 func (e *Engine) AllowRRset(s *identity.Subject, action, zone string, key dns.Key) bool {
-	return e.snap().Decide(roles(s), action, zone, &key).Allowed
+	return scoped(s, action, zone) && e.snap().Decide(roles(s), action, zone, &key).Allowed
 }
 
 // AllowRRsetFolder is AllowRRset with the folder of the zone when the rule
 // granting the action applies through its folders.
 func (e *Engine) AllowRRsetFolder(s *identity.Subject, action, zone string, key dns.Key) (bool, string) {
+	if !scoped(s, action, zone) {
+		return false, ""
+	}
 	d := e.snap().Decide(roles(s), action, zone, &key)
 	return d.Allowed, d.Folder
+}
+
+// Permissions returns the effective permissions of s: the rules of its
+// roles, with the actions and zones of a delegated subject clipped to its
+// scopes and client zones.
+func (e *Engine) Permissions(s *identity.Subject) []uiapi.Permission {
+	ps := e.snap().Permissions(roles(s))
+	if !scope.Delegated(s) {
+		return ps
+	}
+	out := []uiapi.Permission{}
+	for _, p := range ps {
+		var acts []string
+		for _, a := range p.Actions {
+			if scope.Grants(s.Scopes, "", a) {
+				acts = append(acts, a)
+			}
+		}
+		if len(acts) == 0 {
+			continue
+		}
+		p.Actions = acts
+		if len(s.Client.Zones) > 0 {
+			p.Zones = scope.ClipZones(p.Zones, s.Client.Zones)
+			if len(p.Folders) > 0 {
+				if len(p.FolderZones) == 0 {
+					p.FolderZones = append([]string(nil), s.Client.Zones...)
+				} else {
+					p.FolderZones = scope.ClipZones(p.FolderZones, s.Client.Zones)
+				}
+			}
+			if len(p.Zones) == 0 && (len(p.Folders) == 0 || len(p.FolderZones) == 0) {
+				continue
+			}
+		}
+		out = append(out, p)
+	}
+	return out
 }
 
 // IsProtected reports whether an RRset is in the protected list.

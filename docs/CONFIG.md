@@ -8,7 +8,7 @@ A complete example is in [`examples/config.yaml`](../examples/config.yaml); a sm
 |---|---|
 | This page | [secrets](#secrets), [top level and limits](#top-level), [store](#store), [audit](#audit), [propagation check](#propagation-check) |
 | [Providers, discovery and folders](config/providers.md) | `providers`, zone discovery, EuroDNS folders, zone profiles |
-| [Issuers and keys](config/authentication.md) | `issuers`, gate-issued tokens, token exchange, Entra ID, Azure DevOps, `virtual_keys` |
+| [Issuers and keys](config/authentication.md) | `issuers`, gate-issued tokens, token exchange, delegated clients and scopes, Entra ID, Azure DevOps, `virtual_keys` |
 | [Roles, teams and bindings](config/policy.md) | `roles`, URL forward rules, `groups`, `teams`, `ownership`, `bindings`, `team_from`, `protected`, adoption and Terraform export |
 | [Managed policy and delegations](config/managed-policy.md) | `policy`: the UI-edited layer, `policy.delegations` and the delegation API |
 | [Web UI and MCP](config/ui-mcp.md) | `ui`, SAML login, `mcp`, connecting assistants |

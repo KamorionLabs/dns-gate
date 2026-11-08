@@ -20,7 +20,19 @@
     "subject_name": { "type": "string" },
     "subject_category": { "enum": ["human", "pipeline", "key", "system"] },
     "auth_method": {
-      "enum": ["oidc", "oidc-session", "saml-session", "gate-token", "token-exchange", "api-key", "virtual-key"]
+      "enum": ["oidc", "oidc-session", "saml-session", "gate-token", "token-exchange", "api-key", "virtual-key", "oauth-delegated"]
+    },
+    "client_id": { "type": "string", "description": "Delegated client the subject acted through (issuers[].delegated_clients id). Absent for direct callers." },
+    "actor": {
+      "type": "object",
+      "description": "Application acting for the subject; set with client_id.",
+      "required": ["type", "id"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "enum": ["oauth_client"] },
+        "id": { "type": "string", "description": "Client id from the configuration." },
+        "name": { "type": "string", "description": "Client display name from the configuration." }
+      }
     },
     "source_ip": { "type": "string", "description": "Client address (X-Forwarded-For honoured from listen.trusted_proxies only)." },
     "user_agent": { "type": "string", "maxLength": 256 },

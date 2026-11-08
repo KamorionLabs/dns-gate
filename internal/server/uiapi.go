@@ -17,6 +17,7 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/mcpb"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/scope"
 	"github.com/KamorionLabs/dns-gate/internal/store"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 	"github.com/KamorionLabs/dns-gate/internal/version"
@@ -44,7 +45,7 @@ func (s *Server) uiSubject(r *http.Request) (*identity.Subject, *session, *authn
 	if r.Header.Get("Authorization") == "" && r.Header.Get("X-Api-Key") == "" {
 		return nil, nil, &authn.Error{Status: http.StatusUnauthorized, Reason: "unauthenticated", Message: "login required"}
 	}
-	subj, err := s.cfg.Authn.Authenticate(r)
+	subj, err := s.cfg.Authn.AuthenticateFor(r, scope.SurfaceAPI)
 	if err != nil {
 		var ae *authn.Error
 		if errors.As(err, &ae) {
@@ -70,7 +71,15 @@ func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	subj, sess, ae := s.uiSubject(r)
 	if ae != nil {
+		if ae.Reason == "not_delegable" || ae.Reason == "unknown_client" {
+			s.audit(r, nil, "api", "", "deny", ae.Reason)
+		}
 		writeError(w, ae.Status, ae.Reason, ae.Message)
+		return
+	}
+	if de := delegatedRoute(subj, r.Method, pattern); de != nil {
+		s.audit(r, subj, "api", params["zone"], "deny", de.reason)
+		writeDelegationError(w, de)
 		return
 	}
 	if r.Method != http.MethodGet && sess != nil && !s.ui.checkCSRF(r) {
@@ -144,7 +153,11 @@ func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
 			Roles:       nonNil(me.Roles),
 			Teams:       nonNil(me.Teams),
 			Groups:      nonNil(me.Groups),
-			Permissions: s.cfg.Policy.Current().Permissions(me.Roles),
+			Permissions: s.pol.Permissions(me),
+		}
+		if me.Client != nil {
+			out.Client = &uiapi.MeClient{ID: me.Client.ID, Name: me.Client.Name, Zones: nonNil(me.Client.Zones), Surfaces: nonNil(me.Client.Surfaces)}
+			out.Scopes = nonNil(me.Scopes)
 		}
 		if len(me.Teams) > 0 {
 			out.DefaultTeam = me.Teams[0]
@@ -450,6 +463,12 @@ func toAuditEntry(e audit.Event, client bool) uiapi.AuditEntry {
 	}
 	if client {
 		ae.SourceIP, ae.UserAgent = e.SourceIP, e.UserAgent
+	}
+	if e.ClientID != "" {
+		ae.Client = &uiapi.AuditClient{ID: e.ClientID}
+		if e.Actor != nil {
+			ae.Client.Name = e.Actor.Name
+		}
 	}
 	return ae
 }

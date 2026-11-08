@@ -66,6 +66,13 @@ func (a *Authenticator) ExchangeToken(ctx context.Context, raw string) (*Exchang
 			return nil, &Error{Status: http.StatusForbidden, Reason: "bound_claims", Message: "token claims not allowed for this issuer"}
 		}
 	}
+	client, err := a.delegatedClient(ctx, is, claims)
+	if err != nil {
+		return nil, err
+	}
+	if client != nil {
+		return nil, notDelegable(client, "")
+	}
 	s, err := a.bind(is, claims)
 	if err != nil {
 		return nil, err
@@ -98,5 +105,5 @@ func (a *Authenticator) AuthenticateBearer(r *http.Request, raw string) (*identi
 		audit.SetAuthMethod(r.Context(), audit.AuthAPIKey)
 		return a.authenticateAPIKey(r.Context(), "", raw, a.ClientIP(r))
 	}
-	return a.authenticateToken(r.Context(), raw)
+	return a.authenticateToken(r.Context(), raw, "")
 }

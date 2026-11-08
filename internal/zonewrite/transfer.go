@@ -14,6 +14,7 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/scope"
 	"github.com/KamorionLabs/dns-gate/internal/store"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 )
@@ -85,7 +86,7 @@ func (e *engine) ProposeTransfer(ctx context.Context, s *identity.Subject, zoneI
 	if req.Apply && e.cfg.RequireSecondApprover {
 		return nil, fail(ReasonInvalid, "apply: a second approver is required (ownership.require_second_approver)")
 	}
-	if !e.cfg.Authz.Allow(s, policy.ActionOwnershipApprove, zone) && !e.writesIn(s, zone) {
+	if !e.cfg.Authz.Allow(s, policy.ActionOwnershipApprove, zone) && !e.writesIn(s.WithIntent(identity.IntentTransfer), zone) {
 		return nil, e.deny(ctx, s, actionTransferPropose, zone, fail(ReasonForbidden, "%s, %s or %s is required on %s", policy.ActionRecordWrite, policy.ActionForwardWrite, policy.ActionOwnershipApprove, zone))
 	}
 	if err := checkComment(req.Comment); err != nil {
@@ -478,13 +479,21 @@ func (e *engine) finishApplied(ctx context.Context, t *store.Transfer) bool {
 }
 
 func subjectRecord(s *identity.Subject) *store.SubjectRecord {
-	return &store.SubjectRecord{Kind: string(s.Kind), Issuer: s.Issuer, ID: s.ID, Name: s.Name, Category: s.Category,
+	r := &store.SubjectRecord{Kind: string(s.Kind), Issuer: s.Issuer, ID: s.ID, Name: s.Name, Category: s.Category,
 		Claims: s.Claims, Roles: s.Roles, Teams: s.Teams, TeamRoles: s.TeamRoles}
+	if s.Client != nil {
+		r.ClientID, r.ClientName, r.ClientZones, r.Scopes = s.Client.ID, s.Client.Name, s.Client.Zones, s.Scopes
+	}
+	return r
 }
 
 func recordSubject(r store.SubjectRecord) *identity.Subject {
-	return &identity.Subject{Kind: identity.Kind(r.Kind), Issuer: r.Issuer, ID: r.ID, Name: r.Name, Category: r.Category,
+	s := &identity.Subject{Kind: identity.Kind(r.Kind), Issuer: r.Issuer, ID: r.ID, Name: r.Name, Category: r.Category,
 		Claims: r.Claims, Roles: r.Roles, Teams: r.Teams, TeamRoles: r.TeamRoles}
+	if r.ClientID != "" {
+		s.Client, s.Scopes = &identity.Client{ID: r.ClientID, Name: r.ClientName, Zones: r.ClientZones}, r.Scopes
+	}
+	return s
 }
 
 func errorText(err error) string {
@@ -761,6 +770,9 @@ func (e *engine) renameAllowed(ctx context.Context, s *identity.Subject, t store
 // members of both teams; for a rename, policy.read holders and the members
 // of both teams.
 func (e *engine) canSeeTransfer(s *identity.Subject, t store.Transfer) bool {
+	if !clientZoneAllowed(s, t) {
+		return false
+	}
 	if s.String() == t.Requester || slices.Contains(s.Teams, t.FromTeam) || slices.Contains(s.Teams, t.ToTeam) {
 		return true
 	}
@@ -768,6 +780,16 @@ func (e *engine) canSeeTransfer(s *identity.Subject, t store.Transfer) bool {
 		return e.cfg.Authz.Allow(s, uiapi.ActionPolicyRead, "")
 	}
 	return e.cfg.Authz.Allow(s, policy.ActionUIRead, t.Zone) || e.cfg.Authz.Allow(s, policy.ActionDNSRead, t.Zone)
+}
+
+// clientZoneAllowed keeps a delegated subject on the zones of its client:
+// a transfer of another zone, or a team rename (every zone) when the client
+// has zones, is invisible to it.
+func clientZoneAllowed(s *identity.Subject, t store.Transfer) bool {
+	if !scope.Delegated(s) || len(s.Client.Zones) == 0 {
+		return true
+	}
+	return t.Kind != uiapi.TransferKindRename && t.Zone != "" && scope.ZoneAllowed(s.Client.Zones, t.Zone)
 }
 
 // mayDecide tells whether s has the rights to approve t: for every RRset,
@@ -832,7 +854,20 @@ func unverifiedEmail(v any) bool {
 
 // personIssuer reports whether s is a human of one of the person issuers.
 func (e *engine) personIssuer(s *identity.Subject) bool {
-	return s.Category == identity.CategoryHuman && slices.Contains(e.cfg.PersonIssuers, s.Issuer)
+	return human(s) && slices.Contains(e.cfg.PersonIssuers, s.Issuer)
+}
+
+func approverKind(s *identity.Subject) string {
+	if scope.Delegated(s) {
+		return "the delegated client " + s.Client.ID
+	}
+	return "a " + s.Category + " identity"
+}
+
+// human reports whether s is a person acting directly: a delegated client
+// acting for a person counts as a machine for the rules on approvers.
+func human(s *identity.Subject) bool {
+	return s.Category == identity.CategoryHuman && !scope.Delegated(s)
 }
 
 // checkRequester applies ownership.person_issuers to the requester of a
@@ -850,8 +885,8 @@ func (e *engine) checkRequester(s *identity.Subject) error {
 // they are set, both identified by person keys unless machine approvers.
 func (e *engine) checkApprover(s *identity.Subject, t store.Transfer) error {
 	if !e.cfg.RequireSecondApprover {
-		if !e.cfg.MachineApprovers && s.Category != identity.CategoryHuman {
-			return fail(ReasonForbidden, "transfers are approved by a person, not by a %s identity (ownership.machine_approvers)", s.Category)
+		if !e.cfg.MachineApprovers && !human(s) {
+			return fail(ReasonForbidden, "transfers are approved by a person, not by %s (ownership.machine_approvers)", approverKind(s))
 		}
 		return nil
 	}
@@ -864,8 +899,8 @@ func (e *engine) checkApprover(s *identity.Subject, t store.Transfer) error {
 	keys := e.personKeys(s)
 	if !e.cfg.MachineApprovers {
 		switch {
-		case s.Category != identity.CategoryHuman:
-			return fail(ReasonForbidden, "transfers are approved by a person, not by a %s identity (ownership.machine_approvers)", s.Category)
+		case !human(s):
+			return fail(ReasonForbidden, "transfers are approved by a person, not by %s (ownership.machine_approvers)", approverKind(s))
 		case len(t.RequesterPersons) == 0:
 			return fail(ReasonForbidden, "the requester cannot be identified as a person (no ownership.person_claims, not a person issuer): this transfer cannot get a second approver")
 		case len(keys) == 0:
@@ -888,7 +923,7 @@ func (e *engine) teamWrites(g *grants, s *identity.Subject, team, zone string, k
 		return false
 	}
 	c := *s
-	c.Roles = roles
+	c.Roles, c.Intent = roles, identity.IntentTransfer
 	return e.allowRRset(g, &c, policy.WriteAction(k), zone, k)
 }
 

@@ -140,3 +140,47 @@ RFC 8693, `POST /api/v1/token-exchange`, configuration in
   a removed binding takes effect at once;
 - every exchange, and every refused subject token, is audited
   (`gate.token.exchange`).
+
+### 9.7 Delegated clients and scopes
+
+A token of a trusted issuer says who the user is, and its `azp` (Entra v2) or
+`appid` (v1) says which application obtained it. Without more, an assistant such as
+a Microsoft 365 Copilot agent holds every right of its user. A **delegated client**
+(`issuers[].delegated_clients`, [configuration](../config/authentication.md#delegated-clients))
+names an application and caps it:
+
+- **Scopes** are allowlists of RBAC actions (`dns.read`, `dns.plan`, `dns.write`,
+  `dns.adopt`, `dns.transfer`, `policy.read`). Effective rights = RBAC of the user ∩
+  actions of the scopes ∩ zones of the client. The definitions and the intersection
+  live in one package (`internal/scope`), used by the policy engine for every
+  decision (`Allow`, `AllowRRset`, `AllowMeta`, `/api/v1/me` permissions), so no
+  handler can forget it. Policy writes, API key management, zone administration and
+  zone profiles are granted by no scope.
+- **Intents.** `dns.plan` grants the write actions only on a copy of the subject
+  marked for a plan (plan and adoption preview handlers); `dns.transfer` grants them
+  only as proof of ownership inside the transfer checks. The subject of the apply is
+  never marked.
+- **Surfaces and endpoints.** `Authenticate` refuses delegated tokens
+  (`not_delegable`); only `/api/v1` and `/mcp` call `AuthenticateFor` with their
+  surface. The `/api/v1` router and the MCP tool list carry an explicit table of what
+  each scope opens; a route or tool missing from it is refused to every delegated
+  client (deny by default), before the handler runs, with `scope_insufficient` and
+  `required_scope` or `not_delegable`. The MCP middleware filters `tools/list`
+  (cache scope `private`) and refuses hidden tools.
+- **Plans** are keyed by the subject and its client: a plan is applied only through
+  the client that made it, and a plan made without client never through one.
+- **Identity.** `identity.Subject` keeps the user (`String()` unchanged) and gains
+  `Client` and `Scopes`; a transfer approver is recorded with them and rebound from
+  the current client configuration on retries. A delegated subject is not a person
+  for the approver rules (it keeps the step-up of humans), and sees only the
+  transfers of its client zones.
+- **Matching.** `client_ids` (aliases `azp`, `appid`) are lowercased at load and
+  compared with the `azp` claim, else `appid`, so one entry covers v1 and v2 tokens.
+- **Audit.** Events carry `client_id` and `actor {type: oauth_client, id, name}` from
+  the client of their subject (configuration only), so background retries keep it;
+  the client recorded in the request context only fills events without subject
+  (refusals before binding). `auth_method` is `oauth-delegated`.
+- Tokens of undeclared clients keep the full rights of the user unless
+  `require_known_client` refuses them. Gate tokens are not delegated yet: declared
+  OAuth clients of the gate authorization server will carry `client_id` and `scope`
+  in gate tokens and reuse the same `Subject.Client`, `Subject.Scopes` and checks.

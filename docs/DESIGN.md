@@ -213,7 +213,7 @@ backends and are not used:
 |---|---|
 | [Requests and writes](design/write-path.md) | 5 request pipeline, 7 write flow, 8 store, 10 extensions to the EuroDNS contract, 11 rate limit and high availability |
 | [Ownership model](design/ownership.md) | 6 RRsets, URL forwards, rules, adoption, teams, tombstones, transfers, rebase, ephemeral RRsets, reconcile |
-| [Authentication](design/authentication.md) | 9 OIDC, Entra ID, virtual keys, SAML and gate tokens, API keys, token exchange |
+| [Authentication](design/authentication.md) | 9 OIDC, Entra ID, virtual keys, SAML and gate tokens, API keys, token exchange, delegated clients and scopes |
 | [Policy, audit and web UI](design/policy.md) | 12 policy, 13 audit, 14 web UI, 15 editable policy, delegations, folders |
 | [Onboarding, MCP and propagation](design/onboarding-mcp.md) | 16 onboarding, 17 MCP server and the Claude Desktop extension, 19 propagation check |
 

@@ -56,6 +56,9 @@ func (s *Server) handleZoneOps(w http.ResponseWriter, r *http.Request, subj *ide
 			writeError(w, http.StatusNotImplemented, "not_implemented", "adoption is not available")
 			return
 		}
+		if op == "adopt/preview" {
+			subj = planIntent(subj)
+		}
 		if !s.cfg.Authz.Allow(subj, policy.ActionRecordAdopt, zone) {
 			s.audit(r, subj, "adopt", zone, "deny", "forbidden")
 			writeError(w, http.StatusForbidden, "forbidden", "dns.record.adopt not granted on "+zone)

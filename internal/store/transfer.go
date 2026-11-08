@@ -93,15 +93,19 @@ type Transfer struct {
 
 // SubjectRecord is an authenticated subject as stored with a transfer.
 type SubjectRecord struct {
-	Kind      string              `json:"kind,omitempty"`
-	Issuer    string              `json:"issuer"`
-	ID        string              `json:"id"`
-	Name      string              `json:"name,omitempty"`
-	Category  string              `json:"category,omitempty"`
-	Claims    map[string]any      `json:"claims,omitempty"`
-	Roles     []string            `json:"roles,omitempty"`
-	Teams     []string            `json:"teams,omitempty"`
-	TeamRoles map[string][]string `json:"team_roles,omitempty"`
+	Kind        string              `json:"kind,omitempty"`
+	Issuer      string              `json:"issuer"`
+	ID          string              `json:"id"`
+	Name        string              `json:"name,omitempty"`
+	Category    string              `json:"category,omitempty"`
+	Claims      map[string]any      `json:"claims,omitempty"`
+	Roles       []string            `json:"roles,omitempty"`
+	Teams       []string            `json:"teams,omitempty"`
+	TeamRoles   map[string][]string `json:"team_roles,omitempty"`
+	ClientID    string              `json:"client_id,omitempty"`
+	ClientName  string              `json:"client_name,omitempty"`
+	ClientZones []string            `json:"client_zones,omitempty"`
+	Scopes      []string            `json:"scopes,omitempty"`
 }
 
 // TransferQuery filters ListTransfers. Limit defaults to 50, capped at 500.

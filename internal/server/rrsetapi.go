@@ -298,7 +298,7 @@ func (s *Server) handlePlan(w http.ResponseWriter, r *http.Request, subj *identi
 		return
 	}
 	team := selectedTeam(r, req.Team)
-	plan, err := s.cfg.Ops.PlanRRsets(r.Context(), subj, zone, req.Changes)
+	plan, err := s.cfg.Ops.PlanRRsets(r.Context(), planIntent(subj), zone, req.Changes)
 	if err != nil {
 		s.apiError(w, r, "api.plan", zone, err)
 		return
@@ -420,7 +420,7 @@ func (s *Server) savePlan(ctx context.Context, subj *identity.Subject, zone, tea
 	_, _ = rand.Read(b[:])
 	now := s.now().UTC()
 	p := store.Plan{
-		ID: "plan-" + hex.EncodeToString(b[:]), Subject: subj.String(), Zone: zone, Team: team,
+		ID: "plan-" + hex.EncodeToString(b[:]), Subject: planOwner(subj), Zone: zone, Team: team,
 		Changes: changes, ZoneVersion: version, CreatedAt: now, ExpiresAt: now.Add(s.planTTL()),
 	}
 	if err := s.cfg.Plans.PutPlan(ctx, p); err != nil {
@@ -431,7 +431,7 @@ func (s *Server) savePlan(ctx context.Context, subj *identity.Subject, zone, tea
 
 // takePlan consumes a plan of subj; errors are errPlan* or a storage error.
 func (s *Server) takePlan(ctx context.Context, id string, subj *identity.Subject) (*store.Plan, error) {
-	p, err := s.cfg.Plans.TakePlan(ctx, id, subj.String(), s.now())
+	p, err := s.cfg.Plans.TakePlan(ctx, id, planOwner(subj), s.now())
 	switch {
 	case err == nil:
 		return p, nil
@@ -493,6 +493,7 @@ func (s *Server) apiAudit(r *http.Request, subj *identity.Subject, action, zone,
 		Decision: decision, Reason: reason, Extra: map[string]any{"via": "api"},
 		Subject: subj.String(), SubjectName: subj.Name, SubjectCategory: subj.Category, Teams: subj.Teams,
 	}
+	e.SetClient(subj.ClientID(), subj.ClientName())
 	for k, v := range extra {
 		e.Extra[k] = v
 	}

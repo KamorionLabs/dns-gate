@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -47,10 +48,11 @@ func unauthorized(msg string) *Error {
 var credentialHeaders = []string{"Authorization", "X-App-Id", "X-Api-Key", "X-Api-User", "Cookie"}
 
 type issuer struct {
-	cfg    config.Issuer
-	keys   *keySet
-	static *jose.JSONWebKey
-	algs   []jose.SignatureAlgorithm
+	cfg     config.Issuer
+	clients map[string]*config.DelegatedClient
+	keys    *keySet
+	static  *jose.JSONWebKey
+	algs    []jose.SignatureAlgorithm
 }
 
 // Authenticator verifies credentials and builds subjects. Groups,
@@ -103,7 +105,12 @@ func New(c *config.Config, client *http.Client, h *policy.Holder) (*Authenticato
 		now:    time.Now,
 	}
 	for _, ic := range c.AllIssuers() {
-		is := &issuer{cfg: ic}
+		is := &issuer{cfg: ic, clients: map[string]*config.DelegatedClient{}}
+		for i := range is.cfg.DelegatedClients {
+			for _, id := range is.cfg.DelegatedClients[i].MatchIDs() {
+				is.clients[id] = &is.cfg.DelegatedClients[i]
+			}
+		}
 		if ic.SAML {
 			a.byName[ic.Name] = is
 			continue
@@ -146,8 +153,22 @@ func (a *Authenticator) SetClock(now func() time.Time) {
 // Authenticate reads the credentials of r. Bearer tokens and virtual keys
 // are exclusive. A gate API key (dgk_...) is accepted as a bearer token, as
 // the password of basic authentication (user name: the key id) and in
-// X-Api-Key (X-App-Id or X-Api-User, when set: the key id).
+// X-Api-Key (X-App-Id or X-Api-User, when set: the key id). Tokens of
+// delegated clients are refused (not_delegable): the surfaces open to them
+// call AuthenticateFor.
 func (a *Authenticator) Authenticate(r *http.Request) (*identity.Subject, error) {
+	return a.authenticate(r, "")
+}
+
+// AuthenticateFor is Authenticate for a surface open to delegated clients
+// (scope.SurfaceAPI, scope.SurfaceMCP): a token of a delegated client is
+// accepted when the client may use the surface, and its subject carries
+// the client and its scopes.
+func (a *Authenticator) AuthenticateFor(r *http.Request, surface string) (*identity.Subject, error) {
+	return a.authenticate(r, surface)
+}
+
+func (a *Authenticator) authenticate(r *http.Request, surface string) (*identity.Subject, error) {
 	authz := r.Header.Get("Authorization")
 	appID, apiKey := r.Header.Get("X-App-Id"), r.Header.Get("X-Api-Key")
 	switch {
@@ -171,7 +192,7 @@ func (a *Authenticator) Authenticate(r *http.Request) (*identity.Subject, error)
 			audit.SetAuthMethod(r.Context(), audit.AuthAPIKey)
 			return a.authenticateAPIKey(r.Context(), "", tok, a.ClientIP(r))
 		}
-		return a.authenticateToken(r.Context(), tok)
+		return a.authenticateToken(r.Context(), tok, surface)
 	case apikey.Looks(apiKey):
 		audit.SetAuthMethod(r.Context(), audit.AuthAPIKey)
 		user := appID
@@ -212,7 +233,7 @@ func (a *Authenticator) Middleware(next http.Handler, onError func(http.Response
 	})
 }
 
-func (a *Authenticator) authenticateToken(ctx context.Context, raw string) (*identity.Subject, error) {
+func (a *Authenticator) authenticateToken(ctx context.Context, raw, surface string) (*identity.Subject, error) {
 	audit.SetAuthMethod(ctx, audit.AuthOIDC)
 	tok, err := jwt.ParseSigned(raw, allAlgs)
 	if err != nil {
@@ -244,7 +265,100 @@ func (a *Authenticator) authenticateToken(ctx context.Context, raw string) (*ide
 			return nil, &Error{Status: http.StatusForbidden, Reason: "bound_claims", Message: "token claims not allowed for this issuer"}
 		}
 	}
-	return a.bind(is, claims)
+	client, err := a.delegatedClient(ctx, is, claims)
+	if err != nil {
+		return nil, err
+	}
+	if client != nil && (surface == "" || !slices.Contains(client.Surfaces, surface)) {
+		return nil, notDelegable(client, surface)
+	}
+	s, err := a.bind(is, claims)
+	if err != nil {
+		return nil, err
+	}
+	delegate(s, client)
+	return s, nil
+}
+
+// notDelegable is the refusal of a delegated client on a surface it may
+// not use.
+func notDelegable(c *config.DelegatedClient, surface string) *Error {
+	where := "this endpoint"
+	if surface != "" {
+		where = "the " + surface + " surface"
+	}
+	return &Error{Status: http.StatusForbidden, Reason: "not_delegable", Message: "client " + c.ID + " may not use " + where}
+}
+
+// tokenClient returns the claim naming the client a token was issued to:
+// azp (v2), else appid (v1).
+func tokenClient(claims map[string]any) (claim, value string) {
+	if v, _ := claims["azp"].(string); v != "" {
+		return "azp", v
+	}
+	if v, _ := claims["appid"].(string); v != "" {
+		return "appid", v
+	}
+	return "", ""
+}
+
+// delegatedClient returns the delegated client of the issuer a token was
+// issued to, nil when none matches. With require_known_client a token of
+// another client is refused. The audit of the request records the client.
+func (a *Authenticator) delegatedClient(ctx context.Context, is *issuer, claims map[string]any) (*config.DelegatedClient, error) {
+	if len(is.cfg.DelegatedClients) == 0 {
+		return nil, nil
+	}
+	claim, value := tokenClient(claims)
+	if c := is.clients[strings.ToLower(value)]; c != nil && claim != "" {
+		audit.SetAuthMethod(ctx, audit.AuthOAuthDelegated)
+		audit.SetClient(ctx, c.ID, clientName(c))
+		return c, nil
+	}
+	if is.cfg.RequireKnownClient {
+		if claim == "" {
+			return nil, &Error{Status: http.StatusForbidden, Reason: "unknown_client", Message: "issuer " + is.cfg.Name + " requires a known client: the token has no azp or appid claim"}
+		}
+		shown := audit.Truncate(value, 128)
+		a.warnOnce("client:"+is.cfg.Name+":"+shown, "token of an undeclared client refused (require_known_client)", "issuer", is.cfg.Name, claim, shown)
+		return nil, &Error{Status: http.StatusForbidden, Reason: "unknown_client", Message: "issuer " + is.cfg.Name + " requires a known client: " + claim + " " + shown + " is not a delegated client"}
+	}
+	if claim != "" {
+		shown := audit.Truncate(value, 128)
+		a.warnOnce("client:"+is.cfg.Name+":"+shown, "token of a client that is not a delegated client: it holds the full rights of its user (declare it in delegated_clients, or set require_known_client)", "issuer", is.cfg.Name, claim, shown)
+	}
+	return nil, nil
+}
+
+// delegate caps a subject to a delegated client.
+func delegate(s *identity.Subject, c *config.DelegatedClient) {
+	if c == nil {
+		return
+	}
+	s.Client = &identity.Client{ID: c.ID, Name: clientName(c), Zones: append([]string(nil), c.Zones...), Surfaces: append([]string(nil), c.Surfaces...)}
+	s.Scopes = append([]string(nil), c.Scopes...)
+	slices.Sort(s.Scopes)
+}
+
+func clientName(c *config.DelegatedClient) string {
+	if c.Name == "" {
+		return c.ID
+	}
+	return c.Name
+}
+
+// clientByID returns the delegated client id of the named issuer.
+func (a *Authenticator) clientByID(issuerName, id string) *config.DelegatedClient {
+	is := a.byName[issuerName]
+	if is == nil {
+		return nil
+	}
+	for i := range is.cfg.DelegatedClients {
+		if is.cfg.DelegatedClients[i].ID == id {
+			return &is.cfg.DelegatedClients[i]
+		}
+	}
+	return nil
 }
 
 // VerifyToken verifies a token of the named issuer for the given audiences
@@ -339,7 +453,16 @@ func (a *Authenticator) Rebind(s *identity.Subject) (*identity.Subject, error) {
 		return &identity.Subject{Kind: identity.KindAPIKey, Issuer: APIKeyIssuer, ID: k.ID, Claims: map[string]any{}, Roles: []string{k.Role},
 			Teams: []string{k.Team}, TeamRoles: map[string][]string{k.Team: {k.Role}}, Name: s.Name, Category: identity.CategoryKey}, nil
 	}
-	return a.SubjectFromClaims(s.Issuer, s.Claims, s.Category)
+	b, err := a.SubjectFromClaims(s.Issuer, s.Claims, s.Category)
+	if err != nil || s.Client == nil {
+		return b, err
+	}
+	c := a.clientByID(s.Issuer, s.Client.ID)
+	if c == nil {
+		return nil, unauthorized("delegated client " + s.Client.ID + " removed")
+	}
+	delegate(b, c)
+	return b, nil
 }
 
 // SubjectFromClaims binds verified claims of the named issuer. category

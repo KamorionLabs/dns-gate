@@ -345,11 +345,13 @@ func uiChanges(changes []dns.Change) []uiapi.Change {
 }
 
 func (e *engine) emit(ctx context.Context, s *identity.Subject, action, zone, decision, reason string, changes []uiapi.Change, snapshot string, extra map[string]any) {
-	e.cfg.Audit.Log(ctx, audit.Event{
+	ev := audit.Event{
 		Time: e.now().UTC(), RequestID: requestID(ctx), Subject: s.String(), SubjectName: s.Name,
 		SubjectCategory: s.Category, Teams: s.Teams, Action: action, Zone: zone, Provider: e.providerID(zone),
 		Decision: decision, Reason: reason, Changes: changes, SnapshotID: uiapi.SnapshotID(snapshot), Extra: extra,
-	})
+	}
+	ev.SetClient(s.ClientID(), s.ClientName())
+	e.cfg.Audit.Log(ctx, ev)
 }
 
 // deny audits a refusal and returns err unchanged.

@@ -27,6 +27,8 @@ Trusted OIDC token issuers, for bearer tokens (`Authorization: Bearer <JWT>`) an
 | `token_ttl` | `1h` | Lifetime of gate-issued tokens (`self: true` only, 1m to 24h). |
 | `token_exchange` | `false` | Tokens of this issuer can be exchanged for gate tokens, see [Token exchange](#token-exchange). Needs a gate issuer; refused on it. |
 | `max_exchanged_ttl` | `15m` | Longest lifetime of a gate token exchanged for a token of this issuer (`token_exchange` only, 1m to 24h). |
+| `delegated_clients` | `[]` | Applications acting for the users of this issuer with capped rights, see [Delegated clients](#delegated-clients). Not on the gate issuer. |
+| `require_known_client` | `false` | Refuse the tokens whose `azp` / `appid` matches no delegated client (`403 unknown_client`). Needs `delegated_clients`. |
 
 Tokens must carry `exp` and the subject claim(s). Keys are cached and refetched on an unknown `kid` (at most every 30 s).
 
@@ -89,6 +91,60 @@ curl -fsS https://dns.example.com/api/v1/token-exchange \
 - An exchanged token is refused once its issuer no longer has `token_exchange` (after a configuration change).
 - Gate tokens and API keys are never exchanged: no chaining. Errors follow RFC 6749 (`400 invalid_grant` with a description); without a gate issuer or an opted-in issuer the endpoint answers `404 token_exchange_disabled`.
 - Every exchange is audited (`gate.token.exchange`, with the new `jti` and the exchanged one); refusals too.
+
+### Delegated clients
+
+A token of a trusted issuer carries the rights of its user, whatever application obtained it. A **delegated client** caps them: when the client a token was issued to (`azp` claim, Entra v2; `appid` when the token has no `azp`, Entra v1) is one of the `client_ids` of a client declared on the issuer (compared without case), the request holds the RBAC of the user **intersected** with the actions of the client scopes and with its zones, on the surfaces it may use.
+
+```yaml
+issuers:
+  - name: entra
+    issuer: https://login.microsoftonline.com/<tenant-id>/v2.0
+    audiences: ["<gate-application-id>"]
+    subject_template: "{{tid}}/{{oid}}"
+    # require_known_client: true        # refuse every other client of the issuer
+    delegated_clients:
+      - id: m365-copilot                 # shown in the audit (client_id)
+        name: Microsoft 365 Copilot
+        client_ids: [ab3be6b7-f5df-413d-ac2d-abf1e3fd9c0b]
+        scopes: [dns.read]
+        surfaces: [mcp]
+      - id: skopea
+        client_ids: [11111111-2222-3333-4444-555555555555]
+        scopes: [dns.read, dns.plan]
+        zones: ["*.example.com"]
+```
+
+| Field | Default | Description |
+|---|---|---|
+| `id` | (required) | Lowercase identifier, recorded as `client_id` in the audit. |
+| `name` | `id` | Display name (audit `actor.name`). |
+| `client_ids` | (required) | Client ids (string or list), exact but compared without case, matched against the `azp` claim of the token or, without `azp`, its `appid` claim: one entry covers v1 and v2 tokens. A value matches one client only. `azp` and `appid` are accepted as aliases (same meaning). |
+| `scopes` | (required) | Ceiling of the client, below. An unknown scope fails the load. |
+| `zones` | every zone | Zone globs the client may act on (`*` wildcards), on top of the zones of the user. |
+| `surfaces` | `[api]` | `api` (`/api/v1`) and/or `mcp` (`/mcp`). |
+
+| Scope | RBAC actions | Opens |
+|---|---|---|
+| `dns.read` | `ui.read`, `dns.read`, `domain.read` | Zones, RRsets, forwards, propagation, Terraform export, teams, transfers (list), audit journal; MCP read tools. |
+| `dns.plan` | write actions **in a plan only** | `POST …/plan`, `POST …/adopt/preview`; MCP `plan_rrset_change`, `adopt_preview`. |
+| `dns.write` | `dns.record.write`, `dns.forward.write` | RRset and forward `PUT` / `DELETE`, plan and `POST …/apply`; MCP `plan_rrset_change`, `apply_rrset_change`. |
+| `dns.adopt` | `dns.record.adopt` | `POST …/adopt` (and its preview); MCP `adopt_preview`, `adopt_apply`. |
+| `dns.transfer` | `dns.ownership.approve`, and the write rights of the user as proof of ownership of a transfer | Ownership transfers: propose, approve, reject (REST and MCP). |
+| `policy.read` | `policy.read` | `POST /api/v1/policy/explain`, `GET /api/v1/policy/who-can`; MCP `explain`, `who_can`. |
+
+- **Never delegable**, whatever the scopes: policy writes and the policy document, delegated policy, API keys (`gate.apikey.manage`), zone administration (`dns.zone.admin`) and zone profiles, `/api/v1/tokens`, the token exchange, `/acme/*`, the EuroDNS-compatible API (whole-zone `PUT` included) and its adopt extension. Every endpoint not listed in the table above answers `403 not_delegable` to a delegated client (deny by default), as does a surface outside `surfaces`.
+- A request outside the scopes answers `403 scope_insufficient` with `required_scope` (one scope that would open it); RBAC then applies as usual. On MCP, `tools/list` only returns the tools the scopes open (a `dns.read` client sees the read tools only) and the other tools are refused.
+- `GET /api/v1/me` returns `client`, `scopes` and the permissions after the intersection.
+- A plan made through a client is applied only by the same user **through the same client**; a plan made without client is never applied through one, and the other way round.
+- Tokens of clients that are not declared keep today's behaviour, unless `require_known_client: true`: they are then refused with `403 unknown_client` (tokens without `azp` nor `appid` too), and the refusal is audited.
+- Delegated requests are audited with `auth_method: oauth-delegated`, `client_id` and `actor: {type: oauth_client, id, name}` (see [AUDIT.md](../AUDIT.md#fields)); the subject stays the user. The id and name come from this configuration, never from token claims.
+- A delegated subject is never a person for the rules on approvers: it cannot approve a transfer unless `ownership.machine_approvers`, nor be the second person of `require_second_approver`. The step-up of humans still applies to it: actions behind the step-up (adoption) answer `reauth_required` unless its token carries a recent `auth_time`.
+- `GET /api/v1/me` (roles, groups) and `GET /api/v1/teams/{team}` (roles and permissions of the team) still show the roles of the user and of its teams, for information: what the client may do is given by `client`, `scopes` and the clipped `permissions` of `/me`.
+- When an issuer has delegated clients, the gate logs a warning once per undeclared client id it sees: such a token holds the full rights of its user.
+- UI logins are not affected: the UI is the gate itself.
+
+Setting up Microsoft 365 Copilot: [Microsoft 365 Copilot](../integrations/m365-copilot.md).
 
 ### Entra ID
 

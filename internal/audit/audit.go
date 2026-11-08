@@ -28,7 +28,32 @@ const (
 	AuthTokenExchange = "token-exchange" // token exchange request, or a gate token it issued
 	AuthAPIKey        = "api-key"        // gate API key (dgk_...)
 	AuthVirtualKey    = "virtual-key"    // X-App-Id / X-Api-Key virtual key
+	// AuthOAuthDelegated is a bearer JWT of a configured issuer issued to a
+	// delegated client (issuers[].delegated_clients).
+	AuthOAuthDelegated = "oauth-delegated"
 )
+
+// SetClient records on the event the delegated client its subject acted
+// through; an empty id leaves the event unchanged.
+func (e *Event) SetClient(id, name string) {
+	if id == "" {
+		return
+	}
+	if name == "" {
+		name = id
+	}
+	e.ClientID, e.Actor = id, &Actor{Type: ActorOAuthClient, ID: id, Name: name}
+}
+
+// ActorOAuthClient is the actor type of a delegated client.
+const ActorOAuthClient = "oauth_client"
+
+// Actor is the application acting for the subject of an event.
+type Actor struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
+}
 
 // MaxUserAgent is the length (bytes) user agents are truncated to.
 const MaxUserAgent = 256
@@ -43,6 +68,8 @@ type Event struct {
 	SubjectName     string           `json:"subject_name,omitempty"`
 	SubjectCategory string           `json:"subject_category,omitempty"` // human | pipeline | key
 	AuthMethod      string           `json:"auth_method,omitempty"`
+	ClientID        string           `json:"client_id,omitempty"`
+	Actor           *Actor           `json:"actor,omitempty"`
 	SourceIP        string           `json:"source_ip,omitempty"`
 	UserAgent       string           `json:"user_agent,omitempty"`
 	Teams           []string         `json:"teams,omitempty"`
@@ -90,6 +117,9 @@ func Prepare(ctx context.Context, e *Event) {
 		if e.AuthMethod == "" {
 			e.AuthMethod = ri.method()
 		}
+		if e.ClientID == "" && e.Subject == "" {
+			ri.clientInto(e)
+		}
 	}
 	e.UserAgent = Truncate(e.UserAgent, MaxUserAgent)
 }
@@ -101,6 +131,9 @@ func Prepare(ctx context.Context, e *Event) {
 func Capture(ctx context.Context, e *Event) {
 	if ri := requestFrom(ctx); ri != nil {
 		e.SourceIP, e.UserAgent, e.AuthMethod = ri.sourceIP, ri.userAgent, ri.method()
+		if e.ClientID == "" && e.Subject == "" {
+			ri.clientInto(e)
+		}
 	}
 	e.captured = true
 }
@@ -159,6 +192,17 @@ type requestInfo struct {
 	sourceIP, userAgent string
 	mu                  sync.Mutex
 	auth                string
+	clientID            string
+	clientName          string
+}
+
+func (r *requestInfo) clientInto(e *Event) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.clientID != "" {
+		e.ClientID = r.clientID
+		e.Actor = &Actor{Type: ActorOAuthClient, ID: r.clientID, Name: r.clientName}
+	}
 }
 
 func (r *requestInfo) method() string {
@@ -182,6 +226,18 @@ func SetAuthMethod(ctx context.Context, method string) {
 	if ri := requestFrom(ctx); ri != nil {
 		ri.mu.Lock()
 		ri.auth = method
+		ri.mu.Unlock()
+	}
+}
+
+// SetClient records the delegated client the request of ctx authenticates
+// through: its events carry client_id and the actor. The id and name come
+// from the configuration, never from token claims. No-op without
+// WithRequest.
+func SetClient(ctx context.Context, id, name string) {
+	if ri := requestFrom(ctx); ri != nil {
+		ri.mu.Lock()
+		ri.clientID, ri.clientName = id, name
 		ri.mu.Unlock()
 	}
 }

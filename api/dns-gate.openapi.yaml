@@ -1884,7 +1884,8 @@ components:
             401 unauthenticated;
             403 forbidden, not_owner, too_many_changes, reauth_required, csrf,
             no_binding, bound_claims, source_ip, policy_not_editable,
-            self_approval, delegated_object, session_required, not_team_member;
+            self_approval, delegated_object, session_required, not_team_member,
+            not_delegable, scope_insufficient (with required_scope), unknown_client;
             404 not_found, plan_not_found, zone_not_eurodns;
             405 method_not_allowed;
             409 foreign_rrset, tainted, adopt_conflict, https_unavailable, not_owner (delegated
@@ -1919,6 +1920,9 @@ components:
             - delegated_object
             - session_required
             - not_team_member
+            - not_delegable
+            - scope_insufficient
+            - unknown_client
             - not_found
             - plan_not_found
             - zone_not_eurodns
@@ -1958,6 +1962,10 @@ components:
             - protected
             - zone_profiles_disabled
         message: { type: string }
+        required_scope:
+          type: string
+          description: With scope_insufficient, a scope of the delegated client that would open the request.
+          enum: [dns.read, dns.plan, dns.write, dns.adopt, dns.transfer, policy.read]
         details: {}
         transfer:
           $ref: "#/components/schemas/Transfer"
@@ -2017,6 +2025,18 @@ components:
         groups: { type: array, items: { type: string } }
         permissions: { type: array, items: { $ref: "#/components/schemas/Permission" } }
         default_team: { type: string, description: "Team the caller writes for unless it selects another of its teams." }
+        client:
+          type: object
+          description: Delegated client the caller acts through (issuers[].delegated_clients); permissions are then clipped to its scopes and zones.
+          properties:
+            id: { type: string }
+            name: { type: string }
+            zones: { type: array, items: { type: string } }
+            surfaces: { type: array, items: { type: string, enum: [api, mcp] } }
+        scopes:
+          type: array
+          description: Scopes of the delegated client.
+          items: { type: string, enum: [dns.read, dns.plan, dns.write, dns.adopt, dns.transfer, policy.read] }
 
     Connect:
       type: object
@@ -2374,7 +2394,13 @@ components:
         actor: { $ref: "#/components/schemas/Actor" }
         auth_method:
           type: string
-          enum: [oidc, oidc-session, saml-session, gate-token, token-exchange, api-key, virtual-key]
+          enum: [oidc, oidc-session, saml-session, gate-token, token-exchange, api-key, virtual-key, oauth-delegated]
+        client:
+          type: object
+          description: Delegated client the actor acted through (issuers[].delegated_clients).
+          properties:
+            id: { type: string }
+            name: { type: string }
         source_ip: { type: string, description: "Client address. Served to policy.read holders only." }
         user_agent: { type: string, maxLength: 256, description: "Client user agent. Served to policy.read holders only." }
         teams: { type: array, items: { type: string } }

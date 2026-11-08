@@ -77,6 +77,17 @@ filled in for your gate.
 
     The token is static there: renew it when it expires.
 
+=== "Microsoft 365 Copilot"
+
+    A declarative agent reaches `/mcp` through Entra SSO, as a
+    [delegated client](../config/authentication.md#delegated-clients) capped to the
+    scopes you give it (read-only by default): see
+    [Microsoft 365 Copilot](m365-copilot.md).
+
+Third-party assistants can be declared as delegated clients of their issuer: their
+tokens then hold the rights of the user capped by scopes, and `tools/list` only
+shows the tools those scopes open.
+
 Every tool call is audited as `mcp.<tool>` with the client name. Rate limit:
 `mcp.requests_per_minute` (120) per subject. Reference:
 [MCP configuration](../config/ui-mcp.md#mcp).

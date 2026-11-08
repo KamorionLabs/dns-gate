@@ -1,0 +1,40 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/copilot/plugin/v2.4/schema.json",
+  "schema_version": "v2.4",
+  "name_for_human": "DNS gate",
+  "description_for_human": "Read DNS zones, records, owners, propagation and audit history through dns-gate.",
+  "namespace": "dnsgate",
+  "functions": [
+    { "name": "list_zones" },
+    { "name": "list_rrsets" },
+    { "name": "get_rrset" },
+    { "name": "search_audit" },
+    { "name": "list_teams" },
+    { "name": "get_team" },
+    { "name": "check_propagation" }
+  ],
+  "runtimes": [
+    {
+      "type": "RemoteMCPServer",
+      "spec": {
+        "url": "https://dns.example.com/mcp",
+        "mcp_tool_description": {
+          "file": "mcp-tools.json"
+        }
+      },
+      "auth": {
+        "type": "OAuthPluginVault",
+        "reference_id": "<Microsoft Entra SSO registration ID>"
+      },
+      "run_for_functions": [
+        "list_zones",
+        "list_rrsets",
+        "get_rrset",
+        "search_audit",
+        "list_teams",
+        "get_team",
+        "check_propagation"
+      ]
+    }
+  ]
+}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/policy"
 	"github.com/KamorionLabs/dns-gate/internal/provider"
 	"github.com/KamorionLabs/dns-gate/internal/requestid"
+	"github.com/KamorionLabs/dns-gate/internal/scope"
 	"github.com/KamorionLabs/dns-gate/internal/store"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 	"github.com/KamorionLabs/dns-gate/internal/version"
@@ -70,6 +72,7 @@ func (s *Server) newMCP() *mcpServer {
 	if s.cfg.Config.MCP.AllowWrites && s.cfg.Transfers != nil {
 		m.addTransferWriteTools(srv)
 	}
+	srv.AddReceivingMiddleware(m.scopeMiddleware)
 	h := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return srv }, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
 	m.handler = h
 	return m
@@ -97,7 +100,7 @@ func (m *mcpServer) serveResourceMetadata(w http.ResponseWriter, r *http.Request
 func (m *mcpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Header.Del(subjectRefHeader)
 	r.Header.Del("Cookie")
-	subj, err := m.s.cfg.Authn.Authenticate(r)
+	subj, err := m.s.cfg.Authn.AuthenticateFor(r, scope.SurfaceMCP)
 	if err != nil {
 		var ae *authn.Error
 		if !errors.As(err, &ae) {
@@ -136,6 +139,61 @@ func (m *mcpServer) subject(ctx context.Context, req *mcp.CallToolRequest) (*ide
 	return nil, errors.New("unauthenticated")
 }
 
+var toolNameRe = regexp.MustCompile(`^[a-z][a-z0-9_]{0,63}$`)
+
+// requestSubject resolves the subject of any MCP request.
+func (m *mcpServer) requestSubject(ctx context.Context, extra *mcp.RequestExtra) *identity.Subject {
+	if s := identity.From(ctx); s != nil {
+		return s
+	}
+	if extra != nil && extra.Header != nil {
+		if v, ok := m.refs.Load(extra.Header.Get(subjectRefHeader)); ok {
+			return v.(*identity.Subject)
+		}
+	}
+	return nil
+}
+
+// scopeMiddleware hides from a delegated subject the tools its scopes do
+// not open, and refuses their calls.
+func (m *mcpServer) scopeMiddleware(next mcp.MethodHandler) mcp.MethodHandler {
+	return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+		subj := m.requestSubject(ctx, req.GetExtra())
+		if !scope.Delegated(subj) {
+			return next(ctx, method, req)
+		}
+		switch method {
+		case "tools/call":
+			cr, ok := req.(*mcp.CallToolRequest)
+			if !ok || cr.Params == nil {
+				return nil, errors.New("not_delegable: unexpected tool call")
+			}
+			if de := delegatedTool(subj, cr.Params.Name); de != nil {
+				tool := cr.Params.Name
+				if !toolNameRe.MatchString(tool) {
+					tool = "call"
+				}
+				m.audit(ctx, cr, subj, tool, "", "deny", de.reason, nil)
+				return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: de.reason + ": " + de.message}}}, nil
+			}
+		case "tools/list":
+			res, err := next(ctx, method, req)
+			if lr, ok := res.(*mcp.ListToolsResult); ok && err == nil {
+				tools := make([]*mcp.Tool, 0, len(lr.Tools))
+				for _, t := range lr.Tools {
+					if delegatedTool(subj, t.Name) == nil {
+						tools = append(tools, t)
+					}
+				}
+				lr.Tools = tools
+				lr.CacheScope = "private"
+			}
+			return res, err
+		}
+		return next(ctx, method, req)
+	}
+}
+
 func clientName(req *mcp.CallToolRequest) string {
 	if req != nil && req.Session != nil {
 		if p := req.Session.InitializeParams(); p != nil && p.ClientInfo != nil && p.ClientInfo.Name != "" {
@@ -158,6 +216,7 @@ func (m *mcpServer) audit(ctx context.Context, req *mcp.CallToolRequest, subj *i
 	}
 	if subj != nil {
 		e.Subject, e.SubjectName, e.SubjectCategory, e.Teams = subj.String(), subj.Name, subj.Category, subj.Teams
+		e.SetClient(subj.ClientID(), subj.ClientName())
 	}
 	for k, v := range extra {
 		e.Extra[k] = v
@@ -478,6 +537,9 @@ func (m *mcpServer) addReadTools(srv *mcp.Server) {
 		if !m.s.pol.AllowMeta(subj, uiapi.ActionPolicyRead) {
 			return nil, explainOut{}, errors.New("policy.read not granted")
 		}
+		if e := delegatedPolicyQuery(subj, normZoneArg(in.Zone), ""); e != nil {
+			return nil, explainOut{}, errors.New(e.msg)
+		}
 		claims := map[string]any{}
 		for k, v := range in.Claims {
 			if len(v) == 1 {
@@ -505,6 +567,9 @@ func (m *mcpServer) addReadTools(srv *mcp.Server) {
 		if !m.s.pol.AllowMeta(subj, uiapi.ActionPolicyRead) {
 			return nil, uiapi.WhoCanResponse{}, errors.New("policy.read not granted")
 		}
+		if e := delegatedPolicyQuery(subj, normZoneArg(in.Zone), ""); e != nil {
+			return nil, uiapi.WhoCanResponse{}, errors.New(e.msg)
+		}
 		action := in.Action
 		if action == "" {
 			action = policy.ActionRecordWrite
@@ -531,11 +596,12 @@ func (m *mcpServer) addWriteTools(srv *mcp.Server) {
 		if subj, err = m.forTeam(ctx, req, subj, "plan_rrset_change", zone, in.Team); err != nil {
 			return nil, uiapi.PlanResult{}, err
 		}
-		if !m.s.cfg.Authz.Allow(subj, policy.ActionRecordWrite, zone) && !m.s.cfg.Authz.Allow(subj, policy.ActionForwardWrite, zone) {
+		planner := planIntent(subj)
+		if !m.s.cfg.Authz.Allow(planner, policy.ActionRecordWrite, zone) && !m.s.cfg.Authz.Allow(planner, policy.ActionForwardWrite, zone) {
 			m.audit(ctx, req, subj, "plan_rrset_change", zone, "deny", "forbidden", nil)
 			return nil, uiapi.PlanResult{}, fmt.Errorf("dns.record.write or dns.forward.write not granted on %q", zone)
 		}
-		plan, err := m.s.cfg.Ops.PlanRRsets(ctx, subj, zone, in.Changes)
+		plan, err := m.s.cfg.Ops.PlanRRsets(ctx, planner, zone, in.Changes)
 		if err != nil {
 			return nil, uiapi.PlanResult{}, toolError(err)
 		}
@@ -603,6 +669,7 @@ func (m *mcpServer) addWriteTools(srv *mcp.Server) {
 		if subj, err = m.forTeam(ctx, req, subj, "adopt_preview", zone, in.Team); err != nil {
 			return nil, uiapi.AdoptPreview{}, err
 		}
+		subj = planIntent(subj)
 		if !m.s.cfg.Authz.Allow(subj, policy.ActionRecordAdopt, zone) {
 			return nil, uiapi.AdoptPreview{}, fmt.Errorf("dns.record.adopt not granted on %q", zone)
 		}

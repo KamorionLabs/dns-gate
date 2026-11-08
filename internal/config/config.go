@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/KamorionLabs/dns-gate/internal/glob"
 	"github.com/KamorionLabs/dns-gate/internal/propagation"
+	"github.com/KamorionLabs/dns-gate/internal/scope"
 )
 
 // Config is the root configuration document.
@@ -515,9 +517,32 @@ type Issuer struct {
 	// MaxExchangedTTL caps the lifetime of the gate tokens exchanged for
 	// tokens of this issuer (default 15m).
 	MaxExchangedTTL Duration `yaml:"max_exchanged_ttl"`
-	SigningKey      []byte   `yaml:"-"`
+	// DelegatedClients are the applications whose tokens of this issuer
+	// act for a user with capped rights, recognized by the azp (v2) or
+	// appid (v1) claim of the token.
+	DelegatedClients []DelegatedClient `yaml:"delegated_clients"`
+	// RequireKnownClient refuses the tokens whose azp or appid claim
+	// matches no delegated client.
+	RequireKnownClient bool   `yaml:"require_known_client"`
+	SigningKey         []byte `yaml:"-"`
 	// SAML marks the subject issuer of the SAML login (AllIssuers).
 	SAML bool `yaml:"-"`
+}
+
+// DelegatedClient is an application acting for the users of an issuer:
+// its tokens hold the rights of the user capped by Scopes, Zones and
+// Surfaces. A token matches when its client id, the azp claim or, without
+// azp, the appid claim, is one of ClientIDs, AZP or AppID (aliases),
+// ignoring case.
+type DelegatedClient struct {
+	ID        string     `yaml:"id"`
+	Name      string     `yaml:"name"`
+	ClientIDs StringList `yaml:"client_ids"`
+	AZP       StringList `yaml:"azp"`
+	AppID     StringList `yaml:"appid"`
+	Scopes    []string   `yaml:"scopes"`
+	Zones     []string   `yaml:"zones"`
+	Surfaces  []string   `yaml:"surfaces"`
 }
 
 // VirtualKey is a gate-issued key for clients that only speak the EuroDNS
@@ -899,6 +924,15 @@ func (c *Config) defaults() {
 		if c.Issuers[i].Category == "" {
 			c.Issuers[i].Category = "pipeline"
 		}
+		for j := range c.Issuers[i].DelegatedClients {
+			dc := &c.Issuers[i].DelegatedClients[j]
+			if len(dc.Surfaces) == 0 {
+				dc.Surfaces = []string{scope.SurfaceAPI}
+			}
+			if dc.Name == "" {
+				dc.Name = dc.ID
+			}
+		}
 		if c.Issuers[i].SubjectClaim == "" && c.Issuers[i].SubjectTemplate == "" {
 			c.Issuers[i].SubjectClaim = "sub"
 		}
@@ -1069,6 +1103,9 @@ func (c *Config) Validate() error {
 		}
 		if is.ClockSkew.D() < 0 || is.ClockSkew.D() > 5*time.Minute {
 			add("%s.clock_skew: must be between 0 and 5m", at)
+		}
+		for _, e := range validateDelegatedClients(at, is) {
+			add("%s", e)
 		}
 	}
 	for i, is := range c.Issuers {
@@ -1861,6 +1898,83 @@ func ValidateTeamFrom(claim, expr, prefix string) error {
 		return fmt.Errorf("prefix %q must be up to 32 characters [a-z0-9._-], starting with a letter or digit", prefix)
 	}
 	return nil
+}
+
+// MatchIDs returns the client ids of a delegated client (client_ids, azp
+// and appid), lowercase, without duplicates.
+func (c DelegatedClient) MatchIDs() []string {
+	var out []string
+	for _, l := range []StringList{c.ClientIDs, c.AZP, c.AppID} {
+		for _, v := range l {
+			v = strings.ToLower(strings.TrimSpace(v))
+			if v != "" && !slices.Contains(out, v) {
+				out = append(out, v)
+			}
+		}
+	}
+	return out
+}
+
+// validateDelegatedClients checks the delegated clients of an issuer.
+func validateDelegatedClients(at string, is Issuer) []string {
+	var errs []string
+	add := func(format string, args ...any) { errs = append(errs, fmt.Sprintf(format, args...)) }
+	if is.Self && (len(is.DelegatedClients) > 0 || is.RequireKnownClient) {
+		add("%s.delegated_clients: not for the gate issuer (self: true)", at)
+		return errs
+	}
+	if is.RequireKnownClient && len(is.DelegatedClients) == 0 {
+		add("%s.require_known_client: needs delegated_clients", at)
+	}
+	ids := map[string]bool{}
+	seen := map[string]string{}
+	for i, c := range is.DelegatedClients {
+		ca := fmt.Sprintf("%s.delegated_clients[%d]", at, i)
+		if !nameRe.MatchString(c.ID) {
+			add("%s.id: %q must be a lowercase identifier", ca, c.ID)
+		}
+		if ids[c.ID] {
+			add("%s.id: %q duplicated", ca, c.ID)
+		}
+		ids[c.ID] = true
+		if len(c.Name) > 128 {
+			add("%s.name: up to 128 characters", ca)
+		}
+		matchIDs := c.MatchIDs()
+		if len(matchIDs) == 0 {
+			add("%s: client_ids is required (or its aliases azp, appid)", ca)
+		}
+		for _, v := range append(append(append([]string{}, c.ClientIDs...), c.AZP...), c.AppID...) {
+			if strings.TrimSpace(v) == "" || v != strings.TrimSpace(v) || strings.ContainsAny(v, "*?") {
+				add("%s.client_ids: %q must be an exact client id", ca, v)
+			}
+		}
+		for _, v := range matchIDs {
+			if other, ok := seen[v]; ok && other != c.ID {
+				add("%s.client_ids: %q already matches client %s", ca, v, other)
+			}
+			seen[v] = c.ID
+		}
+		if len(c.Scopes) == 0 {
+			add("%s.scopes: at least one scope is required (%s)", ca, strings.Join(scope.All, ", "))
+		}
+		for _, sc := range c.Scopes {
+			if !scope.Valid(sc) {
+				add("%s.scopes: unknown scope %q (%s)", ca, sc, strings.Join(scope.All, ", "))
+			}
+		}
+		for _, z := range c.Zones {
+			if z == "" || z != strings.ToLower(z) || strings.HasSuffix(z, ".") || strings.Contains(z, "?") {
+				add("%s.zones: %q must be a lowercase zone glob without trailing dot (* wildcards only)", ca, z)
+			}
+		}
+		for _, sf := range c.Surfaces {
+			if !scope.ValidSurface(sf) {
+				add("%s.surfaces: unknown surface %q (%s)", ca, sf, strings.Join(scope.Surfaces, ", "))
+			}
+		}
+	}
+	return errs
 }
 
 // validateEntra enforces fixed-tenant Entra ID issuers and audiences.

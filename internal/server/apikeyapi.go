@@ -19,6 +19,7 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/scope"
 	"github.com/KamorionLabs/dns-gate/internal/store"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 )
@@ -46,7 +47,7 @@ func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request, subj *ide
 	}
 	snap := s.cfg.Policy.Current()
 	relaxed := pattern == routeAPIKey && (r.Method == http.MethodDelete || r.Method == http.MethodGet)
-	if subj.Kind == identity.KindAPIKey || subj.Kind == identity.KindVirtualKey || (!relaxed && !snap.GrantsAnywhere(subj.Roles, policy.ActionAPIKeyManage)) {
+	if subj.Kind == identity.KindAPIKey || subj.Kind == identity.KindVirtualKey || scope.Delegated(subj) || (!relaxed && !snap.GrantsAnywhere(subj.Roles, policy.ActionAPIKeyManage)) {
 		s.apiAudit(r, subj, "apikey.manage", "", "deny", "forbidden", nil)
 		writeError(w, http.StatusForbidden, "forbidden", policy.ActionAPIKeyManage+" not granted")
 		return

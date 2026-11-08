@@ -535,6 +535,7 @@ func (s *Server) audit(r *http.Request, subj *identity.Subject, action, zone, de
 	}
 	if subj != nil {
 		e.Subject, e.SubjectName, e.SubjectCategory, e.Teams = subj.String(), subj.Name, subj.Category, subj.Teams
+		e.SetClient(subj.ClientID(), subj.ClientName())
 	} else {
 		e.Extra = map[string]any{"remote_addr": s.cfg.Authn.ClientIP(r).String()}
 	}
@@ -542,10 +543,11 @@ func (s *Server) audit(r *http.Request, subj *identity.Subject, action, zone, de
 }
 
 type errorBody struct {
-	Reason  string                  `json:"reason"`
-	Message string                  `json:"message"`
-	Details any                     `json:"details,omitempty"`
-	Errors  []uiapi.ValidationError `json:"errors,omitempty"`
+	Reason        string                  `json:"reason"`
+	Message       string                  `json:"message"`
+	RequiredScope string                  `json:"required_scope,omitempty"`
+	Details       any                     `json:"details,omitempty"`
+	Errors        []uiapi.ValidationError `json:"errors,omitempty"`
 }
 
 func writeError(w http.ResponseWriter, status int, reason, msg string) {
