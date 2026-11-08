@@ -264,16 +264,17 @@ func (s *Server) consentRemembered(ctx context.Context, a *authorizeRequest, sub
 	return true
 }
 
-// activeGrant returns the newest active grant of a client for a subject,
-// nil if none.
+// activeGrant returns the newest grant of a client for a subject that is
+// neither revoked, expired nor idle for refresh_idle_ttl, nil if none.
 func (s *Server) activeGrant(ctx context.Context, client, subject string) (*store.OAuthGrant, error) {
 	gs, err := s.cfg.OAuth.ListOAuthGrants(ctx, store.OAuthGrantQuery{ClientID: client, Subject: subject})
 	if err != nil {
 		return nil, err
 	}
+	oc := s.cfg.Config.OAuthClient(client)
 	now := s.now()
 	for i := range gs {
-		if gs[i].Active(now) {
+		if gs[i].Active(now) && oc != nil && now.Sub(gs[i].LastUsedAt) <= oc.RefreshIdleTTL.D() {
 			return &gs[i], nil
 		}
 	}

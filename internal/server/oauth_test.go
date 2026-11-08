@@ -512,6 +512,11 @@ func TestOAuthGrantExpiry(t *testing.T) {
 	if r := e.refresh(t, res.tr.RefreshToken); r.status != 400 || r.err != "invalid_grant" {
 		t.Fatalf("idle grant: %d %s", r.status, r.err)
 	}
+	e.login(t, e.b, "alice@example.com", "DNS-Writers")
+	_, challenge := pkcePair()
+	if _, shown := e.authorize(t, skopeaQuery(challenge, "")); !shown {
+		t.Fatal("consent of an idle grant remembered")
+	}
 
 	e.offset = 0
 	e.login(t, e.b, "alice@example.com", "DNS-Writers")

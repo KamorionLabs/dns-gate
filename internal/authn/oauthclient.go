@@ -200,7 +200,8 @@ func (a *Authenticator) clientKey(ctx context.Context, oc *config.OAuthClient, k
 }
 
 // clientFailure audits a failed client authentication (oauth.client_auth),
-// aggregated per client, source and minute, and returns e.
+// aggregated per declared client, source and minute (unknown client ids per
+// source only), and returns e.
 func (a *Authenticator) clientFailure(r *http.Request, id string, e *ClientError) *ClientError {
 	if a.audit == nil || e.Unavailable {
 		return e
@@ -212,13 +213,15 @@ func (a *Authenticator) clientFailure(r *http.Request, id string, e *ClientError
 		Time: a.now().UTC(), RequestID: requestid.From(ctx), Action: "oauth.client_auth", Decision: "deny", Reason: e.Code,
 		Extra: map[string]any{"message": e.Message, "remote_addr": src},
 	}
+	key := "|" + src
 	if oc := a.oauthClients[id]; oc != nil {
 		ev.SetClient(oc.ID, oc.Name)
+		key = oc.ID + key
 	} else if shown != "" {
 		ev.Extra["client_id"] = shown
 	}
 	audit.Capture(ctx, &ev)
-	for _, out := range a.clientNoise.note(shown+"|"+src, a.now(), ev) {
+	for _, out := range a.clientNoise.note(key, a.now(), ev) {
 		a.audit.Log(ctx, out)
 	}
 	return e
