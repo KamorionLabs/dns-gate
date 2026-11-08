@@ -1,0 +1,37 @@
+{
+  "$schema": "https://developer.microsoft.com/json-schemas/teams/v1.22/MicrosoftTeams.schema.json",
+  "manifestVersion": "1.22",
+  "version": "1.0.0",
+  "id": "00000000-0000-0000-0000-000000000000",
+  "developer": {
+    "name": "Example Corp",
+    "websiteUrl": "https://dns.example.com",
+    "privacyUrl": "https://dns.example.com/privacy",
+    "termsOfUseUrl": "https://dns.example.com/terms"
+  },
+  "icons": {
+    "color": "color.png",
+    "outline": "outline.png"
+  },
+  "name": {
+    "short": "DNS gate",
+    "full": "DNS gate (read-only)"
+  },
+  "description": {
+    "short": "Read DNS zones, records, owners and history through dns-gate.",
+    "full": "Answers questions about the DNS zones managed by dns-gate: records, owner teams, propagation and audit history. Read-only: changes are made through dns-gate itself."
+  },
+  "accentColor": "#FFFFFF",
+  "copilotAgents": {
+    "declarativeAgents": [
+      {
+        "id": "dnsGateAgent",
+        "file": "declarativeAgent.json"
+      }
+    ]
+  },
+  "permissions": [
+    "identity"
+  ],
+  "validDomains": []
+}
