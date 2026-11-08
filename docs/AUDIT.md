@@ -149,7 +149,7 @@ Refused authentications on this API carry the operation id of the request.
 | `oauth.token` | Access token of a declared client (`extra.via` `authorization_code` or `refresh_token`, `jti`, `expires_at`, `scopes`, `grant_id`), refused redemptions (`invalid_grant`, `invalid_scope`, with `message`), and `reason` `grace` when a refresh within 30 seconds of a rotation gets the same answer again. | allow, deny | no |
 | `oauth.refresh_reuse` | A refresh token already rotated was presented: the grant is revoked (`extra.generation`, `current_generation`). | deny | no |
 | `oauth.revoke` | Grant revoked: by the client (`/oauth/revoke`, `reason` `client`), its user (`user`) or a `gate.oauth.manage` holder (`admin`), with `extra.grant_id`, `grant_subject`, `client_id`. | allow, deny | no |
-| `oauth.client_auth` | Failed client authentications at the token and revocation endpoints, aggregated per client and source per minute (`extra.count`, `message`). | deny | no |
+| `oauth.client_auth` | Failed client authentications at the token and revocation endpoints, aggregated per client and source per minute, unknown client ids per source (`extra.count`, `message`). Refusals of `oauth.token` for public clients are aggregated the same way. | deny | no |
 | `oauth.grants` | Access to `/api/v1/oauth/grants` refused. | deny | no |
 | `gate.token.exchange` | Token exchange (RFC 8693). | allow, deny | no |
 | `policy.propose`, `.approve`, `.reject`, `.activate` | Managed policy revisions. | allow, deny | no |

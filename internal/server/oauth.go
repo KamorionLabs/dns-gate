@@ -149,7 +149,14 @@ func (s *Server) parseDeclared(v url.Values, a *authorizeRequest) (string, bool)
 		return "unknown client or redirect URI", false
 	}
 	a.client = oc
-	a.Prompt, a.MaxAge, a.LoginHint, a.Reauthed = v.Get("prompt"), v.Get("max_age"), v.Get("login_hint"), v.Get("gate_reauth") == "1"
+	a.Prompt, a.MaxAge, a.LoginHint = v.Get("prompt"), v.Get("max_age"), v.Get("login_hint")
+	if ra := v.Get("gate_reauth"); ra != "" {
+		n, err := strconv.ParseInt(ra, 10, 64)
+		if err != nil || n <= 0 || len(ra) > 12 {
+			return "invalid_request", true
+		}
+		a.ReauthAt = n
+	}
 	if len(a.State) > 512 || len(a.Nonce) > 512 || len(a.Scope) > 1024 || len(a.LoginHint) > 256 || len(a.Prompt) > 64 {
 		return "invalid_request", true
 	}
@@ -183,14 +190,15 @@ func (s *Server) parseDeclared(v url.Values, a *authorizeRequest) (string, bool)
 }
 
 // reauthURL is the forced sign-in that comes back to the request, marked
-// so that a sign-in the IdP did not renew ends with login_required.
-func (a *authorizeRequest) reauthURL() string {
+// with its start so that a sign-in the IdP did not renew ends with
+// login_required.
+func (a *authorizeRequest) reauthURL(now time.Time) string {
 	again := a.values()
 	again.Del("prompt")
 	if p := strings.Join(slices.DeleteFunc(strings.Fields(a.Prompt), func(p string) bool { return p == "login" || p == "select_account" }), " "); p != "" {
 		again.Set("prompt", p)
 	}
-	again.Set("gate_reauth", "1")
+	again.Set("gate_reauth", strconv.FormatInt(now.Unix(), 10))
 	return "/auth/login?" + url.Values{"reauth": {"1"}, "return_to": {oauthAuthorizePath + "?" + again.Encode()}}.Encode()
 }
 
@@ -199,9 +207,13 @@ func (a *authorizeRequest) prompts(p string) bool {
 }
 
 // needsLogin reports whether the request asks for a fresh sign-in at the
-// gate: prompt=login or select_account, or a max_age older than the
-// session sign-in.
+// gate: prompt=login or select_account, a max_age older than the session
+// sign-in, or, back from a forced sign-in, a session signed in before it
+// (a minute of clock skew allowed).
 func (a *authorizeRequest) needsLogin(sess *session, now time.Time) bool {
+	if a.ReauthAt > 0 && sess.AuthTime < a.ReauthAt-60 {
+		return true
+	}
 	if a.prompts("login") || a.prompts("select_account") {
 		return true
 	}
@@ -218,11 +230,11 @@ func (a *authorizeRequest) needsLogin(sess *session, now time.Time) bool {
 func (s *Server) authorizeDeclared(w http.ResponseWriter, r *http.Request, a *authorizeRequest, subj *identity.Subject, sess *session, values url.Values) {
 	now := s.now()
 	if a.needsLogin(sess, now) {
-		if a.Reauthed || a.prompts("none") {
+		if a.ReauthAt > 0 || a.prompts("none") {
 			s.redirectDeclared(w, r, a, url.Values{"error": {"login_required"}})
 			return
 		}
-		http.Redirect(w, r, a.reauthURL(), http.StatusFound)
+		http.Redirect(w, r, a.reauthURL(now), http.StatusFound)
 		return
 	}
 	if r.Method == http.MethodGet {
@@ -344,7 +356,7 @@ func relayRequest(r *http.Request, f url.Values) bool {
 // request; assertions are recorded in the store against replays.
 func (s *Server) authenticateClient(r *http.Request, f url.Values) (*config.OAuthClient, *authn.ClientError) {
 	base := s.cfg.Authn.TokenIssuer().URL()
-	audiences := []string{base + oauthTokenPath, base, base + "/", base + oauthRevokePath}
+	audiences := []string{base + oauthTokenPath, base, base + "/"}
 	return s.cfg.Authn.AuthenticateClient(r, f, audiences, func(ctx context.Context, key string, exp time.Time) error {
 		sum := sha256.Sum256([]byte(key))
 		err := s.cfg.OAuth.UseOAuthJTI(ctx, hex.EncodeToString(sum[:]), exp, s.now())
@@ -425,6 +437,10 @@ func (s *Server) redeemCode(w http.ResponseWriter, r *http.Request, oc *config.O
 			return
 		}
 		nonce = randomToken()
+		if cur == nil && !d.Consented {
+			fail("the grant was revoked: authorize again")
+			return
+		}
 		if cur == nil {
 			g = &store.OAuthGrant{
 				ID: newGrantID(), ClientID: oc.ID, Subject: d.Subject, CreatedAt: now, ConsentedAt: now, ExpiresAt: now.Add(oc.RefreshMaxTTL.D()),
@@ -469,14 +485,14 @@ func (s *Server) redeemCode(w http.ResponseWriter, r *http.Request, oc *config.O
 		}
 	}
 	s.cfg.Authn.InvalidateGrant(g.ID)
-	tok, err := s.issueClientToken(r, oc, g, subj, d.Session.Claims, g.Scopes, "authorization_code")
+	tok, err := s.issueClientToken(r, oc, g, subj, d.Session.Claims, d.Scopes, "authorization_code")
 	if err != nil {
 		fail("session expired")
 		return
 	}
 	writeJSON(w, http.StatusOK, tokenResponse{
 		AccessToken: tok.Raw, TokenType: "Bearer", ExpiresIn: int64(tok.Expires.Sub(s.now()).Round(time.Second).Seconds()),
-		RefreshToken: refresh, Scope: scopeString(g.Scopes, d.Extra),
+		RefreshToken: refresh, Scope: scopeString(d.Scopes, d.Extra),
 	})
 }
 
@@ -592,10 +608,14 @@ func (s *Server) refreshOnce(w http.ResponseWriter, r *http.Request, oc *config.
 		for k, v := range sess.Claims {
 			claims[k] = v
 		}
-		if err := s.ui.mergeStoreGroups(ctx, claims, sess.BaseGroups); err != nil {
+		found, err := s.ui.mergeStoreGroups(ctx, claims, sess.BaseGroups)
+		if err != nil {
 			s.log.Error("oauth refresh: identity store groups", "err", err)
 			tokenFail(w, http.StatusServiceUnavailable, "temporarily_unavailable", "group membership unavailable")
 			return true, false
+		}
+		if !found {
+			return deny("the user is no longer in the identity store", nil)
 		}
 		sess.Claims, claimsAt = claims, now
 	} else if now.Sub(g.ClaimsAt) > oc.ClaimsMaxAge.D() {
@@ -776,6 +796,10 @@ func (s *Server) oauthAudit(r *http.Request, subj *identity.Subject, action stri
 	}
 	if len(e.Extra) == 0 {
 		e.Extra = nil
+	}
+	if decision == "deny" && oc != nil && !oc.Confidential() {
+		s.cfg.Authn.AuditPerSource(r, action+"|"+oc.ID, e)
+		return
 	}
 	s.cfg.Audit.Log(r.Context(), e)
 }

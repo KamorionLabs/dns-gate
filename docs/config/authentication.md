@@ -188,8 +188,8 @@ oauth:
 | `access_token_ttl` | `10m` | Lifetime of the access tokens, 1 minute to the gate issuer `token_ttl`. |
 | `refresh_idle_ttl` | `14d` | A grant unused this long expires. |
 | `refresh_max_ttl` | `90d` | Absolute lifetime of a grant from the last consent (at most `180d`). |
-| `claims_max_age` | `7d` | Age of the session claims (groups) a refresh may replay; then the user signs in again. With `ui.saml.groups_from_identity_store`, the groups are looked up again at every refresh instead. |
-| `write_max_age` | none | `dns.write` then needs a sign-in at the gate within this time (`403 reauth_required`, the client sends the user to `/oauth/authorize?prompt=login`). |
+| `claims_max_age` | `7d` | Age of the session claims (groups) a refresh may replay; then the user signs in again. With `ui.saml.groups_from_identity_store`, the groups are looked up again at every refresh instead, and a user the identity store no longer knows is refused. |
+| `write_max_age` | none | `dns.write` and `dns.transfer` then need a sign-in at the gate within this time (`403 reauth_required`, the client sends the user to `/oauth/authorize?prompt=login`). |
 | `require_pkce` | `true` | PKCE S256 is always required; `false` is refused. |
 | `disabled` | `false` | Cuts every grant of the client at its next request (`401`), and its sign-ins. |
 
@@ -208,6 +208,8 @@ authorization codes and client assertion ids live in the store.
   sign in). An unknown client or redirect URI answers `400` without redirect; other
   errors go back to the redirect URI (`invalid_scope`, `invalid_request`,
   `login_required`, `consent_required`, `access_denied`). Every answer carries `iss`.
+  `prompt=login` and an exceeded `max_age` send the user through a forced sign-in;
+  when the IdP does not renew it, the answer is `login_required`.
 - **Consent** shows the configured client name, the user, the scopes in words, the
   zones and the duration, posted with the CSRF token and a same-origin check; the page
   may only post to the gate and the redirect URI (`form-action`) and is never framed.
@@ -216,15 +218,19 @@ authorization codes and client assertion ids live in the store.
   the page again and the grant then holds the union (incremental consent).
 - `POST /oauth/token`: `authorization_code` (codes are stored, single use, 2 minutes,
   bound to the client, the redirect URI and the PKCE verifier) and `refresh_token`.
-  One grant per client and user. Each refresh returns a new refresh token; presenting
+  One grant per client and user: a new authorization of the same user replaces the
+  refresh tokens issued before (one instance of the client per user). The token of a
+  code carries the scopes requested; a refresh carries every scope of the grant.
+  A code issued from a remembered consent is refused once the grant is revoked.
+  Each refresh returns a new refresh token; presenting
   an earlier one revokes the grant (`oauth.refresh_reuse`), except within 30 seconds of
   a rotation, when the same answer is returned again (two instances of the client
   racing). A refresh fails (`invalid_grant`) once the grant is revoked, idle, past
   `refresh_max_ttl`, past `claims_max_age`, or when the user is no longer bound; a
   disabled client fails client authentication (`401 invalid_client`). `scope` on a
   refresh may narrow the token.
-- `private_key_jwt`: the assertion has `iss` = `sub` = the client id, `aud` the token
-  endpoint (or the issuer URL), `exp` at most 5 minutes ahead and a `jti`, recorded
+- `private_key_jwt` (also at the revocation endpoint): the assertion has `iss` =
+  `sub` = the client id, `aud` the token endpoint (or the issuer URL), `exp` at most 5 minutes ahead and a `jti`, recorded
   until it expires: a replayed assertion is refused.
 - `POST /oauth/revoke` (RFC 7009, client authenticated): a refresh or access token of
   the client revokes its grant. Other tokens get `200` without effect.

@@ -75,6 +75,7 @@ type Authenticator struct {
 	grants       OAuthGrants
 	grantCache   grantCache
 	clientNoise  noiseCounter
+	publicNoise  noiseCounter
 }
 
 // SetLogger sets the logger of the warnings about refused team names

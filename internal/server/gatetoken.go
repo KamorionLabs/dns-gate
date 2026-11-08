@@ -121,7 +121,9 @@ func (s *Server) handleOAuthMetadata(w http.ResponseWriter, r *http.Request) {
 type authorizeRequest struct {
 	ClientID, RedirectURI, State, Challenge, Nonce, Scope string
 	Prompt, MaxAge, LoginHint                             string
-	Reauthed                                              bool
+	// ReauthAt is the start (unix seconds) of the forced sign-in the
+	// request comes back from, 0 otherwise.
+	ReauthAt int64
 
 	client *config.OAuthClient
 	scopes []string
@@ -138,8 +140,8 @@ func (a authorizeRequest) values() url.Values {
 			v.Set(k, val)
 		}
 	}
-	if a.Reauthed {
-		v.Set("gate_reauth", "1")
+	if a.ReauthAt > 0 {
+		v.Set("gate_reauth", strconv.FormatInt(a.ReauthAt, 10))
 	}
 	return v
 }
@@ -250,7 +252,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		}
 		target := "/auth/login?" + url.Values{"return_to": {oauthAuthorizePath + "?" + a.values().Encode()}}.Encode()
 		if a.client != nil && a.needsLogin(&session{}, s.now()) {
-			target = a.reauthURL()
+			target = a.reauthURL(s.now())
 		}
 		http.Redirect(w, r, target, http.StatusFound)
 		return

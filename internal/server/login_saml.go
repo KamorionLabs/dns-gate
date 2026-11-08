@@ -143,7 +143,7 @@ func (u *uiAuth) samlClaims(ctx context.Context, res *samlauth.Result) (map[stri
 		}
 	}
 	base := policyClaimStrings(claims["groups"])
-	if err := u.mergeStoreGroups(ctx, claims, base); err != nil {
+	if _, err := u.mergeStoreGroups(ctx, claims, base); err != nil {
 		return nil, nil, nil, err
 	}
 	var amr []string
@@ -169,16 +169,18 @@ func (u *uiAuth) storeGroups() bool {
 }
 
 // mergeStoreGroups sets the "groups" claim to base merged with the groups
-// of the user in the identity store, when configured.
-func (u *uiAuth) mergeStoreGroups(ctx context.Context, claims map[string]any, base []string) error {
+// of the user in the identity store, when configured. found is false when
+// the identity store does not know the user.
+func (u *uiAuth) mergeStoreGroups(ctx context.Context, claims map[string]any, base []string) (found bool, err error) {
 	if !u.storeGroups() {
-		return nil
+		return true, nil
 	}
 	user, _ := claims[u.cfg.SAML.GroupsFromIdentityStore.UserClaim].(string)
 	names, err := u.groups.Groups(ctx, user)
 	if err != nil && !errors.Is(err, identitystore.ErrUserNotFound) {
-		return err
+		return false, err
 	}
+	found = err == nil
 	merged := append([]string(nil), base...)
 	seen := map[string]bool{}
 	for _, g := range merged {
@@ -195,7 +197,7 @@ func (u *uiAuth) mergeStoreGroups(ctx context.Context, claims map[string]any, ba
 	} else {
 		delete(claims, "groups")
 	}
-	return nil
+	return found, nil
 }
 
 func anyList(vals []string) []any {

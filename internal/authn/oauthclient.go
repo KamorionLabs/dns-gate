@@ -227,6 +227,19 @@ func (a *Authenticator) clientFailure(r *http.Request, id string, e *ClientError
 	return e
 }
 
+// AuditPerSource logs an event of an unauthenticated caller (a public
+// client) at most once per key, source and minute, with extra.count.
+func (a *Authenticator) AuditPerSource(r *http.Request, key string, ev audit.Event) {
+	if a.audit == nil {
+		return
+	}
+	src := source(a.ClientIP(r))
+	audit.Capture(r.Context(), &ev)
+	for _, out := range a.publicNoise.note(key+"|"+src, a.now(), ev) {
+		a.audit.Log(r.Context(), out)
+	}
+}
+
 // SetAuditLog sets the logger of the authentication failures (also set by
 // SetAPIKeys).
 func (a *Authenticator) SetAuditLog(l audit.Logger) {

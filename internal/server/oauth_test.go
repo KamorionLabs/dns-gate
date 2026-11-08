@@ -19,6 +19,7 @@ import (
 
 	"github.com/KamorionLabs/dns-gate/internal/audit"
 	"github.com/KamorionLabs/dns-gate/internal/config"
+	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/scope"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 )
@@ -558,7 +559,7 @@ func TestOAuthRevocation(t *testing.T) {
 	res := e.link(t, "")
 	revoke := func(token string) tokenResult {
 		return e.tokenCall(t, oauthRevokePath, url.Values{"token": {token}, "client_assertion_type": {"urn:ietf:params:oauth:client-assertion-type:jwt-bearer"},
-			"client_assertion": {e.clientAssertion(t, e.base+oauthRevokePath, randomToken(), time.Minute)}}, "", "")
+			"client_assertion": {e.clientAssertion(t, e.base+oauthTokenPath, randomToken(), time.Minute)}}, "", "")
 	}
 	if r := revoke("unknown-token"); r.status != 200 {
 		t.Fatalf("unknown token: %d", r.status)
@@ -630,16 +631,28 @@ func TestOAuthIncrementalConsent(t *testing.T) {
 	wider := e.link(t, "dns.write")
 	claims, _ := unverifiedClaims(t, wider.tr.AccessToken)
 	firstClaims, _ := unverifiedClaims(t, first.tr.AccessToken)
-	if claims["scope"] != "dns.read dns.write" || claims["gate_grant"] != firstClaims["gate_grant"] {
-		t.Fatalf("merged grant: %v", claims)
+	if claims["scope"] != "dns.write" || wider.tr.Scope != "dns.write" || claims["gate_grant"] != firstClaims["gate_grant"] {
+		t.Fatalf("token of the wider consent: %v", claims)
+	}
+	if again := e.link(t, "dns.read"); again.tr.Scope != "dns.read" {
+		t.Fatalf("token of a remembered consent: %s", again.tr.Scope)
+	} else {
+		wider = again
+	}
+	if r := e.refresh(t, wider.tr.RefreshToken); r.status != 200 || r.tr.Scope != "dns.read dns.write" {
+		t.Fatalf("refresh carries the merged grant: %d %s", r.status, r.tr.Scope)
+	} else {
+		wider = r
 	}
 	if r := e.refresh(t, first.tr.RefreshToken); r.status != 400 || r.err != "invalid_grant" {
 		t.Fatalf("refresh token of before the new consent: %d %s", r.status, r.err)
 	}
 	if r := e.refresh(t, wider.tr.RefreshToken); r.status != 200 {
 		t.Fatalf("grant revoked by a stale token: %d %s", r.status, r.err)
+	} else {
+		wider = r
 	}
-	narrow := e.skopeaToken(t, url.Values{"grant_type": {"refresh_token"}, "refresh_token": {e.refresh(t, wider.tr.RefreshToken).tr.RefreshToken}, "scope": {"dns.read"}})
+	narrow := e.skopeaToken(t, url.Values{"grant_type": {"refresh_token"}, "refresh_token": {wider.tr.RefreshToken}, "scope": {"dns.read"}})
 	if c, _ := unverifiedClaims(t, narrow.tr.AccessToken); narrow.status != 200 || c["scope"] != "dns.read" {
 		t.Fatalf("narrowed refresh: %d %v", narrow.status, c)
 	}
@@ -665,7 +678,7 @@ func TestOAuthPromptAndMaxAge(t *testing.T) {
 	resp, _ = e.b.Get(e.base + oauthAuthorizePath + "?" + login.Encode())
 	resp.Body.Close()
 	lu, _ := url.Parse(resp.Header.Get("Location"))
-	if lu.Path != "/auth/login" || lu.Query().Get("reauth") != "1" || !strings.Contains(lu.Query().Get("return_to"), "gate_reauth=1") || strings.Contains(lu.Query().Get("return_to"), "prompt=login") {
+	if lu.Path != "/auth/login" || lu.Query().Get("reauth") != "1" || !strings.Contains(lu.Query().Get("return_to"), "gate_reauth=") || strings.Contains(lu.Query().Get("return_to"), "prompt=login") {
 		t.Fatalf("prompt=login: %s", lu)
 	}
 	in := e.startLogin(t, e.b, "?"+lu.RawQuery)
@@ -684,6 +697,64 @@ func TestOAuthPromptAndMaxAge(t *testing.T) {
 	e.offset = 5 * time.Minute
 	if cb, _ := e.authorize(t, stale); cb.Query().Get("error") != "login_required" {
 		t.Fatalf("max_age not met after a sign-in: %s", cb)
+	}
+}
+
+func TestOAuthReauthNotRenewed(t *testing.T) {
+	e := newOAuthEnv(t, nil)
+	e.login(t, e.b, "alice@example.com", "DNS-Writers")
+	_, challenge := pkcePair()
+	login := skopeaQuery(challenge, "")
+	login.Set("prompt", "login")
+	e.offset = 10 * time.Minute
+	resp, _ := e.b.Get(e.base + oauthAuthorizePath + "?" + login.Encode())
+	resp.Body.Close()
+	lu, _ := url.Parse(resp.Header.Get("Location"))
+	in := e.startLogin(t, e.b, "?"+lu.RawQuery)
+	a := e.samlEnvT.assertion(in, "alice@example.com", "DNS-Writers")
+	a.AuthnInstant = time.Now().Add(-time.Hour)
+	ar := e.post(t, e.b, e.idp.Response(a), in.RelayState)
+	resp, _ = e.b.Get(e.base + ar.Header.Get("Location"))
+	resp.Body.Close()
+	if u, _ := url.Parse(resp.Header.Get("Location")); resp.StatusCode != 302 || u.Query().Get("error") != "login_required" {
+		t.Fatalf("sign-in not renewed by the IdP: %d %s", resp.StatusCode, resp.Header.Get("Location"))
+	}
+}
+
+func TestOAuthRevokedGrantNotRecreatedByARememberedCode(t *testing.T) {
+	e := newOAuthEnv(t, nil)
+	csrf := e.login(t, e.b, "alice@example.com", "DNS-Writers")
+	e.link(t, "")
+	verifier, challenge := pkcePair()
+	cb, shown := e.authorize(t, skopeaQuery(challenge, ""))
+	if shown {
+		t.Fatal("consent not remembered")
+	}
+	var list uiapi.OAuthGrantList
+	_ = getJSON(t, e.b, e.base+"/api/v1/oauth/grants", &list)
+	req, _ := http.NewRequest("DELETE", e.base+"/api/v1/oauth/grants/"+list.Grants[0].ID, nil)
+	req.Header.Set(csrfHeader, csrf)
+	req.Header.Set("Origin", e.base)
+	if r, err := e.b.Do(req); err != nil || r.StatusCode != 204 {
+		t.Fatalf("revoke: %v", err)
+	}
+	r := e.skopeaToken(t, url.Values{"grant_type": {"authorization_code"}, "code": {cb.Query().Get("code")}, "redirect_uri": {skopeaRedirect}, "code_verifier": {verifier}})
+	if r.status != 400 || r.err != "invalid_grant" {
+		t.Fatalf("remembered code after the revocation: %d %s", r.status, r.err)
+	}
+}
+
+func TestOAuthPublicClientRefusalsAggregated(t *testing.T) {
+	e := newOAuthEnv(t, func(c *config.Config) {
+		c.OAuth.Clients = append(c.OAuth.Clients, testOAuthClient("spa", func(oc *config.OAuthClient) {
+			oc.Type, oc.AuthMethod, oc.RedirectURIs, oc.Scopes = config.OAuthPublic, config.OAuthNone, []string{"https://spa.example/cb"}, []string{scope.DNSRead}
+		}))
+	})
+	for i := 0; i < 20; i++ {
+		e.tokenCall(t, oauthTokenPath, url.Values{"grant_type": {"refresh_token"}, "refresh_token": {"forged"}, "client_id": {"spa"}}, "", "")
+	}
+	if n := len(e.eventsOf("oauth.token")); n != 1 {
+		t.Fatalf("refusals of a public client: %d events", n)
 	}
 }
 
@@ -761,6 +832,14 @@ func TestOAuthIdentityStoreGroupsAtRefresh(t *testing.T) {
 	fg.groups["alice@example.com"] = []string{"Other"}
 	if r := e.refresh(t, res.tr.RefreshToken); r.status != 400 || r.err != "invalid_grant" {
 		t.Fatalf("refresh after the removal from the group: %d %s", r.status, r.err)
+	}
+
+	fg.groups["alice@example.com"] = []string{"DNS-Writers"}
+	e.offset = 0
+	res = e.link(t, "")
+	delete(fg.groups, "alice@example.com")
+	if r := e.refresh(t, res.tr.RefreshToken); r.status != 400 || r.err != "invalid_grant" {
+		t.Fatalf("refresh of a user deleted from the identity store: %d %s", r.status, r.err)
 	}
 }
 
@@ -864,5 +943,21 @@ func TestOAuthRelayUnchanged(t *testing.T) {
 	}
 	if ev := e.eventsOf("oauth.token"); len(ev) != 0 {
 		t.Fatalf("relay audited as a declared client: %+v", ev)
+	}
+}
+
+func TestWriteMaxAgeCoversTransfers(t *testing.T) {
+	e := newOAuthEnv(t, nil)
+	old := float64(e.clock().Add(-2 * time.Hour).Unix())
+	subj := &identity.Subject{Claims: map[string]any{"auth_time": old}, Client: &identity.Client{ID: "skopea-acme", WriteMaxAge: time.Hour}}
+	for _, required := range [][]string{{scope.DNSWrite}, {scope.DNSTransfer}} {
+		if de := e.server.delegatedWriteAge(subj, required); de == nil || de.reason != "reauth_required" || de.required != required[0] {
+			t.Errorf("%v: %+v", required, de)
+		}
+	}
+	for _, required := range [][]string{{scope.DNSRead}, {scope.DNSPlan, scope.DNSWrite}} {
+		if de := e.server.delegatedWriteAge(subj, required); de != nil {
+			t.Errorf("%v: %+v", required, de)
+		}
 	}
 }
