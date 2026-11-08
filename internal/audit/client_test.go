@@ -10,9 +10,20 @@ func TestDelegatedClientFormats(t *testing.T) {
 	ctx := WithRequest(context.Background(), Request{SourceIP: "192.0.2.1"})
 	SetAuthMethod(ctx, AuthOAuthDelegated)
 	SetClient(ctx, "m365-copilot", "Microsoft 365 Copilot")
+	denied := Event{Action: "api", Decision: "deny", Reason: "not_delegable"}
+	Prepare(ctx, &denied)
+	if denied.ClientID != "m365-copilot" || denied.Actor == nil {
+		t.Fatalf("event without subject takes the client of the request: %+v", denied)
+	}
+	other := Event{Subject: "entra:t/other", Action: "gate.transfer.apply", Decision: "allow"}
+	Prepare(ctx, &other)
+	if other.ClientID != "" || other.Actor != nil {
+		t.Fatalf("event of a subject without client inherits the request client: %+v", other)
+	}
 	e := Event{Time: time.Unix(0, 0).UTC(), Subject: "entra:t/u", Action: "mcp.list_zones", Decision: "allow"}
-	Prepare(ctx, &e)
-	if e.ClientID != "m365-copilot" || e.Actor == nil || *e.Actor != (Actor{Type: ActorOAuthClient, ID: "m365-copilot", Name: "Microsoft 365 Copilot"}) || e.AuthMethod != AuthOAuthDelegated {
+	e.SetClient("m365-copilot", "Microsoft 365 Copilot")
+	Prepare(context.Background(), &e)
+	if e.ClientID != "m365-copilot" || e.Actor == nil || *e.Actor != (Actor{Type: ActorOAuthClient, ID: "m365-copilot", Name: "Microsoft 365 Copilot"}) {
 		t.Fatalf("prepared: %+v", e)
 	}
 	ecs := ToECS(e)

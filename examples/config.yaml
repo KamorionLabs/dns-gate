@@ -98,7 +98,7 @@ issuers:
     delegated_clients:
       - id: m365-copilot
         name: Microsoft 365 Copilot
-        azp: ab3be6b7-f5df-413d-ac2d-abf1e3fd9c0b
+        client_ids: [ab3be6b7-f5df-413d-ac2d-abf1e3fd9c0b]
         scopes: [dns.read]
         surfaces: [mcp]
 

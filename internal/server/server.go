@@ -535,6 +535,7 @@ func (s *Server) audit(r *http.Request, subj *identity.Subject, action, zone, de
 	}
 	if subj != nil {
 		e.Subject, e.SubjectName, e.SubjectCategory, e.Teams = subj.String(), subj.Name, subj.Category, subj.Teams
+		e.SetClient(subj.ClientID(), subj.ClientName())
 	} else {
 		e.Extra = map[string]any{"remote_addr": s.cfg.Authn.ClientIP(r).String()}
 	}

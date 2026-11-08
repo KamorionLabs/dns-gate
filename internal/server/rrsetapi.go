@@ -493,6 +493,7 @@ func (s *Server) apiAudit(r *http.Request, subj *identity.Subject, action, zone,
 		Decision: decision, Reason: reason, Extra: map[string]any{"via": "api"},
 		Subject: subj.String(), SubjectName: subj.Name, SubjectCategory: subj.Category, Teams: subj.Teams,
 	}
+	e.SetClient(subj.ClientID(), subj.ClientName())
 	for k, v := range extra {
 		e.Extra[k] = v
 	}

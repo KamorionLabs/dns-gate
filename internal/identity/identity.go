@@ -73,6 +73,14 @@ func (s *Subject) WithIntent(i Intent) *Subject {
 	return &c
 }
 
+// ClientName returns the name of the delegated client, empty when none.
+func (s *Subject) ClientName() string {
+	if s == nil || s.Client == nil {
+		return ""
+	}
+	return s.Client.Name
+}
+
 // ClientID returns the id of the delegated client, empty when none.
 func (s *Subject) ClientID() string {
 	if s == nil || s.Client == nil {

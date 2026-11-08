@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -530,16 +531,18 @@ type Issuer struct {
 
 // DelegatedClient is an application acting for the users of an issuer:
 // its tokens hold the rights of the user capped by Scopes, Zones and
-// Surfaces. A token matches when its azp claim is one of AZP, or, without
-// azp, when its appid claim is one of AppID.
+// Surfaces. A token matches when its client id, the azp claim or, without
+// azp, the appid claim, is one of ClientIDs, AZP or AppID (aliases),
+// ignoring case.
 type DelegatedClient struct {
-	ID       string     `yaml:"id"`
-	Name     string     `yaml:"name"`
-	AZP      StringList `yaml:"azp"`
-	AppID    StringList `yaml:"appid"`
-	Scopes   []string   `yaml:"scopes"`
-	Zones    []string   `yaml:"zones"`
-	Surfaces []string   `yaml:"surfaces"`
+	ID        string     `yaml:"id"`
+	Name      string     `yaml:"name"`
+	ClientIDs StringList `yaml:"client_ids"`
+	AZP       StringList `yaml:"azp"`
+	AppID     StringList `yaml:"appid"`
+	Scopes    []string   `yaml:"scopes"`
+	Zones     []string   `yaml:"zones"`
+	Surfaces  []string   `yaml:"surfaces"`
 }
 
 // VirtualKey is a gate-issued key for clients that only speak the EuroDNS
@@ -1897,6 +1900,21 @@ func ValidateTeamFrom(claim, expr, prefix string) error {
 	return nil
 }
 
+// MatchIDs returns the client ids of a delegated client (client_ids, azp
+// and appid), lowercase, without duplicates.
+func (c DelegatedClient) MatchIDs() []string {
+	var out []string
+	for _, l := range []StringList{c.ClientIDs, c.AZP, c.AppID} {
+		for _, v := range l {
+			v = strings.ToLower(strings.TrimSpace(v))
+			if v != "" && !slices.Contains(out, v) {
+				out = append(out, v)
+			}
+		}
+	}
+	return out
+}
+
 // validateDelegatedClients checks the delegated clients of an issuer.
 func validateDelegatedClients(at string, is Issuer) []string {
 	var errs []string
@@ -1909,7 +1927,7 @@ func validateDelegatedClients(at string, is Issuer) []string {
 		add("%s.require_known_client: needs delegated_clients", at)
 	}
 	ids := map[string]bool{}
-	azps, appids := map[string]string{}, map[string]string{}
+	seen := map[string]string{}
 	for i, c := range is.DelegatedClients {
 		ca := fmt.Sprintf("%s.delegated_clients[%d]", at, i)
 		if !nameRe.MatchString(c.ID) {
@@ -1922,24 +1940,20 @@ func validateDelegatedClients(at string, is Issuer) []string {
 		if len(c.Name) > 128 {
 			add("%s.name: up to 128 characters", ca)
 		}
-		if len(c.AZP) == 0 && len(c.AppID) == 0 {
-			add("%s: azp or appid is required", ca)
+		matchIDs := c.MatchIDs()
+		if len(matchIDs) == 0 {
+			add("%s: client_ids is required (or its aliases azp, appid)", ca)
 		}
-		for _, l := range []struct {
-			field string
-			vals  StringList
-			seen  map[string]string
-		}{{"azp", c.AZP, azps}, {"appid", c.AppID, appids}} {
-			for _, v := range l.vals {
-				switch {
-				case strings.TrimSpace(v) == "" || v != strings.TrimSpace(v) || strings.ContainsAny(v, "*?"):
-					add("%s.%s: %q must be an exact client id", ca, l.field, v)
-				case l.seen[v] != "" && l.seen[v] != c.ID:
-					add("%s.%s: %q already matches client %s", ca, l.field, v, l.seen[v])
-				default:
-					l.seen[v] = c.ID
-				}
+		for _, v := range append(append(append([]string{}, c.ClientIDs...), c.AZP...), c.AppID...) {
+			if strings.TrimSpace(v) == "" || v != strings.TrimSpace(v) || strings.ContainsAny(v, "*?") {
+				add("%s.client_ids: %q must be an exact client id", ca, v)
 			}
+		}
+		for _, v := range matchIDs {
+			if other, ok := seen[v]; ok && other != c.ID {
+				add("%s.client_ids: %q already matches client %s", ca, v, other)
+			}
+			seen[v] = c.ID
 		}
 		if len(c.Scopes) == 0 {
 			add("%s.scopes: at least one scope is required (%s)", ca, strings.Join(scope.All, ", "))

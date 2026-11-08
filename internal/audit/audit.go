@@ -33,6 +33,18 @@ const (
 	AuthOAuthDelegated = "oauth-delegated"
 )
 
+// SetClient records on the event the delegated client its subject acted
+// through; an empty id leaves the event unchanged.
+func (e *Event) SetClient(id, name string) {
+	if id == "" {
+		return
+	}
+	if name == "" {
+		name = id
+	}
+	e.ClientID, e.Actor = id, &Actor{Type: ActorOAuthClient, ID: id, Name: name}
+}
+
 // ActorOAuthClient is the actor type of a delegated client.
 const ActorOAuthClient = "oauth_client"
 
@@ -105,7 +117,7 @@ func Prepare(ctx context.Context, e *Event) {
 		if e.AuthMethod == "" {
 			e.AuthMethod = ri.method()
 		}
-		if e.ClientID == "" {
+		if e.ClientID == "" && e.Subject == "" {
 			ri.clientInto(e)
 		}
 	}
@@ -119,7 +131,9 @@ func Prepare(ctx context.Context, e *Event) {
 func Capture(ctx context.Context, e *Event) {
 	if ri := requestFrom(ctx); ri != nil {
 		e.SourceIP, e.UserAgent, e.AuthMethod = ri.sourceIP, ri.userAgent, ri.method()
-		ri.clientInto(e)
+		if e.ClientID == "" && e.Subject == "" {
+			ri.clientInto(e)
+		}
 	}
 	e.captured = true
 }

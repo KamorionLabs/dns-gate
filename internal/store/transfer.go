@@ -103,6 +103,7 @@ type SubjectRecord struct {
 	Teams       []string            `json:"teams,omitempty"`
 	TeamRoles   map[string][]string `json:"team_roles,omitempty"`
 	ClientID    string              `json:"client_id,omitempty"`
+	ClientName  string              `json:"client_name,omitempty"`
 	ClientZones []string            `json:"client_zones,omitempty"`
 	Scopes      []string            `json:"scopes,omitempty"`
 }

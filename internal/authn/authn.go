@@ -48,10 +48,11 @@ func unauthorized(msg string) *Error {
 var credentialHeaders = []string{"Authorization", "X-App-Id", "X-Api-Key", "X-Api-User", "Cookie"}
 
 type issuer struct {
-	cfg    config.Issuer
-	keys   *keySet
-	static *jose.JSONWebKey
-	algs   []jose.SignatureAlgorithm
+	cfg     config.Issuer
+	clients map[string]*config.DelegatedClient
+	keys    *keySet
+	static  *jose.JSONWebKey
+	algs    []jose.SignatureAlgorithm
 }
 
 // Authenticator verifies credentials and builds subjects. Groups,
@@ -104,7 +105,12 @@ func New(c *config.Config, client *http.Client, h *policy.Holder) (*Authenticato
 		now:    time.Now,
 	}
 	for _, ic := range c.AllIssuers() {
-		is := &issuer{cfg: ic}
+		is := &issuer{cfg: ic, clients: map[string]*config.DelegatedClient{}}
+		for i := range is.cfg.DelegatedClients {
+			for _, id := range is.cfg.DelegatedClients[i].MatchIDs() {
+				is.clients[id] = &is.cfg.DelegatedClients[i]
+			}
+		}
 		if ic.SAML {
 			a.byName[ic.Name] = is
 			continue
@@ -304,17 +310,10 @@ func (a *Authenticator) delegatedClient(ctx context.Context, is *issuer, claims 
 		return nil, nil
 	}
 	claim, value := tokenClient(claims)
-	for i := range is.cfg.DelegatedClients {
-		c := &is.cfg.DelegatedClients[i]
-		list := c.AZP
-		if claim == "appid" {
-			list = c.AppID
-		}
-		if claim != "" && slices.Contains(list, value) {
-			audit.SetAuthMethod(ctx, audit.AuthOAuthDelegated)
-			audit.SetClient(ctx, c.ID, clientName(c))
-			return c, nil
-		}
+	if c := is.clients[strings.ToLower(value)]; c != nil && claim != "" {
+		audit.SetAuthMethod(ctx, audit.AuthOAuthDelegated)
+		audit.SetClient(ctx, c.ID, clientName(c))
+		return c, nil
 	}
 	if is.cfg.RequireKnownClient {
 		if claim == "" {
@@ -323,6 +322,10 @@ func (a *Authenticator) delegatedClient(ctx context.Context, is *issuer, claims 
 		shown := audit.Truncate(value, 128)
 		a.warnOnce("client:"+is.cfg.Name+":"+shown, "token of an undeclared client refused (require_known_client)", "issuer", is.cfg.Name, claim, shown)
 		return nil, &Error{Status: http.StatusForbidden, Reason: "unknown_client", Message: "issuer " + is.cfg.Name + " requires a known client: " + claim + " " + shown + " is not a delegated client"}
+	}
+	if claim != "" {
+		shown := audit.Truncate(value, 128)
+		a.warnOnce("client:"+is.cfg.Name+":"+shown, "token of a client that is not a delegated client: it holds the full rights of its user (declare it in delegated_clients, or set require_known_client)", "issuer", is.cfg.Name, claim, shown)
 	}
 	return nil, nil
 }

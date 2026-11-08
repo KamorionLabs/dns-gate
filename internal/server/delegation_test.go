@@ -251,8 +251,8 @@ func TestRequireKnownClient(t *testing.T) {
 	if r := e.do(t, "GET", "/api/v1/zones/example.com/rrsets", e.clientToken("writer", "azp", "copilot-app"), "", nil); r.StatusCode != 200 {
 		t.Fatalf("known client: %d", r.StatusCode)
 	}
-	if r := e.do(t, "GET", "/api/v1/zones/example.com/rrsets", e.clientToken("writer", "appid", "copilot-app"), "", nil); r.StatusCode != 403 {
-		t.Fatalf("an azp client does not match on appid: %d", r.StatusCode)
+	if r := e.do(t, "GET", "/api/v1/zones/example.com/rrsets", e.clientToken("writer", "appid", "copilot-app"), "", nil); r.StatusCode != 200 {
+		t.Fatalf("a v1 token (appid) of a declared client: %d", r.StatusCode)
 	}
 	denied := 0
 	for _, ev := range e.audit.events {
@@ -260,7 +260,7 @@ func TestRequireKnownClient(t *testing.T) {
 			denied++
 		}
 	}
-	if denied != 4 {
+	if denied != 3 {
 		t.Fatalf("refusals audited: %d", denied)
 	}
 }
@@ -396,4 +396,40 @@ func TestDelegatedClientMCP(t *testing.T) {
 
 func delegatedSubject(scopes ...string) *identity.Subject {
 	return &identity.Subject{Kind: identity.KindOIDC, Issuer: "idp", ID: "writer", Client: &identity.Client{ID: "c"}, Scopes: scopes}
+}
+
+func TestDelegatedClientIDsIgnoreCaseAndClaim(t *testing.T) {
+	e := newEnvWith(t, func(c *config.Config) {
+		c.Issuers[0].DelegatedClients = []config.DelegatedClient{
+			{ID: "copilot", ClientIDs: config.StringList{"AB3BE6B7-F5DF-413D-AC2D-ABF1E3FD9C0B"}, Scopes: []string{scope.DNSRead}, Surfaces: []string{scope.SurfaceAPI}},
+			{ID: "legacy", AZP: config.StringList{"Legacy-App"}, Scopes: []string{scope.DNSRead}, Surfaces: []string{scope.SurfaceAPI}},
+		}
+	})
+	body := `{"ttl":600,"values":["192.0.2.7"]}`
+	for name, tok := range map[string]string{
+		"lowercase azp of an uppercase client id": e.clientToken("writer", "azp", "ab3be6b7-f5df-413d-ac2d-abf1e3fd9c0b"),
+		"v1 appid of a client_ids entry":          e.clientToken("writer", "appid", "ab3be6b7-f5df-413d-ac2d-abf1e3fd9c0b"),
+		"v1 appid of an azp-only entry":           e.clientToken("writer", "appid", "legacy-app"),
+	} {
+		r := e.do(t, "PUT", "/api/v1/zones/example.com/rrsets/www/A", tok, body, nil)
+		if b := errBody(t, r); r.StatusCode != 403 || b.Reason != "scope_insufficient" {
+			t.Errorf("%s: %d %+v", name, r.StatusCode, b)
+		}
+	}
+	if len(e.ops.applied) != 0 {
+		t.Fatal("a delegated write reached the engine")
+	}
+}
+
+func TestStepUpOfDelegatedSubject(t *testing.T) {
+	e := delegatedEnv(t, false)
+	human := &identity.Subject{Issuer: "idp", ID: "u", Category: identity.CategoryHuman, Claims: map[string]any{}}
+	if pe := e.server.stepUp(human, nil); pe == nil || pe.reason != "reauth_required" {
+		t.Fatalf("direct human without auth_time: %+v", pe)
+	}
+	d := *human
+	d.Client, d.Scopes = &identity.Client{ID: "copilot"}, []string{scope.DNSAdopt}
+	if pe := e.server.stepUp(&d, nil); pe != nil {
+		t.Fatalf("a delegated subject is not a person: %+v", pe)
+	}
 }

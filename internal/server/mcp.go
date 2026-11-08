@@ -216,6 +216,7 @@ func (m *mcpServer) audit(ctx context.Context, req *mcp.CallToolRequest, subj *i
 	}
 	if subj != nil {
 		e.Subject, e.SubjectName, e.SubjectCategory, e.Teams = subj.String(), subj.Name, subj.Category, subj.Teams
+		e.SetClient(subj.ClientID(), subj.ClientName())
 	}
 	for k, v := range extra {
 		e.Extra[k] = v

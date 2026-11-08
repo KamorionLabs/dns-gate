@@ -15,7 +15,7 @@ func delegatedSetup(t *testing.T, requireKnown bool) (*Authenticator, func(map[s
 		c.Issuers[0].TokenExchange = true
 		c.Issuers[0].RequireKnownClient = requireKnown
 		c.Issuers[0].DelegatedClients = []config.DelegatedClient{
-			{ID: "copilot", Name: "Copilot", AZP: config.StringList{"copilot-app"}, Scopes: []string{scope.DNSRead}, Zones: []string{"example.com"}, Surfaces: []string{scope.SurfaceMCP}},
+			{ID: "copilot", Name: "Copilot", AZP: config.StringList{"COPILOT-App"}, Scopes: []string{scope.DNSRead}, Zones: []string{"example.com"}, Surfaces: []string{scope.SurfaceMCP}},
 			{ID: "v1", AppID: config.StringList{"v1-app"}, Scopes: []string{scope.DNSPlan, scope.DNSRead}, Surfaces: []string{scope.SurfaceAPI}},
 		}
 	})
@@ -65,8 +65,11 @@ func TestDelegatedClientMatch(t *testing.T) {
 	if err != nil || s.ClientID() != "v1" {
 		t.Fatalf("appid client: %+v %v", s, err)
 	}
-	if s, err := a.AuthenticateFor(bearer(sign(map[string]any{"azp": "v1-app"})), scope.SurfaceAPI); err != nil || s.Client != nil {
-		t.Fatalf("an appid client does not match on azp: %+v %v", s, err)
+	if s, err := a.AuthenticateFor(bearer(sign(map[string]any{"azp": "V1-APP"})), scope.SurfaceAPI); err != nil || s.ClientID() != "v1" {
+		t.Fatalf("client ids match on azp or appid, ignoring case: %+v %v", s, err)
+	}
+	if s, err := a.AuthenticateFor(bearer(sign(map[string]any{"appid": "copilot-app"})), scope.SurfaceMCP); err != nil || s.ClientID() != "copilot" {
+		t.Fatalf("a v1 token of an azp client: %+v %v", s, err)
 	}
 	if s, err := a.AuthenticateFor(bearer(sign(map[string]any{"azp": "other", "appid": "v1-app"})), scope.SurfaceAPI); err != nil || s.Client != nil {
 		t.Fatalf("azp wins over appid: %+v %v", s, err)

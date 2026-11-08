@@ -21,6 +21,7 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
 	"github.com/KamorionLabs/dns-gate/internal/requestid"
+	"github.com/KamorionLabs/dns-gate/internal/scope"
 	"github.com/KamorionLabs/dns-gate/internal/store"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 )
@@ -107,7 +108,7 @@ func (s *Server) requireMeta(subj *identity.Subject, action string) *policyError
 // stepUp requires a recent authentication (and the configured AMR values)
 // from humans before a policy mutation. Pipelines are not concerned.
 func (s *Server) stepUp(subj *identity.Subject, sess *session) *policyError {
-	if subj.Category != identity.CategoryHuman {
+	if subj.Category != identity.CategoryHuman || scope.Delegated(subj) {
 		return nil
 	}
 	var authTime int64
@@ -789,6 +790,7 @@ func (s *Server) policyAudit(r *http.Request, subj *identity.Subject, action, re
 		Subject: subj.String(), SubjectName: subj.Name, SubjectCategory: subj.Category, Teams: subj.Teams,
 		Action: action, Decision: decision, Reason: reason, Extra: map[string]any{},
 	}
+	e.SetClient(subj.ClientID(), subj.ClientName())
 	for k, v := range extra {
 		e.Extra[k] = v
 	}

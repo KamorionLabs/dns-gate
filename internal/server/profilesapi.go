@@ -424,6 +424,7 @@ func (s *Server) profileEvent(ctx context.Context, subj *identity.Subject, actio
 	}
 	if subj != nil {
 		e.Subject, e.SubjectName, e.SubjectCategory, e.Teams = subj.String(), subj.Name, subj.Category, subj.Teams
+		e.SetClient(subj.ClientID(), subj.ClientName())
 	}
 	for k, v := range extra {
 		e.Extra[k] = v

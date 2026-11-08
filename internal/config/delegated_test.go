@@ -53,3 +53,19 @@ func TestDelegatedClients(t *testing.T) {
 		t.Errorf("require_known_client without clients: %v", err)
 	}
 }
+
+func TestDelegatedClientIDs(t *testing.T) {
+	issuer := "    audiences: [dns-gate]\n"
+	y := strings.Replace(base, issuer, issuer+"    delegated_clients:\n      - {id: a, client_ids: [AB-CD], azp: x, scopes: [dns.read]}\n", 1)
+	c, err := Parse([]byte(y), env(map[string]string{"EURODNS_API_KEY": "x"}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ids := c.Issuers[0].DelegatedClients[0].MatchIDs(); !slices.Equal(ids, []string{"ab-cd", "x"}) {
+		t.Fatalf("match ids: %v", ids)
+	}
+	y = strings.Replace(base, issuer, issuer+"    delegated_clients:\n      - {id: a, azp: AB-CD, scopes: [dns.read]}\n      - {id: b, appid: ab-cd, scopes: [dns.read]}\n", 1)
+	if _, err := Parse([]byte(y), env(map[string]string{"EURODNS_API_KEY": "x"})); err == nil || !strings.Contains(err.Error(), "already matches client a") {
+		t.Fatalf("one client id on two clients, whatever the case and the claim: %v", err)
+	}
+}
