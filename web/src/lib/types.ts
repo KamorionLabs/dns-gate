@@ -59,6 +59,30 @@ export interface IssuedToken {
   issuer: string;
 }
 
+/** Consent of a user to an application declared at the gate (GET /api/v1/oauth/grants). */
+export interface OAuthGrant {
+  id: string;
+  client_id: string;
+  client_name: string;
+  subject: string;
+  subject_name?: string;
+  scopes: string[];
+  status: 'active' | 'expired' | 'revoked';
+  created_at: string;
+  consented_at: string;
+  last_used_at: string;
+  /** The earlier of the absolute and the idle expiry. */
+  expires_at: string;
+  revoked_at?: string;
+  revoked_by?: string;
+}
+
+export interface OAuthGrantList {
+  grants: OAuthGrant[];
+  /** The caller holds gate.oauth.manage: it may list and revoke the grants of a client or a user. */
+  manage: boolean;
+}
+
 /** DNS provider of a zone, as the gate names it ("eurodns", "route53"). */
 export type Provider = string;
 

@@ -1,6 +1,6 @@
 // JSON client of /api/v1, independent of the browser globals so it can be
 // tested with a mock fetch.
-import type { ForwardList, IssuedToken, PlanResult, RRsetChange, TeamDetail, TeamList, Transfer, TransferPage, TransferProposal, TransferQuery, ValidationError } from './types';
+import type { ForwardList, IssuedToken, OAuthGrant, OAuthGrantList, PlanResult, RRsetChange, TeamDetail, TeamList, Transfer, TransferPage, TransferProposal, TransferQuery, ValidationError } from './types';
 
 export class ApiError extends Error {
   readonly status: number;
@@ -147,4 +147,39 @@ export function teamsApi(request: Request) {
     renameTeam: (team: string, to: string, comment: string, apply = false) =>
       request<Transfer>('POST', '/api/v1/teams/' + encodeURIComponent(team) + '/rename', apply ? { to, comment, apply } : { to, comment }).then(normT),
   };
+}
+
+/** Filter of the grants of a client or a user (gate.oauth.manage). */
+export interface GrantFilter {
+  client?: string;
+  subject?: string;
+}
+
+/** Connected applications: the OAuth grants of the user, or of a client or user for gate.oauth.manage. */
+export function oauthGrantsApi(request: Request) {
+  const base = '/api/v1/oauth/grants';
+  return {
+    list: (f: GrantFilter = {}) =>
+      request<OAuthGrantList>('GET', base + query(f)).then((l) => ({ ...l, grants: (l.grants ?? []).map((g) => ({ ...g, scopes: g.scopes ?? [] })) })),
+    revoke: (id: string) => request<string>('DELETE', base + '/' + encodeURIComponent(id), undefined, true),
+    revokeAll: (f: GrantFilter) => request<{ revoked: number }>('DELETE', base + query(f)),
+  };
+}
+
+const scopeLabels: Record<string, string> = {
+  'dns.read': 'Read zones, records, teams and the journal',
+  'dns.plan': 'Prepare changes',
+  'dns.write': 'Change records and forwards',
+  'dns.adopt': 'Adopt records',
+  'dns.transfer': 'Ownership transfers',
+  'policy.read': 'Read the policy',
+};
+
+/** Readable label of a scope. */
+export const scopeLabel = (s: string) => scopeLabels[s] ?? s;
+
+/** Active grants first, then the most recently used. */
+export function sortGrants(gs: OAuthGrant[]): OAuthGrant[] {
+  const rank = (g: OAuthGrant) => (g.status === 'active' ? 0 : 1);
+  return [...gs].sort((a, b) => rank(a) - rank(b) || b.last_used_at.localeCompare(a.last_used_at));
 }

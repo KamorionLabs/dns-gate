@@ -20,6 +20,8 @@ import type {
   GeneratedKey,
   ImpactItem,
   Me,
+  OAuthGrant,
+  OAuthGrantList,
   PlanChange,
   PlanResult,
   RRsetChange,
@@ -1892,4 +1894,32 @@ export const fixtureBackend = {
     const key = 'egk_' + randomToken(40);
     return delay({ app_id: 'vk_' + randomToken(6), key, key_sha256: await sha256(key) });
   },
+  oauthGrants: async (): Promise<OAuthGrantList> => delay({ grants: grants.map((g) => ({ ...g })), manage: false }),
+  revokeGrant: async (id: string): Promise<string> => {
+    const g = grants.find((x) => x.id === id);
+    if (!g) throw new ApiError(404, 'not_found', 'no grant ' + id);
+    g.status = 'revoked';
+    g.revoked_at = new Date().toISOString();
+    g.revoked_by = me.subject;
+    return delay('', 300);
+  },
+  revokeGrants: async (): Promise<{ revoked: number }> => {
+    throw new ApiError(403, 'forbidden', 'gate.oauth.manage not granted');
+  },
 };
+
+const grants: OAuthGrant[] = [
+  {
+    id: 'g-demo-skopea',
+    client_id: 'skopea-acme',
+    client_name: 'Skopea — Acme',
+    subject: me.subject,
+    subject_name: me.name,
+    scopes: ['dns.read', 'dns.plan'],
+    status: 'active',
+    created_at: new Date(Date.now() - 12 * 86400e3).toISOString(),
+    consented_at: new Date(Date.now() - 12 * 86400e3).toISOString(),
+    last_used_at: new Date(Date.now() - 3600e3).toISOString(),
+    expires_at: new Date(Date.now() + 14 * 86400e3).toISOString(),
+  },
+];
