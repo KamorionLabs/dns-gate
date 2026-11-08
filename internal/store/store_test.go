@@ -195,6 +195,7 @@ func conformance(t *testing.T, s Store, clock *fakeClock) {
 	t.Run("policy", func(t *testing.T) { policyConformance(t, s) })
 	t.Run("plans", func(t *testing.T) { planConformance(t, s, clock) })
 	t.Run("api_keys", func(t *testing.T) { apiKeyConformance(t, s, clock) })
+	t.Run("oauth", func(t *testing.T) { oauthConformance(t, s, clock) })
 	t.Run("tombstones", func(t *testing.T) { tombstoneConformance(t, s, clock) })
 	t.Run("transfers", func(t *testing.T) { transferConformance(t, s, clock) })
 	t.Run("reassign", func(t *testing.T) { reassignConformance(t, s, clock) })
@@ -313,7 +314,7 @@ func TestPostgres(t *testing.T) {
 	}
 	s := st.(*sqlStore)
 	defer s.Close()
-	for _, table := range []string{"acme_registration", "api_key", "policy_active", "policy_revision", "ownership", "zone_meta", "zone_lock", "audit", "rrset_plan", "ownership_tombstone", "ownership_transfer"} {
+	for _, table := range []string{"acme_registration", "api_key", "policy_active", "policy_revision", "ownership", "zone_meta", "zone_lock", "audit", "rrset_plan", "ownership_tombstone", "ownership_transfer", "oauth_grant", "oauth_code", "oauth_jti"} {
 		if _, err := s.db.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			t.Fatal(err)
 		}
