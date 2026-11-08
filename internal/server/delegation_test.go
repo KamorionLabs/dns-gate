@@ -432,6 +432,7 @@ func TestStepUpOfDelegatedSubject(t *testing.T) {
 	if pe := e.server.stepUp(&d, nil); pe == nil || pe.reason != "reauth_required" {
 		t.Fatalf("a delegated subject never skips the step-up: %+v", pe)
 	}
+	e.server.cfg.Config.Policy.EditMaxAge = config.Duration(time.Hour)
 	d.Claims = map[string]any{"auth_time": float64(time.Now().Unix())}
 	if pe := e.server.stepUp(&d, nil); pe != nil {
 		t.Fatalf("delegated subject with a recent auth_time: %+v", pe)
