@@ -20,6 +20,9 @@ const (
 	DNSAdopt    = "dns.adopt"
 	DNSTransfer = "dns.transfer"
 	PolicyRead  = "policy.read"
+	// OfflineAccess asks the gate authorization server for a refresh
+	// token; it grants no action.
+	OfflineAccess = "offline_access"
 )
 
 // Surfaces a delegated client may use.
@@ -60,8 +63,27 @@ var intentActions = map[identity.Intent]map[string][]string{
 
 // NeverDelegable lists the actions no scope grants, whatever the
 // configuration: policy writes, API keys, zone administration and zone
-// profiles.
-var NeverDelegable = []string{"policy.propose", "policy.approve", "gate.apikey.manage", "dns.zone.admin", "dns.zone.profile"}
+// profiles, OAuth grants.
+var NeverDelegable = []string{"policy.propose", "policy.approve", "gate.apikey.manage", "gate.oauth.manage", "dns.zone.admin", "dns.zone.profile"}
+
+// Label is the description of a scope shown on the consent page.
+func Label(name string) string {
+	switch name {
+	case DNSRead:
+		return "Read the zones, records, teams, transfers and audit you can read"
+	case DNSPlan:
+		return "Prepare changes (plans) on the records you can change, without applying them"
+	case DNSWrite:
+		return "Change and delete the records and forwards you can change"
+	case DNSAdopt:
+		return "Adopt existing records for your teams"
+	case DNSTransfer:
+		return "Propose, approve and reject ownership transfers"
+	case PolicyRead:
+		return "Read the policy and explain who can do what"
+	}
+	return name
+}
 
 // Valid reports whether name is a scope.
 func Valid(name string) bool { return slices.Contains(All, name) }

@@ -24,7 +24,7 @@ var (
 var knownActions = map[string]bool{
 	ActionDNSRead: true, ActionRecordWrite: true, ActionRecordAdopt: true, ActionForwardWrite: true,
 	ActionZoneAdmin: true, ActionZoneProfile: true, ActionDomainRead: true, ActionUIRead: true,
-	ActionAPIKeyManage: true, ActionOwnershipApprove: true,
+	ActionAPIKeyManage: true, ActionOAuthManage: true, ActionOwnershipApprove: true,
 }
 
 func bytesReader(b []byte) io.Reader { return bytes.NewReader(b) }
