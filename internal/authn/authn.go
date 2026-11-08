@@ -69,6 +69,12 @@ type Authenticator struct {
 	now     func() time.Time
 	log     *slog.Logger
 	warned  sync.Map
+
+	oauthClients map[string]*config.OAuthClient
+	clientKeys   map[string]*keySet
+	grants       OAuthGrants
+	grantCache   grantCache
+	clientNoise  noiseCounter
 }
 
 // SetLogger sets the logger of the warnings about refused team names
@@ -99,10 +105,19 @@ func New(c *config.Config, client *http.Client, h *policy.Holder) (*Authenticato
 		}
 	}
 	a := &Authenticator{
-		byURL:  map[string]*issuer{},
-		byName: map[string]*issuer{},
-		policy: h,
-		now:    time.Now,
+		byURL:        map[string]*issuer{},
+		byName:       map[string]*issuer{},
+		policy:       h,
+		now:          time.Now,
+		oauthClients: map[string]*config.OAuthClient{},
+		clientKeys:   map[string]*keySet{},
+	}
+	for i := range c.OAuth.Clients {
+		oc := &c.OAuth.Clients[i]
+		a.oauthClients[oc.ID] = oc
+		if oc.JWKSURI != "" {
+			a.clientKeys[oc.ID] = newKeySet("", oc.JWKSURI, client)
+		}
 	}
 	for _, ic := range c.AllIssuers() {
 		is := &issuer{cfg: ic, clients: map[string]*config.DelegatedClient{}}
@@ -147,6 +162,9 @@ func (a *Authenticator) SetClock(now func() time.Time) {
 		if is.keys != nil {
 			is.keys.now = now
 		}
+	}
+	for _, k := range a.clientKeys {
+		k.now = now
 	}
 }
 
@@ -258,7 +276,7 @@ func (a *Authenticator) authenticateToken(ctx context.Context, raw, surface stri
 		if _, ok := claims[ClaimExchanged]; ok {
 			audit.SetAuthMethod(ctx, audit.AuthTokenExchange)
 		}
-		return a.bindGateToken(claims)
+		return a.bindGateToken(ctx, claims, surface)
 	}
 	for name, patterns := range is.cfg.BoundClaims {
 		if !claimMatches(claims[name], patterns) {
@@ -456,6 +474,18 @@ func (a *Authenticator) Rebind(s *identity.Subject) (*identity.Subject, error) {
 	b, err := a.SubjectFromClaims(s.Issuer, s.Claims, s.Category)
 	if err != nil || s.Client == nil {
 		return b, err
+	}
+	if s.Client.Grant != "" {
+		oc := a.oauthClients[s.Client.ID]
+		if oc == nil || oc.Disabled {
+			return nil, unauthorized("OAuth client " + s.Client.ID + " removed or disabled")
+		}
+		ctx := context.Background()
+		if err := a.checkGrant(ctx, s.Client.Grant, oc.ID, b.String()); err != nil {
+			return nil, err
+		}
+		a.delegateOAuth(ctx, b, oc, s.Client.Grant, s.Scopes)
+		return b, nil
 	}
 	c := a.clientByID(s.Issuer, s.Client.ID)
 	if c == nil {
