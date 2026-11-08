@@ -5,12 +5,15 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,6 +24,7 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/config"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/scope"
+	"github.com/KamorionLabs/dns-gate/internal/store"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 )
 
@@ -950,7 +954,7 @@ func TestWriteMaxAgeCoversTransfers(t *testing.T) {
 	e := newOAuthEnv(t, nil)
 	old := float64(e.clock().Add(-2 * time.Hour).Unix())
 	subj := &identity.Subject{Claims: map[string]any{"auth_time": old}, Client: &identity.Client{ID: "skopea-acme", WriteMaxAge: time.Hour}}
-	for _, required := range [][]string{{scope.DNSWrite}, {scope.DNSTransfer}} {
+	for _, required := range [][]string{{scope.DNSWrite}, {scope.DNSTransfer}, {scope.DNSAdopt}} {
 		if de := e.server.delegatedWriteAge(subj, required); de == nil || de.reason != "reauth_required" || de.required != required[0] {
 			t.Errorf("%v: %+v", required, de)
 		}
@@ -959,5 +963,146 @@ func TestWriteMaxAgeCoversTransfers(t *testing.T) {
 		if de := e.server.delegatedWriteAge(subj, required); de != nil {
 			t.Errorf("%v: %+v", required, de)
 		}
+	}
+}
+
+func TestOAuthPublicClientAlwaysConsents(t *testing.T) {
+	e := newOAuthEnv(t, func(c *config.Config) {
+		c.OAuth.Clients = append(c.OAuth.Clients, testOAuthClient("spa", func(oc *config.OAuthClient) {
+			oc.Type, oc.AuthMethod, oc.RedirectURIs, oc.Scopes = config.OAuthPublic, config.OAuthNone, []string{"https://spa.example/cb"}, []string{scope.DNSRead}
+			oc.DefaultScopes = []string{scope.DNSRead}
+		}))
+	})
+	e.login(t, e.b, "alice@example.com", "DNS-Writers")
+	verifier, challenge := pkcePair()
+	q := url.Values{"response_type": {"code"}, "client_id": {"spa"}, "redirect_uri": {"https://spa.example/cb"}, "code_challenge": {challenge}, "code_challenge_method": {"S256"}}
+	cb, shown := e.authorize(t, q)
+	if !shown {
+		t.Fatal("first consent of a public client")
+	}
+	if r := e.tokenCall(t, oauthTokenPath, url.Values{"grant_type": {"authorization_code"}, "code": {cb.Query().Get("code")}, "client_id": {"spa"},
+		"redirect_uri": {"https://spa.example/cb"}, "code_verifier": {verifier}}, "", ""); r.status != 200 {
+		t.Fatalf("public client exchange: %d %s", r.status, r.err)
+	}
+	if _, shown := e.authorize(t, q); !shown {
+		t.Fatal("consent of a public client remembered")
+	}
+	none := url.Values{}
+	for k, v := range q {
+		none[k] = v
+	}
+	none.Set("prompt", "none")
+	if cb, _ := e.authorize(t, none); cb.Query().Get("error") != "consent_required" {
+		t.Fatalf("prompt=none for a public client: %s", cb)
+	}
+}
+
+func TestOAuthBasicSecretRawOrEncoded(t *testing.T) {
+	secret := "copilot+secret%zz/0123456789abcdefghijklm"
+	e := newOAuthEnv(t, func(c *config.Config) { c.OAuth.Clients[1].Secret = secret })
+	call := func(header string) int {
+		req, _ := http.NewRequest("POST", e.base+oauthTokenPath, strings.NewReader("grant_type=refresh_token&refresh_token=x"))
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(header)))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := call("copilot:" + secret); code != 400 {
+		t.Fatalf("raw secret: %d", code)
+	}
+	if code := call("copilot:" + url.QueryEscape(secret)); code != 400 {
+		t.Fatalf("encoded secret: %d", code)
+	}
+	if code := call("copilot:wrong" + secret); code != 401 {
+		t.Fatalf("wrong secret: %d", code)
+	}
+}
+
+func TestSAMLSessionBaseGroupsOnlyWithOAuthClients(t *testing.T) {
+	for _, withClients := range []bool{false, true} {
+		e := newSAMLEnv(t, func(c *config.Config) {
+			c.UI.SAML.GroupsFromIdentityStore = &config.IdentityStoreGroups{IdentityStoreID: "d-1234567890", Region: "eu-west-1", UserAttribute: "email", UserClaim: "email"}
+			if withClients {
+				c.OAuth.Clients = []config.OAuthClient{testOAuthClient("x", func(oc *config.OAuthClient) { oc.Scopes = []string{scope.DNSRead} })}
+			}
+		})
+		e.server.ui.groups = &fakeGroups{groups: map[string][]string{"alice@example.com": {"DNS-Writers"}}}
+		b := browser()
+		e.login(t, b, "alice@example.com", "Assertion-Group")
+		u, _ := url.Parse(e.base)
+		var sess session
+		for _, c := range b.Jar.Cookies(u) {
+			if c.Name == e.server.ui.cookies.session {
+				if err := e.server.ui.sealer.open(c.Name, c.Value, &sess); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		if sess.StoreGroups != withClients || (len(sess.BaseGroups) > 0) != withClients {
+			t.Fatalf("with clients %v: %+v", withClients, sess)
+		}
+	}
+}
+
+func TestOAuthRememberedCodeOutsideTheGrant(t *testing.T) {
+	e := newOAuthEnv(t, nil)
+	csrf := e.login(t, e.b, "alice@example.com", "DNS-Writers")
+	e.link(t, "dns.read dns.write")
+	verifier, challenge := pkcePair()
+	cb, shown := e.authorize(t, skopeaQuery(challenge, "dns.write"))
+	if shown {
+		t.Fatal("consent not remembered")
+	}
+	var list uiapi.OAuthGrantList
+	_ = getJSON(t, e.b, e.base+"/api/v1/oauth/grants", &list)
+	req, _ := http.NewRequest("DELETE", e.base+"/api/v1/oauth/grants/"+list.Grants[0].ID, nil)
+	req.Header.Set(csrfHeader, csrf)
+	req.Header.Set("Origin", e.base)
+	if r, err := e.b.Do(req); err != nil || r.StatusCode != 204 {
+		t.Fatalf("revoke: %v", err)
+	}
+	e.link(t, "dns.read")
+	r := e.skopeaToken(t, url.Values{"grant_type": {"authorization_code"}, "code": {cb.Query().Get("code")}, "redirect_uri": {skopeaRedirect}, "code_verifier": {verifier}})
+	if r.status != 400 || r.err != "invalid_grant" {
+		t.Fatalf("remembered code wider than the new grant: %d %s", r.status, r.err)
+	}
+}
+
+type failingOAuth struct {
+	store.OAuthStore
+	fail atomic.Bool
+}
+
+func (f *failingOAuth) UpdateOAuthGrant(ctx context.Context, g store.OAuthGrant) error {
+	if f.fail.Load() {
+		return errors.New("store down")
+	}
+	return f.OAuthStore.UpdateOAuthGrant(ctx, g)
+}
+
+func TestOAuthReuseWhenTheRevocationFails(t *testing.T) {
+	e := newOAuthEnv(t, nil)
+	fs := &failingOAuth{OAuthStore: e.server.cfg.OAuth}
+	e.server.cfg.OAuth = fs
+	e.login(t, e.b, "alice@example.com", "DNS-Writers")
+	first := e.link(t, "")
+	if r := e.refresh(t, first.tr.RefreshToken); r.status != 200 {
+		t.Fatalf("refresh: %d", r.status)
+	}
+	e.offset = time.Minute
+	fs.fail.Store(true)
+	if r := e.refresh(t, first.tr.RefreshToken); r.status != 503 {
+		t.Fatalf("reuse with the store down: %d %s", r.status, r.err)
+	}
+	if ev := e.eventsOf("oauth.refresh_reuse"); len(ev) != 1 || ev[0].Decision != "error" {
+		t.Fatalf("reuse audit: %+v", ev)
+	}
+	fs.fail.Store(false)
+	if r := e.refresh(t, first.tr.RefreshToken); r.status != 400 {
+		t.Fatalf("reuse once the store is back: %d", r.status)
 	}
 }

@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -91,12 +92,12 @@ func checkDelegated(subj *identity.Subject, required []string, known bool, what 
 
 // delegatedWriteAge refuses the writes of a subject delegated to a
 // declared OAuth client with write_max_age (routes and tools requiring
-// dns.write or dns.transfer only) when its last sign-in at the gate is
-// older:
+// dns.write, dns.transfer or dns.adopt only) when its last sign-in at the
+// gate is older:
 // reauth_required, the client sends the user to /oauth/authorize with
 // prompt=login.
 func (s *Server) delegatedWriteAge(subj *identity.Subject, required []string) *delegationError {
-	if !scope.Delegated(subj) || subj.Client.WriteMaxAge <= 0 || len(required) != 1 || (required[0] != scope.DNSWrite && required[0] != scope.DNSTransfer) {
+	if !scope.Delegated(subj) || subj.Client.WriteMaxAge <= 0 || len(required) != 1 || !slices.Contains([]string{scope.DNSWrite, scope.DNSTransfer, scope.DNSAdopt}, required[0]) {
 		return nil
 	}
 	at, _ := subj.Claims["auth_time"].(float64)

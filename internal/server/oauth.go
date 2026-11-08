@@ -238,7 +238,7 @@ func (s *Server) authorizeDeclared(w http.ResponseWriter, r *http.Request, a *au
 		return
 	}
 	if r.Method == http.MethodGet {
-		remembered := !a.prompts("consent") && s.consentRemembered(r.Context(), a, subj)
+		remembered := !a.prompts("consent") && a.client.Confidential() && s.consentRemembered(r.Context(), a, subj)
 		switch {
 		case remembered:
 			s.issueCode(w, r, a, subj, sess, false)
@@ -448,6 +448,12 @@ func (s *Server) redeemCode(w http.ResponseWriter, r *http.Request, oc *config.O
 		} else {
 			g = cur
 			for _, sc := range d.Scopes {
+				if !d.Consented && !slices.Contains(g.Scopes, sc) {
+					fail("the scopes of the code are not granted: authorize again")
+					return
+				}
+			}
+			for _, sc := range d.Scopes {
 				if !slices.Contains(g.Scopes, sc) {
 					g.Scopes = append(g.Scopes, sc)
 				}
@@ -589,10 +595,15 @@ func (s *Server) refreshOnce(w http.ResponseWriter, r *http.Request, oc *config.
 		writeJSON(w, http.StatusOK, tokenResponse{AccessToken: p.Access, TokenType: "Bearer", ExpiresIn: p.Expires - now.Unix(), RefreshToken: p.Refresh, Scope: p.Scope})
 		return true, false
 	case ref.Generation >= g.BaseGeneration && ref.Generation < g.Generation:
-		s.revokeGrant(ctx, g, "gate", "refresh_reuse")
-		s.oauthAudit(r, nil, "oauth.refresh_reuse", oc, g.ID, "deny", "refresh_reuse", map[string]any{
-			"subject": g.Subject, "generation": ref.Generation, "current_generation": g.Generation,
-		})
+		extra := map[string]any{"subject": g.Subject, "generation": ref.Generation, "current_generation": g.Generation}
+		if err := s.revokeGrant(ctx, g, "gate", "refresh_reuse"); err != nil {
+			s.log.Error("oauth refresh reuse: grant not revoked", "grant", g.ID, "err", err)
+			extra["message"] = "the grant could not be revoked"
+			s.oauthAudit(r, nil, "oauth.refresh_reuse", oc, g.ID, "error", "refresh_reuse", extra)
+			tokenFail(w, http.StatusServiceUnavailable, "temporarily_unavailable", "")
+			return true, false
+		}
+		s.oauthAudit(r, nil, "oauth.refresh_reuse", oc, g.ID, "deny", "refresh_reuse", extra)
 		tokenFail(w, http.StatusBadRequest, "invalid_grant", "refresh token reused: the grant is revoked")
 		return true, false
 	default:

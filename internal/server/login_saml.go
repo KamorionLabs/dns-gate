@@ -114,7 +114,7 @@ func (u *uiAuth) samlACS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sess := session{Issuer: u.issuer.Name, Claims: claims, Expires: exp.Unix(), AMR: amr}
-	if u.storeGroups() {
+	if u.storeGroups() && u.oauthClients {
 		sess.StoreGroups, sess.BaseGroups = true, base
 	}
 	if !res.AuthnInstant.IsZero() {

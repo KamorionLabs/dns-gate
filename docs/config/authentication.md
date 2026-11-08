@@ -180,7 +180,7 @@ oauth:
 | `id` | (required) | Lowercase identifier, the OAuth `client_id`. Unique, never `dns-gate-relay` nor the id of a delegated client of an issuer. |
 | `name` | `id` | Display name, from this file only (the client never chooses it). |
 | `type` | `confidential` | `confidential` (authenticates at the token endpoint) or `public` (`auth_method: none`, PKCE only). |
-| `auth_method` | `none` for public clients | `private_key_jwt` (RFC 7523, with `jwks_uri` or an inline `jwks` of public keys), `client_secret_basic` or `client_secret_post` (the secret from `DNS_GATE_OAUTH_CLIENT_<ID>_SECRET` or `_FILE`, at least 32 characters, compared in constant time; both methods accept the secret in the `Authorization: Basic` header or in the form). |
+| `auth_method` | `none` for public clients | `private_key_jwt` (RFC 7523, with `jwks_uri` or an inline `jwks` of public keys), `client_secret_basic` or `client_secret_post` (the secret from `DNS_GATE_OAUTH_CLIENT_<ID>_SECRET` or `_FILE`, at least 32 characters, compared in constant time; both methods accept the secret in the `Authorization: Basic` header, URL-encoded or not, or in the form). Two client ids may not map to the same variable. |
 | `redirect_uris` | (required) | Exact HTTPS redirect URIs (no wildcard, fragment, user information, quote or space). |
 | `scopes` | (required) | Ceiling of the client, the scopes of [delegated clients](#delegated-clients). Lowering it applies to the tokens in circulation at their next request. |
 | `default_scopes` | `[dns.read]` if in `scopes` | Granted when the request names no scope; a subset of `scopes`. |
@@ -189,7 +189,7 @@ oauth:
 | `refresh_idle_ttl` | `14d` | A grant unused this long expires. |
 | `refresh_max_ttl` | `90d` | Absolute lifetime of a grant from the last consent (at most `180d`). |
 | `claims_max_age` | `7d` | Age of the session claims (groups) a refresh may replay; then the user signs in again. With `ui.saml.groups_from_identity_store`, the groups are looked up again at every refresh instead, and a user the identity store no longer knows is refused. |
-| `write_max_age` | none | `dns.write` and `dns.transfer` then need a sign-in at the gate within this time (`403 reauth_required`, the client sends the user to `/oauth/authorize?prompt=login`). |
+| `write_max_age` | none | `dns.write`, `dns.transfer` and `dns.adopt` then need a sign-in at the gate within this time (`403 reauth_required`, the client sends the user to `/oauth/authorize?prompt=login`). |
 | `require_pkce` | `true` | PKCE S256 is always required; `false` is refused. |
 | `disabled` | `false` | Cuts every grant of the client at its next request (`401`), and its sign-ins. |
 
@@ -213,9 +213,11 @@ authorization codes and client assertion ids live in the store.
 - **Consent** shows the configured client name, the user, the scopes in words, the
   zones and the duration, posted with the CSRF token and a same-origin check; the page
   may only post to the gate and the redirect URI (`form-action`) and is never framed.
-  Consent is remembered per client and user: a request within the scopes already
-  granted gets its code without the page (unless `prompt=consent`), a wider one shows
-  the page again and the grant then holds the union (incremental consent).
+  Consent is remembered per client and user for confidential clients: a request
+  within the scopes already granted gets its code without the page (unless
+  `prompt=consent`), a wider one shows the page again and the grant then holds the
+  union (incremental consent). Public clients always get the consent page
+  (`prompt=none` answers `consent_required`).
 - `POST /oauth/token`: `authorization_code` (codes are stored, single use, 2 minutes,
   bound to the client, the redirect URI and the PKCE verifier) and `refresh_token`.
   One grant per client and user: a new authorization of the same user replaces the

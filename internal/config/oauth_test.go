@@ -101,6 +101,10 @@ func TestOAuthClients(t *testing.T) {
 	if _, err := Parse([]byte(oauthDoc()), env(stray)); err == nil || !strings.Contains(err.Error(), "does not use a client secret") {
 		t.Errorf("secret of a key client: %v", err)
 	}
+	clash := strings.Replace(oauthDoc(), "    - id: copilot\n", "    - id: a.b\n      auth_method: private_key_jwt\n      jwks_uri: https://a.example/jwks\n      redirect_uris: [https://a.example/cb]\n      scopes: [dns.read]\n    - id: a-b\n      auth_method: private_key_jwt\n      jwks_uri: https://a.example/jwks\n      redirect_uris: [https://a.example/cb]\n      scopes: [dns.read]\n    - id: copilot\n", 1)
+	if _, err := Parse([]byte(clash), env(vars)); err == nil || !strings.Contains(err.Error(), "share the secret variable") {
+		t.Errorf("two clients, one secret variable: %v", err)
+	}
 	doc := strings.Replace(oauthDoc(), "issuers:\n", "issuers:\n  - name: entra\n    issuer: https://login.example.net\n    audiences: [x]\n    delegated_clients: [{id: copilot, azp: abc, scopes: [dns.read]}]\n", 1)
 	if _, err := Parse([]byte(doc), env(vars)); err == nil || !strings.Contains(err.Error(), "already a delegated client") {
 		t.Errorf("id of a delegated client: %v", err)

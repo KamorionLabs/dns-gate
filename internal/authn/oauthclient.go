@@ -55,7 +55,7 @@ func (a *Authenticator) OAuthClient(id string) *config.OAuthClient { return a.oa
 // (oauth.client_auth), aggregated per client, source and minute.
 func (a *Authenticator) AuthenticateClient(r *http.Request, form url.Values, audiences []string, useJTI UseJTI) (*config.OAuthClient, *ClientError) {
 	ctx := r.Context()
-	id, secret, basic, cerr := clientCredentials(r, form)
+	id, secret, rawSecret, basic, cerr := clientCredentials(r, form)
 	if cerr != nil {
 		return nil, a.clientFailure(r, id, cerr)
 	}
@@ -83,8 +83,9 @@ func (a *Authenticator) AuthenticateClient(r *http.Request, form url.Values, aud
 		if secret == "" || assertion != "" {
 			return nil, a.clientFailure(r, id, &ClientError{Code: "invalid_client", Message: "client secret required", Basic: basic})
 		}
-		got, want := sha256.Sum256([]byte(secret)), sha256.Sum256([]byte(oc.Secret))
-		if subtle.ConstantTimeCompare(got[:], want[:]) != 1 {
+		want := sha256.Sum256([]byte(oc.Secret))
+		got, raw := sha256.Sum256([]byte(secret)), sha256.Sum256([]byte(rawSecret))
+		if subtle.ConstantTimeCompare(got[:], want[:])|subtle.ConstantTimeCompare(raw[:], want[:]) != 1 {
 			return nil, a.clientFailure(r, id, &ClientError{Code: "invalid_client", Message: "invalid client secret", Basic: basic})
 		}
 	case oc.AuthMethod == config.OAuthPrivateKeyJWT:
@@ -103,31 +104,35 @@ func (a *Authenticator) AuthenticateClient(r *http.Request, form url.Values, aud
 }
 
 // clientCredentials reads the client id and secret of HTTP Basic or of the
-// form; both at once are refused.
-func clientCredentials(r *http.Request, form url.Values) (id, secret string, basic bool, err *ClientError) {
+// form; both at once are refused. Basic credentials are URL-decoded (RFC
+// 6749 2.3.1); rawSecret is the secret as sent, for clients that do not
+// encode it.
+func clientCredentials(r *http.Request, form url.Values) (id, secret, rawSecret string, basic bool, err *ClientError) {
 	id = form.Get("client_id")
 	authz := r.Header.Get("Authorization")
 	if authz == "" {
-		return id, form.Get("client_secret"), false, nil
+		s := form.Get("client_secret")
+		return id, s, s, false, nil
 	}
 	scheme, raw, ok := strings.Cut(authz, " ")
 	if !ok || !strings.EqualFold(scheme, "Basic") {
-		return id, "", false, &ClientError{Code: "invalid_client", Message: "only Basic client authentication is accepted in Authorization"}
+		return id, "", "", false, &ClientError{Code: "invalid_client", Message: "only Basic client authentication is accepted in Authorization"}
 	}
 	user, pass, ok := basicAuth(raw)
-	if ok {
-		var e1, e2 error
-		user, e1 = url.QueryUnescape(user)
-		pass, e2 = url.QueryUnescape(pass)
-		ok = e1 == nil && e2 == nil
-	}
 	if !ok || user == "" {
-		return id, "", true, &ClientError{Code: "invalid_client", Message: "malformed Basic credentials", Basic: true}
+		return id, "", "", true, &ClientError{Code: "invalid_client", Message: "malformed Basic credentials", Basic: true}
+	}
+	rawSecret, secret = pass, pass
+	if d, err := url.QueryUnescape(pass); err == nil {
+		secret = d
+	}
+	if d, err := url.QueryUnescape(user); err == nil {
+		user = d
 	}
 	if form.Get("client_secret") != "" || (id != "" && id != user) {
-		return user, "", true, &ClientError{Code: "invalid_request", Message: "several client authentication methods", Basic: true}
+		return user, "", "", true, &ClientError{Code: "invalid_request", Message: "several client authentication methods", Basic: true}
 	}
-	return user, pass, true, nil
+	return user, secret, rawSecret, true, nil
 }
 
 func assertionSubject(raw string) string {

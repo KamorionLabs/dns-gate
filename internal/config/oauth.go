@@ -168,7 +168,12 @@ func (c *Config) validateOAuth(add func(string, ...any)) {
 		}
 	}
 	ids := map[string]bool{}
+	envs := map[string]string{}
 	for i, oc := range c.OAuth.Clients {
+		if other, ok := envs[oc.SecretEnv()]; ok {
+			add("oauth.clients[%d].id: %q and %q share the secret variable %s", i, other, oc.ID, oc.SecretEnv())
+		}
+		envs[oc.SecretEnv()] = oc.ID
 		at := fmt.Sprintf("oauth.clients[%d]", i)
 		switch {
 		case !nameRe.MatchString(oc.ID):
