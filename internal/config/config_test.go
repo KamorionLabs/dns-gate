@@ -223,6 +223,35 @@ func TestSubjectTemplate(t *testing.T) {
 	}
 }
 
+func TestIssuerEmailClaims(t *testing.T) {
+	e := env(map[string]string{"EURODNS_API_KEY": "k"})
+	with := func(extra string) string {
+		return strings.Replace(base, "audiences: [dns-gate]", "audiences: [dns-gate]\n    "+extra, 1)
+	}
+	c, err := Parse([]byte(with("email_claim: upn\n    email_verified_claim: xms_edov\n    email_trusted: true")), e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if is := c.Issuers[0]; is.EmailClaim != "upn" || is.EmailVerifiedClaim != "xms_edov" || is.EmailTrusted == nil || !*is.EmailTrusted {
+		t.Fatalf("issuer: %+v", is)
+	}
+	for _, bad := range []string{`email_claim: "e mail"`, `email_verified_claim: "a/b"`} {
+		if _, err := Parse([]byte(with(bad)), e); err == nil {
+			t.Errorf("%q: expected an error", bad)
+		}
+	}
+	self := strings.Replace(base, "roles:", `  - name: gate
+    self: true
+    issuer: https://dns.example.com
+    audiences: [https://dns.example.com]
+    email_claim: email
+roles:`, 1)
+	_, err = Parse([]byte(self), env(map[string]string{"EURODNS_API_KEY": "k", "DNS_GATE_TOKEN_SIGNING_KEY": ecPEM(t)}))
+	if err == nil || !strings.Contains(err.Error(), "email_claim: not used by the gate issuer") {
+		t.Fatalf("email_claim on the gate issuer: %v", err)
+	}
+}
+
 func TestGroupsAndPolicySection(t *testing.T) {
 	e := env(map[string]string{"EURODNS_API_KEY": "k"})
 	groups := "\ngroups:\n  admins:\n    members:\n      - issuer: ci\n        claims: {roles: [Gate.PolicyAdmin]}\n"

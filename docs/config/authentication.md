@@ -17,7 +17,9 @@ Trusted OIDC token issuers, for bearer tokens (`Authorization: Bearer <JWT>`) an
 | `subject_template` | | Composite subject id instead of `subject_claim`, e.g. `"{{tid}}/{{oid}}"`; every referenced claim must be a non-empty string. |
 | `team_claim` | | Claim (string or list) whose values are added to the subject teams, after `team_claim_prefix`. |
 | `team_claim_prefix` | | Prepended to every `team_claim` value: the teams of the claim form the family `<prefix>*` of this issuer, and only that family. Required once a [`teams`](policy.md#teams) block exists. |
-| `email_trusted` | `true` | Whether the `email` claim of this issuer identifies a person for the [two-person rule](policy.md#ownership) of transfers (an `email_verified: false` claim always excludes it). |
+| `email_trusted` | unset | `false`: the email of this issuer never identifies a person for the [two-person rule](policy.md#ownership) of transfers and is never returned by `GET /api/v1/me`. `true`: the administrator vouches for every value of `email_claim`, which `/me` then returns without a verification claim. Unset: the two-person rule uses the `email` claim (as with `true`), `/me` returns the email only when `email_verified_claim` is true. See [Email of the subject](#email-of-the-subject). |
+| `email_claim` | `email` | Claim holding the email returned by `GET /api/v1/me` (`email`, `upn`, `preferred_username`...). |
+| `email_verified_claim` | `email_verified` | Claim that must be true for `GET /api/v1/me` to return the email (Entra ID: `xms_edov`). Present and not true, it always withholds the email. |
 | `name_claim` | subject id | Claim shown as display name in the UI and the audit log. |
 | `category` | `pipeline` | `human` or `pipeline`, static. UI sessions are always `human`. |
 | `category_claim`, `category_map` | | Derive the category from a claim value, e.g. `idtyp` with `{app: pipeline, user: human}`; unmapped values fall back to `category`. |
@@ -35,6 +37,27 @@ Tokens must carry `exp` and the subject claim(s). Keys are cached and refetched 
 Claim matching (`bound_claims`, `bindings[].subjects[].claims`): a string claim must match one of the globs; an array claim (Entra `roles`, `groups`) matches when **it contains** a value matching one of the globs. Booleans and numbers are compared as text; other types never match.
 
 Examples: AWS IAM outbound identity federation (`sts:GetWebIdentityToken`, the issuer URL is given by `aws iam get-outbound-web-identity-federation-info`, `sub` is the role ARN), GitHub Actions (`https://token.actions.githubusercontent.com`), Kubernetes projected service account tokens (cluster OIDC issuer, custom audience), any corporate IdP.
+
+### Email of the subject
+
+`GET /api/v1/me` returns `email` only when the issuer vouches for the address; otherwise
+the field is absent, never derived from the display name or the subject id. An
+application that links its users to the gate (a [declared OAuth client](#oauth-clients))
+compares it to the email it knows, case-insensitively.
+
+| Caller | `email` of `/api/v1/me` |
+|---|---|
+| SAML login (session, gate token, OAuth client) | The mapped `email` attribute, else the NameID when the IdP sends it with the `emailAddress` format. |
+| OIDC issuer (bearer token, UI session, token exchange, delegated client) | `email_claim` when `email_verified_claim` is true. Without that claim, only with `email_trusted: true`. Never with `email_trusted: false`. |
+| Declared OAuth client | The email of the session the user authorized, under the rules of its issuer. A refresh replays it within `claims_max_age`; past it (identity store groups only), the email is omitted until the user authorizes again. |
+| API key, virtual key | None. |
+
+The value must be a bare address (`user@domain`, no display name, at most 254 characters).
+
+`email_trusted: true` is a decision of the administrator: the issuer then vouches for
+every value of `email_claim`, verified or not. Most IdPs (Google, Keycloak, Okta,
+Auth0, Cognito, Dex) send `email_verified` and need nothing. Entra ID does not: see
+[Entra ID](#entra-id).
 
 ### Gate-issued tokens
 
@@ -188,7 +211,7 @@ oauth:
 | `access_token_ttl` | `10m` | Lifetime of the access tokens, 1 minute to the gate issuer `token_ttl`. |
 | `refresh_idle_ttl` | `14d` | A grant unused this long expires. |
 | `refresh_max_ttl` | `90d` | Absolute lifetime of a grant from the last consent (at most `180d`). |
-| `claims_max_age` | `7d` | Age of the session claims (groups) a refresh may replay; then the user signs in again. With `ui.saml.groups_from_identity_store`, the groups are looked up again at every refresh instead, and a user the identity store no longer knows is refused. |
+| `claims_max_age` | `7d` | Age of the session claims (groups, email) a refresh may replay; then the user signs in again. With `ui.saml.groups_from_identity_store`, the groups are looked up again at every refresh instead, and a user the identity store no longer knows is refused; the [email](#email-of-the-subject) of the grant is then omitted from the tokens past this age, until the user authorizes again. |
 | `write_max_age` | none | `dns.write`, `dns.transfer` and `dns.adopt` then need a sign-in at the gate within this time (`403 reauth_required`, the client sends the user to `/oauth/authorize?prompt=login`). |
 | `require_pkce` | `true` | PKCE S256 is always required; `false` is refused. |
 | `disabled` | `false` | Cuts every grant of the client at its next request (`401`), and its sign-ins. |
@@ -275,6 +298,17 @@ issuers:
 - Issuers are fixed tenants only: `/common`, `/organizations` and `/consumers` are refused (their `iss` is not fixed). v2 (`https://login.microsoftonline.com/<tid>/v2.0`) and v1 (`https://sts.windows.net/<tid>/`) are accepted when configured explicitly; for v1 the JWKS URL defaults to the tenant keys (`https://login.microsoftonline.com/<tid>/discovery/v2.0/keys`). Entra audiences must be the application id (GUID) or an `api://` URI.
 - App registration of the gate: expose an Application ID URI (`api://dns-gate`), set `accessTokenAcceptedVersion: 2` in the manifest (tokens then carry the v2 issuer), declare **app roles** (for example `DNS.Write`, `DNS.Read` for applications, `DNS.Admin` for users) and set *Assignment required* on the enterprise application so only assigned identities obtain a token.
 - Bind on `oid` (object id of the managed identity or service principal, stable) or on `roles` (app roles assigned in Entra). `sub` is pairwise per application and `appid`/`azp` identify the client application, not the identity.
+- Email of the subject (`GET /api/v1/me`, for applications that link users by email): Entra sends no `email_verified`, and its optional `email` claim is the `mail` attribute, which an administrator can set to any address (and which, for a guest, comes from another tenant). With the default settings, `/me` returns no email. Choose one:
+    - `email_verified_claim: xms_edov`, with the optional claims `email` and `xms_edov` added to the tokens (ID token for the UI login, access token for bearer tokens): Entra vouches that the domain of the address is verified by its owner.
+    - `email_claim: upn` (optional claim) or `preferred_username` (v2, scope `profile`) with `email_trusted: true`: the user principal name, in a domain verified by the tenant. Right for a tenant whose members sign in with their email address, wrong when the UPN differs from the email or for guests (`…#EXT#@…`, `preferred_username` set by the home tenant).
+
+```yaml
+issuers:
+  - name: entra
+    # ...
+    email_claim: upn            # or: email_verified_claim: xms_edov
+    email_trusted: true
+```
 
 ```yaml
 bindings:

@@ -50,6 +50,10 @@ type grantSession struct {
 	AMR         []string       `json:"amr,omitempty"`
 	StoreGroups bool           `json:"sg,omitempty"`
 	BaseGroups  []string       `json:"bg,omitempty"`
+	// ClaimsAt is when Claims were taken from the session (Unix time): the
+	// identity store refresh keeps the claims past claims_max_age, but no
+	// longer vouches for their email.
+	ClaimsAt int64 `json:"ca,omitempty"`
 }
 
 // codeData is the content of a stored authorization code.
@@ -425,7 +429,7 @@ func (s *Server) redeemCode(w http.ResponseWriter, r *http.Request, oc *config.O
 		fail("the identity is no longer allowed")
 		return
 	}
-	snap, _ := json.Marshal(grantSession{Claims: d.Session.Claims, AMR: d.Session.AMR, StoreGroups: d.Session.StoreGroups, BaseGroups: d.Session.BaseGroups})
+	snap, _ := json.Marshal(grantSession{Claims: d.Session.Claims, AMR: d.Session.AMR, StoreGroups: d.Session.StoreGroups, BaseGroups: d.Session.BaseGroups, ClaimsAt: s.now().Unix()})
 	refresh, nonce := "", ""
 	var g *store.OAuthGrant
 	for attempt := 0; ; attempt++ {
@@ -613,7 +617,7 @@ func (s *Server) refreshOnce(w http.ResponseWriter, r *http.Request, oc *config.
 	if json.Unmarshal(g.Session, &sess) != nil {
 		return deny("invalid grant", nil)
 	}
-	claimsAt := g.ClaimsAt
+	claimsAt, emailAt := g.ClaimsAt, g.ClaimsAt
 	if sess.StoreGroups && s.ui.storeGroups() && g.Issuer == s.ui.issuer.Name {
 		claims := map[string]any{}
 		for k, v := range sess.Claims {
@@ -628,7 +632,7 @@ func (s *Server) refreshOnce(w http.ResponseWriter, r *http.Request, oc *config.
 		if !found {
 			return deny("the user is no longer in the identity store", nil)
 		}
-		sess.Claims, claimsAt = claims, now
+		sess.Claims, claimsAt, emailAt = claims, now, time.Unix(sess.ClaimsAt, 0)
 	} else if now.Sub(g.ClaimsAt) > oc.ClaimsMaxAge.D() {
 		return deny("the claims of the grant are older than claims_max_age: authorize again", nil)
 	}
@@ -670,6 +674,7 @@ func (s *Server) refreshOnce(w http.ResponseWriter, r *http.Request, oc *config.
 	tok, err := s.cfg.Authn.TokenIssuer().Issue(authn.TokenRequest{
 		Origin: g.Issuer, Subject: subj.ID, Category: identity.CategoryHuman, Claims: sess.Claims,
 		AuthTime: g.AuthTime, AMR: sess.AMR, MaxExpiry: exp, Client: oc.ID, Scopes: scopes, Grant: g.ID,
+		NoEmail: now.Sub(emailAt) > oc.ClaimsMaxAge.D(),
 	}, now)
 	if err != nil {
 		return deny("the grant expired", nil)

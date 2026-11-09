@@ -81,6 +81,11 @@ type Result struct {
 	AssertionID         string
 }
 
+// EmailNameID reports whether the NameID has the emailAddress format.
+func (r *Result) EmailNameID() bool {
+	return r.NameIDFormat == string(saml.EmailAddressNameIDFormat)
+}
+
 // New builds a provider. client fetches idp_metadata_url.
 func New(c config.UISAML, client *http.Client) (*Provider, error) {
 	if client == nil {

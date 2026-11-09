@@ -559,3 +559,56 @@ func TestSAMLConnectInfo(t *testing.T) {
 		t.Fatalf("resource metadata: %v", rm)
 	}
 }
+
+func TestSAMLEmail(t *testing.T) {
+	e := newSAMLEnv(t, func(c *config.Config) {
+		c.UI.SAML.Attributes = map[string]string{"name_id_format": "nif"}
+	})
+	signIn := func(nameID, format string, attrs map[string][]string) (*http.Client, map[string]any) {
+		t.Helper()
+		b := browser()
+		in := e.startLogin(t, b, "")
+		a := e.assertion(in, nameID, "DNS-Writers")
+		a.NameIDFormat = format
+		for k, v := range attrs {
+			a.Attributes[k] = v
+		}
+		if attrs != nil && attrs["email"] == nil {
+			delete(a.Attributes, "email")
+		}
+		if r := e.post(t, b, e.idp.Response(a), in.RelayState); r.StatusCode != http.StatusSeeOther {
+			t.Fatalf("acs: %d", r.StatusCode)
+		}
+		var me map[string]any
+		if code := getJSON(t, b, e.base+"/api/v1/me", &me); code != 200 {
+			t.Fatalf("me: %d", code)
+		}
+		return b, me
+	}
+	persistent := "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent"
+
+	b, me := signIn("alice", persistent, map[string][]string{"email": {"alice@example.com"}})
+	if me["email"] != "alice@example.com" {
+		t.Fatalf("email attribute: %v", me)
+	}
+	_, tok, _ := issueToken(t, e, b, csrfOf(b, e.base), e.base)
+	r := e.do(t, "GET", "/api/v1/me", tok.AccessToken, "", nil)
+	var viaToken uiapi.Me
+	_ = json.NewDecoder(r.Body).Decode(&viaToken)
+	if r.StatusCode != 200 || viaToken.Email != "alice@example.com" {
+		t.Fatalf("gate token: %d %+v", r.StatusCode, viaToken)
+	}
+
+	if _, me = signIn("bob@example.com", "", map[string][]string{}); me["email"] != "bob@example.com" {
+		t.Fatalf("emailAddress NameID: %v", me)
+	}
+	if _, me = signIn("bob@example.com", persistent, map[string][]string{}); me["email"] != nil {
+		t.Fatalf("persistent NameID taken for an email: %v", me)
+	}
+	if _, me = signIn("bob@example.com", persistent, map[string][]string{"nif": {"email"}}); me["email"] != nil {
+		t.Fatalf("NameID format forged by an attribute: %v", me)
+	}
+	if _, me = signIn("bob", "", map[string][]string{}); me["email"] != nil {
+		t.Fatalf("NameID that is not an address: %v", me)
+	}
+}

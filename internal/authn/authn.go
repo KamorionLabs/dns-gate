@@ -530,6 +530,7 @@ func (a *Authenticator) bind(is *issuer, claims map[string]any) (*identity.Subje
 		Claims:   claims,
 		Name:     id,
 		Category: is.cfg.Category,
+		Email:    subjectEmail(is.cfg, claims),
 	}
 	if is.cfg.CategoryClaim != "" {
 		if v, ok := claims[is.cfg.CategoryClaim].(string); ok {

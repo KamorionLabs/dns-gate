@@ -307,7 +307,7 @@ The full list is in the `Error` schema of the OpenAPI document.
 | Path | Description |
 |---|---|
 | `GET /.well-known/dns-gate` | version and features, unauthenticated |
-| `/api/v1/me`, `/api/v1/connect`, `/api/v1/zones`, `/api/v1/zones/{zone}/rrsets` | identity and effective permissions, Connect page data, zones (managed, then unmanaged with `"unmanaged": true`), inventory; `ui.read` (`dns.read` for unmanaged zones) |
+| `/api/v1/me`, `/api/v1/connect`, `/api/v1/zones`, `/api/v1/zones/{zone}/rrsets` | identity (`email` only when the issuer vouches for it, see [Email of the subject](config/authentication.md#email-of-the-subject)) and effective permissions, Connect page data, zones (managed, then unmanaged with `"unmanaged": true`), inventory; `ui.read` (`dns.read` for unmanaged zones) |
 | `/api/v1/zones/{zone}/rrsets/{host}/{type}`, `…/forwards[/{host}]` | single RRsets and URL forwards |
 | `…/rrsets/{host}/{type}/propagation` | [propagation check](#dns-propagation) |
 | `POST /api/v1/zones/{zone}/plan`, `/apply` | [plan and apply](#plan-and-apply) |

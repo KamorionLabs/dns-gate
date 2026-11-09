@@ -2175,6 +2175,16 @@ components:
         subject: { type: string }
         name: { type: string }
         category: { type: string }
+        email:
+          type: string
+          format: email
+          description: >-
+            Email address the issuer of the caller vouches for: the SAML email
+            attribute or email-format NameID, the email claim of an OIDC issuer when
+            verified (email_claim, email_verified_claim) or trusted (email_trusted),
+            the email of the session a declared OAuth client was authorized with
+            (within claims_max_age). Absent otherwise (API keys, virtual keys,
+            unverified claims); never derived from name or subject.
         roles: { type: array, items: { type: string } }
         teams: { type: array, items: { type: string } }
         groups: { type: array, items: { type: string } }

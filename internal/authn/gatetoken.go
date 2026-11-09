@@ -43,6 +43,7 @@ var registeredClaims = map[string]bool{
 	"iss": true, "aud": true, "exp": true, "nbf": true, "iat": true, "jti": true,
 	"auth_time": true, "amr": true, ClaimOrigin: true, ClaimCategory: true, ClaimExchanged: true,
 	ClaimClientID: true, ClaimScope: true, ClaimGrant: true, ClaimActor: true, "may_act": true, "cnf": true,
+	ClaimNoEmail: true,
 }
 
 // TokenIssuer signs the gate's own access tokens (issuer with self: true).
@@ -81,6 +82,9 @@ type TokenRequest struct {
 	Client string
 	Scopes []string
 	Grant  string
+	// NoEmail withholds the email of the session from the subject of the
+	// token (ClaimNoEmail).
+	NoEmail bool
 }
 
 func newTokenIssuer(ic config.Issuer) (*TokenIssuer, error) {
@@ -166,6 +170,9 @@ func (t *TokenIssuer) Issue(req TokenRequest, now time.Time) (*IssuedToken, erro
 	}
 	if req.Exchanged != "" {
 		claims[ClaimExchanged] = req.Exchanged
+	}
+	if req.NoEmail {
+		claims[ClaimNoEmail] = true
 	}
 	signer := t.signer
 	if req.Client != "" {
