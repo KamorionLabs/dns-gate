@@ -393,8 +393,15 @@ func TestUIAPIWithBearer(t *testing.T) {
 	r := e.do(t, "GET", "/api/v1/me", tok, "", nil)
 	var me uiapi.Me
 	_ = json.NewDecoder(r.Body).Decode(&me)
-	if me.Name != "writer@example.com" || me.Category != "pipeline" || me.Teams[0] != "web" {
+	if me.Name != "writer@example.com" || me.Category != "pipeline" || me.Teams[0] != "web" || me.Email != "" {
 		t.Fatalf("me: %+v", me)
+	}
+	verified := e.idp.Sign(map[string]any{"sub": "writer", "aud": "dns-gate", "email": "writer@example.com", "email_verified": true})
+	r = e.do(t, "GET", "/api/v1/me", verified, "", nil)
+	me = uiapi.Me{}
+	_ = json.NewDecoder(r.Body).Decode(&me)
+	if r.StatusCode != 200 || me.Email != "writer@example.com" {
+		t.Fatalf("me with a verified email: %d %+v", r.StatusCode, me)
 	}
 	r = e.do(t, "GET", "/api/v1/zones", tok, "", nil)
 	var zs []uiapi.ZoneSummary

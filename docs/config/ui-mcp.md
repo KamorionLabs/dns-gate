@@ -58,7 +58,7 @@ bindings:
 | `ui.saml.entity_id` | (required) | SP entity id, which the IdP puts in the assertion audience. |
 | `ui.saml.acs_url` | (required) | `https://<gate>/auth/saml/acs`; its origin is the origin of the UI (CSRF checks, cookies). |
 | `ui.saml.idp_metadata_url`, `ui.saml.idp_metadata` | (one required) | IdP metadata, fetched over HTTPS (cached per instance for 24 h, the previous copy kept when a refresh fails) or inline XML. It gives the IdP entity id, its signing certificates and its single sign-on URL. |
-| `ui.saml.name_id_format` | `unspecified` | `unspecified`, `email`, `persistent` or `transient`, requested in the AuthnRequest. The NameID is the subject id (`sub`): avoid `transient`, whose value changes at each login. |
+| `ui.saml.name_id_format` | `unspecified` | `unspecified`, `email`, `persistent` or `transient`, requested in the AuthnRequest. The NameID is the subject id (`sub`): avoid `transient`, whose value changes at each login. Without an `email` attribute, a NameID the IdP sends with the `emailAddress` format is the [email](authentication.md#email-of-the-subject) of `GET /api/v1/me`. |
 | `ui.saml.attributes` | `{email: email, name: name, groups: groups}` | Claim to SAML attribute (`Name` or `FriendlyName`) mapping; the given entries are added to the defaults. A single value becomes a string claim, several a list; `groups` is always a list. An `amr` entry feeds the authentication methods instead of a claim. Unmapped attributes are dropped. |
 | `ui.saml.team_claim`, `ui.saml.team_claim_prefix` | | As `issuers[].team_claim` and `team_claim_prefix`. |
 | `ui.saml.groups_from_identity_store.identity_store_id` | | Identity store (`d-xxxxxxxxxx`) whose groups are looked up at login. |

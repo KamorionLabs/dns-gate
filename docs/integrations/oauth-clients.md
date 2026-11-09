@@ -55,7 +55,11 @@ or `client_secret_post` instead, the secret comes from
   `403 not_delegable` (the endpoint is never open to applications), `invalid_grant` on
   refresh (link again).
 - `GET /api/v1/me` gives the client, the scopes and the permissions after the cap:
-  what to enable in the interface.
+  what to enable in the interface. To check that the linked user is the user of the
+  application, compare its `email` (case-insensitively) right after the code exchange:
+  it is present only when the issuer of the user vouches for it
+  ([Email of the subject](../config/authentication.md#email-of-the-subject)); without
+  it, ask the administrator of the gate rather than reading `name` or `subject`.
 - Unlink: `POST /oauth/revoke` with the refresh token.
 
 Applications never reach policy writes, API keys, gate tokens, the token exchange,

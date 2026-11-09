@@ -9,6 +9,8 @@ export interface Me {
   subject: string;
   name: string;
   category: Category;
+  /** Address the issuer vouches for; absent when none. */
+  email?: string;
   roles: string[];
   teams: string[];
   groups?: string[];

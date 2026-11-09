@@ -35,6 +35,9 @@ type Subject struct {
 
 	Name     string // display name (email, pipeline name, key id)
 	Category string // CategoryHuman | CategoryPipeline | CategoryKey
+	// Email is the address the issuer vouches for (authn), empty when
+	// none.
+	Email string
 
 	// Addr is the source address of the request of an API key subject.
 	Addr netip.Addr

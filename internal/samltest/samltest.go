@@ -91,6 +91,8 @@ type Assertion struct {
 	Audience   string
 	NameID     string
 	Attributes map[string][]string
+	// NameIDFormat overrides the emailAddress format of the NameID.
+	NameIDFormat string
 
 	IssueInstant time.Time
 	AuthnInstant time.Time
@@ -126,6 +128,10 @@ func (i *IdP) Response(a Assertion) string {
 	if a.Issuer != "" {
 		issuer = a.Issuer
 	}
+	format := string(saml.EmailAddressNameIDFormat)
+	if a.NameIDFormat != "" {
+		format = a.NameIDFormat
+	}
 	key, cert := i.key, i.cert
 	if a.WrongKey {
 		key, cert = KeyPair("rogue")
@@ -134,7 +140,7 @@ func (i *IdP) Response(a Assertion) string {
 		ID: "id-" + randomHex(), IssueInstant: a.IssueInstant, Version: "2.0",
 		Issuer: saml.Issuer{Format: "urn:oasis:names:tc:SAML:2.0:nameid-format:entity", Value: issuer},
 		Subject: &saml.Subject{
-			NameID: &saml.NameID{Format: string(saml.EmailAddressNameIDFormat), Value: a.NameID},
+			NameID: &saml.NameID{Format: format, Value: a.NameID},
 			SubjectConfirmations: []saml.SubjectConfirmation{{
 				Method: "urn:oasis:names:tc:SAML:2.0:cm:bearer",
 				SubjectConfirmationData: &saml.SubjectConfirmationData{

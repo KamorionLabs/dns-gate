@@ -487,9 +487,17 @@ type Issuer struct {
 	NameClaim       string `yaml:"name_claim"` // display name claim (default: the subject)
 	// EmailTrusted tells whether the email claim of this issuer identifies
 	// a person for the two-person rule of transfers (default true; an
-	// email_verified claim set to false always excludes it).
-	EmailTrusted *bool  `yaml:"email_trusted"`
-	Category     string `yaml:"category"` // human | pipeline (default pipeline)
+	// email_verified claim set to false always excludes it). For the email
+	// of GET /api/v1/me, false never returns it, true returns EmailClaim
+	// without a verification claim, unset requires EmailVerifiedClaim.
+	EmailTrusted *bool `yaml:"email_trusted"`
+	// EmailClaim is the claim holding the email of GET /api/v1/me
+	// (default email).
+	EmailClaim string `yaml:"email_claim"`
+	// EmailVerifiedClaim is the claim that must be true for GET /api/v1/me
+	// to return the email (default email_verified; Entra ID: xms_edov).
+	EmailVerifiedClaim string `yaml:"email_verified_claim"`
+	Category           string `yaml:"category"` // human | pipeline (default pipeline)
 
 	// SubjectClaim is the claim used as subject id (default "sub").
 	// SubjectTemplate builds a composite id instead, e.g. "{{tid}}/{{oid}}".
@@ -1098,6 +1106,14 @@ func (c *Config) Validate() error {
 		}
 		if len(is.CategoryMap) > 0 && is.CategoryClaim == "" {
 			add("%s.category_map: category_claim required", at)
+		}
+		for _, f := range [][2]string{{"email_claim", is.EmailClaim}, {"email_verified_claim", is.EmailVerifiedClaim}} {
+			switch {
+			case f[1] != "" && is.Self:
+				add("%s.%s: not used by the gate issuer (its tokens use the issuer of the session)", at, f[0])
+			case f[1] != "" && !claimNameRe.MatchString(f[1]):
+				add("%s.%s: %q is not a claim name", at, f[0], f[1])
+			}
 		}
 		for v, cat := range is.CategoryMap {
 			if cat != "human" && cat != "pipeline" {

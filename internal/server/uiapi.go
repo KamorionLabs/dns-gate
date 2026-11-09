@@ -158,6 +158,7 @@ func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
 			Subject:     me.String(),
 			Name:        me.Name,
 			Category:    me.Category,
+			Email:       me.Email,
 			Roles:       nonNil(me.Roles),
 			Teams:       nonNil(me.Teams),
 			Groups:      nonNil(me.Groups),

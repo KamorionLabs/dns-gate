@@ -26,9 +26,12 @@ import (
 
 // Me describes the logged-in user.
 type Me struct {
-	Subject     string       `json:"subject"`  // issuer:id
-	Name        string       `json:"name"`     // display name
-	Category    string       `json:"category"` // human | pipeline | key
+	Subject  string `json:"subject"`  // issuer:id
+	Name     string `json:"name"`     // display name
+	Category string `json:"category"` // human | pipeline | key
+	// Email is the address the issuer of the caller vouches for, omitted
+	// when none (never derived from the name or the subject).
+	Email       string       `json:"email,omitempty"`
 	Roles       []string     `json:"roles"`
 	Teams       []string     `json:"teams"`
 	Groups      []string     `json:"groups"`

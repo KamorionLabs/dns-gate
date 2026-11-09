@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 
+	"github.com/KamorionLabs/dns-gate/internal/authn"
 	"github.com/KamorionLabs/dns-gate/internal/identitystore"
 	"github.com/KamorionLabs/dns-gate/internal/samlauth"
 )
@@ -141,6 +142,10 @@ func (u *uiAuth) samlClaims(ctx context.Context, res *samlauth.Result) (map[stri
 		default:
 			claims[claim] = anyList(vals)
 		}
+	}
+	delete(claims, authn.ClaimNameIDFormat)
+	if res.EmailNameID() {
+		claims[authn.ClaimNameIDFormat] = "email"
 	}
 	base := policyClaimStrings(claims["groups"])
 	if _, err := u.mergeStoreGroups(ctx, claims, base); err != nil {

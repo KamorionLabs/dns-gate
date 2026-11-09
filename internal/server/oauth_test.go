@@ -298,7 +298,7 @@ func TestOAuthClientLink(t *testing.T) {
 		t.Fatalf("access token: %s %v", typ, claims)
 	}
 	code200, me := e.me(t, res.tr.AccessToken)
-	if code200 != 200 || me.Subject != "identity-center:alice@example.com" || me.Client == nil || me.Client.ID != "skopea-acme" || len(me.Scopes) != 1 {
+	if code200 != 200 || me.Subject != "identity-center:alice@example.com" || me.Email != "alice@example.com" || me.Client == nil || me.Client.ID != "skopea-acme" || len(me.Scopes) != 1 {
 		t.Fatalf("me: %d %+v", code200, me)
 	}
 	if r := e.do(t, "PUT", "/api/v1/zones/example.com/rrsets/www/A", res.tr.AccessToken, `{"ttl":300,"records":["192.0.2.1"]}`, nil); r.StatusCode != 403 || reason(t, r) != "scope_insufficient" {
@@ -529,6 +529,9 @@ func TestOAuthGrantExpiry(t *testing.T) {
 	e.offset = 40 * time.Hour
 	if res = e.refresh(t, res.tr.RefreshToken); res.status != 200 {
 		t.Fatalf("refresh within the idle time: %d %s", res.status, res.err)
+	}
+	if code, me := e.me(t, res.tr.AccessToken); code != 200 || me.Email != "alice@example.com" {
+		t.Fatalf("email after a refresh within claims_max_age: %d %+v", code, me)
 	}
 	e.offset = 73 * time.Hour
 	if r := e.refresh(t, res.tr.RefreshToken); r.status != 400 || r.err != "invalid_grant" {
@@ -826,12 +829,25 @@ func TestOAuthIdentityStoreGroupsAtRefresh(t *testing.T) {
 	e.server.ui.groups = fg
 	e.login(t, e.b, "alice@example.com")
 	res := e.link(t, "")
+	if code, me := e.me(t, res.tr.AccessToken); code != 200 || me.Email != "alice@example.com" {
+		t.Fatalf("email of the grant: %d %+v", code, me)
+	}
+	e.offset = 30 * time.Minute
+	if res = e.refresh(t, res.tr.RefreshToken); res.status != 200 {
+		t.Fatalf("refresh within claims_max_age: %d %s", res.status, res.err)
+	}
+	if code, me := e.me(t, res.tr.AccessToken); code != 200 || me.Email != "alice@example.com" {
+		t.Fatalf("email within claims_max_age: %d %+v", code, me)
+	}
 	e.offset = 2 * time.Hour
 	if res = e.refresh(t, res.tr.RefreshToken); res.status != 200 {
 		t.Fatalf("refresh with reloaded groups after claims_max_age: %d %s", res.status, res.err)
 	}
-	if len(fg.asked) != 2 {
+	if len(fg.asked) != 3 {
 		t.Fatalf("identity store lookups: %v", fg.asked)
+	}
+	if code, me := e.me(t, res.tr.AccessToken); code != 200 || me.Email != "" || me.Subject != "identity-center:alice@example.com" {
+		t.Fatalf("email of claims older than claims_max_age: %d %+v", code, me)
 	}
 	fg.groups["alice@example.com"] = []string{"Other"}
 	if r := e.refresh(t, res.tr.RefreshToken); r.status != 400 || r.err != "invalid_grant" {
