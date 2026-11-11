@@ -51,6 +51,9 @@ func rrsetPlan(zone string, p provider.Provider, sets map[dns.Key]dns.RRset, own
 		if key.Type == "" {
 			return nil, fail(ReasonInvalid, "type is required for host %q", c.Host)
 		}
+		if msg := dns.HostProblem(key.Host, zone); msg != "" {
+			return nil, fail(ReasonInvalid, "%s: %s", keyString(key), msg)
+		}
 		if seen[key] {
 			return nil, fail(ReasonInvalid, "%s appears twice in the request", keyString(key))
 		}
@@ -101,6 +104,9 @@ func rrsetPlan(zone string, p provider.Provider, sets map[dns.Key]dns.RRset, own
 		norm, err := p.Normalize(zone, n)
 		if err != nil {
 			return nil, upstreamError("normalize", err)
+		}
+		if norm.Key.Host != key.Host {
+			return nil, fail(ReasonInvalid, "%s: provider %s would write it as host %q", keyString(key), p.ID(), norm.Key.Host)
 		}
 		norm.Key = key
 		if !exists {

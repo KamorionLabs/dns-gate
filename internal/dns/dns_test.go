@@ -1,6 +1,7 @@
 package dns
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/KamorionLabs/eurodns-go/rrset"
@@ -36,6 +37,30 @@ func TestNormalizeHost(t *testing.T) {
 	} {
 		if got := NormalizeHost(in[0], in[1]); got != want {
 			t.Errorf("NormalizeHost(%q,%q)=%q want %q", in[0], in[1], got, want)
+		}
+	}
+}
+
+func TestHostProblem(t *testing.T) {
+	const zone = "example.com"
+	for _, h := range []string{"@", "www", "a.b", "_acme-challenge.www", "*", "*.wild", "com", "example", "xexample.com", "example.com.x"} {
+		if msg := HostProblem(h, zone); msg != "" {
+			t.Errorf("HostProblem(%q) = %q, want none", h, msg)
+		}
+	}
+	for _, h := range []string{
+		"", "example.com", "www.example.com", "a.example.com.example.com", "WWW", "www.", `\119ww`, `a\.b`,
+		"a b", "a\tb", "a\nb", ".a", "a..b", strings.Repeat("a.", 127),
+	} {
+		if msg := HostProblem(h, zone); msg == "" {
+			t.Errorf("HostProblem(%q) accepted", h)
+		}
+	}
+	// Whatever the input, a normalized host that passes is stable.
+	for _, in := range []string{"example.com.example.com", "www.example.com.example.com.", "Example.COM.", "a.example.com"} {
+		h := NormalizeHost(in, zone)
+		if HostProblem(h, zone) == "" && NormalizeHost(h, zone) != h {
+			t.Errorf("%q normalizes to %q, accepted but not stable", in, h)
 		}
 	}
 }
