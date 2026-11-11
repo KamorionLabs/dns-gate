@@ -78,6 +78,9 @@ func rrsetKey(zoneIn, hostIn, typeIn string) (string, dns.Key, string) {
 		return "", dns.Key{}, "invalid zone"
 	}
 	host := dns.NormalizeHost(hostIn, zone)
+	if msg := dns.HostProblem(host, zone); msg != "" {
+		return "", dns.Key{}, "invalid host: " + msg
+	}
 	if host != dns.Apex {
 		if len(host) > 253 {
 			return "", dns.Key{}, "invalid host"

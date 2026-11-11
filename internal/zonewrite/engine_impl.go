@@ -676,6 +676,11 @@ func (e *engine) validate(ctx context.Context, s *identity.Subject, p provider.P
 	var tombs map[dns.Key]store.Tombstone
 	for i := range plan.Changes {
 		c := &plan.Changes[i]
+		// Every check below is made on c.Key: the provider must write that
+		// name and no other.
+		if msg := dns.HostProblem(c.Key.Host, zone); msg != "" {
+			return nil, fail(ReasonInvalid, "%s: %s", keyString(c.Key), msg)
+		}
 		writes := e.allowRRset(&plan.grants, s, policy.WriteAction(c.Key), zone, c.Key)
 		legacy := c.Key.IsForward() && plan.ForeignForwards
 		zoneAdmin := legacy && !writes && e.allowRRset(&plan.grants, s, policy.ActionZoneAdmin, zone, c.Key)
@@ -708,6 +713,9 @@ func (e *engine) validate(ctx context.Context, s *identity.Subject, p provider.P
 			n, err := p.Normalize(zone, *c.New)
 			if err != nil {
 				return nil, upstreamError("normalize", err)
+			}
+			if n.Key.Host != c.Key.Host {
+				return nil, fail(ReasonInvalid, "%s: provider %s would write it as host %q", keyString(c.Key), p.ID(), n.Key.Host)
 			}
 			n.Key = c.Key
 			c.New = &n

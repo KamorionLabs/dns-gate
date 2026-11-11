@@ -146,6 +146,38 @@ func NormalizeHost(host, zone string) string {
 	return h
 }
 
+// maxHostLen is the longest name of the DNS in presentation form.
+const maxHostLen = 253
+
+// HostProblem explains why a host, as returned by NormalizeHost for zone, is
+// refused as the name of an RRset the gate writes; "" when it is fine.
+//
+// The host must be canonical: normalizing it again must return it unchanged.
+// A relative host equal to the zone or ending in ".<zone>" is not, since a
+// provider reading it as a name of the zone would write another RRset (the
+// apex, or the host before the suffix) than the one the gate authorized.
+// Escapes are refused for the same reason: "\119ww" is "www" on the wire.
+func HostProblem(host, zone string) string {
+	if host == Apex {
+		return ""
+	}
+	if len(host) > maxHostLen {
+		return fmt.Sprintf("the host is longer than %d characters", maxHostLen)
+	}
+	for _, r := range host {
+		if r == '\\' || r <= ' ' || r == 0x7f {
+			return "the host contains an escape, a space or a control character"
+		}
+	}
+	if host == "" || strings.HasPrefix(host, ".") || strings.Contains(host, "..") {
+		return "the host has an empty label"
+	}
+	if NormalizeHost(host, zone) != host {
+		return fmt.Sprintf("the host is ambiguous: relative to %s it still names the zone; write it relative to the zone, once", NormalizeZone(zone))
+	}
+	return ""
+}
+
 // ContentHash identifies the content of an RRset (TTL and values, order
 // insensitive). For RRsets without alias nor forward it is byte for byte the
 // hash of eurodns-go rrset.ContentHash, so ownership entries written before
