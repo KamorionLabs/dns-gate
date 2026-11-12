@@ -221,6 +221,7 @@ type Checker struct {
 	inflight chan struct{}
 	mu       sync.Mutex
 	cache    map[string]cached
+	targets  map[string]cachedTarget
 	buckets  map[string]*list.Element
 	subjects *list.List
 }

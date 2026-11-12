@@ -44,10 +44,14 @@ type Record struct {
 	Forward *dns.Forward `json:"forward,omitempty"`
 	Status  string       `json:"status"`
 	Owner   string       `json:"owner,omitempty"`
+	// TargetOwner and Targets: see uiapi.RRset (target_owners, resolve).
+	TargetOwner string                   `json:"target_owner,omitempty"`
+	Targets     []uiapi.TargetResolution `json:"targets,omitempty"`
 }
 
 func compactRecord(zone string, rs uiapi.RRset) Record {
-	r := Record{Zone: zone, Host: rs.Host, Type: rs.Type, TTL: rs.TTL, Alias: rs.Alias, Forward: rs.Forward, Status: rs.Status, Owner: rs.Owner}
+	r := Record{Zone: zone, Host: rs.Host, Type: rs.Type, TTL: rs.TTL, Alias: rs.Alias, Forward: rs.Forward, Status: rs.Status, Owner: rs.Owner,
+		TargetOwner: rs.TargetOwner, Targets: rs.Targets}
 	if len(rs.Values) > 0 {
 		r.Values = append([]string{}, rs.Values...)
 	}

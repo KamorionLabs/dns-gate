@@ -117,7 +117,7 @@ nav:
       - EuroDNS: providers/eurodns.md
   - Reference:
       - Configuration:
-          - Overview, store, audit, propagation: CONFIG.md
+          - Overview, store, audit, propagation, target owners: CONFIG.md
           - Providers, discovery, folders: config/providers.md
           - Issuers and keys: config/authentication.md
           - Roles, teams, bindings: config/policy.md

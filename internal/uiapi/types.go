@@ -146,6 +146,11 @@ type RRset struct {
 	Adopted       bool         `json:"adopted"`
 	ExpiresAt     *time.Time   `json:"expires_at,omitempty"`
 	LastRequestID string       `json:"last_request_id,omitempty"`
+	// TargetOwner labels the target of the RRset with who runs it, from
+	// the target_owners table of the configuration.
+	TargetOwner string `json:"target_owner,omitempty"`
+	// Targets is how the targets resolve, when asked (resolve=true).
+	Targets []TargetResolution `json:"targets,omitempty"`
 }
 
 // Actor is who did something.

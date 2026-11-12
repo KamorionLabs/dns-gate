@@ -554,7 +554,21 @@ paths:
       tags: [zones]
       operationId: getZoneInventory
       summary: RRsets of a zone with their ownership
-      description: Requires ui.read on the zone. The ETag is the gate version of the zone.
+      description: >-
+        Requires ui.read on the zone. The ETag is the gate version of the zone.
+        RRsets whose target matches the `target_owners` table of the configuration carry `target_owner`.
+        With `resolve=true`, the targets of CNAME, alias, APEX, MX, NS, SRV and PTR RRsets are resolved
+        through the public resolvers of the propagation check (`targets`).
+      parameters:
+        - name: resolve
+          in: query
+          required: false
+          description: >-
+            Resolve the targets of the RRsets: status, CNAME chain, addresses and takeover risk. At most 256
+            distinct targets per request, the others are `skipped`; results are cached for a minute and a
+            request that resolves anything counts against the per-subject limit of the propagation check
+            (`429` with `Retry-After` beyond). `400 resolve_unavailable` when the propagation check is disabled.
+          schema: { type: boolean, default: false }
       responses:
         "200":
           description: Inventory.
@@ -2466,6 +2480,34 @@ components:
         adopted: { type: boolean }
         expires_at: { type: string, format: date-time }
         last_request_id: { type: string }
+        target_owner: { type: string, description: "Who runs the target of the RRset, from the target_owners table of the configuration (first match, in value order)." }
+        targets:
+          type: array
+          description: How the targets resolve, only with resolve=true.
+          items: { $ref: "#/components/schemas/TargetResolution" }
+
+    TargetResolution:
+      type: object
+      required: [name, status]
+      properties:
+        name: { type: string, description: "Target, absolute with a trailing dot." }
+        status:
+          type: string
+          enum: [live, nxdomain, nodata, servfail, timeout, skipped]
+          description: >-
+            live: resolves to addresses; nxdomain: the target or a name of its chain does not exist;
+            nodata: exists without A or AAAA; servfail: the resolvers failed (SERVFAIL, REFUSED, filtered);
+            timeout: no answer in time; skipped: beyond 256 targets in one request.
+        chain: { type: array, items: { type: string }, description: CNAME chain followed from the target. }
+        addresses: { type: array, items: { type: string }, description: A and AAAA records at the end of the chain (at most 8). }
+        resolver: { type: string, description: Public resolver that answered. }
+        takeover_risk:
+          type: string
+          description: >-
+            Third-party service (AWS CloudFront, AWS S3, Azure App Service, Heroku, GitHub Pages...) of a target
+            that does not resolve: whoever claims that name there would serve the host.
+        error: { type: string }
+        cached: { type: boolean }
 
     ZoneInventory:
       type: object

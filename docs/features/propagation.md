@@ -91,3 +91,42 @@ gate needs outbound UDP and TCP port 53 to the resolvers and to the zones' name
 servers (the Helm chart's NetworkPolicy allows DNS to any address). The resolver list,
 timeouts and limits: [propagation settings](../CONFIG.md#propagation-check). A check
 only reads: it is not audited, and it never asks names outside the managed zones.
+
+## Target resolution
+
+`list_rrsets`, `get_rrset` (MCP) and `GET /api/v1/zones/{zone}/rrsets?resolve=true`
+also resolve the **targets** of record sets: the name of a CNAME, an alias, a EuroDNS
+APEX, an MX, NS, SRV or PTR. Each target is asked to the public resolvers of the check
+(unfiltered ones first, a second one when the first fails), recursively, A then AAAA:
+
+| Status | Meaning |
+|---|---|
+| `live` | resolves to addresses, directly or at the end of its CNAME `chain` |
+| `nxdomain` | the target, or a name of its chain, does not exist |
+| `nodata` | the name exists without address |
+| `servfail` | the resolvers failed (SERVFAIL, REFUSED, filtered) |
+| `timeout` | no answer in time |
+| `skipped` | beyond 256 targets in one request: filter on host or type |
+
+A target that does not resolve (`nxdomain`, `nodata`) on a service where anyone can
+claim a released name (CloudFront, S3, Azure App Service, Traffic Manager, Blob
+Storage, Heroku, GitHub Pages, Netlify, Vercel, Shopify...) carries `takeover_risk`
+with the service: whoever creates that distribution, bucket or app again would
+serve the host. Delete or repoint such records first. A target that still resolves
+can be dangling too (an S3 website endpoint answers for any bucket name): DNS alone
+does not tell.
+
+> Which CNAMEs of example.com point to something that no longer exists?
+
+Tool `list_rrsets` (`zone`, `type: CNAME`, `resolve: true`).
+
+Resolutions are cached for one minute, whoever asks. A request that has to ask
+anything counts once against `propagation.requests_per_minute` of its subject and
+against `propagation.max_in_flight` (`429` with `Retry-After` beyond, the MCP tools
+answer `rate_limited`); a request is bounded to 10 seconds. Only names read from the
+zones of the gate are resolved, never a name given by the caller. Without the
+propagation check, `resolve` answers `400 resolve_unavailable`.
+
+Targets are labelled with who runs them by the [`target_owners`](../CONFIG.md#target-owners)
+table of the configuration (`target_owner`), with or without `resolve`.
+

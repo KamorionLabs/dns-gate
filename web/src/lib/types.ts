@@ -153,6 +153,21 @@ export interface RRset {
   adopted: boolean;
   expires_at?: string;
   last_request_id?: string;
+  /** Who runs the target, from target_owners in the configuration. */
+  target_owner?: string;
+  /** How the targets resolve, only with resolve=true. */
+  targets?: TargetResolution[];
+}
+
+export interface TargetResolution {
+  name: string;
+  status: 'live' | 'nxdomain' | 'nodata' | 'servfail' | 'timeout' | 'skipped';
+  chain?: string[];
+  addresses?: string[];
+  resolver?: string;
+  takeover_risk?: string;
+  error?: string;
+  cached?: boolean;
 }
 
 export interface ZoneInventory {

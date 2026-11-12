@@ -6,7 +6,7 @@ A complete example is in [`examples/config.yaml`](../examples/config.yaml); a sm
 
 | Page | Sections |
 |---|---|
-| This page | [secrets](#secrets), [top level and limits](#top-level), [store](#store), [audit](#audit), [propagation check](#propagation-check) |
+| This page | [secrets](#secrets), [top level and limits](#top-level), [store](#store), [audit](#audit), [propagation check](#propagation-check), [target owners](#target-owners) |
 | [Providers, discovery and folders](config/providers.md) | `providers`, zone discovery, EuroDNS folders, zone profiles |
 | [Issuers and keys](config/authentication.md) | `issuers`, gate-issued tokens, token exchange, delegated clients and scopes, `oauth.clients`, Entra ID, Azure DevOps, `virtual_keys` |
 | [Roles, teams and bindings](config/policy.md) | `roles`, URL forward rules, `groups`, `teams`, `ownership`, `bindings`, `team_from`, `protected`, adoption and Terraform export |
@@ -134,3 +134,25 @@ Default resolvers, all documented open resolvers needing no account, unfiltered 
 How to read a result, and how answers are compared: [Propagation check](features/propagation.md).
 
 A check is a read: no audit event, a debug log line (`propagation`). The provider re-read of `expect` runs only for callers holding `dns.read` on the whole zone (a record-scoped reader gets the `412`), so no refusal is audited either ([AUDIT.md](AUDIT.md#not-audited)).
+
+
+## Target owners
+
+`target_owners` labels the targets of record sets (CNAME, alias, EuroDNS APEX, MX, NS, SRV, PTR) with who runs them, so that a reader of a zone tells a legacy distribution from a production one without looking it up in each cloud account. The label is the `target_owner` field of the RRsets in `list_rrsets`, `get_rrset` and `GET /api/v1/zones/{zone}/rrsets`.
+
+| Field | Description |
+|---|---|
+| `target_owners[].match` | A suffix (`cloudfront.net` matches `cloudfront.net` and every name below it) or, with `*` or `?`, a glob on the whole name (`d1234*.cloudfront.net`, `*.nbs-aws.com`). Case-insensitive, trailing dot optional. `*` alone is refused. |
+| `target_owners[].owner` | Label shown, 1 to 64 characters. |
+
+The **first** entry that matches wins: list single distributions or accounts before the services they belong to. At most 1024 entries. A target is matched as written in the zone (a relative EuroDNS target is completed with the zone); the CNAME chain behind it is not.
+
+```yaml
+target_owners:
+  - {match: d1a2b3c4d5e6f7.cloudfront.net, owner: NH prod}
+  - {match: "*.nbs-aws.com", owner: NBS legacy}
+  - {match: mail.protection.outlook.com, owner: Microsoft 365}
+  - {match: cloudfront.net, owner: AWS CloudFront (unknown account)}
+```
+
+Resolving the targets (`resolve=true`) needs the propagation check: it uses its resolvers, its per-subject limit and `max_in_flight`, see [target resolution](features/propagation.md#target-resolution).
