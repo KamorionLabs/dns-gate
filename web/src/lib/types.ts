@@ -98,8 +98,10 @@ export interface ZoneSummary {
   foreign: number;
   last_synced_at?: string;
   last_write_at?: string;
-  /** Zone found at the DNS provider but not managed by the gate: read-only, counts are 0 until it was read once. */
+  /** Zone found at the DNS provider but not managed by the gate: read-only. Its counts are absent until it was read once (always present for a managed zone). */
   unmanaged?: boolean;
+  /** Unmanaged domain for which the provider holds no DNS zone (registered only, e.g. parked): its records cannot be read. */
+  no_zone?: boolean;
   /** Folder of the zone at the provider (EuroDNS), "/" for a zone in no folder; absent without folders. */
   folder?: string;
 }

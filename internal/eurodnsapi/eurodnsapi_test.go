@@ -763,7 +763,7 @@ func TestInventoryAndZones(t *testing.T) {
 		t.Fatal("protected flag")
 	}
 	// Tainted counts the missing RRset "api A".
-	if len(sums) != 1 || sums[0].Managed != 1 || sums[0].Tainted != 1 || sums[0].Foreign != 6 || sums[0].RRsets != 7 || sums[0].LastWriteAt == nil {
+	if len(sums) != 1 || *sums[0].Managed != 1 || *sums[0].Tainted != 1 || *sums[0].Foreign != 6 || *sums[0].RRsets != 7 || sums[0].LastWriteAt == nil {
 		t.Fatalf("summary %+v", sums)
 	}
 

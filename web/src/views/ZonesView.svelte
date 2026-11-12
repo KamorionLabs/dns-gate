@@ -252,7 +252,7 @@
                 <a class="zname mono" href={zoneHref(z.zone)}>{z.zone}</a>
                 {#if multiProvider}<ProviderBadge provider={z.provider} />{/if}
                 {#if z.folder}<span class="mmeta fold mono" title="Folder at the DNS provider"><Icon name="folder" size={12} />{z.folder}</span>{/if}
-                {#if z.last_synced_at}<span class="mmeta">{plural(z.rrsets, 'record set')}</span>{/if}
+                {#if z.no_zone}<span class="mmeta" title="The domain is in the provider account but has no DNS zone there (registered only, e.g. parked)">No DNS zone</span>{:else if z.last_synced_at && z.rrsets !== undefined}<span class="mmeta">{plural(z.rrsets, 'record set')}</span>{/if}
                 {#if admin && managing !== z.zone}
                   <button class="btn quiet small manage" type="button" onclick={() => (managing = z.zone)} aria-label="Manage {z.zone}…">Manage…</button>
                 {/if}

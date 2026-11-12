@@ -534,7 +534,7 @@ func (e *env) scenarioACME(t *testing.T) {
 func (e *env) scenarioUIAPI(t *testing.T) {
 	var zones []uiapi.ZoneSummary
 	e.getJSON(t, "ci-web", "/api/v1/zones", &zones)
-	if len(zones) != 1 || zones[0].Zone != zone || zones[0].Managed < 1 || zones[0].Foreign < 1 {
+	if len(zones) != 1 || zones[0].Zone != zone || !zones[0].Counted() || *zones[0].Managed < 1 || *zones[0].Foreign < 1 {
 		t.Errorf("zones summary: %+v", zones)
 	}
 	var inv uiapi.ZoneInventory

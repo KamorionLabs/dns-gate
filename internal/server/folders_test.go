@@ -101,3 +101,53 @@ func TestExplainAndWhoCanByFolder(t *testing.T) {
 		t.Fatalf("who-can: %d %+v", r.StatusCode, wc)
 	}
 }
+
+// TestListZonesCompact: compact=true drops sync and write times, and for an
+// unmanaged zone every count but its total; unknown counts and no_zone come
+// through as they are, in the full and the compact answer.
+func TestListZonesCompact(t *testing.T) {
+	e := folderEnv(t)
+	now := time.Now()
+	e.engine.extra = []uiapi.ZoneSummary{
+		{Zone: "new.example.net", Unmanaged: true, LastSyncedAt: &now, RRsets: uiapi.Count(4), Foreign: uiapi.Count(4),
+			Managed: uiapi.Count(0), Tainted: uiapi.Count(0), Pending: uiapi.Count(0)},
+		{Zone: "other.net", Unmanaged: true, NoZone: true},
+	}
+	cs := connect(t, e, e.token("reader"))
+
+	raw := func(args map[string]any) map[string]map[string]any {
+		t.Helper()
+		var out struct {
+			Zones []map[string]any `json:"zones"`
+		}
+		if res := call(t, cs, "list_zones", args, &out); res.IsError {
+			t.Fatalf("list_zones %v: %s", args, errText(res))
+		}
+		m := map[string]map[string]any{}
+		for _, z := range out.Zones {
+			m[z["zone"].(string)] = z
+		}
+		return m
+	}
+
+	full := raw(map[string]any{})
+	if _, ok := full["other.net"]["rrsets"]; ok || full["other.net"]["no_zone"] != true {
+		t.Fatalf("domain without zone: %v", full["other.net"])
+	}
+	if full["new.example.net"]["foreign"] != float64(4) || full["new.example.net"]["last_synced_at"] == nil {
+		t.Fatalf("read unmanaged zone: %v", full["new.example.net"])
+	}
+
+	compact := raw(map[string]any{"compact": true})
+	for _, k := range []string{"last_synced_at", "last_write_at", "managed", "tainted", "pending", "foreign"} {
+		if _, ok := compact["new.example.net"][k]; ok {
+			t.Fatalf("compact unmanaged zone has %s: %v", k, compact["new.example.net"])
+		}
+	}
+	if compact["new.example.net"]["rrsets"] != float64(4) || compact["new.example.net"]["folder"] != "/ES/Madrid" || compact["other.net"]["no_zone"] != true {
+		t.Fatalf("compact: %v", compact)
+	}
+	if mz := compact["example.com"]; mz["managed"] != float64(1) || mz["rrsets"] != float64(3) || mz["last_synced_at"] != nil {
+		t.Fatalf("compact managed zone: %v", mz)
+	}
+}

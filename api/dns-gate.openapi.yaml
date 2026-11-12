@@ -2236,17 +2236,21 @@ components:
 
     ZoneSummary:
       type: object
-      required: [zone, provider, rrsets, managed, tainted, pending, foreign]
+      description: |
+        A zone. The counts are always present for a managed zone; for an
+        unmanaged zone they are absent until its content has been read once.
+      required: [zone, provider]
       properties:
         zone: { type: string }
         provider: { type: string, description: "Provider instance id, e.g. eurodns or route53-prod." }
         folder: { type: string, description: 'Provider folder of the zone (EuroDNS), "/" for a zone in no folder; absent for providers without folders (Route53) or a zone not listed.', examples: ["/ES/Madrid"] }
         unmanaged: { type: boolean, description: "Discovered, not managed by the gate (read-only)." }
-        rrsets: { type: integer }
-        managed: { type: integer }
-        tainted: { type: integer }
-        pending: { type: integer }
-        foreign: { type: integer }
+        no_zone: { type: boolean, description: "Unmanaged domain of the provider account for which the provider holds no DNS zone (a EuroDNS domain registered only, e.g. parked): its records cannot be read. Known once a read of the zone was refused." }
+        rrsets: { type: integer, description: "Upstream RRsets; absent while unknown." }
+        managed: { type: integer, description: "Absent while unknown." }
+        tainted: { type: integer, description: "Absent while unknown." }
+        pending: { type: integer, description: "Absent while unknown." }
+        foreign: { type: integer, description: "Absent while unknown." }
         last_synced_at: { type: string, format: date-time }
         last_write_at: { type: string, format: date-time }
 
