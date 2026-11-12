@@ -32,6 +32,8 @@ var apiRoutes = []apiRoute{
 	{http.MethodGet, "/api/v1" + claudeDesktopExtensionPath},
 	{http.MethodPost, routeTokens},
 	{http.MethodGet, "/api/v1/zones"},
+	{http.MethodGet, routeRecords},
+	{http.MethodGet, routeRecordsExport},
 	{http.MethodGet, routeZoneRRsets},
 	{http.MethodGet, routeRRset},
 	{http.MethodPut, routeRRset},
