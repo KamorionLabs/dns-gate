@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -113,8 +115,8 @@ func (m *mcpServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, ae.Status, ae.Reason, ae.Message)
 		return
 	}
-	if !m.limiter.allow(subj.String()) {
-		w.Header().Set("Retry-After", "10")
+	if wait := m.limiter.reserve(subj.String()); wait > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(wait.Seconds()))))
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "too many MCP requests")
 		return
 	}
@@ -754,7 +756,12 @@ func newSubjectLimiter(perMinute int, now func() time.Time) *subjectLimiter {
 	return &subjectLimiter{rate: float64(perMinute) / 60, burst: burst, now: now, buckets: map[string]*bucket{}}
 }
 
-func (l *subjectLimiter) allow(subject string) bool {
+func (l *subjectLimiter) allow(subject string) bool { return l.reserve(subject) == 0 }
+
+// reserve takes a token from the bucket of subject and returns 0, or, when
+// the bucket is empty, takes nothing and returns how long until a token is
+// available.
+func (l *subjectLimiter) reserve(subject string) time.Duration {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := l.now()
@@ -769,10 +776,10 @@ func (l *subjectLimiter) allow(subject string) bool {
 	b.tokens = min(l.burst, b.tokens+now.Sub(b.last).Seconds()*l.rate)
 	b.last = now
 	if b.tokens < 1 {
-		return false
+		return max(time.Duration((1-b.tokens)/l.rate*float64(time.Second)), time.Millisecond)
 	}
 	b.tokens--
-	return true
+	return 0
 }
 
 func (l *subjectLimiter) gc(now time.Time) {

@@ -18,16 +18,25 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/mcpb"
 )
 
-// TestClaudeDesktopRelayAgainstGate runs the relay of a downloaded bundle,
-// as Claude Desktop does, against the real /mcp handler. The browser sign-in
-// is covered by internal/mcpb/relay.test.js; here the token is already saved.
-func TestClaudeDesktopRelayAgainstGate(t *testing.T) {
+// bundleRelay is the relay of a downloaded bundle, run as Claude Desktop
+// does: messages are written on its stdin and read back by id.
+type bundleRelay struct {
+	send   func(string)
+	recv   func(id float64) map[string]any
+	stderr *lockedBuffer
+	exited <-chan error
+}
+
+// startBundleRelay downloads the bundle of e, saves tok as the signed-in
+// token and starts the relay. The browser sign-in is covered by
+// internal/mcpb/relay.test.js.
+func startBundleRelay(t *testing.T, e *env, tok string) *bundleRelay {
+	t.Helper()
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("node not installed")
 	}
-	e := mcpEnv(t, false)
-	r := e.do(t, "GET", "/api/v1/connect/claude-desktop.mcpb", e.token("writer"), "", nil)
+	r := e.do(t, "GET", "/api/v1/connect/claude-desktop.mcpb", tok, "", nil)
 	b, _ := io.ReadAll(r.Body)
 	if r.StatusCode != 200 {
 		t.Fatalf("bundle: %d %s", r.StatusCode, b)
@@ -57,7 +66,7 @@ func TestClaudeDesktopRelayAgainstGate(t *testing.T) {
 	tokens := filepath.Join(dir, "tokens")
 	saved, _ := json.Marshal(map[string]any{
 		"issuer": env["DNS_GATE_ISSUER"], "client_id": env["DNS_GATE_CLIENT_ID"], "scope": "openid offline_access",
-		"access_token": e.token("writer"), "expires_at": time.Now().Add(time.Hour).UnixMilli(),
+		"access_token": tok, "expires_at": time.Now().Add(time.Hour).UnixMilli(),
 	})
 	_ = os.MkdirAll(tokens, 0o700)
 	if err := os.WriteFile(filepath.Join(tokens, strings.ReplaceAll(u.Host, ":", "_")+".json"), saved, 0o600); err != nil {
@@ -80,11 +89,8 @@ func TestClaudeDesktopRelayAgainstGate(t *testing.T) {
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		stdin.Close()
-		_ = cmd.Wait()
-	})
-	lines := make(chan map[string]any, 16)
+	exited := make(chan error, 1)
+	lines := make(chan map[string]any, 256)
 	go func() {
 		sc := bufio.NewScanner(stdout)
 		sc.Buffer(make([]byte, 1<<20), 1<<20)
@@ -94,25 +100,63 @@ func TestClaudeDesktopRelayAgainstGate(t *testing.T) {
 			lines <- msg
 		}
 		close(lines)
+		exited <- cmd.Wait()
 	}()
-	send := func(s string) { _, _ = io.WriteString(stdin, s+"\n") }
-	recv := func(id float64) map[string]any {
+	t.Cleanup(func() {
+		stdin.Close()
+		select {
+		case <-exited:
+		case <-time.After(5 * time.Second):
+			_ = cmd.Process.Kill()
+		}
+	})
+	var mu sync.Mutex
+	pending := map[float64]map[string]any{}
+	rl := &bundleRelay{stderr: stderr, exited: exited}
+	rl.send = func(s string) {
+		mu.Lock()
+		defer mu.Unlock()
+		_, _ = io.WriteString(stdin, s+"\n")
+	}
+	var recvMu sync.Mutex
+	rl.recv = func(id float64) map[string]any {
 		t.Helper()
-		timeout := time.After(10 * time.Second)
+		recvMu.Lock()
+		defer recvMu.Unlock()
+		if msg, ok := pending[id]; ok {
+			delete(pending, id)
+			return msg
+		}
+		timeout := time.After(90 * time.Second)
 		for {
 			select {
 			case msg, ok := <-lines:
 				if !ok {
 					t.Fatalf("relay exited; stderr:\n%s", stderr.String())
 				}
-				if msg["id"] == id {
+				mid, isNum := msg["id"].(float64)
+				if !isNum {
+					continue
+				}
+				if mid == id {
 					return msg
 				}
+				pending[mid] = msg
 			case <-timeout:
 				t.Fatalf("no response %v; stderr:\n%s", id, stderr.String())
 			}
 		}
 	}
+	return rl
+}
+
+// TestClaudeDesktopRelayAgainstGate runs the relay of a downloaded bundle,
+// as Claude Desktop does, against the real /mcp handler. The browser sign-in
+// is covered by internal/mcpb/relay.test.js; here the token is already saved.
+func TestClaudeDesktopRelayAgainstGate(t *testing.T) {
+	e := mcpEnv(t, false)
+	rl := startBundleRelay(t, e, e.token("writer"))
+	send, recv, stderr := rl.send, rl.recv, rl.stderr
 
 	send(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"claude-desktop-test","version":"0"}}}`)
 	init := recv(1)
