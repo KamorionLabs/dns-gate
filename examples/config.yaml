@@ -313,6 +313,14 @@ propagation:
   enabled: true
   requests_per_minute: 30
 
+# Who runs the targets of records (target_owner of list_rrsets, get_rrset and
+# the inventory API): a suffix, or a glob with * or ?. The first match wins.
+target_owners:
+  - {match: d1a2b3c4d5e6f7.cloudfront.net, owner: NH prod}
+  - {match: "*.nbs-aws.com", owner: NBS legacy}
+  - {match: mail.protection.outlook.com, owner: Microsoft 365}
+  - {match: cloudfront.net, owner: AWS CloudFront (unknown account)}
+
 ui:
   enabled: true
   issuer: entra

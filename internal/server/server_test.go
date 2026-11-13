@@ -38,6 +38,11 @@ type fakeEngine struct {
 	zonewrite.Engine
 	extra []uiapi.ZoneSummary // appended to Zones (unmanaged zones)
 	tombs []uiapi.Tombstone   // tombstones of every inventory
+	// rrsets, when set, are the RRsets of each zone; errs fail a zone and
+	// block holds a zone until closed.
+	rrsets map[string][]uiapi.RRset
+	errs   map[string]error
+	block  map[string]chan struct{}
 }
 
 // fakeFacade answers the engine-backed EuroDNS operations; passthrough goes
@@ -82,6 +87,15 @@ func (f *fakeEngine) Zones(ctx context.Context, s *identity.Subject) ([]uiapi.Zo
 }
 
 func (f *fakeEngine) Inventory(ctx context.Context, s *identity.Subject, zone string) (*uiapi.ZoneInventory, error) {
+	if ch := f.block[zone]; ch != nil {
+		<-ch
+	}
+	if err := f.errs[zone]; err != nil {
+		return nil, err
+	}
+	if f.rrsets != nil {
+		return &uiapi.ZoneInventory{Zone: zone, RRsets: f.rrsets[zone], Tombstones: f.tombs}, nil
+	}
 	return &uiapi.ZoneInventory{Zone: zone, RRsets: []uiapi.RRset{{Host: "www", Type: "A", TTL: 600, Values: []string{"192.0.2.1"}, Status: uiapi.StatusManaged, Owner: "web"}}, Tombstones: f.tombs}, nil
 }
 

@@ -16,6 +16,8 @@ import (
 var delegableRoutes = map[string][]string{
 	http.MethodGet + " /api/v1/me":                          {},
 	http.MethodGet + " /api/v1/zones":                       {scope.DNSRead},
+	http.MethodGet + " " + routeRecords:                     {scope.DNSRead},
+	http.MethodGet + " " + routeRecordsExport:               {scope.DNSRead},
 	http.MethodGet + " " + routeZoneRRsets:                  {scope.DNSRead},
 	http.MethodGet + " " + routeRRset:                       {scope.DNSRead},
 	http.MethodPut + " " + routeRRset:                       {scope.DNSWrite},
@@ -49,6 +51,8 @@ var mcpToolScopes = map[string][]string{
 	"list_zones":         {scope.DNSRead},
 	"list_rrsets":        {scope.DNSRead},
 	"get_rrset":          {scope.DNSRead},
+	"search_records":     {scope.DNSRead},
+	"export_records":     {scope.DNSRead},
 	"search_audit":       {scope.DNSRead},
 	"list_teams":         {scope.DNSRead},
 	"get_team":           {scope.DNSRead},

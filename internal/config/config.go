@@ -49,6 +49,7 @@ type Config struct {
 	Propagation       Propagation      `yaml:"propagation"`
 	Audit             Audit            `yaml:"audit"`
 	OAuth             OAuth            `yaml:"oauth"`
+	TargetOwners      []TargetOwner    `yaml:"target_owners"` // who runs the targets of RRsets (targets.go)
 
 	Hash     string    `yaml:"-"` // sha256 of the file
 	LoadedAt time.Time `yaml:"-"`
@@ -1417,6 +1418,7 @@ func (c *Config) Validate() error {
 		add("mcp.requests_per_minute: must be between 1 and 6000")
 	}
 	c.validatePropagation(add)
+	c.validateTargetOwners(add)
 	if c.MCP.PublicURL != "" {
 		if u, err := url.Parse(c.MCP.PublicURL); err != nil || u.Host == "" || u.Path != "" && u.Path != "/" || (u.Scheme != "https" && !isLoopback(u.Hostname())) {
 			add("mcp.public_url: https base URL without path required")

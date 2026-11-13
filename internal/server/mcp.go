@@ -56,6 +56,7 @@ func (s *Server) newMCP() *mcpServer {
 		Instructions: "dns-gate manages DNS zones (EuroDNS, Route53) under RBAC and record ownership. Read tools are always available; changes are made with plan_rrset_change then apply_rrset_change, and only on RRsets owned by your team. " + recordRules,
 	})
 	m.addReadTools(srv)
+	m.addSearchTools(srv)
 	m.addTeamTools(srv)
 	if s.cfg.EuroDNS != nil {
 		m.addProfileReadTools(srv)
@@ -286,6 +287,12 @@ type listRRsetsIn struct {
 	Host   string `json:"host,omitempty" jsonschema:"host glob relative to the zone, * matches any characters, @ is the apex"`
 	Type   string `json:"type,omitempty" jsonschema:"record type, e.g. CNAME"`
 	Owner  string `json:"owner,omitempty" jsonschema:"owner team"`
+	// Compact returns records instead of rrsets.
+	Compact bool   `json:"compact,omitempty" jsonschema:"return records (host, type, ttl, values, status, owner) instead of rrsets: no hash, actors, dates nor request ids"`
+	Limit   int    `json:"limit,omitempty" jsonschema:"page size, 1 to 1000; every RRset when omitted"`
+	Cursor  string `json:"cursor,omitempty" jsonschema:"next_cursor of the previous page"`
+	// Resolve resolves the targets of the RRsets of the page (mcp_targets.go).
+	Resolve bool `json:"resolve,omitempty" jsonschema:"resolve the targets of the page (CNAME, alias, APEX, MX, NS, SRV, PTR): status, CNAME chain, takeover risk; filter on host or type, or set limit, to stay under 256 targets"`
 }
 
 type listRRsetsOut struct {
@@ -293,14 +300,22 @@ type listRRsetsOut struct {
 	Unmanaged    bool          `json:"unmanaged,omitempty"`
 	LastSyncedAt *time.Time    `json:"last_synced_at,omitempty"`
 	RRsets       []uiapi.RRset `json:"rrsets"`
-	// Tombstones are RRsets deleted recently, reserved for their team.
+	// Records are the RRsets in compact form, with compact=true (rrsets is
+	// then empty).
+	Records []Record `json:"records,omitempty"`
+	// Tombstones are RRsets deleted recently, reserved for their team
+	// (first page only).
 	Tombstones []uiapi.Tombstone `json:"tombstones,omitempty"`
+	// NextCursor is set when more RRsets follow this page.
+	NextCursor string `json:"next_cursor,omitempty"`
 }
 
 type getRRsetIn struct {
 	Zone string `json:"zone" jsonschema:"zone name (managed or unmanaged)"`
 	Host string `json:"host" jsonschema:"host relative to the zone, @ for the apex"`
 	Type string `json:"type" jsonschema:"record type"`
+	// Resolve resolves the targets of the RRset (mcp_targets.go).
+	Resolve bool `json:"resolve,omitempty" jsonschema:"resolve the targets of the RRset: status, CNAME chain, takeover risk"`
 }
 
 type getRRsetOut struct {
@@ -394,7 +409,7 @@ func (m *mcpServer) addReadTools(srv *mcp.Server) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_rrsets",
-		Description: "List the RRsets of a zone, URL forwards included (type URLFWD), with their owner team and ownership status (managed: owned by a team through the gate; foreign: created outside the gate, read-only; tainted: changed outside the gate, writes blocked; pending; missing), and the tombstones: RRsets deleted recently, reserved for their team until they expire. Optional filters on status, host glob, type and owner team.",
+		Description: "List the RRsets of a zone, URL forwards included (type URLFWD), with their owner team and ownership status (managed: owned by a team through the gate; foreign: created outside the gate, read-only; tainted: changed outside the gate, writes blocked; pending; missing), and the tombstones: RRsets deleted recently, reserved for their team until they expire. Optional filters on status, host glob, type and owner team. compact=true returns records without hashes, actors and dates; limit and cursor page through large zones (next_cursor). To search values across zones, use search_records." + resolveNote + " With limit, only the targets of the page are resolved.",
 		Annotations: readOnly("List RRsets"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in listRRsetsIn) (*mcp.CallToolResult, listRRsetsOut, error) {
 		subj, err := m.subject(ctx, req)
@@ -405,6 +420,15 @@ func (m *mcpServer) addReadTools(srv *mcp.Server) {
 		if !m.canRead(subj, zone) {
 			return nil, listRRsetsOut{}, fmt.Errorf("read access to %q not granted", zone)
 		}
+		if in.Limit < 0 || in.Limit > listMaxLimit {
+			return nil, listRRsetsOut{}, fmt.Errorf("limit must be between 1 and %d", listMaxLimit)
+		}
+		var cHost, cType string
+		if in.Cursor != "" {
+			if cHost, cType, err = decodeListCursor(in.Cursor); err != nil {
+				return nil, listRRsetsOut{}, err
+			}
+		}
 		inv, err := m.s.cfg.Engine.Inventory(ctx, subj, zone)
 		if err != nil {
 			return nil, listRRsetsOut{}, inventoryError(err)
@@ -414,12 +438,33 @@ func (m *mcpServer) addReadTools(srv *mcp.Server) {
 			return (in.Host == "" || glob.Match(strings.ToLower(in.Host), host)) && (in.Type == "" || strings.EqualFold(in.Type, typ)) &&
 				(in.Owner == "" || owner == in.Owner)
 		}
+		n := 0
 		for _, rs := range inv.RRsets {
+			if in.Cursor != "" && !afterCursor(rs.Host, rs.Type, cHost, cType) {
+				continue
+			}
 			if (in.Status == "" || rs.Status == in.Status) && match(rs.Host, rs.Type, rs.Owner) {
+				if in.Limit > 0 && n == in.Limit {
+					last := out.RRsets[len(out.RRsets)-1]
+					out.NextCursor = encodeListCursor(last.Host, last.Type)
+					break
+				}
+				n++
 				out.RRsets = append(out.RRsets, rs)
 			}
 		}
-		if in.Status == "" {
+		// The page is cut first: only its targets are labelled and resolved.
+		if err := m.s.decorateTargets(ctx, subj, inv.Zone, out.RRsets, in.Resolve); err != nil {
+			return nil, listRRsetsOut{}, err
+		}
+		if in.Compact {
+			out.Records = make([]Record, 0, len(out.RRsets))
+			for _, rs := range out.RRsets {
+				out.Records = append(out.Records, compactRecord("", rs))
+			}
+			out.RRsets = []uiapi.RRset{}
+		}
+		if in.Status == "" && in.Cursor == "" {
 			for _, tb := range inv.Tombstones {
 				if match(tb.Host, tb.Type, tb.Team) {
 					out.Tombstones = append(out.Tombstones, tb)
@@ -432,7 +477,7 @@ func (m *mcpServer) addReadTools(srv *mcp.Server) {
 
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "get_rrset",
-		Description: "Get one RRset (values, TTL, owner team, status; for type URLFWD the URL forward of the host and whether forwards answer HTTPS), its tombstone when it was deleted recently, whether and why you may change it (ownership), and its recent audit history.",
+		Description: "Get one RRset (values, TTL, owner team, status; for type URLFWD the URL forward of the host and whether forwards answer HTTPS), its tombstone when it was deleted recently, whether and why you may change it (ownership), and its recent audit history." + resolveNote,
 		Annotations: readOnly("Get RRset"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in getRRsetIn) (*mcp.CallToolResult, getRRsetOut, error) {
 		subj, err := m.subject(ctx, req)
@@ -461,6 +506,13 @@ func (m *mcpServer) addReadTools(srv *mcp.Server) {
 			if inv.Tombstones[i].Host == host && strings.EqualFold(inv.Tombstones[i].Type, in.Type) {
 				out.Tombstone = &inv.Tombstones[i]
 			}
+		}
+		if out.RRset != nil {
+			one := []uiapi.RRset{*out.RRset}
+			if err := m.s.decorateTargets(ctx, subj, inv.Zone, one, in.Resolve); err != nil {
+				return nil, getRRsetOut{}, err
+			}
+			out.RRset = &one[0]
 		}
 		out.Ownership = m.ownershipNote(subj, zone, inv.Unmanaged, out.RRset, out.Tombstone)
 		if strings.EqualFold(in.Type, dns.TypeURLForward) && !inv.Unmanaged {

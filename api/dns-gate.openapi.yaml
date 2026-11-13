@@ -450,6 +450,103 @@ paths:
                 items: { $ref: "#/components/schemas/ZoneSummary" }
         default: { $ref: "#/components/responses/Error" }
 
+  /api/v1/records:
+    get:
+      tags: [zones]
+      operationId: searchRecords
+      summary: Search RRsets across zones
+      description: |
+        RRsets of every zone the caller can read (managed and unmanaged), or of
+        one folder or zone, matching globs on value, host and type, in compact
+        form. Zones are read with bounded concurrency until a deadline; the
+        zones not read in time, or that cannot be read, are listed in
+        `zones_skipped` and come from the cache on a later call. Requires
+        ui.read.
+      parameters:
+        - name: value
+          in: query
+          description: Glob on the values, alias targets and forward URLs, case-insensitive (`*` any characters, `?` one).
+          schema: { type: string, examples: ["*nbs-aws.com*"] }
+        - name: host
+          in: query
+          description: Glob on the host relative to its zone, `@` the apex.
+          schema: { type: string }
+        - name: type
+          in: query
+          description: Glob on the record type.
+          schema: { type: string, examples: ["CNAME"] }
+        - name: folder
+          in: query
+          description: Keep the zones whose folder matches this folder glob, as for `GET /api/v1/zones`.
+          schema: { type: string, examples: ["/ES/**"] }
+        - name: zone
+          in: query
+          description: One zone only.
+          schema: { type: string }
+        - name: limit
+          in: query
+          description: Maximum records returned.
+          schema: { type: integer, minimum: 1, maximum: 5000, default: 500 }
+      responses:
+        "200":
+          description: Matching records.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/RecordSearch" }
+        default: { $ref: "#/components/responses/Error" }
+
+  /api/v1/records/export:
+    get:
+      tags: [zones]
+      operationId: exportRecords
+      summary: Export RRsets across zones
+      description: |
+        RRsets of every zone the caller can read, or of one folder or zone,
+        optionally filtered as for `GET /api/v1/records`. `format=tsv`
+        (default): a header line, then one line per value with the columns
+        zone, host, type, ttl, value, status, owner (tab, newline and
+        backslash escaped). `format=zone`: one `$ORIGIN` block per zone, URL
+        forwards and aliases as comments. At most 50000 records. Requires
+        ui.read.
+      parameters:
+        - name: format
+          in: query
+          schema: { type: string, enum: [tsv, zone], default: tsv }
+        - name: value
+          in: query
+          description: Glob on the values, alias targets and forward URLs, case-insensitive (`*` any characters, `?` one).
+          schema: { type: string, examples: ["*nbs-aws.com*"] }
+        - name: host
+          in: query
+          description: Glob on the host relative to its zone, `@` the apex.
+          schema: { type: string }
+        - name: type
+          in: query
+          description: Glob on the record type.
+          schema: { type: string, examples: ["CNAME"] }
+        - name: folder
+          in: query
+          description: Keep the zones whose folder matches this folder glob, as for `GET /api/v1/zones`.
+          schema: { type: string, examples: ["/ES/**"] }
+        - name: zone
+          in: query
+          description: One zone only.
+          schema: { type: string }
+      responses:
+        "200":
+          description: The export.
+          headers:
+            X-Records: { description: Records exported., schema: { type: integer } }
+            X-Zones-Scanned: { description: Zones read., schema: { type: integer } }
+            X-Zones-Skipped: { description: "Zones not read (deadline or unreadable); `GET /api/v1/records` lists them with their reason.", schema: { type: integer } }
+            X-Truncated: { description: "`true` when the export stopped at 50000 records.", schema: { type: string } }
+          content:
+            text/tab-separated-values:
+              schema: { type: string }
+            text/plain:
+              schema: { type: string }
+        default: { $ref: "#/components/responses/Error" }
+
   /api/v1/zones/{zone}/rrsets:
     parameters:
       - $ref: "#/components/parameters/Zone"
@@ -457,7 +554,21 @@ paths:
       tags: [zones]
       operationId: getZoneInventory
       summary: RRsets of a zone with their ownership
-      description: Requires ui.read on the zone. The ETag is the gate version of the zone.
+      description: >-
+        Requires ui.read on the zone. The ETag is the gate version of the zone.
+        RRsets whose target matches the `target_owners` table of the configuration carry `target_owner`.
+        With `resolve=true`, the targets of CNAME, alias, APEX, MX, NS, SRV and PTR RRsets are resolved
+        through the public resolvers of the propagation check (`targets`).
+      parameters:
+        - name: resolve
+          in: query
+          required: false
+          description: >-
+            Resolve the targets of the RRsets: status, CNAME chain, addresses and takeover risk. At most 256
+            distinct targets per request, the others are `skipped`; results are cached for a minute and a
+            request that resolves anything counts against the per-subject limit of the propagation check
+            (`429` with `Retry-After` beyond). `400 resolve_unavailable` when the propagation check is disabled.
+          schema: { type: boolean, default: false }
       responses:
         "200":
           description: Inventory.
@@ -2234,6 +2345,34 @@ components:
         expires_at: { type: string, format: date-time }
         issuer: { type: string, description: "URL of the gate issuer." }
 
+    Record:
+      type: object
+      description: Compact RRset, without hash, actors, dates nor request ids.
+      required: [zone, host, type, status]
+      properties:
+        zone: { type: string }
+        host: { type: string }
+        type: { type: string }
+        ttl: { type: integer }
+        values: { type: array, items: { type: string } }
+        alias: { $ref: "#/components/schemas/Alias" }
+        forward: { $ref: "#/components/schemas/Forward" }
+        status: { type: string, enum: [managed, tainted, foreign] }
+        owner: { type: string }
+    SkippedZone:
+      type: object
+      required: [zone, reason]
+      properties:
+        zone: { type: string }
+        reason: { type: string, description: "`timeout`, or why the zone could not be read." }
+    RecordSearch:
+      type: object
+      required: [records, zones_scanned]
+      properties:
+        records: { type: array, items: { $ref: "#/components/schemas/Record" } }
+        zones_scanned: { type: integer }
+        zones_skipped: { type: array, items: { $ref: "#/components/schemas/SkippedZone" } }
+        truncated: { type: boolean, description: More records matched than limit. }
     ZoneSummary:
       type: object
       required: [zone, provider, rrsets, managed, tainted, pending, foreign]
@@ -2341,6 +2480,34 @@ components:
         adopted: { type: boolean }
         expires_at: { type: string, format: date-time }
         last_request_id: { type: string }
+        target_owner: { type: string, description: "Who runs the target of the RRset, from the target_owners table of the configuration (first match, in value order)." }
+        targets:
+          type: array
+          description: How the targets resolve, only with resolve=true.
+          items: { $ref: "#/components/schemas/TargetResolution" }
+
+    TargetResolution:
+      type: object
+      required: [name, status]
+      properties:
+        name: { type: string, description: "Target, absolute with a trailing dot." }
+        status:
+          type: string
+          enum: [live, nxdomain, nodata, servfail, timeout, skipped]
+          description: >-
+            live: resolves to addresses; nxdomain: the target or a name of its chain does not exist;
+            nodata: exists without A or AAAA; servfail: the resolvers failed (SERVFAIL, REFUSED, filtered);
+            timeout: no answer in time; skipped: beyond 256 targets in one request.
+        chain: { type: array, items: { type: string }, description: CNAME chain followed from the target. }
+        addresses: { type: array, items: { type: string }, description: A and AAAA records at the end of the chain (at most 8). }
+        resolver: { type: string, description: Public resolver that answered. }
+        takeover_risk:
+          type: string
+          description: >-
+            Third-party service (AWS CloudFront, AWS S3, Azure App Service, Heroku, GitHub Pages...) of a target
+            that does not resolve: whoever claims that name there would serve the host.
+        error: { type: string }
+        cached: { type: boolean }
 
     ZoneInventory:
       type: object

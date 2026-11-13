@@ -222,12 +222,18 @@ func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		inv.Folder = s.cfg.Policy.Current().Folder(zone)
 		fillHashes(inv.RRsets)
+		if err := s.decorateTargets(ctx, subj, zone, inv.RRsets, r.URL.Query().Get("resolve") == "true"); err != nil {
+			writeResolveError(w, err)
+			return
+		}
 		if s.cfg.Versions != nil {
 			if v, err := s.cfg.Versions.ZoneVersion(ctx, zone); err == nil {
 				w.Header().Set("ETag", zoneETag(v))
 			}
 		}
 		writeJSON(w, http.StatusOK, inv)
+	case pattern == routeRecords || pattern == routeRecordsExport:
+		s.handleRecords(w, r, subj, readable, pattern == routeRecordsExport)
 	case rest == "/audit":
 		s.handleAudit(w, r, subj, readable)
 	default:
