@@ -115,6 +115,10 @@ nav:
   - Providers:
       - Route 53: providers/route53.md
       - EuroDNS: providers/eurodns.md
+      - OVHcloud: providers/ovh.md
+      - Scaleway: providers/scaleway.md
+      - Infomaniak: providers/infomaniak.md
+      - Azure DNS: providers/azure.md
   - Reference:
       - Configuration:
           - Overview, store, audit, propagation: CONFIG.md

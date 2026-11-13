@@ -53,7 +53,7 @@ func (s *Server) newMCP() *mcpServer {
 		limiter: newSubjectLimiter(s.cfg.Config.MCP.RequestsPerMinute, s.now),
 	}
 	srv := mcp.NewServer(&mcp.Implementation{Name: "dns-gate", Version: version.Version}, &mcp.ServerOptions{
-		Instructions: "dns-gate manages DNS zones (EuroDNS, Route53) under RBAC and record ownership. Read tools are always available; changes are made with plan_rrset_change then apply_rrset_change, and only on RRsets owned by your team. " + recordRules,
+		Instructions: "dns-gate manages DNS zones (EuroDNS, Route53, OVHcloud, Scaleway, Infomaniak, Azure DNS) under RBAC and record ownership. Read tools are always available; changes are made with plan_rrset_change then apply_rrset_change, and only on RRsets owned by your team. " + recordRules,
 	})
 	m.addReadTools(srv)
 	m.addTeamTools(srv)

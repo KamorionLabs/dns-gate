@@ -126,7 +126,14 @@ const adoptReasons: Record<string, string> = {
 
 export const adoptReasonLabel = (r: string | undefined) => (r ? (adoptReasons[r] ?? r.replaceAll('_', ' ')) : '');
 
-const providers: Record<string, string> = { eurodns: 'EuroDNS', route53: 'Route53' };
+const providers: Record<string, string> = {
+  eurodns: 'EuroDNS',
+  route53: 'Route53',
+  ovh: 'OVHcloud',
+  scaleway: 'Scaleway',
+  infomaniak: 'Infomaniak',
+  azure: 'Azure DNS',
+};
 
 /** Display name of a DNS provider: "route53" → "Route53". */
 export const providerLabel = (p: string | undefined) => (p ? (providers[p.toLowerCase()] ?? p) : '');

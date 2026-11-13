@@ -38,7 +38,8 @@ type Capabilities struct {
 type Provider interface {
 	// ID is the instance id from the configuration (unique in a gate).
 	ID() string
-	// Kind is the adapter kind ("eurodns", "route53").
+	// Kind is the adapter kind ("eurodns", "route53", "ovh", "scaleway",
+	// "infomaniak", "azure").
 	Kind() string
 	Capabilities() Capabilities
 	// ListZones returns the normalized names of the zones of the account.

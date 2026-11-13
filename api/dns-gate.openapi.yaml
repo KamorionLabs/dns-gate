@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: dns-gate API
   version: "1"
-  summary: Security gateway in front of DNS provider APIs (EuroDNS, Route53).
+  summary: Security gateway in front of DNS provider APIs (EuroDNS, Route53, OVHcloud, Scaleway, Infomaniak, Azure DNS).
   description: |
     The gate's own API, the same whatever the DNS provider of a zone: zones and
     RRsets owned by teams, writes with content-hash preconditions, plans,

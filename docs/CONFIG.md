@@ -21,6 +21,10 @@ Secrets never live in the YAML file. Each one is read from an environment variab
 |---|---|---|
 | `EURODNS_<ID>_API_KEY`, else `EURODNS_API_KEY` | EuroDNS `X-API-KEY` of the provider `<ID>` | with a `eurodns` provider |
 | `EURODNS_<ID>_APP_ID`, else `EURODNS_APP_ID` | EuroDNS `X-APP-ID`, overrides `eurodns.app_id` | if `eurodns.app_id` is empty |
+| `OVH_<ID>_APPLICATION_KEY`, `OVH_<ID>_APPLICATION_SECRET`, `OVH_<ID>_CONSUMER_KEY`, or `OVH_<ID>_CLIENT_ID`, `OVH_<ID>_CLIENT_SECRET` (else without `_<ID>`) | OVHcloud application or service account ([providers/ovh.md](providers/ovh.md)) | with an `ovh` provider |
+| `SCALEWAY_<ID>_SECRET_KEY`, else `SCALEWAY_SECRET_KEY`, else `SCW_SECRET_KEY` | Scaleway API secret key ([providers/scaleway.md](providers/scaleway.md)) | with a `scaleway` provider |
+| `INFOMANIAK_<ID>_TOKEN`, else `INFOMANIAK_TOKEN` | Infomaniak API token ([providers/infomaniak.md](providers/infomaniak.md)) | with an `infomaniak` provider |
+| `AZURE_<ID>_CLIENT_SECRET`, else `AZURE_CLIENT_SECRET` | Client secret of the Entra application ([providers/azure.md](providers/azure.md)) | with an `azure` provider without federated token nor managed identity |
 | `DNS_GATE_POSTGRES_DSN` | Postgres connection string | with `store.type: postgres` |
 | `DNS_GATE_SESSION_KEY` | 32-byte key (hex or base64) encrypting UI cookies | with `ui.enabled` |
 | `DNS_GATE_UI_CLIENT_SECRET` | OIDC client secret of the UI | no (public client with PKCE) |

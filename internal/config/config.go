@@ -60,19 +60,88 @@ type Config struct {
 
 // Provider kinds.
 const (
-	KindEuroDNS = "eurodns"
-	KindRoute53 = "route53"
+	KindEuroDNS    = "eurodns"
+	KindRoute53    = "route53"
+	KindOVH        = "ovh"
+	KindScaleway   = "scaleway"
+	KindInfomaniak = "infomaniak"
+	KindAzure      = "azure"
 )
+
+// Kinds are the provider kinds, in documentation order.
+var Kinds = []string{KindEuroDNS, KindRoute53, KindOVH, KindScaleway, KindInfomaniak, KindAzure}
 
 // Provider is one upstream DNS account. Each zone is served by exactly one
 // provider: the one whose zones filter matches it and, when several match,
 // whose account lists it.
 type Provider struct {
 	ID      string         `yaml:"id"`
-	Kind    string         `yaml:"kind"` // eurodns | route53
+	Kind    string         `yaml:"kind"` // one of Kinds
 	Zones   ProviderZones  `yaml:"zones"`
 	EuroDNS *EuroDNSConfig `yaml:"eurodns"`
 	Route53 *Route53Config `yaml:"route53"`
+	// The blocks below are optional: every setting has a default or comes
+	// from the environment.
+	OVH        *OVHConfig        `yaml:"ovh"`
+	Scaleway   *ScalewayConfig   `yaml:"scaleway"`
+	Infomaniak *InfomaniakConfig `yaml:"infomaniak"`
+	Azure      *AzureConfig      `yaml:"azure"`
+}
+
+// OVHConfig configures an OVHcloud account. Secrets are never read from the
+// file. The account authenticates either with an application
+// (application_key or OVH_<ID>_APPLICATION_KEY, OVH_<ID>_APPLICATION_SECRET,
+// OVH_<ID>_CONSUMER_KEY) or with a service account (client_id or
+// OVH_<ID>_CLIENT_ID, OVH_<ID>_CLIENT_SECRET); every variable also exists
+// without _<ID> and with _FILE.
+type OVHConfig struct {
+	Endpoint       string `yaml:"endpoint"` // ovh-eu (default), ovh-ca, ovh-us
+	ApplicationKey string `yaml:"application_key"`
+	ClientID       string `yaml:"client_id"`
+	MaxRetries     *int   `yaml:"max_retries"`
+
+	ApplicationSecret string `yaml:"-"`
+	ConsumerKey       string `yaml:"-"`
+	ClientSecret      string `yaml:"-"`
+}
+
+// ScalewayConfig configures a Scaleway API key. Its secret key comes from
+// SCALEWAY_<ID>_SECRET_KEY, SCALEWAY_SECRET_KEY or SCW_SECRET_KEY (or their
+// _FILE variants).
+type ScalewayConfig struct {
+	ProjectID      string `yaml:"project_id"`
+	OrganizationID string `yaml:"organization_id"`
+	MaxRetries     *int   `yaml:"max_retries"`
+
+	SecretKey string `yaml:"-"`
+}
+
+// InfomaniakConfig configures an Infomaniak API token, read from
+// INFOMANIAK_<ID>_TOKEN or INFOMANIAK_TOKEN (or their _FILE variants).
+type InfomaniakConfig struct {
+	// Zones, when set, are the zones served: the account is not listed.
+	Zones      []string `yaml:"zones"`
+	Rate       Rate     `yaml:"rate"` // only every is used
+	MaxRetries *int     `yaml:"max_retries"`
+
+	Token string `yaml:"-"`
+}
+
+// AzureConfig configures an Azure subscription for Azure DNS. The identity
+// is a client secret (AZURE_<ID>_CLIENT_SECRET or AZURE_CLIENT_SECRET, or
+// their _FILE variants), a federated token file (federated_token_file or
+// AZURE_FEDERATED_TOKEN_FILE) or the managed identity of the host.
+// tenant_id and client_id default to AZURE_TENANT_ID and AZURE_CLIENT_ID.
+type AzureConfig struct {
+	SubscriptionID     string `yaml:"subscription_id"`
+	ResourceGroup      string `yaml:"resource_group"`
+	TenantID           string `yaml:"tenant_id"`
+	ClientID           string `yaml:"client_id"`
+	FederatedTokenFile string `yaml:"federated_token_file"`
+	ManagedIdentity    bool   `yaml:"managed_identity"`
+	MaxRetries         *int   `yaml:"max_retries"`
+
+	ClientSecret string `yaml:"-"`
 }
 
 // ProviderZones selects the zones of the account the gate serves. The
@@ -753,6 +822,9 @@ func (c *Config) applyEnv(getenv func(string) string) error {
 			}
 		}
 	}
+	if err := c.applyProviderEnv(read, getenv); err != nil {
+		return err
+	}
 	var err error
 	if c.Store.Postgres.DSN, err = read("DNS_GATE_POSTGRES_DSN"); err != nil {
 		return err
@@ -782,6 +854,77 @@ func (c *Config) applyEnv(getenv func(string) string) error {
 		return err
 	}
 	return c.applySAMLEnv(read)
+}
+
+// applyProviderEnv reads the credentials of the OVH, Scaleway, Infomaniak
+// and Azure providers: <PREFIX>_<ID>_<NAME> first, then each fallback name,
+// each also as a _FILE variable.
+func (c *Config) applyProviderEnv(read func(string) (string, error), getenv func(string) string) error {
+	set := func(dst *string, names ...string) error {
+		for _, n := range names {
+			v, err := read(n)
+			if err != nil {
+				return err
+			}
+			if v != "" {
+				*dst = v
+				return nil
+			}
+		}
+		return nil
+	}
+	for i := range c.Providers {
+		p := &c.Providers[i]
+		id := envName(p.ID)
+		var err error
+		switch strings.ToLower(strings.TrimSpace(p.Kind)) {
+		case KindOVH:
+			if p.OVH == nil {
+				p.OVH = &OVHConfig{}
+			}
+			o := p.OVH
+			for _, f := range []struct {
+				name string
+				dst  *string
+			}{
+				{"APPLICATION_KEY", &o.ApplicationKey}, {"APPLICATION_SECRET", &o.ApplicationSecret},
+				{"CONSUMER_KEY", &o.ConsumerKey}, {"CLIENT_ID", &o.ClientID}, {"CLIENT_SECRET", &o.ClientSecret},
+			} {
+				err = errors.Join(err, set(f.dst, "OVH_"+id+"_"+f.name, "OVH_"+f.name))
+			}
+		case KindScaleway:
+			if p.Scaleway == nil {
+				p.Scaleway = &ScalewayConfig{}
+			}
+			err = set(&p.Scaleway.SecretKey, "SCALEWAY_"+id+"_SECRET_KEY", "SCALEWAY_SECRET_KEY", "SCW_SECRET_KEY")
+		case KindInfomaniak:
+			if p.Infomaniak == nil {
+				p.Infomaniak = &InfomaniakConfig{}
+			}
+			err = set(&p.Infomaniak.Token, "INFOMANIAK_"+id+"_TOKEN", "INFOMANIAK_TOKEN")
+		case KindAzure:
+			if p.Azure == nil {
+				p.Azure = &AzureConfig{}
+			}
+			a := p.Azure
+			err = set(&a.ClientSecret, "AZURE_"+id+"_CLIENT_SECRET", "AZURE_CLIENT_SECRET")
+			for _, f := range []struct {
+				name string
+				dst  *string
+			}{
+				{"AZURE_TENANT_ID", &a.TenantID}, {"AZURE_CLIENT_ID", &a.ClientID},
+				{"AZURE_SUBSCRIPTION_ID", &a.SubscriptionID}, {"AZURE_FEDERATED_TOKEN_FILE", &a.FederatedTokenFile},
+			} {
+				if *f.dst == "" {
+					*f.dst = getenv(f.name)
+				}
+			}
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (c *Config) defaults() {
@@ -818,6 +961,17 @@ func (c *Config) defaults() {
 			if e.MaxRetries == nil {
 				n := 3
 				e.MaxRetries = &n
+			}
+		}
+		if o := p.OVH; o != nil && o.Endpoint == "" {
+			o.Endpoint = "ovh-eu"
+		}
+		if k := p.Infomaniak; k != nil {
+			if k.Rate.Every == 0 {
+				k.Rate.Every = Duration(time.Second)
+			}
+			for j := range k.Zones {
+				k.Zones[j] = normZone(k.Zones[j])
 			}
 		}
 		if r := p.Route53; r != nil && len(r.HostedZones) > 0 {
@@ -2115,6 +2269,9 @@ var (
 	hostedZone  = regexp.MustCompile(`^(/hostedzone/)?[A-Z0-9]{1,32}$`)
 	roleARNRe   = regexp.MustCompile(`^arn:aws[a-z-]*:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]{1,512}$`)
 	awsRegionRe = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-[0-9]$`)
+	uuidRe      = regexp.MustCompile(`^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$`)
+	// azureGroupRe: letters, digits, "_", "-", ".", "(" and ")", not ending with a dot.
+	azureGroupRe = regexp.MustCompile(`^[\w().-]{0,89}[\w()-]$`)
 )
 
 // envName is the environment variable fragment of a provider id.
@@ -2277,20 +2434,25 @@ func (c *Config) validateProviders(add func(string, ...any)) {
 		if p.Zones.Refresh.D() < 5*time.Minute {
 			add("%s.zones.refresh: must be >= 5m (provider rate limits)", at)
 		}
+		for _, b := range []struct {
+			kind string
+			set  bool
+		}{
+			{KindEuroDNS, p.EuroDNS != nil}, {KindRoute53, p.Route53 != nil}, {KindOVH, p.OVH != nil},
+			{KindScaleway, p.Scaleway != nil}, {KindInfomaniak, p.Infomaniak != nil}, {KindAzure, p.Azure != nil},
+		} {
+			if b.set && b.kind != p.Kind && slices.Contains(Kinds, p.Kind) {
+				add("%s.%s: not allowed for kind %s", at, b.kind, p.Kind)
+			}
+		}
 		switch p.Kind {
 		case KindEuroDNS:
-			if p.Route53 != nil {
-				add("%s.route53: not allowed for kind eurodns", at)
-			}
 			if p.EuroDNS == nil {
 				add("%s.eurodns: required for kind eurodns", at)
 				continue
 			}
 			validateEuroDNS(at+".eurodns", p.ID, p.EuroDNS, add)
 		case KindRoute53:
-			if p.EuroDNS != nil {
-				add("%s.eurodns: not allowed for kind route53", at)
-			}
 			if p.Route53 == nil {
 				add("%s.route53: required for kind route53", at)
 				continue
@@ -2302,10 +2464,101 @@ func (c *Config) validateProviders(add func(string, ...any)) {
 				}
 				pinned[z] = p.ID
 			}
+		case KindOVH:
+			validateOVH(at+".ovh", p, add)
+		case KindScaleway:
+			if p.Scaleway == nil || p.Scaleway.SecretKey == "" {
+				env := "SCALEWAY_" + envName(p.ID)
+				add("%s.scaleway: secret key missing (%s_SECRET_KEY, SCALEWAY_SECRET_KEY or SCW_SECRET_KEY, or their _FILE variants)", at, env)
+			}
+			if s := p.Scaleway; s != nil {
+				for name, v := range map[string]string{"project_id": s.ProjectID, "organization_id": s.OrganizationID} {
+					if v != "" && !uuidRe.MatchString(v) {
+						add("%s.scaleway.%s: %q is not a UUID", at, name, v)
+					}
+				}
+				validRetries(at+".scaleway", s.MaxRetries, add)
+			}
+		case KindInfomaniak:
+			if p.Infomaniak == nil || p.Infomaniak.Token == "" {
+				add("%s.infomaniak: API token missing (INFOMANIAK_%s_TOKEN or INFOMANIAK_TOKEN, or their _FILE variants)", at, envName(p.ID))
+			}
+			if k := p.Infomaniak; k != nil {
+				for _, z := range k.Zones {
+					if !ValidFQDN(z) {
+						add("%s.infomaniak.zones: %q is not a valid domain name", at, z)
+					} else if !p.Matches(z) {
+						add("%s.infomaniak.zones: %q is excluded by the zones filter of the provider", at, z)
+					}
+				}
+				if k.Rate.Every.D() < 0 {
+					add("%s.infomaniak.rate.every: must be >= 0", at)
+				}
+				validRetries(at+".infomaniak", k.MaxRetries, add)
+			}
+		case KindAzure:
+			validateAzure(at+".azure", p, add)
 		default:
-			add("%s.kind: %q (expected eurodns or route53)", at, p.Kind)
+			add("%s.kind: %q (expected %s)", at, p.Kind, strings.Join(Kinds, ", "))
 		}
 	}
+}
+
+func validRetries(at string, n *int, add func(string, ...any)) {
+	if n != nil && *n < 0 {
+		add("%s.max_retries: must be >= 0", at)
+	}
+}
+
+var ovhEndpoints = []string{"ovh-ca", "ovh-eu", "ovh-us"}
+
+func validateOVH(at string, p Provider, add func(string, ...any)) {
+	o := p.OVH
+	if o == nil {
+		o = &OVHConfig{}
+	}
+	env := "OVH_" + envName(p.ID)
+	if o.Endpoint != "" && !slices.Contains(ovhEndpoints, o.Endpoint) {
+		add("%s.endpoint: %q (expected %s)", at, o.Endpoint, strings.Join(ovhEndpoints, ", "))
+	}
+	app := o.ApplicationKey != "" || o.ApplicationSecret != "" || o.ConsumerKey != ""
+	oauth := o.ClientID != "" || o.ClientSecret != ""
+	switch {
+	case app && oauth:
+		add("%s: an application (application key, secret, consumer key) and a service account (client id, secret) are both configured, keep one", at)
+	case app && (o.ApplicationKey == "" || o.ApplicationSecret == "" || o.ConsumerKey == ""):
+		add("%s: application credentials incomplete (%s.application_key or %s_APPLICATION_KEY, %s_APPLICATION_SECRET, %s_CONSUMER_KEY)", at, at, env, env, env)
+	case oauth && (o.ClientID == "" || o.ClientSecret == ""):
+		add("%s: service account incomplete (%s.client_id or %s_CLIENT_ID, %s_CLIENT_SECRET)", at, at, env, env)
+	case !app && !oauth:
+		add("%s: credentials missing (%s_APPLICATION_KEY, %s_APPLICATION_SECRET and %s_CONSUMER_KEY, or %s_CLIENT_ID and %s_CLIENT_SECRET; also without _%s and as _FILE)", at, env, env, env, env, env, envName(p.ID))
+	}
+	validRetries(at, o.MaxRetries, add)
+}
+
+func validateAzure(at string, p Provider, add func(string, ...any)) {
+	a := p.Azure
+	if a == nil {
+		a = &AzureConfig{}
+	}
+	if !uuidRe.MatchString(a.SubscriptionID) {
+		add("%s.subscription_id: %q is not a subscription id (or AZURE_SUBSCRIPTION_ID)", at, a.SubscriptionID)
+	}
+	if a.ResourceGroup != "" && !azureGroupRe.MatchString(a.ResourceGroup) {
+		add("%s.resource_group: %q is not a resource group name", at, a.ResourceGroup)
+	}
+	switch {
+	case a.ClientSecret != "" || a.FederatedTokenFile != "":
+		if a.ManagedIdentity {
+			add("%s.managed_identity: not allowed with a client secret or a federated token file", at)
+		}
+		if a.TenantID == "" || a.ClientID == "" {
+			add("%s: tenant_id and client_id are required with a client secret or a federated token file (or AZURE_TENANT_ID, AZURE_CLIENT_ID)", at)
+		}
+	case !a.ManagedIdentity:
+		add("%s: identity missing (AZURE_%s_CLIENT_SECRET or AZURE_CLIENT_SECRET, %s.federated_token_file or AZURE_FEDERATED_TOKEN_FILE, or %s.managed_identity)", at, envName(p.ID), at, at)
+	}
+	validRetries(at, a.MaxRetries, add)
 }
 
 func validateEuroDNS(at, id string, e *EuroDNSConfig, add func(string, ...any)) {
