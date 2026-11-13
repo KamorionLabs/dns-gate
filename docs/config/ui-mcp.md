@@ -87,7 +87,7 @@ How the gate validates a SAML response, and its replay protection: [design](../d
 | `mcp.enabled` | `false` | Serves `/mcp` and `/.well-known/oauth-protected-resource`. |
 | `mcp.allow_writes` | `false` | Adds the write tools (plan/apply, adoption, transfer requests and decisions, zone profiles). Without it, the server is read-only. |
 | `mcp.plan_ttl` | `10m` | Lifetime of a plan returned by `plan_rrset_change` or `POST /api/v1/zones/{zone}/plan` (1m to 1h). |
-| `mcp.requests_per_minute` | `120` | Rate limit per subject (`429` beyond). |
+| `mcp.requests_per_minute` | `120` | Rate limit per subject, with a burst of a quarter of it (at least 5): `429` beyond, with a `Retry-After` giving the seconds until the next request is accepted. |
 | `mcp.public_url` | UI origin, else the request host | Public base URL of the gate, advertised in the protected resource metadata and shown on the Connect page. |
 
 Authentication is the same as the API: an OIDC bearer token of a configured issuer, or a virtual key (`X-APP-ID` / `X-API-KEY`); cookies are ignored. Without credentials the answer is `401` with `WWW-Authenticate: Bearer resource_metadata="<base>/.well-known/oauth-protected-resource"`, and that document (RFC 9728) names the UI issuer as authorization server. Every tool runs with the RBAC and ownership rules of the caller and is audited (`mcp.<tool>`, with `via: mcp` and the client name), except `check_propagation`.
@@ -128,6 +128,8 @@ With a [SAML UI login](#saml-login), the extension signs in at the gate itself: 
 The file comes from `GET /api/v1/connect/claude-desktop.mcpb` (same authentication as `/api/v1/connect`), offered when `mcp.enabled` and the UI login are both on; `/api/v1/connect` then returns its URL in `claude_desktop_extension_url` (empty otherwise, and the download answers `404`). It is an [MCP Bundle](https://github.com/modelcontextprotocol/mcpb) (manifest `0.3`, `dns-gate-<host>.mcpb`) generated on the fly with the MCP URL, the UI issuer, `ui.client_id` and the token scope (from `ui.cli_scope`, see Entra ID below) baked in. It holds no secret and is the same for every user of the gate.
 
 The extension relays every MCP message to `/mcp` with the user's token, signs in through the system browser and keeps its tokens in `~/.dns-gate/<host>.json` (mode `0600`): [how it works](../design/onboarding-mcp.md#174-claude-desktop-extension).
+
+The relay sends at most 8 requests to the gate at once, the others wait their turn. On a `429` it waits for the `Retry-After` and sends again, holding back the other requests meanwhile, as long as the wait stays under 45 seconds (under the minute after which Claude gives up on a request); beyond, the call fails with a JSON-RPC error carrying `data: {reason: "rate_limited", retry_after}`. While Claude connects, `initialize` waits at most 5 seconds and is otherwise answered by the relay, the session being opened on the next request: an agent that emptied the limit does not make Claude drop the extension.
 
 The identity provider must accept `ui.client_id` as a **public client** for this flow:
 

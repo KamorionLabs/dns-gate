@@ -32,21 +32,63 @@ const readline = require('node:readline');
 const { spawn } = require('node:child_process');
 
 const RELAY_NAME = 'dns-gate';
-const RELAY_VERSION = '1.0.0';
+const RELAY_VERSION = '1.1.0';
 const DEFAULT_PROTOCOL_VERSION = '2025-06-18';
 const HTTP_TIMEOUT_MS = 30_000;
 const EXPIRY_MARGIN_MS = 60_000;
 const ERR_GATE = -32000;
 const ERR_SIGN_IN = -32001;
+// Requests sent to the gate at once; the others wait their turn, so that an
+// agent fanning out tool calls does not empty the gate rate limit at once.
+const MAX_IN_FLIGHT = 8;
+// How long a request may wait for the gate rate limit (429 and Retry-After)
+// before failing: below the minute after which Claude gives up on it.
+const RATE_LIMIT_BUDGET_MS = 45_000;
+// The shorter wait while Claude connects: initialize is then answered by the
+// relay and the session opened on the next request.
+const INIT_BUDGET_MS = 5_000;
 // List methods answered empty while signed out, keyed to their result field.
 const LIST_METHODS = { 'tools/list': 'tools', 'prompts/list': 'prompts', 'resources/list': 'resources', 'resources/templates/list': 'resourceTemplates' };
 
 const log = (...a) => process.stderr.write(`[${RELAY_NAME}] ${a.join(' ')}\n`);
 
 class RelayError extends Error {
-  constructor(message, code = ERR_GATE) {
+  constructor(message, code = ERR_GATE, data) {
     super(message);
     this.code = code;
+    this.data = data;
+  }
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms).unref());
+
+// retryAfterMs reads a Retry-After header, in seconds or as an HTTP date;
+// 1 s when absent or unreadable.
+function retryAfterMs(v, now = Date.now()) {
+  if (v && /^\s*\d+\s*$/.test(v)) return Number(v) * 1000;
+  const t = v ? Date.parse(v) : NaN;
+  return Number.isFinite(t) ? Math.max(t - now, 0) : 1000;
+}
+
+// Slots bounds the requests in flight; the others wait in order.
+class Slots {
+  constructor(n) {
+    this.free = n;
+    this.waiting = [];
+  }
+
+  async acquire() {
+    if (this.free > 0) {
+      this.free--;
+      return;
+    }
+    await new Promise((r) => this.waiting.push(r));
+  }
+
+  release() {
+    const next = this.waiting.shift();
+    if (next) next();
+    else this.free++;
   }
 }
 
@@ -441,6 +483,8 @@ class Relay {
     this.backgroundSignIn = null;
     this.listening = false;
     this.closed = false;
+    this.slots = new Slots(MAX_IN_FLIGHT);
+    this.pausedUntil = 0; // the gate rate limit answered: wait until then
   }
 
   reply(id, result) {
@@ -454,7 +498,9 @@ class Relay {
       code === ERR_SIGN_IN
         ? `Sign-in to ${this.cfg.host} failed: ${e.message}. Ask again to restart the sign-in.`
         : `dns-gate (${this.cfg.host}): ${e.message}`;
-    this.write({ jsonrpc: '2.0', id, error: { code, message } });
+    const error = { code, message };
+    if (e instanceof RelayError && e.data !== undefined) error.data = e.data;
+    this.write({ jsonrpc: '2.0', id, error });
   }
 
   async handle(msg) {
@@ -526,7 +572,7 @@ class Relay {
     }
     if (token) {
       try {
-        const res = await this.upstreamInit(false);
+        const res = await this.upstreamInit(false, INIT_BUDGET_MS);
         this.localInit = false;
         this.write({ ...res, id: msg.id });
         return;
@@ -550,12 +596,12 @@ class Relay {
   // upstreamInit opens the session with the gate using the client's
   // initialize parameters. internal: the client's notifications/initialized
   // was already consumed, so the relay sends its own.
-  upstreamInit(internal) {
+  upstreamInit(internal, budgetMs = RATE_LIMIT_BUDGET_MS) {
     if (!this.initializing) {
       this.initializing = (async () => {
         const id = `relay-init-${randomString(8)}`;
         const params = this.initParams || { protocolVersion: DEFAULT_PROTOCOL_VERSION, capabilities: {}, clientInfo: { name: RELAY_NAME, version: RELAY_VERSION } };
-        const res = await this.post({ jsonrpc: '2.0', id, method: 'initialize', params }, { capture: id, interactive: false });
+        const res = await this.post({ jsonrpc: '2.0', id, method: 'initialize', params }, { capture: id, interactive: false, budgetMs });
         if (!res) throw new RelayError('the gate did not answer initialize');
         if (res.error) {
           const e = new RelayError(res.error.message || 'initialize refused');
@@ -603,16 +649,7 @@ class Relay {
   async post(msg, opts) {
     const token = await this.auth.token(opts.interactive);
     if (!token) throw new RelayError('not signed in', ERR_SIGN_IN);
-    let res;
-    try {
-      res = await fetch(this.cfg.mcpURL, {
-        method: 'POST',
-        headers: { ...this.headers(token, 'application/json, text/event-stream'), 'Content-Type': 'application/json' },
-        body: JSON.stringify(msg),
-      });
-    } catch (e) {
-      throw new RelayError(`cannot reach the gate (${(e.cause && e.cause.code) || e.message})`);
-    }
+    const res = await this.send(msg, token, opts.budgetMs ?? RATE_LIMIT_BUDGET_MS);
     const sid = res.headers.get('mcp-session-id');
     if (sid) this.sessionID = sid;
     if (res.status === 401 && !opts.retried) {
@@ -656,6 +693,43 @@ class Relay {
     return captured;
   }
 
+  // send POSTs one message to the gate within the bounded slots. A 429 is
+  // retried after its Retry-After, which also holds back the other requests,
+  // as long as the wait fits in budgetMs; then it fails with a clear error.
+  async send(msg, token, budgetMs) {
+    const deadline = Date.now() + budgetMs;
+    for (;;) {
+      const pause = this.pausedUntil - Date.now();
+      if (pause > 0) {
+        if (Date.now() + pause > deadline) throw this.rateLimited(pause);
+        await sleep(pause + Math.floor(Math.random() * 200));
+      }
+      await this.slots.acquire();
+      let res;
+      try {
+        res = await fetch(this.cfg.mcpURL, {
+          method: 'POST',
+          headers: { ...this.headers(token, 'application/json, text/event-stream'), 'Content-Type': 'application/json' },
+          body: JSON.stringify(msg),
+        });
+      } catch (e) {
+        throw new RelayError(`cannot reach the gate (${(e.cause && e.cause.code) || e.message})`);
+      } finally {
+        this.slots.release();
+      }
+      if (res.status !== 429) return res;
+      const wait = retryAfterMs(res.headers.get('retry-after'));
+      await res.body?.cancel();
+      this.pausedUntil = Math.max(this.pausedUntil, Date.now() + wait);
+      if (Date.now() + wait > deadline) throw this.rateLimited(wait);
+    }
+  }
+
+  rateLimited(waitMs) {
+    const s = Math.max(1, Math.ceil(waitMs / 1000));
+    return new RelayError(`the gate is rate limiting your requests; retry in ${s} s, or send fewer calls at once`, ERR_GATE, { reason: 'rate_limited', retry_after: s });
+  }
+
   async readSSE(body, target, capture) {
     let captured = null;
     for await (const data of parseSSE(body)) {
@@ -693,6 +767,11 @@ class Relay {
           continue;
         }
         const ct = (res.headers.get('content-type') || '').toLowerCase();
+        if (res.status === 429) {
+          await res.body?.cancel();
+          await sleep(Math.max(retryAfterMs(res.headers.get('retry-after')), delay));
+          continue;
+        }
         if (!res.ok || !ct.startsWith('text/event-stream')) {
           await res.body?.cancel();
           return;
@@ -719,6 +798,13 @@ function main() {
     log(`configuration error: ${e.message}`);
     process.exit(1);
   }
+  // A failure in one request must never stop the relay: Claude would see
+  // the connection closed and every tool of the gate go away.
+  process.on('unhandledRejection', (e) => log(`unexpected error: ${(e && e.message) || e}`));
+  process.on('uncaughtException', (e) => log(`unexpected error: ${(e && e.message) || e}`));
+  process.stdout.on('error', (e) => {
+    if (e.code === 'EPIPE') process.exit(0);
+  });
   const write = (m) => process.stdout.write(JSON.stringify(m) + '\n');
   const relay = new Relay(cfg, new Auth(cfg), write);
   const rl = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -744,4 +830,4 @@ function main() {
 // require.main is not this module: run unless loaded as a library.
 if (require.main === module || !process.env.DNS_GATE_RELAY_NO_MAIN) main();
 
-module.exports = { loadConfig, parseSSE, Relay, Auth };
+module.exports = { loadConfig, parseSSE, retryAfterMs, Relay, Auth };

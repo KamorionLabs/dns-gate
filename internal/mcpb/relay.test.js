@@ -28,6 +28,11 @@ function fakeServer() {
     authorizeError: null,
     mcp: [], // {method, auth, session, protocol}
     getCalls: 0,
+    limited: 0, // POSTs to answer 429 before serving again
+    retryAfter: '1',
+    callDelay: 0, // ms a tools/call takes
+    inFlight: 0,
+    maxInFlight: 0,
   };
   const issue = (nonce) => {
     f.seq++;
@@ -107,6 +112,11 @@ function fakeServer() {
         return;
       }
       const msg = JSON.parse(await readBody(req));
+      if (f.limited > 0) {
+        f.limited--;
+        f.mcp.push({ method: msg.method, limited: true });
+        return json(res, 429, { reason: 'rate_limited', message: 'too many MCP requests' }, { 'Retry-After': f.retryAfter });
+      }
       f.mcp.push({ method: msg.method, auth, session: req.headers['mcp-session-id'], protocol: req.headers['mcp-protocol-version'] });
       if (msg.method === 'initialize') {
         return json(res, 200, { jsonrpc: '2.0', id: msg.id, result: { protocolVersion: msg.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'fake-gate', version: '0' } } }, { 'Mcp-Session-Id': 'sess-1' });
@@ -125,6 +135,10 @@ function fakeServer() {
         return;
       }
       if (msg.method === 'tools/call') {
+        f.inFlight++;
+        f.maxInFlight = Math.max(f.maxInFlight, f.inFlight);
+        if (f.callDelay) await new Promise((r) => setTimeout(r, f.callDelay));
+        f.inFlight--;
         return json(res, 200, { jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'zones' }] } });
       }
       return json(res, 200, { jsonrpc: '2.0', id: msg.id, error: { code: -32601, message: 'method not found' } });
@@ -378,4 +392,121 @@ test('rejects plain http towards a remote host', async () => {
   assert.equal(c.scope, 'openid offline_access');
   assert.equal(c.issuer, 'https://idp.example.com');
   assert.equal(c.tokenFile, path.join('/t', 'gate.example.com.json'));
+});
+
+// signedIn saves a valid token for f in a new directory, as after a sign-in.
+function signedIn(f) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gate-relay-'));
+  f.validTokens.add('at-saved');
+  const file = path.join(dir, new URL(f.url).host.replace(/[^A-Za-z0-9.-]/g, '_') + '.json');
+  const saved = { issuer: f.url, client_id: f.clientID, scope: 'openid offline_access api://gate/.default', access_token: 'at-saved', expires_at: Date.now() + 3_600_000 };
+  fs.writeFileSync(file, JSON.stringify(saved), { mode: 0o600 });
+  return dir;
+}
+
+test('rate limit of the gate', async (t) => {
+  const f = await fakeServer();
+  const dirs = [];
+  t.after(() => {
+    f.server.closeAllConnections();
+    f.server.close();
+    for (const d of dirs) fs.rmSync(d, { recursive: true, force: true });
+  });
+  const relay = () => {
+    const d = signedIn(f);
+    dirs.push(d);
+    return startRelay(f, d);
+  };
+  const call = (id) => ({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'list_zones', arguments: {} } });
+
+  await t.test('waits for the limit while Claude connects instead of failing the tool list', async () => {
+    // Claude Desktop restarted the relay while the agent had emptied the
+    // limit: initialize and tools/list must not fail, or Claude gives up on
+    // the extension and shows it unavailable.
+    f.limited = 1;
+    f.retryAfter = '6'; // longer than the wait allowed for initialize
+    f.mcp.length = 0;
+    const r = relay();
+    try {
+      const t0 = Date.now();
+      r.send(init());
+      assert.equal((await r.response(1)).result.serverInfo.name, 'dns-gate', 'initialize answered by the relay');
+      assert.ok(Date.now() - t0 < 2000, 'initialize does not wait for the limit');
+      r.send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+      r.send({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
+      const list = await r.wait((m) => m.id === 2 && !m.method, 'tools/list after the limit');
+      assert.equal(list.result.tools[0].name, 'list_zones');
+      assert.equal(f.mcp.filter((c) => c.limited).length, 1, 'tools/list waited for Retry-After instead of asking again');
+      assert.ok(Date.now() - t0 >= 5900, 'Retry-After respected');
+    } finally {
+      f.limited = 0;
+      f.retryAfter = '1';
+      await r.stop();
+    }
+  });
+
+  await t.test('retries a refused call after Retry-After', async () => {
+    const r = relay();
+    try {
+      r.send(init());
+      assert.equal((await r.response(1)).result.serverInfo.name, 'fake-gate');
+      f.limited = 2;
+      r.send(call(2));
+      assert.equal((await r.response(2)).result.content[0].text, 'zones');
+    } finally {
+      f.limited = 0;
+      await r.stop();
+    }
+  });
+
+  await t.test('fails clearly when the wait exceeds what Claude allows', async () => {
+    const r = relay();
+    try {
+      r.send(init());
+      await r.response(1);
+      f.limited = 1;
+      f.retryAfter = '120';
+      const t0 = Date.now();
+      r.send(call(2));
+      const res = await r.response(2);
+      assert.ok(Date.now() - t0 < 2000, 'no pointless wait');
+      assert.equal(res.error.code, -32000);
+      assert.match(res.error.message, /rate limiting your requests; retry in 120 s/);
+      assert.deepEqual(res.error.data, { reason: 'rate_limited', retry_after: 120 });
+      f.retryAfter = '1';
+      r.send({ jsonrpc: '2.0', id: 3, method: 'ping' });
+      assert.deepEqual((await r.response(3)).result, {}, 'still alive');
+    } finally {
+      f.limited = 0;
+      f.retryAfter = '1';
+      await r.stop();
+    }
+  });
+
+  await t.test('bounds the requests in flight in a burst', async () => {
+    const r = relay();
+    try {
+      r.send(init());
+      await r.response(1);
+      f.callDelay = 50;
+      f.maxInFlight = 0;
+      for (let i = 0; i < 30; i++) r.send(call(100 + i));
+      for (let i = 0; i < 30; i++) assert.equal((await r.response(100 + i)).result.content[0].text, 'zones');
+      assert.ok(f.maxInFlight <= 8, `at most 8 calls at once, saw ${f.maxInFlight}`);
+      assert.ok(f.maxInFlight > 1, 'calls still run in parallel');
+    } finally {
+      f.callDelay = 0;
+      await r.stop();
+    }
+  });
+});
+
+test('retryAfterMs reads seconds and HTTP dates', () => {
+  const { retryAfterMs } = require(RELAY);
+  assert.equal(retryAfterMs('10'), 10_000);
+  assert.equal(retryAfterMs(null), 1000);
+  assert.equal(retryAfterMs('soon'), 1000);
+  const now = Date.parse('2026-11-12T10:00:00Z');
+  assert.equal(retryAfterMs('Thu, 12 Nov 2026 10:00:05 GMT', now), 5000);
+  assert.equal(retryAfterMs('Thu, 12 Nov 2026 09:00:00 GMT', now), 0);
 });
