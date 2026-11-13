@@ -1,7 +1,9 @@
 # dns-gate
 
 A security gateway in front of DNS provider APIs: today
-[Amazon Route 53](docs/providers/route53.md) and [EuroDNS](https://www.eurodns.com),
+[Amazon Route 53](docs/providers/route53.md), [EuroDNS](https://www.eurodns.com),
+[OVHcloud](docs/providers/ovh.md), [Scaleway](docs/providers/scaleway.md),
+[Infomaniak](docs/providers/infomaniak.md) and [Azure DNS](docs/providers/azure.md),
 several accounts of each in one gate, other providers on the
 [roadmap](https://github.com/KamorionLabs/dns-gate/issues). Clients see one
 provider-neutral API whatever the provider of a zone.

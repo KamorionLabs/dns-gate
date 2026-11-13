@@ -21,8 +21,12 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
 	"github.com/KamorionLabs/dns-gate/internal/provider"
+	azureprov "github.com/KamorionLabs/dns-gate/internal/provider/azure"
 	eurodnsprov "github.com/KamorionLabs/dns-gate/internal/provider/eurodns"
+	infomaniakprov "github.com/KamorionLabs/dns-gate/internal/provider/infomaniak"
+	ovhprov "github.com/KamorionLabs/dns-gate/internal/provider/ovh"
 	route53prov "github.com/KamorionLabs/dns-gate/internal/provider/route53"
+	scalewayprov "github.com/KamorionLabs/dns-gate/internal/provider/scaleway"
 	"github.com/KamorionLabs/dns-gate/internal/requestid"
 	"github.com/KamorionLabs/dns-gate/internal/server"
 	"github.com/KamorionLabs/dns-gate/internal/store"
@@ -371,13 +375,14 @@ func (a *App) WarnUndeclaredOwners(ctx context.Context) {
 
 // newProvider builds the adapter of a configured provider.
 func newProvider(ctx context.Context, pc config.Provider) (provider.Provider, error) {
+	ua := "dns-gate/" + version.Version
 	switch pc.Kind {
 	case config.KindEuroDNS:
 		e := pc.EuroDNS
 		return eurodnsprov.New(pc.ID, eurodnsprov.Config{
 			BaseURL: e.BaseURL, AppID: e.AppID, APIKey: e.APIKey,
 			RateEvery: e.Rate.Every.D(), RateBurst: e.Rate.Burst, MaxRetries: *e.MaxRetries,
-			UserAgent: "dns-gate/" + version.Version,
+			UserAgent: ua,
 		})
 	case config.KindRoute53:
 		r := pc.Route53
@@ -387,6 +392,43 @@ func newProvider(ctx context.Context, pc config.Provider) (provider.Provider, er
 		return route53prov.New(ctx, pc.ID, route53prov.Config{
 			Region: r.Region, AssumeRoleARN: r.AssumeRoleARN, ExternalID: r.ExternalID,
 			HostedZones: r.HostedZones, IncludePrivate: r.IncludePrivate,
+		})
+	case config.KindOVH:
+		o := pc.OVH
+		if o == nil {
+			o = &config.OVHConfig{}
+		}
+		return ovhprov.New(pc.ID, ovhprov.Config{
+			Endpoint: o.Endpoint, ApplicationKey: o.ApplicationKey, ApplicationSecret: o.ApplicationSecret,
+			ConsumerKey: o.ConsumerKey, ClientID: o.ClientID, ClientSecret: o.ClientSecret,
+			MaxRetries: o.MaxRetries, UserAgent: ua,
+		})
+	case config.KindScaleway:
+		s := pc.Scaleway
+		if s == nil {
+			s = &config.ScalewayConfig{}
+		}
+		return scalewayprov.New(pc.ID, scalewayprov.Config{
+			SecretKey: s.SecretKey, ProjectID: s.ProjectID, OrganizationID: s.OrganizationID,
+			MaxRetries: s.MaxRetries, UserAgent: ua,
+		})
+	case config.KindInfomaniak:
+		k := pc.Infomaniak
+		if k == nil {
+			k = &config.InfomaniakConfig{}
+		}
+		return infomaniakprov.New(pc.ID, infomaniakprov.Config{
+			Token: k.Token, Zones: k.Zones, Every: k.Rate.Every.D(), MaxRetries: k.MaxRetries, UserAgent: ua,
+		})
+	case config.KindAzure:
+		a := pc.Azure
+		if a == nil {
+			a = &config.AzureConfig{}
+		}
+		return azureprov.New(pc.ID, azureprov.Config{
+			SubscriptionID: a.SubscriptionID, ResourceGroup: a.ResourceGroup, TenantID: a.TenantID, ClientID: a.ClientID,
+			ClientSecret: a.ClientSecret, FederatedTokenFile: a.FederatedTokenFile, ManagedIdentity: a.ManagedIdentity,
+			MaxRetries: a.MaxRetries, UserAgent: ua,
 		})
 	}
 	return nil, fmt.Errorf("provider %s: unknown kind %q", pc.ID, pc.Kind)

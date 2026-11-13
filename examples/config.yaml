@@ -30,6 +30,24 @@ providers:
   #     external_id: dns-gate
   #     hosted_zones: {"example.net": Z0123456789ABC}  # optional pinning
   #     include_private: false
+  # - id: ovh-main                  # OVH_OVH_MAIN_APPLICATION_SECRET, OVH_OVH_MAIN_CONSUMER_KEY
+  #   kind: ovh
+  #   zones: {include: ["*.fr"]}
+  #   ovh: {endpoint: ovh-eu, application_key: 0123456789abcdef}
+  # - id: scw                       # SCALEWAY_SCW_SECRET_KEY or SCW_SECRET_KEY
+  #   kind: scaleway
+  #   zones: {include: ["*.io"]}
+  # - id: ik                        # INFOMANIAK_IK_TOKEN
+  #   kind: infomaniak
+  #   zones: {include: ["*.ch"]}
+  # - id: azure-prod                # AZURE_AZURE_PROD_CLIENT_SECRET, or a federated token file
+  #   kind: azure
+  #   zones: {include: ["*.example.net"]}
+  #   azure:
+  #     subscription_id: 00000000-0000-0000-0000-000000000001
+  #     resource_group: rg-dns
+  #     tenant_id: 11111111-1111-1111-1111-111111111111
+  #     client_id: 22222222-2222-2222-2222-222222222222
 
 # Only these zones are reachable through the gate (plus the zones of the
 # active managed policy revision).

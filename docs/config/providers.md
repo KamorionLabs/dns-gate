@@ -1,15 +1,15 @@
 # Providers, discovery and folders
 
-The DNS accounts the gate fronts, how it lists their zones, and the EuroDNS-only settings (folders, zone profiles). Provider pages: [Route 53](../providers/route53.md), [EuroDNS](../providers/eurodns.md).
+The DNS accounts the gate fronts, how it lists their zones, and the EuroDNS-only settings (folders, zone profiles). Provider pages: [Route 53](../providers/route53.md), [EuroDNS](../providers/eurodns.md), [OVHcloud](../providers/ovh.md), [Scaleway](../providers/scaleway.md), [Infomaniak](../providers/infomaniak.md), [Azure DNS](../providers/azure.md).
 
 ## Providers
 
-A provider is one DNS account: a EuroDNS account or an AWS account for Route53. The gate alone holds its credentials. Each zone is served by exactly one provider: the one whose `zones` filter selects it, or, when the filters of several providers select it, the only one of them whose account lists it. A zone listed by two providers that both select it is served by neither (an error is logged): exclude it from all but one. Ownership, locks and audit stay keyed by zone name.
+A provider is one DNS account: a EuroDNS account, an AWS account for Route53, an OVHcloud account, a Scaleway API key, an Infomaniak API token or an Azure subscription. The gate alone holds its credentials. Each zone is served by exactly one provider: the one whose `zones` filter selects it, or, when the filters of several providers select it, the only one of them whose account lists it. A zone listed by two providers that both select it is served by neither (an error is logged): exclude it from all but one. Ownership, locks and audit stay keyed by zone name.
 
 | Field | Default | Description |
 |---|---|---|
 | `providers[].id` | (required) | Unique lowercase identifier, shown in the UI, the audit (`provider`) and zone summaries. |
-| `providers[].kind` | (required) | `eurodns` or `route53` ([providers/route53.md](../providers/route53.md)). |
+| `providers[].kind` | (required) | `eurodns`, `route53` ([providers/route53.md](../providers/route53.md)), `ovh`, `scaleway`, `infomaniak` or `azure`. |
 | `providers[].zones.include` | `["*"]` | Zone globs (`*` wildcards) the provider serves. |
 | `providers[].zones.exclude` | `[]` | Zone globs removed; they win over `include`. |
 | `providers[].zones.folders` | `[]` | EuroDNS only: keep the zones whose [folder](#eurodns-folders) matches one of these folder globs (`/ES` the folder ES, `/ES/**` every folder below it, `/` the domains in no folder). Empty: every folder. |
@@ -25,6 +25,10 @@ A provider is one DNS account: a EuroDNS account or an AWS account for Route53. 
 | `providers[].route53.external_id` | | External id of the assumed role (requires `assume_role_arn`). |
 | `providers[].route53.hosted_zones` | `{}` | Zone name to hosted zone id, to pin a name with several hosted zones or skip the listing of the account. |
 | `providers[].route53.include_private` | `false` | Serve private hosted zones too. |
+| `providers[].ovh.*` | | OVHcloud: `endpoint`, `application_key` or `client_id`, `max_retries` ([providers/ovh.md](../providers/ovh.md)). |
+| `providers[].scaleway.*` | | Scaleway: `project_id`, `organization_id`, `max_retries` ([providers/scaleway.md](../providers/scaleway.md)). |
+| `providers[].infomaniak.*` | | Infomaniak: `zones`, `rate.every`, `max_retries` ([providers/infomaniak.md](../providers/infomaniak.md)). |
+| `providers[].azure.*` | | Azure DNS: `subscription_id`, `resource_group`, `tenant_id`, `client_id`, `federated_token_file`, `managed_identity`, `max_retries` ([providers/azure.md](../providers/azure.md)). |
 
 ```yaml
 providers:
@@ -41,7 +45,7 @@ providers:
       hosted_zones: {"example.net": Z0123456789ABC}
 ```
 
-What a provider can write is reported by the gate and enforced by the engine: alias RRsets only where the provider supports them (Route53), accepted TTLs (EuroDNS: a fixed list), read-only RRsets (`read_only` in the inventory: SOA and locked records at EuroDNS, `relative_target` for a EuroDNS RRset holding a target without ending dot, routing policies at Route53), which are never written nor adopted. The [EuroDNS-compatible API](../API.md#endpoints) only serves zones of a `eurodns` provider; the RRset API under `/api/v1` serves every zone.
+What a provider can write is reported by the gate and enforced by the engine: alias RRsets only where the provider supports them (Route53), accepted TTLs (EuroDNS: a fixed list), read-only RRsets (`read_only` in the inventory: SOA and locked records at EuroDNS, `relative_target` for a EuroDNS RRset holding a target without ending dot, routing policies at Route53), alias, dynamic and server-managed records of the other providers), which are never written nor adopted. Route53 writes are atomic; OVHcloud, Scaleway, Infomaniak and Azure DNS writes are not (see their pages): after a failed write the gate settles ownership on the zone it reads back. The [EuroDNS-compatible API](../API.md#endpoints) only serves zones of a `eurodns` provider; the RRset API under `/api/v1` serves every zone.
 
 Desired targets (CNAME, MX, NS, SRV, PTR) are read the same way for every provider: a name of several labels is absolute (`target.example.net` is written `target.example.net.`), a single label is refused as ambiguous. Values already stored are never rewritten.
 
