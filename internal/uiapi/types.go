@@ -98,23 +98,33 @@ type ConnectIssuer struct {
 }
 
 // ZoneSummary is one zone: managed, or discovered in a provider account
-// and not managed (Unmanaged, read-only; counts stay zero until its content
-// has been read once).
+// and not managed (Unmanaged, read-only). The counts are nil while they are
+// unknown: an unmanaged zone is counted once its content has been read.
 type ZoneSummary struct {
 	Zone     string `json:"zone"`
 	Provider string `json:"provider"`
 	// Folder is the provider folder of the zone (EuroDNS, "/" at the
 	// root), "" when the provider has no folders or the zone is not listed.
-	Folder       string     `json:"folder,omitempty"`
-	Unmanaged    bool       `json:"unmanaged,omitempty"`
-	RRsets       int        `json:"rrsets"`  // total upstream RRsets
-	Managed      int        `json:"managed"` // owned by the gate (active)
-	Tainted      int        `json:"tainted"`
-	Pending      int        `json:"pending"`
-	Foreign      int        `json:"foreign"`
+	Folder    string `json:"folder,omitempty"`
+	Unmanaged bool   `json:"unmanaged,omitempty"`
+	// NoZone: the domain is in the provider account but the provider holds
+	// no DNS zone for it (a EuroDNS domain registered only, parked or
+	// served elsewhere). Known once a read of the zone was refused.
+	NoZone       bool       `json:"no_zone,omitempty"`
+	RRsets       *int       `json:"rrsets,omitempty"`  // total upstream RRsets
+	Managed      *int       `json:"managed,omitempty"` // owned by the gate (active)
+	Tainted      *int       `json:"tainted,omitempty"`
+	Pending      *int       `json:"pending,omitempty"`
+	Foreign      *int       `json:"foreign,omitempty"`
 	LastSyncedAt *time.Time `json:"last_synced_at,omitempty"` // last upstream read
 	LastWriteAt  *time.Time `json:"last_write_at,omitempty"`  // latest successful gate write, from the journal
 }
+
+// Count is a known count of a ZoneSummary.
+func Count(n int) *int { return &n }
+
+// Counted reports whether the counts of the zone are known.
+func (z ZoneSummary) Counted() bool { return z.RRsets != nil }
 
 // RRset statuses.
 const (

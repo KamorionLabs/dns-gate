@@ -262,6 +262,19 @@ func inventoryError(err error) error {
 	return errors.New("inventory unavailable")
 }
 
+// compactZones keeps what tells a zone apart in a long listing: no sync or
+// write times, and for an unmanaged zone only its total, the other counts
+// being zero or all foreign by definition.
+func compactZones(zs []uiapi.ZoneSummary) {
+	for i := range zs {
+		z := &zs[i]
+		z.LastSyncedAt, z.LastWriteAt = nil, nil
+		if z.Unmanaged {
+			z.Managed, z.Tainted, z.Pending, z.Foreign = nil, nil, nil, nil
+		}
+	}
+}
+
 func normZoneArg(z string) string {
 	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(z)), ".")
 }
@@ -273,7 +286,8 @@ type zoneArg struct {
 }
 
 type listZonesIn struct {
-	Folder string `json:"folder,omitempty" jsonschema:"optional EuroDNS folder glob: /ES is the folder ES only, /ES/** every folder below it, / the zones in no folder"`
+	Folder  string `json:"folder,omitempty" jsonschema:"optional EuroDNS folder glob: /ES is the folder ES only, /ES/** every folder below it, / the zones in no folder"`
+	Compact bool   `json:"compact,omitempty" jsonschema:"only zone, provider, folder, unmanaged, no_zone and the known counts: no sync or write times, and for an unmanaged zone only rrsets"`
 }
 
 type listZonesOut struct {
@@ -371,7 +385,7 @@ type adoptApplyIn struct {
 func (m *mcpServer) addReadTools(srv *mcp.Server) {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "list_zones",
-		Description: "List the DNS zones you can read, with their provider folder (EuroDNS folders, \"/\" for a zone in no folder) and counts of managed, foreign, tainted and pending RRsets. Zones flagged unmanaged exist in a provider account but are not managed by the gate: their RRsets are readable (list_rrsets, get_rrset) but cannot be changed or adopted until a policy administrator brings them under management. Optional filter on a folder glob.",
+		Description: "List the DNS zones you can read, with their provider folder (EuroDNS folders, \"/\" for a zone in no folder) and counts of managed, foreign, tainted and pending RRsets. Zones flagged unmanaged exist in a provider account but are not managed by the gate: their RRsets are readable (list_rrsets, get_rrset) but cannot be changed or adopted until a policy administrator brings them under management. The counts of an unmanaged zone are absent until it has been read once (list_rrsets); no_zone marks a domain of the account for which the provider holds no DNS zone (registered only, e.g. parked), which list_rrsets cannot read. Optional filter on a folder glob; compact=true for a lighter answer over many zones.",
 		Annotations: readOnly("List zones"),
 	}, func(ctx context.Context, req *mcp.CallToolRequest, in listZonesIn) (*mcp.CallToolResult, listZonesOut, error) {
 		subj, err := m.subject(ctx, req)
@@ -388,6 +402,9 @@ func (m *mcpServer) addReadTools(srv *mcp.Server) {
 			return nil, listZonesOut{}, errors.New("inventory unavailable")
 		}
 		out := listZonesOut{Zones: readableZones(m.s.cfg.Policy.Current(), zs, m.readable(subj), in.Folder)}
+		if in.Compact {
+			compactZones(out.Zones)
+		}
 		m.audit(ctx, req, subj, "list_zones", "", "allow", "", nil)
 		return nil, out, nil
 	})

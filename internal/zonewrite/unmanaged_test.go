@@ -2,11 +2,14 @@ package zonewrite
 
 import (
 	"context"
+	"errors"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
 	"github.com/KamorionLabs/dns-gate/internal/provider"
@@ -109,7 +112,7 @@ func TestUnmanagedZoneReadOnly(t *testing.T) {
 		t.Fatalf("listing made %d upstream requests, want 1", got)
 	}
 	if len(sums) != 3 || sums[0].Zone != zoneName || sums[0].Unmanaged || !sums[1].Unmanaged || sums[1].Zone != "cold.org" ||
-		sums[2].Zone != otherZone || sums[2].RRsets != 0 || sums[2].LastSyncedAt != nil {
+		sums[2].Zone != otherZone || sums[2].Counted() || sums[2].NoZone || sums[2].LastSyncedAt != nil {
 		t.Fatalf("summaries %+v", sums)
 	}
 
@@ -131,7 +134,7 @@ func TestUnmanagedZoneReadOnly(t *testing.T) {
 		t.Fatalf("%d upstream reads, want 1 within the TTL", got)
 	}
 	sums, _ = e.eng.Zones(ctx, alice)
-	if sums[2].RRsets != 4 || sums[2].Foreign != 4 || sums[2].LastSyncedAt == nil {
+	if !sums[2].Counted() || *sums[2].RRsets != 4 || *sums[2].Foreign != 4 || *sums[2].Managed != 0 || sums[2].LastSyncedAt == nil {
 		t.Fatalf("summary after a read %+v", sums[2])
 	}
 	e.clock.Add(11 * time.Minute)
@@ -170,5 +173,57 @@ func TestUnmanagedZoneReadOnly(t *testing.T) {
 	inv, err = e.eng.Inventory(ctx, alice, otherZone)
 	if err != nil || inv.Unmanaged {
 		t.Fatalf("inventory after management: %+v %v", inv, err)
+	}
+}
+
+// TestUnmanagedNoZone: a domain of the account without a DNS zone at the
+// provider is told as such, marked no_zone in the listing and not asked again
+// upstream before UnmanagedTTL.
+func TestUnmanagedNoZone(t *testing.T) {
+	e, _ := unmanagedEnv(t)
+	ctx := context.Background()
+
+	n := e.srv.Requests()
+	_, err := e.eng.Inventory(ctx, alice, "cold.org")
+	ze, ok := AsError(err)
+	if !ok || ze.Reason != ReasonNotFound || !errors.Is(err, provider.ErrZoneNotFound) || !strings.Contains(ze.Message, "has no DNS zone at its provider") {
+		t.Fatalf("inventory of a domain without zone: %v", err)
+	}
+	for range 3 {
+		if _, err := e.eng.RRset(ctx, alice, "cold.org", dns.Key{Host: "@", Type: "A"}); err == nil {
+			t.Fatal("RRset of a domain without zone succeeded")
+		}
+	}
+	if got := e.srv.Requests() - n; got != 1 {
+		t.Fatalf("%d upstream reads, want 1 within the TTL", got)
+	}
+	sums, err := e.eng.Zones(ctx, alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sums[1].Zone != "cold.org" || !sums[1].NoZone || sums[1].Counted() || sums[1].LastSyncedAt != nil {
+		t.Fatalf("summary %+v", sums[1])
+	}
+
+	// The zone is created at the provider: read again after the TTL.
+	e.srv.Seed(&eurodns.Zone{Name: "cold.org", Records: []eurodns.Record{{Type: "A", Host: "@", TTL: 3600, RData: "192.0.2.1"}}})
+	e.clock.Add(11 * time.Minute)
+	if _, err := e.eng.Inventory(ctx, alice, "cold.org"); err != nil {
+		t.Fatal(err)
+	}
+	sums, _ = e.eng.Zones(ctx, alice)
+	if sums[1].NoZone || !sums[1].Counted() {
+		t.Fatalf("summary after the zone was created %+v", sums[1])
+	}
+}
+
+// TestManagedZoneMissingNotNoZone: a managed zone missing upstream stays an
+// upstream error and is not remembered as a domain without zone.
+func TestManagedZoneMissingNotNoZone(t *testing.T) {
+	e, zs := unmanagedEnv(t)
+	zs.manage("cold.org")
+	_, err := e.eng.Inventory(context.Background(), alice, "cold.org")
+	if ze, ok := AsError(err); !ok || strings.Contains(ze.Message, "has no DNS zone") {
+		t.Fatalf("managed zone missing upstream: %v", err)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/KamorionLabs/dns-gate/internal/dns"
 	"github.com/KamorionLabs/dns-gate/internal/identity"
 	"github.com/KamorionLabs/dns-gate/internal/policy"
+	"github.com/KamorionLabs/dns-gate/internal/provider"
 	"github.com/KamorionLabs/dns-gate/internal/store"
 	"github.com/KamorionLabs/dns-gate/internal/uiapi"
 )
@@ -20,6 +21,10 @@ import (
 func (e *engine) cached(ctx context.Context, zone string, maxAge time.Duration) (cachedZone, error) {
 	if c, ok := e.peek(zone, maxAge); ok {
 		return c, nil
+	}
+	if e.unmanaged(zone) && e.knownNoZone(zone, true) {
+		// Refused recently: not asked again before UnmanagedTTL.
+		return cachedZone{}, noZoneError(zone, provider.ErrZoneNotFound)
 	}
 	_, err, _ := e.reads.Do(zone, func() (any, error) {
 		if _, ok := e.peek(zone, maxAge); ok {
@@ -198,15 +203,20 @@ func (e *engine) addTombstones(ctx context.Context, inv *uiapi.ZoneInventory) {
 }
 
 // unmanagedSummary describes a discovered zone from the cache only: listing
-// zones never reads an unmanaged zone upstream.
+// zones never reads an unmanaged zone upstream. Its counts stay unknown (nil)
+// until the zone has been read once; NoZone tells a read refused for lack of
+// a DNS zone at the provider.
 func (e *engine) unmanagedSummary(zone string) uiapi.ZoneSummary {
 	sum := uiapi.ZoneSummary{Zone: zone, Provider: e.providerID(zone), Unmanaged: true}
 	if c, ok := e.peek(zone, 0); ok {
 		synced := c.syncedAt
 		sum.LastSyncedAt = &synced
 		n := len(c.zone.RRsets)
-		sum.RRsets, sum.Foreign = n, n
+		sum.RRsets, sum.Foreign = uiapi.Count(n), uiapi.Count(n)
+		sum.Managed, sum.Tainted, sum.Pending = uiapi.Count(0), uiapi.Count(0), uiapi.Count(0)
+		return sum
 	}
+	sum.NoZone = e.knownNoZone(zone, false)
 	return sum
 }
 
@@ -221,21 +231,24 @@ func (e *engine) Zones(ctx context.Context, s *identity.Subject) ([]uiapi.ZoneSu
 			return nil, err
 		}
 		sum := uiapi.ZoneSummary{Zone: zone, Provider: inv.Provider, LastSyncedAt: inv.LastSyncedAt, LastWriteAt: e.lastWrite(ctx, zone, c.writeAt)}
+		var total, managed, tainted, pending, foreign int
 		for _, r := range inv.RRsets {
 			if r.Status != uiapi.StatusMissing {
-				sum.RRsets++
+				total++
 			}
 			switch r.Status {
 			case uiapi.StatusManaged:
-				sum.Managed++
+				managed++
 			case uiapi.StatusTainted, uiapi.StatusMissing:
-				sum.Tainted++
+				tainted++
 			case uiapi.StatusPending:
-				sum.Pending++
+				pending++
 			case uiapi.StatusForeign:
-				sum.Foreign++
+				foreign++
 			}
 		}
+		sum.RRsets, sum.Managed, sum.Tainted = uiapi.Count(total), uiapi.Count(managed), uiapi.Count(tainted)
+		sum.Pending, sum.Foreign = uiapi.Count(pending), uiapi.Count(foreign)
 		out = append(out, sum)
 	}
 	for _, zone := range e.zones.UnmanagedZones() {

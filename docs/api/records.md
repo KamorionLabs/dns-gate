@@ -42,11 +42,14 @@ change against the zone as it is at the provider, under a per-zone lock.
 
     > Which DNS zones can I read, and how many records does each have?
 
-    Tool `list_zones` (optional `folder` glob for EuroDNS folders).
+    Tool `list_zones` (optional `folder` glob for EuroDNS folders, `compact: true` for a
+    lighter answer over many zones: no sync or write times, and only the total for an
+    unmanaged zone).
 
 `?folder=/ES/**` keeps the EuroDNS zones of a folder. Zones of the provider accounts
 that the gate does not manage are listed after the others with `"unmanaged": true`,
-read-only.
+read-only. Their counts are absent until the zone has been read once, and `"no_zone": true`
+marks a domain of the account for which the provider holds no DNS zone (registered only).
 
 ## Read a record set
 

@@ -49,6 +49,9 @@ type engine struct {
 	reads  singleflight.Group // coalesces cache fills
 	locals map[string]chan struct{}
 	writes map[string]journalWrite // latest write per zone, read from the journal
+	// noZone is when a read of an unmanaged zone was refused because the
+	// provider holds no DNS zone for the domain.
+	noZone map[string]time.Time
 }
 
 type noopAudit struct{}
@@ -93,6 +96,7 @@ func newEngine(cfg Config) (*engine, error) {
 	e := &engine{
 		cfg: cfg, zones: cfg.ZoneSet, now: cfg.Now, log: cfg.Logger,
 		cache: map[string]*cachedZone{}, locals: map[string]chan struct{}{}, writes: map[string]journalWrite{},
+		noZone: map[string]time.Time{},
 	}
 	if e.zones == nil {
 		st := &staticZones{set: map[string]bool{}}
@@ -247,13 +251,43 @@ func notApplied(err error) bool {
 func (e *engine) fetch(ctx context.Context, p provider.Provider, zone string) (*dns.Zone, error) {
 	z, err := p.ReadZone(ctx, zone)
 	if err != nil {
+		if errors.Is(err, provider.ErrZoneNotFound) && e.unmanaged(zone) {
+			e.mu.Lock()
+			e.noZone[zone] = e.now()
+			e.mu.Unlock()
+			return nil, noZoneError(zone, err)
+		}
 		return nil, upstreamError("get zone", err)
 	}
 	if z.Provider == "" {
 		z.Provider = p.ID()
 	}
 	e.remember(zone, z, false)
+	e.mu.Lock()
+	delete(e.noZone, zone)
+	e.mu.Unlock()
 	return z, nil
+}
+
+// unmanaged reports whether zone is discovered and not managed.
+func (e *engine) unmanaged(zone string) bool {
+	return !e.zones.Managed(zone) && e.zones.IsUnmanaged(zone)
+}
+
+// noZoneError tells that the provider account has the domain but no DNS
+// zone for it.
+func noZoneError(zone string, err error) *Error {
+	return &Error{Reason: ReasonNotFound, Err: err,
+		Message: zone + " has no DNS zone at its provider: the domain is in the account but its zone is not hosted there (registered only, e.g. parked)"}
+}
+
+// knownNoZone reports whether a read of zone was refused for lack of a DNS
+// zone; fresh limits it to the refusals younger than UnmanagedTTL.
+func (e *engine) knownNoZone(zone string, fresh bool) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	at, ok := e.noZone[zone]
+	return ok && (!fresh || e.now().Sub(at) < e.cfg.UnmanagedTTL)
 }
 
 func (e *engine) remember(zone string, z *dns.Zone, written bool) {

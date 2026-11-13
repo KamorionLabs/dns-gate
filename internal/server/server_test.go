@@ -78,7 +78,7 @@ func (f *fakeFacade) AdoptJSON(ctx context.Context, s *identity.Subject, zone st
 }
 
 func (f *fakeEngine) Zones(ctx context.Context, s *identity.Subject) ([]uiapi.ZoneSummary, error) {
-	return append([]uiapi.ZoneSummary{{Zone: "example.com", RRsets: 3, Managed: 1}, {Zone: "example.org", RRsets: 1}}, f.extra...), nil
+	return append([]uiapi.ZoneSummary{{Zone: "example.com", RRsets: uiapi.Count(3), Managed: uiapi.Count(1)}, {Zone: "example.org", RRsets: uiapi.Count(1)}}, f.extra...), nil
 }
 
 func (f *fakeEngine) Inventory(ctx context.Context, s *identity.Subject, zone string) (*uiapi.ZoneInventory, error) {
