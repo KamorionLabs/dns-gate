@@ -17,6 +17,7 @@ mcp:
 |---|---|
 | "Which zones can I read? What does team web own in example.com?" | `list_zones`, `list_rrsets`, `list_teams`, `get_team` |
 | "Who owns www CNAME, and could I change it? What happened to it last week?" | `get_rrset`, `search_audit` |
+| "Which records point to `*.nbs-aws.com`? Export the zones of folder /ES as TSV." | `search_records`, `export_records` |
 | "Has my change of app CNAME propagated?" | `check_propagation` |
 | "Who may write `_acme-challenge` TXT records in example.com?" | `explain`, `who_can` (`policy.read`) |
 | "Add api A 192.0.2.20, show me the plan first." | `plan_rrset_change`, then `apply_rrset_change` |

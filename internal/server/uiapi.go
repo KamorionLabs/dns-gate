@@ -228,6 +228,8 @@ func (s *Server) handleUIAPI(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		writeJSON(w, http.StatusOK, inv)
+	case pattern == routeRecords || pattern == routeRecordsExport:
+		s.handleRecords(w, r, subj, readable, pattern == routeRecordsExport)
 	case rest == "/audit":
 		s.handleAudit(w, r, subj, readable)
 	default:

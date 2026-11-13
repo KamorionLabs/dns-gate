@@ -132,6 +132,7 @@ Refused authentications on this API carry the operation id of the request.
 | `applyRRsets` | Engine write of RRset changes (REST, MCP, UI). | allow, deny, error | yes |
 | `api.plan` | REST dry run (`POST /api/v1/zones/{zone}/plan`). `extra.allowed` false with a `reason` when the plan would be refused. | allow | yes |
 | `api.apply` | REST apply of a plan. | allow, deny, error | yes |
+| `api.search_records`, `api.export_records` | REST search and bulk export across zones (`GET /api/v1/records`, `/api/v1/records/export`), with the filters, `zones_scanned`, `zones_skipped`, `records` and the export `format`; `zone` set only when one zone was asked. | allow | no |
 | `api.rrset.put`, `api.rrset.delete` | REST single-RRset write refused before the engine (step-up). | deny | yes |
 | `api.forward.put`, `api.forward.delete` | REST URL forward write refused before the engine (step-up), with `extra.host` and `extra.type` (`URLFWD`). The write itself is `applyRRsets` with a `URLFWD` change. | deny | yes |
 | `adopt` | Adoption entry point refused (authentication, RBAC). | deny | yes |
@@ -160,7 +161,7 @@ Refused authentications on this API carry the operation id of the request.
 | `gate.zone.folders_listed` | Discovery: first listing of a EuroDNS provider by a process. Subject `gate:discovery`, category `system`; `extra.count` (zones) and `extra.digest` (SHA-256 of the sorted `zone<TAB>folder` lines). | allow | no |
 | `gate.zone.folder_changed`, `gate.zone.folder_seen`, `gate.zone.folder_gone` | Discovery: a zone found in another folder, a new zone, a zone no longer listed (`extra.old`, `extra.new`). Same subject, one request id per listing. | allow | yes |
 | `mcp` | MCP endpoint authentication refused. | deny | no |
-| `mcp.<tool>` | MCP tool calls: `list_zones`, `list_rrsets`, `get_rrset`, `plan_rrset_change`, `apply_rrset_change`, `adopt_preview`, `adopt_apply`, `list_teams`, `get_team`, `transfer_list`, `transfer_propose`, `transfer_approve`, `transfer_reject`. `extra.via` is `mcp` and `extra.mcp_client` names the client. | allow, deny, error | per tool |
+| `mcp.<tool>` | MCP tool calls: `list_zones`, `list_rrsets`, `get_rrset`, `search_records`, `export_records` (with the filters, `zones_scanned`, `zones_skipped`, `records`, and `format`), `plan_rrset_change`, `apply_rrset_change`, `adopt_preview`, `adopt_apply`, `list_teams`, `get_team`, `transfer_list`, `transfer_propose`, `transfer_approve`, `transfer_reject`. `extra.via` is `mcp` and `extra.mcp_client` names the client. | allow, deny, error | per tool |
 
 ### Reasons
 
